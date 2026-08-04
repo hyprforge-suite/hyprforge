@@ -1,0 +1,14 @@
+[package]
+name = "hyprforge-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+dbus = ["dep:zbus"]
+
+[dependencies]
+iced.workspace = true
+zbus = { workspace = true, optional = true }
+serde.workspace = true
