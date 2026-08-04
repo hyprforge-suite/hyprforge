@@ -245,3 +245,70 @@ async fn most_recently_used_wins_tie_break_across_reconnects() {
     assert!(second_used >= first_used);
     let _ = dell; // reserved for a future multi-profile tie-break test
 }
+
+#[tokio::test(start_paused = true)]
+async fn swap_heads_toggles_rather_than_accumulates() {
+    let mut h = Harness::new();
+    let boe = identity("BOE", "0x0BC9", "");
+
+    h.backend.set_topology(vec![boe.clone(), boe]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await;
+
+    let id = h.daemon.profiles().await[0].id.clone();
+    assert!(h.daemon.profiles().await[0].head_swaps.is_empty());
+
+    h.daemon.swap_heads(&id, "MOCK-1", "MOCK-2").await.unwrap();
+    assert_eq!(h.daemon.profiles().await[0].head_swaps.len(), 1);
+
+    // Calling again with the same pair toggles it back off, rather than
+    // accumulating a second entry that would cancel the first out via
+    // matching::assign_heads' sequential swap application.
+    h.daemon.swap_heads(&id, "MOCK-1", "MOCK-2").await.unwrap();
+    assert!(h.daemon.profiles().await[0].head_swaps.is_empty());
+
+    // Reversed pair order is recognized as the same swap.
+    h.daemon.swap_heads(&id, "MOCK-1", "MOCK-2").await.unwrap();
+    h.daemon.swap_heads(&id, "MOCK-2", "MOCK-1").await.unwrap();
+    assert!(h.daemon.profiles().await[0].head_swaps.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn set_head_position_updates_stored_profile() {
+    let mut h = Harness::new();
+    let boe = identity("BOE", "0x0BC9", "");
+
+    h.backend.set_topology(vec![boe]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await;
+
+    let id = h.daemon.profiles().await[0].id.clone();
+    h.daemon
+        .set_head_position(&id, "MOCK-1", 500, 250)
+        .await
+        .unwrap();
+
+    let profiles = h.daemon.profiles().await;
+    let head = &profiles[0].heads[0];
+    assert_eq!((head.x, head.y), (500, 250));
+
+    // Round-trips through JSON the same way the GUI's layout editor
+    // consumes it via the `GetProfile` D-Bus method.
+    let json = h.daemon.get_profile_json(&id).await.unwrap();
+    assert!(json.contains("\"x\":500"));
+    assert!(json.contains("\"y\":250"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn set_head_position_rejects_unknown_connector() {
+    let mut h = Harness::new();
+    let boe = identity("BOE", "0x0BC9", "");
+
+    h.backend.set_topology(vec![boe]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await;
+
+    let id = h.daemon.profiles().await[0].id.clone();
+    let result = h.daemon.set_head_position(&id, "NOT-A-HEAD", 0, 0).await;
+    assert!(result.is_err());
+}
