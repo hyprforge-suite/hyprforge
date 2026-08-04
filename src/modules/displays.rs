@@ -1,9 +1,59 @@
+use crate::modules::layout_canvas::{CanvasHead, LayoutCanvas};
 use hyprforge_core::displayd_proxy::DisplaydProxy;
 use hyprforge_core::theme::{spacing, FontScale};
 use hyprforge_core::widgets::{scaled_text, section};
 use hyprforge_core::SettingsModule;
-use iced::widget::{button, column, container, row, scrollable, text_input};
+use iced::widget::{button, column, container, pick_list, row, scrollable, text_input};
 use iced::{Element, Length, Subscription, Task};
+use serde::Deserialize;
+
+/// Full geometry for one stored profile, fetched on demand for the layout
+/// editor — `ListProfiles`' summary row doesn't carry per-head detail.
+/// Field names/renames mirror `hyprforge_displayd::profile::Profile`
+/// exactly, since it's what `GetProfile` serializes; kept as a local,
+/// GUI-only type rather than a dependency on the (Wayland-heavy) daemon
+/// crate.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProfileDetail {
+    id: String,
+    #[allow(dead_code)]
+    name: String,
+    extra_output_policy: String,
+    #[allow(dead_code)]
+    head_swaps: Vec<(String, String)>,
+    #[serde(rename = "head")]
+    heads: Vec<HeadDetail>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct HeadDetail {
+    #[allow(dead_code)]
+    make: String,
+    #[allow(dead_code)]
+    model: String,
+    #[allow(dead_code)]
+    serial: String,
+    connector_hint: String,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    #[allow(dead_code)]
+    refresh_mhz: i32,
+    #[allow(dead_code)]
+    scale: f64,
+    #[allow(dead_code)]
+    transform: String,
+    enabled: bool,
+}
+
+struct LayoutEditor {
+    profile: ProfileDetail,
+    swap_a: Option<String>,
+    swap_b: Option<String>,
+    status: Option<String>,
+    error: Option<String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct ProfileInfo {
@@ -38,6 +88,18 @@ pub enum Message {
     RenameCancelled,
     Renamed(Result<(), String>),
     SignalReceived(SignalKind),
+    EditLayout(String),
+    LayoutLoaded(Result<ProfileDetail, String>),
+    HeadDragMoved(String, i32, i32),
+    SwapSelectA(String),
+    SwapSelectB(String),
+    ToggleSwap,
+    SwapToggled(Result<ProfileDetail, String>),
+    SetPolicy(String),
+    PolicySet(Result<ProfileDetail, String>),
+    SaveLayout,
+    LayoutSaved(Result<(), String>),
+    CloseEditor,
 }
 
 pub struct DisplaysModule {
@@ -48,6 +110,7 @@ pub struct DisplaysModule {
     competing_monitor_rules: Vec<String>,
     renaming: Option<(String, String)>,
     last_event: Option<String>,
+    editor: Option<LayoutEditor>,
 }
 
 impl DisplaysModule {
@@ -61,6 +124,7 @@ impl DisplaysModule {
                 competing_monitor_rules: Vec::new(),
                 renaming: None,
                 last_event: None,
+                editor: None,
             },
             Task::perform(load(), Message::Loaded),
         )
@@ -74,6 +138,7 @@ impl DisplaysModule {
             scaled_text(p.last_used.clone(), 14.0, scale).width(Length::FillPortion(2)),
             button("Apply").on_press(Message::Apply(p.id.clone())),
             button("Rename").on_press(Message::RenameStart(p.id.clone(), p.name.clone())),
+            button("Edit Layout").on_press(Message::EditLayout(p.id.clone())),
         ]
         .spacing(spacing::SM)
         .align_y(iced::Alignment::Center)
@@ -149,10 +214,133 @@ impl SettingsModule for DisplaysModule {
                 });
                 Task::perform(load(), Message::Loaded)
             }
+            Message::EditLayout(id) => Task::perform(load_profile(id), Message::LayoutLoaded),
+            Message::LayoutLoaded(Ok(profile)) => {
+                self.editor = Some(LayoutEditor {
+                    profile,
+                    swap_a: None,
+                    swap_b: None,
+                    status: None,
+                    error: None,
+                });
+                Task::none()
+            }
+            Message::LayoutLoaded(Err(e)) => {
+                self.error = Some(e);
+                Task::none()
+            }
+            Message::HeadDragMoved(connector_hint, x, y) => {
+                if let Some(editor) = &mut self.editor {
+                    if let Some(head) = editor
+                        .profile
+                        .heads
+                        .iter_mut()
+                        .find(|h| h.connector_hint == connector_hint)
+                    {
+                        head.x = x;
+                        head.y = y;
+                    }
+                }
+                Task::none()
+            }
+            Message::SwapSelectA(hint) => {
+                if let Some(editor) = &mut self.editor {
+                    editor.swap_a = Some(hint);
+                }
+                Task::none()
+            }
+            Message::SwapSelectB(hint) => {
+                if let Some(editor) = &mut self.editor {
+                    editor.swap_b = Some(hint);
+                }
+                Task::none()
+            }
+            Message::ToggleSwap => {
+                let Some(editor) = &self.editor else {
+                    return Task::none();
+                };
+                let (Some(a), Some(b)) = (editor.swap_a.clone(), editor.swap_b.clone()) else {
+                    return Task::none();
+                };
+                if a == b {
+                    return Task::none();
+                }
+                Task::perform(toggle_swap(editor.profile.id.clone(), a, b), Message::SwapToggled)
+            }
+            Message::SwapToggled(Ok(profile)) => {
+                if let Some(editor) = &mut self.editor {
+                    editor.profile = profile;
+                    editor.status = Some("Swap updated.".to_string());
+                    editor.error = None;
+                }
+                Task::none()
+            }
+            Message::SwapToggled(Err(e)) => {
+                if let Some(editor) = &mut self.editor {
+                    editor.error = Some(e);
+                }
+                Task::none()
+            }
+            Message::SetPolicy(policy) => {
+                let Some(editor) = &self.editor else {
+                    return Task::none();
+                };
+                Task::perform(
+                    set_policy(editor.profile.id.clone(), policy),
+                    Message::PolicySet,
+                )
+            }
+            Message::PolicySet(Ok(profile)) => {
+                if let Some(editor) = &mut self.editor {
+                    editor.profile = profile;
+                    editor.status = Some("Policy updated.".to_string());
+                    editor.error = None;
+                }
+                Task::none()
+            }
+            Message::PolicySet(Err(e)) => {
+                if let Some(editor) = &mut self.editor {
+                    editor.error = Some(e);
+                }
+                Task::none()
+            }
+            Message::SaveLayout => {
+                let Some(editor) = &self.editor else {
+                    return Task::none();
+                };
+                let heads: Vec<(String, i32, i32)> = editor
+                    .profile
+                    .heads
+                    .iter()
+                    .map(|h| (h.connector_hint.clone(), h.x, h.y))
+                    .collect();
+                Task::perform(
+                    save_positions(editor.profile.id.clone(), heads),
+                    Message::LayoutSaved,
+                )
+            }
+            Message::LayoutSaved(Ok(())) => {
+                self.editor = None;
+                Task::perform(load(), Message::Loaded)
+            }
+            Message::LayoutSaved(Err(e)) => {
+                if let Some(editor) = &mut self.editor {
+                    editor.error = Some(e);
+                }
+                Task::none()
+            }
+            Message::CloseEditor => {
+                self.editor = None;
+                Task::none()
+            }
         }
     }
 
     fn view(&self, scale: FontScale) -> Element<'_, Message> {
+        if let Some(editor) = &self.editor {
+            return self.editor_view(editor, scale);
+        }
+
         if !self.connected {
             return container(
                 column![
@@ -254,6 +442,108 @@ impl SettingsModule for DisplaysModule {
     }
 }
 
+impl DisplaysModule {
+    fn editor_view(&self, editor: &LayoutEditor, scale: FontScale) -> Element<'_, Message> {
+        let connector_hints: Vec<String> = editor
+            .profile
+            .heads
+            .iter()
+            .map(|h| h.connector_hint.clone())
+            .collect();
+
+        let canvas_heads: Vec<CanvasHead> = editor
+            .profile
+            .heads
+            .iter()
+            .map(|h| CanvasHead {
+                connector_hint: h.connector_hint.clone(),
+                x: h.x,
+                y: h.y,
+                width: h.width,
+                height: h.height,
+                enabled: h.enabled,
+            })
+            .collect();
+        let canvas = LayoutCanvas::new(canvas_heads, Message::HeadDragMoved).into_element();
+
+        let swap_row = row![
+            pick_list(connector_hints.clone(), editor.swap_a.clone(), Message::SwapSelectA)
+                .placeholder("Head A"),
+            pick_list(connector_hints.clone(), editor.swap_b.clone(), Message::SwapSelectB)
+                .placeholder("Head B"),
+            {
+                let ready = matches!(
+                    (&editor.swap_a, &editor.swap_b),
+                    (Some(a), Some(b)) if a != b
+                );
+                let btn = button("Toggle Swap");
+                if ready {
+                    btn.on_press(Message::ToggleSwap)
+                } else {
+                    btn
+                }
+            },
+        ]
+        .spacing(spacing::SM)
+        .align_y(iced::Alignment::Center);
+
+        let policy_button = |label: &'static str, value: &'static str| {
+            let active = editor.profile.extra_output_policy == value;
+            let btn = button(label);
+            let btn = if active {
+                btn.style(button::primary)
+            } else {
+                btn.style(button::secondary)
+            };
+            btn.on_press(Message::SetPolicy(value.to_string()))
+        };
+        let policy_row = row![
+            policy_button("Extend Right", "extend_right"),
+            policy_button("Mirror", "mirror"),
+            policy_button("Disable", "disable"),
+        ]
+        .spacing(spacing::SM);
+
+        let mut content = column![
+            scaled_text("Edit Layout", 20.0, scale),
+            scaled_text(
+                "Drag heads to reposition them, then Save & Apply. Extra output \
+                 policy governs any output this profile doesn't cover; head swap \
+                 fixes assignment when two heads share an identical (often \
+                 blank-serial) EDID identity.",
+                13.0,
+                scale,
+            ),
+            canvas,
+        ]
+        .spacing(spacing::MD);
+
+        content = content.push(section("Extra output policy", scale, policy_row));
+        content = content.push(section(
+            "Swap heads (for duplicate/blank-serial identities)",
+            scale,
+            swap_row,
+        ));
+
+        if let Some(status) = &editor.status {
+            content = content.push(scaled_text(status.clone(), 13.0, scale));
+        }
+        if let Some(err) = &editor.error {
+            content = content.push(scaled_text(format!("Error: {err}"), 13.0, scale));
+        }
+
+        content = content.push(
+            row![
+                button("Cancel").on_press(Message::CloseEditor),
+                button("Save & Apply").on_press(Message::SaveLayout),
+            ]
+            .spacing(spacing::SM),
+        );
+
+        container(content).padding(spacing::LG).into()
+    }
+}
+
 async fn connect() -> Result<zbus::Connection, String> {
     zbus::Connection::session().await.map_err(|e| e.to_string())
 }
@@ -299,6 +589,48 @@ async fn rename(id: String, new_name: String) -> Result<(), String> {
     let proxy = DisplaydProxy::new(&conn).await.map_err(|e| e.to_string())?;
     proxy
         .rename_profile(&id, &new_name)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn load_profile(id: String) -> Result<ProfileDetail, String> {
+    let conn = connect().await?;
+    let proxy = DisplaydProxy::new(&conn).await.map_err(|e| e.to_string())?;
+    let json = proxy.get_profile(&id).await.map_err(|e| e.to_string())?;
+    serde_json::from_str(&json).map_err(|e| e.to_string())
+}
+
+async fn toggle_swap(profile_id: String, a: String, b: String) -> Result<ProfileDetail, String> {
+    let conn = connect().await?;
+    let proxy = DisplaydProxy::new(&conn).await.map_err(|e| e.to_string())?;
+    proxy
+        .swap_heads(&profile_id, &a, &b)
+        .await
+        .map_err(|e| e.to_string())?;
+    load_profile(profile_id).await
+}
+
+async fn set_policy(profile_id: String, policy: String) -> Result<ProfileDetail, String> {
+    let conn = connect().await?;
+    let proxy = DisplaydProxy::new(&conn).await.map_err(|e| e.to_string())?;
+    proxy
+        .set_extra_output_policy(&profile_id, &policy)
+        .await
+        .map_err(|e| e.to_string())?;
+    load_profile(profile_id).await
+}
+
+async fn save_positions(profile_id: String, heads: Vec<(String, i32, i32)>) -> Result<(), String> {
+    let conn = connect().await?;
+    let proxy = DisplaydProxy::new(&conn).await.map_err(|e| e.to_string())?;
+    for (connector_hint, x, y) in heads {
+        proxy
+            .set_head_position(&profile_id, &connector_hint, x, y)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    proxy
+        .apply_profile(&profile_id)
         .await
         .map_err(|e| e.to_string())
 }
