@@ -126,10 +126,15 @@ impl Daemon {
         Ok(())
     }
 
-    /// Persists a swap override: whichever connector the given pair of
+    /// Toggles a swap override: whichever connector the given pair of
     /// stored `connector_hint`s would each normally resolve to, resolve to
     /// the other's instead. Used for duplicate/blank-serial identities
     /// where per-head assignment can't be derived from EDID alone.
+    ///
+    /// Idempotent by pair rather than append-only: calling this again with
+    /// the same (or reversed) pair removes the override instead of piling
+    /// up a second entry that would cancel the first out — a GUI button
+    /// bound to this call behaves as a plain on/off toggle.
     pub async fn swap_heads(
         &self,
         profile_id: &str,
@@ -141,11 +146,56 @@ impl Daemon {
             .iter_mut()
             .find(|p| p.id == profile_id)
             .ok_or_else(|| anyhow::anyhow!("no such profile: {profile_id}"))?;
-        profile
-            .head_swaps
-            .push((connector_a.to_string(), connector_b.to_string()));
+        let matches_pair = |p: &(String, String)| {
+            (p.0 == connector_a && p.1 == connector_b) || (p.0 == connector_b && p.1 == connector_a)
+        };
+        if let Some(pos) = profile.head_swaps.iter().position(matches_pair) {
+            profile.head_swaps.remove(pos);
+        } else {
+            profile
+                .head_swaps
+                .push((connector_a.to_string(), connector_b.to_string()));
+        }
         self.persist(&profiles);
         Ok(())
+    }
+
+    /// Directly sets one head's stored position within a profile — used by
+    /// the Displays module's drag-arrange canvas. Positions only; mode/
+    /// scale/transform/enabled are edited elsewhere (or inherited as-is).
+    pub async fn set_head_position(
+        &self,
+        profile_id: &str,
+        connector_hint: &str,
+        x: i32,
+        y: i32,
+    ) -> anyhow::Result<()> {
+        let mut profiles = self.profiles.lock().await;
+        let profile = profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
+            .ok_or_else(|| anyhow::anyhow!("no such profile: {profile_id}"))?;
+        let head = profile
+            .heads
+            .iter_mut()
+            .find(|h| h.connector_hint == connector_hint)
+            .ok_or_else(|| anyhow::anyhow!("no such head: {connector_hint}"))?;
+        head.x = x;
+        head.y = y;
+        self.persist(&profiles);
+        Ok(())
+    }
+
+    /// JSON-encoded snapshot of one stored profile (full head geometry
+    /// included) — for the Displays module's layout editor, which needs
+    /// more detail than `ListProfiles`' summary row provides.
+    pub async fn get_profile_json(&self, profile_id: &str) -> anyhow::Result<String> {
+        let profiles = self.profiles.lock().await;
+        let profile = profiles
+            .iter()
+            .find(|p| p.id == profile_id)
+            .ok_or_else(|| anyhow::anyhow!("no such profile: {profile_id}"))?;
+        Ok(serde_json::to_string(profile)?)
     }
 
     pub async fn set_extra_output_policy(

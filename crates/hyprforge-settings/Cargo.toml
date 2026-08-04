@@ -7,8 +7,10 @@ license.workspace = true
 [dependencies]
 hyprforge-core = { workspace = true, features = ["dbus"] }
 hyprforge-windowrules.workspace = true
-iced.workspace = true
+iced = { workspace = true, features = ["canvas"] }
 zbus.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 futures-util.workspace = true
 tracing.workspace = true

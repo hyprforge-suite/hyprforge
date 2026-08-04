@@ -83,6 +83,28 @@ impl DisplaydService {
             .map_err(to_zbus_error)
     }
 
+    async fn set_head_position(
+        &self,
+        profile_id: &str,
+        connector_hint: &str,
+        x: i32,
+        y: i32,
+    ) -> zbus::fdo::Result<()> {
+        self.daemon
+            .set_head_position(profile_id, connector_hint, x, y)
+            .await
+            .map_err(to_zbus_error)
+    }
+
+    /// JSON-encoded snapshot of one stored profile, including full head
+    /// geometry — used by the Displays module's layout editor.
+    async fn get_profile(&self, profile_id: &str) -> zbus::fdo::Result<String> {
+        self.daemon
+            .get_profile_json(profile_id)
+            .await
+            .map_err(to_zbus_error)
+    }
+
     #[zbus(property)]
     async fn competing_monitor_rules(&self) -> Vec<String> {
         self.daemon.competing_monitor_rules().await

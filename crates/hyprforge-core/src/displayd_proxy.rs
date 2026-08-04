@@ -31,6 +31,18 @@ pub trait Displayd {
 
     fn set_extra_output_policy(&self, profile_id: &str, policy: &str) -> zbus::Result<()>;
 
+    fn set_head_position(
+        &self,
+        profile_id: &str,
+        connector_hint: &str,
+        x: i32,
+        y: i32,
+    ) -> zbus::Result<()>;
+
+    /// JSON-encoded snapshot of one stored profile, including full head
+    /// geometry.
+    fn get_profile(&self, profile_id: &str) -> zbus::Result<String>;
+
     #[zbus(property)]
     fn competing_monitor_rules(&self) -> zbus::Result<Vec<String>>;
 
