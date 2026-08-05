@@ -45,20 +45,32 @@ fn nearest_step_index(scale: f32) -> usize {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
-    Displays,
+    Monitors,
     WindowRules,
 }
 
 impl Screen {
-    const ALL: [Screen; 2] = [Screen::Displays, Screen::WindowRules];
-
     fn title(self) -> &'static str {
         match self {
-            Screen::Displays => "Displays",
+            Screen::Monitors => "Monitors",
             Screen::WindowRules => "Window Rules",
         }
     }
 }
+
+/// A top-level sidebar grouping. Both current screens live under the same
+/// "Displays" category today (they're both about how windows/outputs are
+/// arranged) — later categories (Network, Bluetooth, ...) each get their
+/// own entry here rather than flattening everything into one nav list.
+struct NavCategory {
+    label: &'static str,
+    screens: &'static [Screen],
+}
+
+const NAV: &[NavCategory] = &[NavCategory {
+    label: "Displays",
+    screens: &[Screen::Monitors, Screen::WindowRules],
+}];
 
 #[derive(Debug, Clone)]
 enum Message {
@@ -88,7 +100,7 @@ impl App {
         let (window_rules, window_rules_task) = WindowRulesModule::new();
         (
             App {
-                screen: Screen::Displays,
+                screen: Screen::Monitors,
                 displays,
                 window_rules,
                 search_query: String::new(),
@@ -141,7 +153,7 @@ impl App {
                 }
             }
             Message::RefreshActive => match self.screen {
-                Screen::Displays => self
+                Screen::Monitors => self
                     .displays
                     .update(modules::displays::Message::Refresh)
                     .map(Message::Displays),
@@ -180,25 +192,42 @@ impl App {
                 .on_press(Message::Navigate(screen))
         };
 
+        let icon_for = |screen: Screen| match screen {
+            Screen::Monitors => self.displays.icon(),
+            Screen::WindowRules => self.window_rules.icon(),
+        };
+
         let query = self.search_query.to_lowercase();
-        let mut nav = column![].spacing(spacing::XS);
+        let mut nav = column![].spacing(spacing::MD);
         let mut any_visible = false;
-        for screen in Screen::ALL {
-            if !query.is_empty() && !screen.title().to_lowercase().contains(&query) {
+        for category in NAV {
+            let visible_screens: Vec<Screen> = category
+                .screens
+                .iter()
+                .copied()
+                .filter(|s| query.is_empty() || s.title().to_lowercase().contains(&query))
+                .collect();
+            if visible_screens.is_empty() {
                 continue;
             }
             any_visible = true;
-            let (label, active) = match screen {
-                Screen::Displays => (
-                    format!("{}  Displays", self.displays.icon()),
-                    self.screen == Screen::Displays,
-                ),
-                Screen::WindowRules => (
-                    format!("{}  Window Rules", self.window_rules.icon()),
-                    self.screen == Screen::WindowRules,
-                ),
-            };
-            nav = nav.push(sidebar_button(label, screen, active));
+
+            let mut sub_items = column![].spacing(spacing::XS);
+            for screen in visible_screens {
+                let label = format!("{}  {}", icon_for(screen), screen.title());
+                sub_items = sub_items.push(sidebar_button(label, screen, self.screen == screen));
+            }
+
+            nav = nav.push(
+                column![
+                    scaled_text(category.label.to_uppercase(), 11.0, scale).color(TEXT_DIM),
+                    container(sub_items).padding(iced::Padding {
+                        left: 4.0,
+                        ..iced::Padding::default()
+                    }),
+                ]
+                .spacing(spacing::XS),
+            );
         }
         if !any_visible {
             nav = nav.push(scaled_text("No matches", 13.0, scale).color(TEXT_DIM));
@@ -236,7 +265,7 @@ impl App {
         });
 
         let content: Element<'_, Message> = match self.screen {
-            Screen::Displays => self.displays.view(scale).map(Message::Displays),
+            Screen::Monitors => self.displays.view(scale).map(Message::Displays),
             Screen::WindowRules => self.window_rules.view(scale).map(Message::WindowRules),
         };
         let content = container(content)
@@ -275,7 +304,7 @@ impl App {
                 };
             }
             match key.as_ref() {
-                Key::Character("1") => Some(Message::Navigate(Screen::Displays)),
+                Key::Character("1") => Some(Message::Navigate(Screen::Monitors)),
                 Key::Character("2") => Some(Message::Navigate(Screen::WindowRules)),
                 Key::Character("f") => Some(Message::FocusSearch),
                 Key::Character("r") => Some(Message::RefreshActive),
