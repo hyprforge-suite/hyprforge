@@ -72,7 +72,7 @@ pub struct LoadedState {
 
 #[derive(Debug, Clone)]
 pub enum SignalKind {
-    ProfileApplied { name: String, tier: String },
+    ProfileApplied { id: String, name: String, tier: String },
     NewTopologySeen { summary: String },
 }
 
@@ -81,13 +81,14 @@ pub enum Message {
     Refresh,
     Loaded(Result<LoadedState, String>),
     Apply(String),
-    Applied(Result<(), String>),
+    Applied(String, Result<(), String>),
     RenameStart(String, String),
     RenameInput(String),
     RenameSubmit,
     RenameCancelled,
     Renamed(Result<(), String>),
     SignalReceived(SignalKind),
+    ToggleAdvanced,
     EditLayout(String),
     LayoutLoaded(Result<ProfileDetail, String>),
     HeadDragMoved(String, i32, i32),
@@ -107,9 +108,18 @@ pub struct DisplaysModule {
     error: Option<String>,
     profiles: Vec<ProfileInfo>,
     current_fingerprint: String,
+    /// The profile the daemon actually matched/applied, tracked from the
+    /// `ProfileApplied` signal (accurate for superset/subset matches too)
+    /// and, as a fallback for the very first load, by comparing
+    /// `current_fingerprint` against exact-match profile ids.
+    current_profile_id: Option<String>,
     competing_monitor_rules: Vec<String>,
     renaming: Option<(String, String)>,
     last_event: Option<String>,
+    /// Managing every stored profile (not just the one that's active) is
+    /// the power-user case — collapsed by default so the common case
+    /// ("here's what's applied right now") isn't buried under it.
+    show_advanced: bool,
     editor: Option<LayoutEditor>,
 }
 
@@ -121,18 +131,30 @@ impl DisplaysModule {
                 error: None,
                 profiles: Vec::new(),
                 current_fingerprint: String::new(),
+                current_profile_id: None,
                 competing_monitor_rules: Vec::new(),
                 renaming: None,
                 last_event: None,
+                show_advanced: false,
                 editor: None,
             },
             Task::perform(load(), Message::Loaded),
         )
     }
 
-    fn profile_row(&self, p: &ProfileInfo, scale: FontScale) -> Element<'_, Message> {
+    fn current_profile(&self) -> Option<&ProfileInfo> {
+        let id = self.current_profile_id.as_ref()?;
+        self.profiles.iter().find(|p| &p.id == id)
+    }
+
+    fn profile_row(&self, p: &ProfileInfo, scale: FontScale, is_current: bool) -> Element<'_, Message> {
+        let name = if is_current {
+            format!("{} (current)", p.name)
+        } else {
+            p.name.clone()
+        };
         let info = column![
-            scaled_text(p.name.clone(), 14.0, scale),
+            scaled_text(name, 14.0, scale),
             meta_text(
                 format!("{} head(s) · last used {}", p.head_count, p.last_used),
                 12.0,
@@ -162,7 +184,7 @@ impl SettingsModule for DisplaysModule {
     type Message = Message;
 
     fn title(&self) -> &str {
-        "Displays"
+        "Monitors"
     }
 
     fn icon(&self) -> &'static str {
@@ -178,6 +200,18 @@ impl SettingsModule for DisplaysModule {
                 self.profiles = state.profiles;
                 self.current_fingerprint = state.current_fingerprint;
                 self.competing_monitor_rules = state.competing_monitor_rules;
+                // Only covers the exact-match case (profile id == connected
+                // fingerprint); superset/subset matches are only known once
+                // a ProfileApplied signal arrives. Never clobber an already
+                // -known current profile with "unknown" just because this
+                // particular load can't derive it.
+                if let Some(p) = self
+                    .profiles
+                    .iter()
+                    .find(|p| p.id == self.current_fingerprint)
+                {
+                    self.current_profile_id = Some(p.id.clone());
+                }
                 Task::none()
             }
             Message::Loaded(Err(e)) => {
@@ -185,10 +219,17 @@ impl SettingsModule for DisplaysModule {
                 self.error = Some(e);
                 Task::none()
             }
-            Message::Apply(id) => Task::perform(apply(id), Message::Applied),
-            Message::Applied(Ok(())) => Task::perform(load(), Message::Loaded),
-            Message::Applied(Err(e)) => {
+            Message::Apply(id) => Task::perform(apply(id), |(id, result)| Message::Applied(id, result)),
+            Message::Applied(id, Ok(())) => {
+                self.current_profile_id = Some(id);
+                Task::perform(load(), Message::Loaded)
+            }
+            Message::Applied(_, Err(e)) => {
                 self.error = Some(e);
+                Task::none()
+            }
+            Message::ToggleAdvanced => {
+                self.show_advanced = !self.show_advanced;
                 Task::none()
             }
             Message::RenameStart(id, current) => {
@@ -219,7 +260,8 @@ impl SettingsModule for DisplaysModule {
             }
             Message::SignalReceived(kind) => {
                 self.last_event = Some(match kind {
-                    SignalKind::ProfileApplied { name, tier } => {
+                    SignalKind::ProfileApplied { id, name, tier } => {
+                        self.current_profile_id = Some(id);
                         format!("Applied '{name}' ({tier})")
                     }
                     SignalKind::NewTopologySeen { summary } => format!("New topology: {summary}"),
@@ -356,7 +398,7 @@ impl SettingsModule for DisplaysModule {
         if !self.connected {
             return container(
                 column![
-                    scaled_text("Displays", 22.0, scale),
+                    scaled_text("Monitors", 22.0, scale),
                     scaled_text(
                         self.error
                             .clone()
@@ -377,7 +419,7 @@ impl SettingsModule for DisplaysModule {
             .into();
         }
 
-        let mut content = column![scaled_text("Displays", 22.0, scale)].spacing(spacing::LG);
+        let mut content = column![scaled_text("Monitors", 22.0, scale)].spacing(spacing::LG);
 
         if !self.competing_monitor_rules.is_empty() {
             content = content.push(section(
@@ -396,51 +438,106 @@ impl SettingsModule for DisplaysModule {
             ));
         }
 
-        let status = column![meta_text(
-            format!("Fingerprint: {}", self.current_fingerprint),
-            13.0,
-            scale,
-        )]
-        .spacing(spacing::XS);
-        let status = if let Some(event) = &self.last_event {
-            status.push(scaled_text(event.clone(), 13.0, scale))
-        } else {
-            status
-        };
-        content = content.push(section("Status", scale, status));
-
-        let mut list = column![].spacing(spacing::SM);
-        if self.profiles.is_empty() {
-            list = list.push(meta_text(
-                "No profiles yet — connect a display configuration and Hyprforge will learn it.",
+        // The common case: what's applied right now, front and center —
+        // renaming/editing the setup you're actually using shouldn't
+        // require digging through a list of every profile you've ever had.
+        let is_renaming_current = matches!(
+            (&self.renaming, &self.current_profile_id),
+            (Some((id, _)), Some(current)) if id == current
+        );
+        let mut current_col = column![].spacing(spacing::SM);
+        let current_row: Element<'_, Message> = match (&self.renaming, self.current_profile()) {
+            (Some((_, draft)), _) if is_renaming_current => row![
+                text_input("Profile name", draft)
+                    .on_input(Message::RenameInput)
+                    .on_submit(Message::RenameSubmit),
+                primary_button("Save").on_press(Message::RenameSubmit),
+                secondary_button("Cancel").on_press(Message::RenameCancelled),
+            ]
+            .spacing(spacing::SM)
+            .into(),
+            (_, Some(p)) => row![
+                column![
+                    scaled_text(p.name.clone(), 16.0, scale),
+                    meta_text(
+                        format!("{} head(s) · last used {}", p.head_count, p.last_used),
+                        12.0,
+                        scale,
+                    ),
+                ]
+                .spacing(spacing::XS)
+                .width(Length::Fill),
+                secondary_button("Rename")
+                    .on_press(Message::RenameStart(p.id.clone(), p.name.clone())),
+                primary_button("Edit Layout").on_press(Message::EditLayout(p.id.clone())),
+            ]
+            .spacing(spacing::SM)
+            .align_y(iced::Alignment::Center)
+            .into(),
+            (_, None) => meta_text(
+                "Hyprforge hasn't matched a saved profile to this display setup yet — \
+                 it will learn one automatically.",
                 14.0,
                 scale,
+            )
+            .into(),
+        };
+        current_col = current_col.push(current_row);
+        current_col = current_col.push(divider());
+        current_col = current_col.push(meta_text(
+            format!("Fingerprint: {}", self.current_fingerprint),
+            11.0,
+            scale,
+        ));
+        if let Some(event) = &self.last_event {
+            current_col = current_col.push(meta_text(event.clone(), 11.0, scale));
+        }
+        content = content.push(section("Current Setup", scale, current_col));
+
+        content = content.push(
+            secondary_button(if self.show_advanced {
+                "Hide advanced"
+            } else {
+                "Show advanced"
+            })
+            .on_press(Message::ToggleAdvanced),
+        );
+
+        if self.show_advanced {
+            let mut list = column![].spacing(spacing::SM);
+            if self.profiles.is_empty() {
+                list = list.push(meta_text(
+                    "No profiles yet — connect a display configuration and Hyprforge will learn it.",
+                    14.0,
+                    scale,
+                ));
+            }
+            for (i, p) in self.profiles.iter().enumerate() {
+                if i > 0 {
+                    list = list.push(divider());
+                }
+                let is_current = Some(&p.id) == self.current_profile_id.as_ref();
+                let row_el: Element<'_, Message> = match &self.renaming {
+                    Some((id, draft)) if id == &p.id && !is_renaming_current => row![
+                        text_input("Profile name", draft)
+                            .on_input(Message::RenameInput)
+                            .on_submit(Message::RenameSubmit),
+                        primary_button("Save").on_press(Message::RenameSubmit),
+                        secondary_button("Cancel").on_press(Message::RenameCancelled),
+                    ]
+                    .spacing(spacing::SM)
+                    .padding([spacing::SM, 0.0])
+                    .into(),
+                    _ => self.profile_row(p, scale, is_current),
+                };
+                list = list.push(row_el);
+            }
+            content = content.push(section(
+                "All Profiles",
+                scale,
+                container(scrollable(list).height(Length::Shrink)).max_height(360.0),
             ));
         }
-        for (i, p) in self.profiles.iter().enumerate() {
-            if i > 0 {
-                list = list.push(divider());
-            }
-            let row_el: Element<'_, Message> = match &self.renaming {
-                Some((id, draft)) if id == &p.id => row![
-                    text_input("Profile name", draft)
-                        .on_input(Message::RenameInput)
-                        .on_submit(Message::RenameSubmit),
-                    primary_button("Save").on_press(Message::RenameSubmit),
-                    secondary_button("Cancel").on_press(Message::RenameCancelled),
-                ]
-                .spacing(spacing::SM)
-                .padding([spacing::SM, 0.0])
-                .into(),
-                _ => self.profile_row(p, scale),
-            };
-            list = list.push(row_el);
-        }
-        content = content.push(section(
-            "Profiles",
-            scale,
-            container(scrollable(list).height(Length::Shrink)).max_height(360.0),
-        ));
 
         content = content.push(secondary_button("Refresh").on_press(Message::Refresh));
 
@@ -591,10 +688,15 @@ async fn load() -> Result<LoadedState, String> {
     })
 }
 
-async fn apply(id: String) -> Result<(), String> {
+async fn apply(id: String) -> (String, Result<(), String>) {
+    let result = apply_inner(&id).await;
+    (id, result)
+}
+
+async fn apply_inner(id: &str) -> Result<(), String> {
     let conn = connect().await?;
     let proxy = DisplaydProxy::new(&conn).await.map_err(|e| e.to_string())?;
-    proxy.apply_profile(&id).await.map_err(|e| e.to_string())
+    proxy.apply_profile(id).await.map_err(|e| e.to_string())
 }
 
 async fn rename(id: String, new_name: String) -> Result<(), String> {
@@ -677,6 +779,7 @@ async fn forward_signals(
                 let args = signal.args()?;
                 let _ = output
                     .send(Message::SignalReceived(SignalKind::ProfileApplied {
+                        id: args.id.clone(),
                         name: args.name.clone(),
                         tier: args.tier.clone(),
                     }))
