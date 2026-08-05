@@ -2,7 +2,7 @@ use crate::backend::OutputBackend;
 use crate::fingerprint::fingerprint;
 use crate::matching::{build_layout_plan, find_match, MatchTier};
 use crate::profile::{generate_profile_name, ExtraOutputPolicy, Profile};
-use crate::types::{Head, TopologyEvent};
+use crate::types::{Head, Transform, TopologyEvent};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -96,6 +96,28 @@ impl Daemon {
         Ok(serde_json::to_string(&heads)?)
     }
 
+    /// The modes a *currently-connected* head advertises — `(width,
+    /// height, refresh_mhz, preferred)` — for the Displays module's
+    /// resolution dropdown. Stored profiles only ever remember the one
+    /// configured mode, not the full list a head supports, so this reads
+    /// live backend state; returns empty if `connector_hint` isn't
+    /// currently connected (e.g. editing a profile for a different,
+    /// not-plugged-in setup), which callers should treat as "fall back to
+    /// showing just the stored mode."
+    pub fn available_modes(&self, connector_hint: &str) -> anyhow::Result<Vec<(i32, i32, i32, bool)>> {
+        let heads = self.backend.list_outputs()?;
+        Ok(heads
+            .iter()
+            .find(|h| h.connector == connector_hint)
+            .map(|h| {
+                h.modes
+                    .iter()
+                    .map(|m| (m.width, m.height, m.refresh_mhz, m.preferred))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
     /// Force-applies `profile_id` regardless of whether it currently
     /// matches the connected fingerprint — used by `apply <profile-id>`
     /// and the D-Bus `ApplyProfile` method.
@@ -182,6 +204,45 @@ impl Daemon {
             .ok_or_else(|| anyhow::anyhow!("no such head: {connector_hint}"))?;
         head.x = x;
         head.y = y;
+        self.persist(&profiles);
+        Ok(())
+    }
+
+    /// Sets a head's full stored geometry within a profile — position,
+    /// mode, scale, and orientation — used by the Displays module's
+    /// per-head property panel (Windows-Display-Settings-style position/
+    /// size/refresh/scale/orientation editing), as opposed to
+    /// `set_head_position` which only covers drag-to-reposition.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn set_head_geometry(
+        &self,
+        profile_id: &str,
+        connector_hint: &str,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        refresh_mhz: i32,
+        scale: f64,
+        transform: Transform,
+    ) -> anyhow::Result<()> {
+        let mut profiles = self.profiles.lock().await;
+        let profile = profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
+            .ok_or_else(|| anyhow::anyhow!("no such profile: {profile_id}"))?;
+        let head = profile
+            .heads
+            .iter_mut()
+            .find(|h| h.connector_hint == connector_hint)
+            .ok_or_else(|| anyhow::anyhow!("no such head: {connector_hint}"))?;
+        head.x = x;
+        head.y = y;
+        head.width = width;
+        head.height = height;
+        head.refresh_mhz = refresh_mhz;
+        head.scale = scale;
+        head.transform = transform;
         self.persist(&profiles);
         Ok(())
     }

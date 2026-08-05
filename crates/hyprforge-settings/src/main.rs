@@ -4,7 +4,7 @@ use hyprforge_core::theme::{app_theme, spacing, surface, FontScale, TEXT_DIM};
 use hyprforge_core::widgets::{primary_button, scaled_text, secondary_button};
 use hyprforge_core::SettingsModule;
 use iced::keyboard::{self, key, Key};
-use iced::widget::{column, container, operation, row, text_input, Id, Space};
+use iced::widget::{column, container, operation, row, text_input, Id};
 use iced::{window, Background, Element, Length, Size, Subscription, Task, Theme};
 use modules::displays::DisplaysModule;
 use modules::window_rules::WindowRulesModule;
@@ -30,17 +30,22 @@ fn main() -> iced::Result {
         .run()
 }
 
-/// Accessibility font-scale steps a user can cycle through with the
-/// sidebar's A-/A+ controls (vision pillar #7).
-const FONT_SCALE_STEPS: [f32; 5] = [0.85, 1.0, 1.15, 1.3, 1.5];
-
-fn nearest_step_index(scale: f32) -> usize {
-    FONT_SCALE_STEPS
-        .iter()
-        .enumerate()
-        .min_by(|(_, a), (_, b)| (*a - scale).abs().partial_cmp(&(*b - scale).abs()).unwrap())
-        .map(|(i, _)| i)
-        .unwrap_or(1)
+/// Reads the desktop's own accessibility text-scaling-factor once at
+/// startup (vision pillar #7: accessibility, but following the *system*
+/// setting rather than a bespoke per-app control the user would have to
+/// discover and set separately). `FontScale` itself stays fully wired
+/// through the shared widget layer — this is the only thing that changed:
+/// where the value comes from.
+fn read_global_font_scale() -> FontScale {
+    std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.interface", "text-scaling-factor"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .and_then(|s| s.trim().parse::<f32>().ok())
+        .map(FontScale)
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,8 +84,6 @@ enum Message {
     FocusSearch,
     ClearOrCancel,
     RefreshActive,
-    IncreaseFontScale,
-    DecreaseFontScale,
     Displays(modules::displays::Message),
     WindowRules(modules::window_rules::Message),
 }
@@ -105,7 +108,7 @@ impl App {
                 window_rules,
                 search_query: String::new(),
                 search_id: Id::unique(),
-                font_scale: FontScale::default(),
+                font_scale: read_global_font_scale(),
             },
             Task::batch([
                 displays_task.map(Message::Displays),
@@ -162,17 +165,6 @@ impl App {
                 // current.
                 Screen::WindowRules => Task::none(),
             },
-            Message::IncreaseFontScale => {
-                let next = (nearest_step_index(self.font_scale.0) + 1)
-                    .min(FONT_SCALE_STEPS.len() - 1);
-                self.font_scale = FontScale(FONT_SCALE_STEPS[next]);
-                Task::none()
-            }
-            Message::DecreaseFontScale => {
-                let next = nearest_step_index(self.font_scale.0).saturating_sub(1);
-                self.font_scale = FontScale(FONT_SCALE_STEPS[next]);
-                Task::none()
-            }
             Message::Displays(msg) => self.displays.update(msg).map(Message::Displays),
             Message::WindowRules(msg) => self.window_rules.update(msg).map(Message::WindowRules),
         }
@@ -218,9 +210,19 @@ impl App {
                 sub_items = sub_items.push(sidebar_button(label, screen, self.screen == screen));
             }
 
+            // The category header is itself a button to its first/default
+            // sub-item, not just a static label — "Displays" takes you to
+            // Monitors the same way clicking "Monitors" does.
+            let header = iced::widget::button(
+                scaled_text(category.label.to_uppercase(), 11.0, scale).color(TEXT_DIM),
+            )
+            .style(|_theme: &Theme, _status| iced::widget::button::Style::default())
+            .padding(0)
+            .on_press(Message::Navigate(category.screens[0]));
+
             nav = nav.push(
                 column![
-                    scaled_text(category.label.to_uppercase(), 11.0, scale).color(TEXT_DIM),
+                    header,
                     container(sub_items).padding(iced::Padding {
                         left: 4.0,
                         ..iced::Padding::default()
@@ -233,16 +235,6 @@ impl App {
             nav = nav.push(scaled_text("No matches", 13.0, scale).color(TEXT_DIM));
         }
 
-        let font_scale_controls = column![
-            scaled_text("TEXT SIZE", 11.0, scale).color(TEXT_DIM),
-            row![
-                secondary_button("A-").on_press(Message::DecreaseFontScale),
-                secondary_button("A+").on_press(Message::IncreaseFontScale),
-            ]
-            .spacing(spacing::SM),
-        ]
-        .spacing(spacing::SM);
-
         let sidebar = container(
             column![
                 scaled_text("Hyprforge", 20.0, scale),
@@ -251,8 +243,6 @@ impl App {
                     .on_input(Message::SearchChanged)
                     .padding(8),
                 nav,
-                Space::new().height(Length::Fill),
-                font_scale_controls,
             ]
             .spacing(spacing::MD)
             .padding(spacing::MD)
@@ -268,6 +258,13 @@ impl App {
             Screen::Monitors => self.displays.view(scale).map(Message::Displays),
             Screen::WindowRules => self.window_rules.view(scale).map(Message::WindowRules),
         };
+        // The Monitors editor (canvas + full property panel + policy/swap
+        // sections) routinely exceeds window height — without scrolling,
+        // everything past the window edge was just clipped and silently
+        // invisible, not merely off-screen.
+        let content = iced::widget::scrollable(content)
+            .width(Length::Fill)
+            .height(Length::Fill);
         let content = container(content)
             .max_width(CONTENT_MAX_WIDTH)
             .width(Length::Fill);

@@ -3,6 +3,7 @@
 
 use crate::daemon::{Daemon, DaemonSignal};
 use crate::profile::ExtraOutputPolicy;
+use crate::types::Transform;
 use std::str::FromStr;
 use std::sync::Arc;
 use zbus::object_server::SignalEmitter;
@@ -42,6 +43,17 @@ impl DisplaydService {
 
     async fn get_current_layout(&self) -> zbus::fdo::Result<String> {
         self.daemon.current_layout_json().map_err(to_zbus_error)
+    }
+
+    /// `(width, height, refresh_mhz, preferred)` per mode a currently
+    /// -connected head supports; empty if `connector_hint` isn't live.
+    async fn get_available_modes(
+        &self,
+        connector_hint: &str,
+    ) -> zbus::fdo::Result<Vec<(i32, i32, i32, bool)>> {
+        self.daemon
+            .available_modes(connector_hint)
+            .map_err(to_zbus_error)
     }
 
     async fn apply_profile(&self, profile_id: &str) -> zbus::fdo::Result<()> {
@@ -96,6 +108,37 @@ impl DisplaydService {
             .map_err(to_zbus_error)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn set_head_geometry(
+        &self,
+        profile_id: &str,
+        connector_hint: &str,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        refresh_mhz: i32,
+        scale: f64,
+        transform: &str,
+    ) -> zbus::fdo::Result<()> {
+        let transform = Transform::from_str(transform)
+            .map_err(|_| zbus::fdo::Error::InvalidArgs(format!("unknown transform: {transform}")))?;
+        self.daemon
+            .set_head_geometry(
+                profile_id,
+                connector_hint,
+                x,
+                y,
+                width,
+                height,
+                refresh_mhz,
+                scale,
+                transform,
+            )
+            .await
+            .map_err(to_zbus_error)
+    }
+
     /// JSON-encoded snapshot of one stored profile, including full head
     /// geometry — used by the Displays module's layout editor.
     async fn get_profile(&self, profile_id: &str) -> zbus::fdo::Result<String> {
@@ -134,6 +177,28 @@ impl FromStr for ExtraOutputPolicy {
             "extend_right" => Ok(ExtraOutputPolicy::ExtendRight),
             "mirror" => Ok(ExtraOutputPolicy::Mirror),
             "disable" => Ok(ExtraOutputPolicy::Disable),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Parses the same variant-name strings `Transform`'s default `Serialize`
+/// derive produces (used by `GetProfile`'s JSON), so the GUI can round
+/// -trip a value straight from that JSON back into a `SetHeadGeometry`
+/// call without a separate string mapping to keep in sync.
+impl FromStr for Transform {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "Normal" => Ok(Transform::Normal),
+            "Rotate90" => Ok(Transform::Rotate90),
+            "Rotate180" => Ok(Transform::Rotate180),
+            "Rotate270" => Ok(Transform::Rotate270),
+            "Flipped" => Ok(Transform::Flipped),
+            "Flipped90" => Ok(Transform::Flipped90),
+            "Flipped180" => Ok(Transform::Flipped180),
+            "Flipped270" => Ok(Transform::Flipped270),
             _ => Err(()),
         }
     }

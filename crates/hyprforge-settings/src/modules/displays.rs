@@ -1,22 +1,23 @@
 use crate::modules::layout_canvas::{CanvasHead, LayoutCanvas};
 use hyprforge_core::displayd_proxy::DisplaydProxy;
 use hyprforge_core::theme::{spacing, FontScale};
-use hyprforge_core::widgets::{divider, meta_text, primary_button, scaled_text, secondary_button, section};
+use hyprforge_core::widgets::{
+    divider, meta_text, primary_button, row_field, scaled_text, secondary_button, section,
+};
 use hyprforge_core::SettingsModule;
-use iced::widget::{column, container, pick_list, row, scrollable, text_input};
+use iced::widget::{column, container, row, scrollable, text_input};
 use iced::{Element, Length, Subscription, Task};
 use serde::Deserialize;
 
-/// Full geometry for one stored profile, fetched on demand for the layout
-/// editor — `ListProfiles`' summary row doesn't carry per-head detail.
-/// Field names/renames mirror `hyprforge_displayd::profile::Profile`
+/// Full geometry for one stored profile, fetched on demand for the
+/// Monitors editor — `ListProfiles`' summary row doesn't carry per-head
+/// detail. Field names/renames mirror `hyprforge_displayd::profile::Profile`
 /// exactly, since it's what `GetProfile` serializes; kept as a local,
 /// GUI-only type rather than a dependency on the (Wayland-heavy) daemon
 /// crate.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProfileDetail {
     id: String,
-    #[allow(dead_code)]
     name: String,
     extra_output_policy: String,
     #[allow(dead_code)]
@@ -38,21 +39,181 @@ struct HeadDetail {
     y: i32,
     width: i32,
     height: i32,
-    #[allow(dead_code)]
     refresh_mhz: i32,
-    #[allow(dead_code)]
     scale: f64,
     #[allow(dead_code)]
     transform: String,
     enabled: bool,
 }
 
+/// One entry in the resolution/refresh-rate dropdown — populated from the
+/// head's *live* supported modes (see `available_modes` on the daemon),
+/// since a stored profile only ever remembers the one mode it was saved
+/// with, not the full list a physical head supports.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModeOption {
+    width: i32,
+    height: i32,
+    refresh_mhz: i32,
+    preferred: bool,
+}
+
+impl std::fmt::Display for ModeOption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} x {} @ {:.0}Hz{}",
+            self.width,
+            self.height,
+            self.refresh_mhz as f64 / 1000.0,
+            if self.preferred { " (recommended)" } else { "" }
+        )
+    }
+}
+
+/// Orientation options shown in the property panel, in the same order as
+/// `Transform`'s wire representation (`GetProfile`'s JSON / `Transform`'s
+/// default serde variant names) — index-paired with `TRANSFORM_RAW` so a
+/// label picked from the dropdown maps straight back to the string
+/// `SetHeadGeometry` expects.
+const TRANSFORM_LABELS: [&str; 8] = [
+    "Landscape",
+    "Portrait (90°)",
+    "Landscape (180°)",
+    "Portrait (270°)",
+    "Landscape (mirrored)",
+    "Portrait (90°, mirrored)",
+    "Landscape (180°, mirrored)",
+    "Portrait (270°, mirrored)",
+];
+const TRANSFORM_RAW: [&str; 8] = [
+    "Normal",
+    "Rotate90",
+    "Rotate180",
+    "Rotate270",
+    "Flipped",
+    "Flipped90",
+    "Flipped180",
+    "Flipped270",
+];
+
+fn transform_to_label(raw: &str) -> &'static str {
+    TRANSFORM_RAW
+        .iter()
+        .position(|r| *r == raw)
+        .map(|i| TRANSFORM_LABELS[i])
+        .unwrap_or(TRANSFORM_LABELS[0])
+}
+
+fn label_to_transform(label: &str) -> &'static str {
+    TRANSFORM_LABELS
+        .iter()
+        .position(|l| *l == label)
+        .map(|i| TRANSFORM_RAW[i])
+        .unwrap_or(TRANSFORM_RAW[0])
+}
+
+/// The property-panel draft for whichever head is selected — text fields
+/// so partial/invalid input (e.g. a bare "-" while typing a negative X)
+/// never gets silently reformatted out from under the user, mirroring the
+/// same pattern `RuleDraft` uses in the Window Rules module.
+fn fields_from_head(h: &HeadDetail) -> (String, String, String, String, String, String, String) {
+    (
+        h.x.to_string(),
+        h.y.to_string(),
+        h.width.to_string(),
+        h.height.to_string(),
+        format!("{:.0}", h.refresh_mhz as f64 / 1000.0),
+        format!("{:.0}", h.scale * 100.0),
+        transform_to_label(&h.transform).to_string(),
+    )
+}
+
+/// Writes the property panel's draft fields straight into the selected
+/// head as soon as they parse cleanly, mirroring how dragging on the
+/// canvas already updates the head live — so there's no separate "Apply to
+/// head" step to remember. Silently no-ops while a field is mid-edit and
+/// not yet a valid number (e.g. a bare "-"); the last valid value stays in
+/// effect until Save & Apply persists it.
+fn commit_selected_head(editor: &mut LayoutEditor) {
+    let Some(selected) = editor.selected.clone() else {
+        return;
+    };
+    let parsed = (
+        editor.field_x.trim().parse::<i32>(),
+        editor.field_y.trim().parse::<i32>(),
+        editor.field_width.trim().parse::<i32>(),
+        editor.field_height.trim().parse::<i32>(),
+        editor.field_refresh.trim().parse::<f64>(),
+        editor.field_scale.trim().parse::<f64>(),
+    );
+    if let (Ok(x), Ok(y), Ok(width), Ok(height), Ok(refresh_hz), Ok(scale_pct)) = parsed {
+        if width > 0 && height > 0 && refresh_hz > 0.0 && scale_pct > 0.0 {
+            if let Some(head) = editor
+                .profile
+                .heads
+                .iter_mut()
+                .find(|h| h.connector_hint == selected)
+            {
+                head.x = x;
+                head.y = y;
+                head.width = width;
+                head.height = height;
+                head.refresh_mhz = (refresh_hz * 1000.0).round() as i32;
+                head.scale = scale_pct / 100.0;
+                head.transform = label_to_transform(&editor.field_transform).to_string();
+            }
+        }
+    }
+}
+
 struct LayoutEditor {
     profile: ProfileDetail,
+    selected: Option<String>,
+    /// Live modes for `selected`'s connector, if it's currently connected
+    /// — empty otherwise, in which case the view falls back to free-text
+    /// width/height/refresh fields.
+    available_modes: Vec<ModeOption>,
+    field_x: String,
+    field_y: String,
+    field_width: String,
+    field_height: String,
+    field_refresh: String,
+    field_scale: String,
+    field_transform: String,
     swap_a: Option<String>,
     swap_b: Option<String>,
     status: Option<String>,
     error: Option<String>,
+}
+
+impl LayoutEditor {
+    fn new(profile: ProfileDetail) -> Self {
+        let selected = profile.heads.first().map(|h| h.connector_hint.clone());
+        let (field_x, field_y, field_width, field_height, field_refresh, field_scale, field_transform) =
+            profile.heads.first().map(fields_from_head).unwrap_or_default();
+        LayoutEditor {
+            profile,
+            selected,
+            available_modes: Vec::new(),
+            field_x,
+            field_y,
+            field_width,
+            field_height,
+            field_refresh,
+            field_scale,
+            field_transform,
+            swap_a: None,
+            swap_b: None,
+            status: None,
+            error: None,
+        }
+    }
+
+    fn selected_head(&self) -> Option<&HeadDetail> {
+        let hint = self.selected.as_ref()?;
+        self.profile.heads.iter().find(|h| &h.connector_hint == hint)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -88,10 +249,21 @@ pub enum Message {
     RenameCancelled,
     Renamed(Result<(), String>),
     SignalReceived(SignalKind),
-    ToggleAdvanced,
+    ToggleOtherProfiles,
     EditLayout(String),
     LayoutLoaded(Result<ProfileDetail, String>),
+    DiscardEdits,
+    SelectHead(String),
+    ModesLoaded(String, Vec<(i32, i32, i32, bool)>),
+    ModeSelected(ModeOption),
     HeadDragMoved(String, i32, i32),
+    FieldX(String),
+    FieldY(String),
+    FieldWidth(String),
+    FieldHeight(String),
+    FieldRefresh(String),
+    FieldScale(String),
+    FieldTransform(String),
     SwapSelectA(String),
     SwapSelectB(String),
     ToggleSwap,
@@ -100,7 +272,6 @@ pub enum Message {
     PolicySet(Result<ProfileDetail, String>),
     SaveLayout,
     LayoutSaved(Result<(), String>),
-    CloseEditor,
 }
 
 pub struct DisplaysModule {
@@ -116,10 +287,14 @@ pub struct DisplaysModule {
     competing_monitor_rules: Vec<String>,
     renaming: Option<(String, String)>,
     last_event: Option<String>,
-    /// Managing every stored profile (not just the one that's active) is
-    /// the power-user case — collapsed by default so the common case
-    /// ("here's what's applied right now") isn't buried under it.
-    show_advanced: bool,
+    /// Managing every stored profile (not just the one loaded in the
+    /// editor) is the power-user case — collapsed by default.
+    show_other_profiles: bool,
+    /// The profile currently shown in the canvas/property panel. Starts
+    /// out following `current_profile_id` automatically; once the user
+    /// explicitly picks a different profile to edit (via `EditLayout`),
+    /// it stops following so an unrelated apply/auto-learn elsewhere
+    /// can't yank their in-progress edit out from under them.
     editor: Option<LayoutEditor>,
 }
 
@@ -135,16 +310,23 @@ impl DisplaysModule {
                 competing_monitor_rules: Vec::new(),
                 renaming: None,
                 last_event: None,
-                show_advanced: false,
+                show_other_profiles: false,
                 editor: None,
             },
             Task::perform(load(), Message::Loaded),
         )
     }
 
-    fn current_profile(&self) -> Option<&ProfileInfo> {
-        let id = self.current_profile_id.as_ref()?;
-        self.profiles.iter().find(|p| &p.id == id)
+    /// Loads `current_profile_id` into the editor, but only if nothing is
+    /// loaded there yet — see the `editor` field doc for why this doesn't
+    /// run unconditionally on every update.
+    fn maybe_autoload_editor(&self) -> Task<Message> {
+        if self.editor.is_none() {
+            if let Some(id) = &self.current_profile_id {
+                return Task::perform(load_profile(id.clone()), Message::LayoutLoaded);
+            }
+        }
+        Task::none()
     }
 
     fn profile_row(&self, p: &ProfileInfo, scale: FontScale, is_current: bool) -> Element<'_, Message> {
@@ -167,7 +349,7 @@ impl DisplaysModule {
         container(
             row![
                 info,
-                secondary_button("Edit Layout").on_press(Message::EditLayout(p.id.clone())),
+                secondary_button("Edit").on_press(Message::EditLayout(p.id.clone())),
                 secondary_button("Rename")
                     .on_press(Message::RenameStart(p.id.clone(), p.name.clone())),
                 primary_button("Apply").on_press(Message::Apply(p.id.clone())),
@@ -212,7 +394,7 @@ impl SettingsModule for DisplaysModule {
                 {
                     self.current_profile_id = Some(p.id.clone());
                 }
-                Task::none()
+                self.maybe_autoload_editor()
             }
             Message::Loaded(Err(e)) => {
                 self.connected = false;
@@ -228,8 +410,8 @@ impl SettingsModule for DisplaysModule {
                 self.error = Some(e);
                 Task::none()
             }
-            Message::ToggleAdvanced => {
-                self.show_advanced = !self.show_advanced;
+            Message::ToggleOtherProfiles => {
+                self.show_other_profiles = !self.show_other_profiles;
                 Task::none()
             }
             Message::RenameStart(id, current) => {
@@ -266,21 +448,83 @@ impl SettingsModule for DisplaysModule {
                     }
                     SignalKind::NewTopologySeen { summary } => format!("New topology: {summary}"),
                 });
-                Task::perform(load(), Message::Loaded)
+                let reload = Task::perform(load(), Message::Loaded);
+                Task::batch([reload, self.maybe_autoload_editor()])
             }
             Message::EditLayout(id) => Task::perform(load_profile(id), Message::LayoutLoaded),
             Message::LayoutLoaded(Ok(profile)) => {
-                self.editor = Some(LayoutEditor {
-                    profile,
-                    swap_a: None,
-                    swap_b: None,
-                    status: None,
-                    error: None,
-                });
-                Task::none()
+                let selected = profile.heads.first().map(|h| h.connector_hint.clone());
+                self.editor = Some(LayoutEditor::new(profile));
+                match selected {
+                    Some(hint) => Task::perform(fetch_modes(hint.clone()), move |modes| {
+                        Message::ModesLoaded(hint.clone(), modes)
+                    }),
+                    None => Task::none(),
+                }
             }
             Message::LayoutLoaded(Err(e)) => {
                 self.error = Some(e);
+                Task::none()
+            }
+            Message::DiscardEdits => {
+                let Some(editor) = &self.editor else {
+                    return Task::none();
+                };
+                Task::perform(load_profile(editor.profile.id.clone()), Message::LayoutLoaded)
+            }
+            Message::SelectHead(hint) => {
+                if let Some(editor) = &mut self.editor {
+                    if let Some(h) = editor.profile.heads.iter().find(|h| h.connector_hint == hint) {
+                        let (x, y, w, ht, r, s, t) = fields_from_head(h);
+                        editor.field_x = x;
+                        editor.field_y = y;
+                        editor.field_width = w;
+                        editor.field_height = ht;
+                        editor.field_refresh = r;
+                        editor.field_scale = s;
+                        editor.field_transform = t;
+                    }
+                    editor.available_modes = Vec::new();
+                    editor.selected = Some(hint.clone());
+                    return Task::perform(fetch_modes(hint.clone()), move |modes| {
+                        Message::ModesLoaded(hint.clone(), modes)
+                    });
+                }
+                Task::none()
+            }
+            Message::ModesLoaded(hint, modes) => {
+                if let Some(editor) = &mut self.editor {
+                    // Discard if the user already selected a different
+                    // head before this (possibly slow) D-Bus round trip
+                    // returned.
+                    if editor.selected.as_deref() == Some(hint.as_str()) {
+                        editor.available_modes = modes
+                            .into_iter()
+                            .map(|(width, height, refresh_mhz, preferred)| ModeOption {
+                                width,
+                                height,
+                                refresh_mhz,
+                                preferred,
+                            })
+                            .collect();
+                    }
+                }
+                Task::none()
+            }
+            Message::ModeSelected(mode) => {
+                if let Some(editor) = &mut self.editor {
+                    editor.field_width = mode.width.to_string();
+                    editor.field_height = mode.height.to_string();
+                    editor.field_refresh = format!("{:.0}", mode.refresh_mhz as f64 / 1000.0);
+                    commit_selected_head(editor);
+                }
+                Task::none()
+            }
+            Message::FieldTransform(label) => {
+                if let Some(editor) = &mut self.editor {
+                    editor.field_transform = label;
+                    commit_selected_head(editor);
+                }
                 Task::none()
             }
             Message::HeadDragMoved(connector_hint, x, y) => {
@@ -294,6 +538,52 @@ impl SettingsModule for DisplaysModule {
                         head.x = x;
                         head.y = y;
                     }
+                    if editor.selected.as_deref() == Some(connector_hint.as_str()) {
+                        editor.field_x = x.to_string();
+                        editor.field_y = y.to_string();
+                    }
+                }
+                Task::none()
+            }
+            Message::FieldX(v) => {
+                if let Some(editor) = &mut self.editor {
+                    editor.field_x = v;
+                    commit_selected_head(editor);
+                }
+                Task::none()
+            }
+            Message::FieldY(v) => {
+                if let Some(editor) = &mut self.editor {
+                    editor.field_y = v;
+                    commit_selected_head(editor);
+                }
+                Task::none()
+            }
+            Message::FieldWidth(v) => {
+                if let Some(editor) = &mut self.editor {
+                    editor.field_width = v;
+                    commit_selected_head(editor);
+                }
+                Task::none()
+            }
+            Message::FieldHeight(v) => {
+                if let Some(editor) = &mut self.editor {
+                    editor.field_height = v;
+                    commit_selected_head(editor);
+                }
+                Task::none()
+            }
+            Message::FieldRefresh(v) => {
+                if let Some(editor) = &mut self.editor {
+                    editor.field_refresh = v;
+                    commit_selected_head(editor);
+                }
+                Task::none()
+            }
+            Message::FieldScale(v) => {
+                if let Some(editor) = &mut self.editor {
+                    editor.field_scale = v;
+                    commit_selected_head(editor);
                 }
                 Task::none()
             }
@@ -362,19 +652,33 @@ impl SettingsModule for DisplaysModule {
                 let Some(editor) = &self.editor else {
                     return Task::none();
                 };
-                let heads: Vec<(String, i32, i32)> = editor
+                let heads: Vec<HeadGeometry> = editor
                     .profile
                     .heads
                     .iter()
-                    .map(|h| (h.connector_hint.clone(), h.x, h.y))
+                    .map(|h| {
+                        (
+                            h.connector_hint.clone(),
+                            h.x,
+                            h.y,
+                            h.width,
+                            h.height,
+                            h.refresh_mhz,
+                            h.scale,
+                            h.transform.clone(),
+                        )
+                    })
                     .collect();
                 Task::perform(
-                    save_positions(editor.profile.id.clone(), heads),
+                    save_geometry(editor.profile.id.clone(), heads),
                     Message::LayoutSaved,
                 )
             }
             Message::LayoutSaved(Ok(())) => {
-                self.editor = None;
+                if let Some(editor) = &mut self.editor {
+                    editor.status = Some("Saved and applied.".to_string());
+                    editor.error = None;
+                }
                 Task::perform(load(), Message::Loaded)
             }
             Message::LayoutSaved(Err(e)) => {
@@ -383,18 +687,10 @@ impl SettingsModule for DisplaysModule {
                 }
                 Task::none()
             }
-            Message::CloseEditor => {
-                self.editor = None;
-                Task::none()
-            }
         }
     }
 
     fn view(&self, scale: FontScale) -> Element<'_, Message> {
-        if let Some(editor) = &self.editor {
-            return self.editor_view(editor, scale);
-        }
-
         if !self.connected {
             return container(
                 column![
@@ -411,7 +707,9 @@ impl SettingsModule for DisplaysModule {
                         13.0,
                         scale,
                     ),
-                    primary_button("Retry").on_press(Message::Refresh),
+                    container(primary_button("Retry").on_press(Message::Refresh))
+                        .width(Length::Fill)
+                        .align_x(iced::alignment::Horizontal::Right),
                 ]
                 .spacing(spacing::SM),
             )
@@ -438,72 +736,42 @@ impl SettingsModule for DisplaysModule {
             ));
         }
 
-        // The common case: what's applied right now, front and center —
-        // renaming/editing the setup you're actually using shouldn't
-        // require digging through a list of every profile you've ever had.
-        let is_renaming_current = matches!(
-            (&self.renaming, &self.current_profile_id),
-            (Some((id, _)), Some(current)) if id == current
-        );
-        let mut current_col = column![].spacing(spacing::SM);
-        let current_row: Element<'_, Message> = match (&self.renaming, self.current_profile()) {
-            (Some((_, draft)), _) if is_renaming_current => row![
-                text_input("Profile name", draft)
-                    .on_input(Message::RenameInput)
-                    .on_submit(Message::RenameSubmit),
-                primary_button("Save").on_press(Message::RenameSubmit),
-                secondary_button("Cancel").on_press(Message::RenameCancelled),
-            ]
-            .spacing(spacing::SM)
-            .into(),
-            (_, Some(p)) => row![
-                column![
-                    scaled_text(p.name.clone(), 16.0, scale),
-                    meta_text(
-                        format!("{} head(s) · last used {}", p.head_count, p.last_used),
-                        12.0,
-                        scale,
-                    ),
-                ]
-                .spacing(spacing::XS)
-                .width(Length::Fill),
-                secondary_button("Rename")
-                    .on_press(Message::RenameStart(p.id.clone(), p.name.clone())),
-                primary_button("Edit Layout").on_press(Message::EditLayout(p.id.clone())),
-            ]
-            .spacing(spacing::SM)
-            .align_y(iced::Alignment::Center)
-            .into(),
-            (_, None) => meta_text(
-                "Hyprforge hasn't matched a saved profile to this display setup yet — \
-                 it will learn one automatically.",
-                14.0,
-                scale,
-            )
-            .into(),
-        };
-        current_col = current_col.push(current_row);
-        current_col = current_col.push(divider());
-        current_col = current_col.push(meta_text(
+        match &self.editor {
+            Some(editor) => content = content.push(self.editor_body(editor, scale)),
+            None => {
+                let msg = if self.current_profile_id.is_some() {
+                    "Loading current setup…"
+                } else {
+                    "Hyprforge hasn't matched a saved profile to this display setup yet — \
+                     it will learn one automatically."
+                };
+                content = content.push(section("Current Setup", scale, meta_text(msg, 14.0, scale)));
+            }
+        }
+
+        content = content.push(meta_text(
             format!("Fingerprint: {}", self.current_fingerprint),
             11.0,
             scale,
         ));
         if let Some(event) = &self.last_event {
-            current_col = current_col.push(meta_text(event.clone(), 11.0, scale));
+            content = content.push(meta_text(event.clone(), 11.0, scale));
         }
-        content = content.push(section("Current Setup", scale, current_col));
 
         content = content.push(
-            secondary_button(if self.show_advanced {
-                "Hide advanced"
-            } else {
-                "Show advanced"
-            })
-            .on_press(Message::ToggleAdvanced),
+            container(
+                secondary_button(if self.show_other_profiles {
+                    "Hide other display profiles"
+                } else {
+                    "Other display profiles"
+                })
+                .on_press(Message::ToggleOtherProfiles),
+            )
+            .width(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Right),
         );
 
-        if self.show_advanced {
+        if self.show_other_profiles {
             let mut list = column![].spacing(spacing::SM);
             if self.profiles.is_empty() {
                 list = list.push(meta_text(
@@ -518,10 +786,11 @@ impl SettingsModule for DisplaysModule {
                 }
                 let is_current = Some(&p.id) == self.current_profile_id.as_ref();
                 let row_el: Element<'_, Message> = match &self.renaming {
-                    Some((id, draft)) if id == &p.id && !is_renaming_current => row![
+                    Some((id, draft)) if id == &p.id => row![
                         text_input("Profile name", draft)
                             .on_input(Message::RenameInput)
-                            .on_submit(Message::RenameSubmit),
+                            .on_submit(Message::RenameSubmit)
+                            .width(Length::Fill),
                         primary_button("Save").on_press(Message::RenameSubmit),
                         secondary_button("Cancel").on_press(Message::RenameCancelled),
                     ]
@@ -533,13 +802,17 @@ impl SettingsModule for DisplaysModule {
                 list = list.push(row_el);
             }
             content = content.push(section(
-                "All Profiles",
+                "Other Display Profiles",
                 scale,
                 container(scrollable(list).height(Length::Shrink)).max_height(360.0),
             ));
         }
 
-        content = content.push(secondary_button("Refresh").on_press(Message::Refresh));
+        content = content.push(
+            container(secondary_button("Refresh").on_press(Message::Refresh))
+                .width(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Right),
+        );
 
         container(content).padding(spacing::LG).into()
     }
@@ -554,13 +827,30 @@ impl SettingsModule for DisplaysModule {
 }
 
 impl DisplaysModule {
-    fn editor_view(&self, editor: &LayoutEditor, scale: FontScale) -> Element<'_, Message> {
-        let connector_hints: Vec<String> = editor
-            .profile
-            .heads
-            .iter()
-            .map(|h| h.connector_hint.clone())
-            .collect();
+    /// The canvas + property panel + policy/swap controls — the "editing a
+    /// profile" view, embedded directly in the Monitors screen rather than
+    /// behind a separate button (Windows-Display-Settings-style: land on
+    /// the diagram, not a summary card).
+    fn editor_body<'a>(&'a self, editor: &'a LayoutEditor, scale: FontScale) -> Element<'a, Message> {
+        let mut body = column![].spacing(spacing::LG);
+
+        if Some(&editor.profile.id) != self.current_profile_id.as_ref() {
+            let mut notice = row![meta_text(
+                format!(
+                    "Editing '{}' — not the currently-applied setup.",
+                    editor.profile.name
+                ),
+                12.0,
+                scale,
+            )]
+            .spacing(spacing::SM)
+            .align_y(iced::Alignment::Center);
+            if let Some(current_id) = &self.current_profile_id {
+                notice = notice
+                    .push(secondary_button("Back to current").on_press(Message::EditLayout(current_id.clone())));
+            }
+            body = body.push(notice);
+        }
 
         let canvas_heads: Vec<CanvasHead> = editor
             .profile
@@ -575,12 +865,123 @@ impl DisplaysModule {
                 enabled: h.enabled,
             })
             .collect();
-        let canvas = LayoutCanvas::new(canvas_heads, Message::HeadDragMoved).into_element();
+        let canvas = LayoutCanvas::new(
+            canvas_heads,
+            editor.selected.clone(),
+            Message::SelectHead,
+            Message::HeadDragMoved,
+        )
+        .into_element();
+        body = body.push(section("Layout — drag or click a monitor to select it", scale, canvas));
 
+        let head_hints: Vec<String> = editor
+            .profile
+            .heads
+            .iter()
+            .map(|h| h.connector_hint.clone())
+            .collect();
+        let monitor_picker = row_field(
+            "Monitor",
+            iced::widget::pick_list(head_hints, editor.selected.clone(), Message::SelectHead)
+                .placeholder("Select a monitor"),
+        );
+
+        let properties: Element<'_, Message> = if editor.selected_head().is_some() {
+            let resolution_field: Element<'_, Message> = if editor.available_modes.is_empty() {
+                column![
+                    row_field(
+                        "Width (px)",
+                        text_input("1920", &editor.field_width).on_input(Message::FieldWidth),
+                    ),
+                    row_field(
+                        "Height (px)",
+                        text_input("1080", &editor.field_height).on_input(Message::FieldHeight),
+                    ),
+                    row_field(
+                        "Refresh rate (Hz)",
+                        text_input("60", &editor.field_refresh).on_input(Message::FieldRefresh),
+                    ),
+                    meta_text(
+                        "This monitor isn't currently connected, so its supported \
+                         resolutions aren't known — enter values manually.",
+                        11.0,
+                        scale,
+                    ),
+                ]
+                .spacing(spacing::SM)
+                .into()
+            } else {
+                let current_mode = editor
+                    .field_width
+                    .trim()
+                    .parse::<i32>()
+                    .ok()
+                    .zip(editor.field_height.trim().parse::<i32>().ok())
+                    .zip(editor.field_refresh.trim().parse::<f64>().ok())
+                    .and_then(|((width, height), refresh_hz)| {
+                        let refresh_mhz = (refresh_hz * 1000.0).round() as i32;
+                        editor
+                            .available_modes
+                            .iter()
+                            .find(|m| m.width == width && m.height == height && m.refresh_mhz == refresh_mhz)
+                            .cloned()
+                    });
+                row_field(
+                    "Resolution",
+                    iced::widget::pick_list(
+                        editor.available_modes.clone(),
+                        current_mode,
+                        Message::ModeSelected,
+                    )
+                    .placeholder("Select a resolution"),
+                )
+            };
+
+            let orientation_field = row_field(
+                "Orientation",
+                iced::widget::pick_list(
+                    TRANSFORM_LABELS.to_vec(),
+                    Some(editor.field_transform.as_str()),
+                    |label: &str| Message::FieldTransform(label.to_string()),
+                ),
+            );
+
+            column![
+                monitor_picker,
+                row_field(
+                    "Position X",
+                    text_input("0", &editor.field_x).on_input(Message::FieldX),
+                ),
+                row_field(
+                    "Position Y",
+                    text_input("0", &editor.field_y).on_input(Message::FieldY),
+                ),
+                resolution_field,
+                row_field(
+                    "Scale (%)",
+                    text_input("100", &editor.field_scale).on_input(Message::FieldScale),
+                ),
+                orientation_field,
+            ]
+            .spacing(spacing::SM)
+            .into()
+        } else {
+            column![monitor_picker, meta_text("This profile has no heads.", 13.0, scale)]
+                .spacing(spacing::SM)
+                .into()
+        };
+        body = body.push(section("Selected monitor", scale, properties));
+
+        let swap_hints: Vec<String> = editor
+            .profile
+            .heads
+            .iter()
+            .map(|h| h.connector_hint.clone())
+            .collect();
         let swap_row = row![
-            pick_list(connector_hints.clone(), editor.swap_a.clone(), Message::SwapSelectA)
+            iced::widget::pick_list(swap_hints.clone(), editor.swap_a.clone(), Message::SwapSelectA)
                 .placeholder("Head A"),
-            pick_list(connector_hints.clone(), editor.swap_b.clone(), Message::SwapSelectB)
+            iced::widget::pick_list(swap_hints, editor.swap_b.clone(), Message::SwapSelectB)
                 .placeholder("Head B"),
             {
                 let ready = matches!(
@@ -614,43 +1015,33 @@ impl DisplaysModule {
         ]
         .spacing(spacing::SM);
 
-        let mut content = column![
-            scaled_text("Edit Layout", 22.0, scale),
-            meta_text(
-                "Drag heads to reposition them, then Save & Apply. Extra output \
-                 policy governs any output this profile doesn't cover; head swap \
-                 fixes assignment when two heads share an identical (often \
-                 blank-serial) EDID identity.",
-                13.0,
-                scale,
-            ),
-            section("Layout", scale, canvas),
-        ]
-        .spacing(spacing::LG);
-
-        content = content.push(section("Extra output policy", scale, policy_row));
-        content = content.push(section(
+        body = body.push(section("Extra output policy", scale, policy_row));
+        body = body.push(section(
             "Swap heads (for duplicate/blank-serial identities)",
             scale,
             swap_row,
         ));
 
         if let Some(status) = &editor.status {
-            content = content.push(meta_text(status.clone(), 13.0, scale));
+            body = body.push(meta_text(status.clone(), 13.0, scale));
         }
         if let Some(err) = &editor.error {
-            content = content.push(scaled_text(format!("Error: {err}"), 13.0, scale));
+            body = body.push(scaled_text(format!("Error: {err}"), 13.0, scale));
         }
 
-        content = content.push(
-            row![
-                secondary_button("Cancel").on_press(Message::CloseEditor),
-                primary_button("Save & Apply").on_press(Message::SaveLayout),
-            ]
-            .spacing(spacing::SM),
+        body = body.push(
+            container(
+                row![
+                    secondary_button("Discard changes").on_press(Message::DiscardEdits),
+                    primary_button("Save & Apply").on_press(Message::SaveLayout),
+                ]
+                .spacing(spacing::SM),
+            )
+            .width(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Right),
         );
 
-        container(content).padding(spacing::LG).into()
+        body.into()
     }
 }
 
@@ -735,12 +1126,25 @@ async fn set_policy(profile_id: String, policy: String) -> Result<ProfileDetail,
     load_profile(profile_id).await
 }
 
-async fn save_positions(profile_id: String, heads: Vec<(String, i32, i32)>) -> Result<(), String> {
+/// `(connector_hint, x, y, width, height, refresh_mhz, scale, transform)`.
+type HeadGeometry = (String, i32, i32, i32, i32, i32, f64, String);
+
+async fn save_geometry(profile_id: String, heads: Vec<HeadGeometry>) -> Result<(), String> {
     let conn = connect().await?;
     let proxy = DisplaydProxy::new(&conn).await.map_err(|e| e.to_string())?;
-    for (connector_hint, x, y) in heads {
+    for (connector_hint, x, y, width, height, refresh_mhz, scale, transform) in heads {
         proxy
-            .set_head_position(&profile_id, &connector_hint, x, y)
+            .set_head_geometry(
+                &profile_id,
+                &connector_hint,
+                x,
+                y,
+                width,
+                height,
+                refresh_mhz,
+                scale,
+                &transform,
+            )
             .await
             .map_err(|e| e.to_string())?;
     }
@@ -748,6 +1152,16 @@ async fn save_positions(profile_id: String, heads: Vec<(String, i32, i32)>) -> R
         .apply_profile(&profile_id)
         .await
         .map_err(|e| e.to_string())
+}
+
+async fn fetch_modes(connector_hint: String) -> Vec<(i32, i32, i32, bool)> {
+    let Ok(conn) = connect().await else {
+        return Vec::new();
+    };
+    let Ok(proxy) = DisplaydProxy::new(&conn).await else {
+        return Vec::new();
+    };
+    proxy.get_available_modes(&connector_hint).await.unwrap_or_default()
 }
 
 fn signal_stream() -> impl iced::futures::Stream<Item = Message> {

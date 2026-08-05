@@ -39,9 +39,30 @@ pub trait Displayd {
         y: i32,
     ) -> zbus::Result<()>;
 
+    #[allow(clippy::too_many_arguments)]
+    fn set_head_geometry(
+        &self,
+        profile_id: &str,
+        connector_hint: &str,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        refresh_mhz: i32,
+        scale: f64,
+        transform: &str,
+    ) -> zbus::Result<()>;
+
     /// JSON-encoded snapshot of one stored profile, including full head
     /// geometry.
     fn get_profile(&self, profile_id: &str) -> zbus::Result<String>;
+
+    /// `(width, height, refresh_mhz, preferred)` per mode a currently
+    /// -connected head supports; empty if the connector isn't live.
+    fn get_available_modes(
+        &self,
+        connector_hint: &str,
+    ) -> zbus::Result<Vec<(i32, i32, i32, bool)>>;
 
     #[zbus(property)]
     fn competing_monitor_rules(&self) -> zbus::Result<Vec<String>>;
