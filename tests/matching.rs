@@ -312,3 +312,37 @@ async fn set_head_position_rejects_unknown_connector() {
     let result = h.daemon.set_head_position(&id, "NOT-A-HEAD", 0, 0).await;
     assert!(result.is_err());
 }
+
+#[tokio::test(start_paused = true)]
+async fn set_head_geometry_updates_position_mode_and_scale() {
+    let mut h = Harness::new();
+    let boe = identity("BOE", "0x0BC9", "");
+
+    h.backend.set_topology(vec![boe]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await;
+
+    let id = h.daemon.profiles().await[0].id.clone();
+    h.daemon
+        .set_head_geometry(
+            &id,
+            "MOCK-1",
+            100,
+            200,
+            3840,
+            2160,
+            144000,
+            1.5,
+            hyprforge_displayd::types::Transform::Rotate90,
+        )
+        .await
+        .unwrap();
+
+    let profiles = h.daemon.profiles().await;
+    let head = &profiles[0].heads[0];
+    assert_eq!((head.x, head.y), (100, 200));
+    assert_eq!((head.width, head.height), (3840, 2160));
+    assert_eq!(head.transform, hyprforge_displayd::types::Transform::Rotate90);
+    assert_eq!(head.refresh_mhz, 144000);
+    assert_eq!(head.scale, 1.5);
+}
