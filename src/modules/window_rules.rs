@@ -358,7 +358,11 @@ impl SettingsModule for WindowRulesModule {
             scale,
             container(scrollable(list).height(Length::Shrink)).max_height(360.0),
         ));
-        content = content.push(primary_button("Add rule").on_press(Message::Add));
+        content = content.push(
+            container(primary_button("Add rule").on_press(Message::Add))
+                .width(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Right),
+        );
 
         container(content).padding(spacing::LG).into()
     }
@@ -400,11 +404,15 @@ impl WindowRulesModule {
             column![
                 scaled_text(title, 22.0, scale),
                 section("Rule", scale, form),
-                row![
-                    secondary_button("Cancel").on_press(Message::DraftCancel),
-                    primary_button("Save").on_press(Message::DraftSave),
-                ]
-                .spacing(spacing::SM),
+                container(
+                    row![
+                        secondary_button("Cancel").on_press(Message::DraftCancel),
+                        primary_button("Save").on_press(Message::DraftSave),
+                    ]
+                    .spacing(spacing::SM),
+                )
+                .width(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Right),
             ]
             .spacing(spacing::LG)
             .max_width(520.0),
