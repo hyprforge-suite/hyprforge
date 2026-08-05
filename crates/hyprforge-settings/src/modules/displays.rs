@@ -1,9 +1,9 @@
 use crate::modules::layout_canvas::{CanvasHead, LayoutCanvas};
 use hyprforge_core::displayd_proxy::DisplaydProxy;
 use hyprforge_core::theme::{spacing, FontScale};
-use hyprforge_core::widgets::{scaled_text, section};
+use hyprforge_core::widgets::{divider, meta_text, primary_button, scaled_text, secondary_button, section};
 use hyprforge_core::SettingsModule;
-use iced::widget::{button, column, container, pick_list, row, scrollable, text_input};
+use iced::widget::{column, container, pick_list, row, scrollable, text_input};
 use iced::{Element, Length, Subscription, Task};
 use serde::Deserialize;
 
@@ -131,17 +131,29 @@ impl DisplaysModule {
     }
 
     fn profile_row(&self, p: &ProfileInfo, scale: FontScale) -> Element<'_, Message> {
-        row![
-            scaled_text(p.name.clone(), 14.0, scale).width(Length::FillPortion(2)),
-            scaled_text(format!("{} head(s)", p.head_count), 14.0, scale)
-                .width(Length::FillPortion(1)),
-            scaled_text(p.last_used.clone(), 14.0, scale).width(Length::FillPortion(2)),
-            button("Apply").on_press(Message::Apply(p.id.clone())),
-            button("Rename").on_press(Message::RenameStart(p.id.clone(), p.name.clone())),
-            button("Edit Layout").on_press(Message::EditLayout(p.id.clone())),
+        let info = column![
+            scaled_text(p.name.clone(), 14.0, scale),
+            meta_text(
+                format!("{} head(s) · last used {}", p.head_count, p.last_used),
+                12.0,
+                scale,
+            ),
         ]
-        .spacing(spacing::SM)
-        .align_y(iced::Alignment::Center)
+        .spacing(spacing::XS)
+        .width(Length::Fill);
+
+        container(
+            row![
+                info,
+                secondary_button("Edit Layout").on_press(Message::EditLayout(p.id.clone())),
+                secondary_button("Rename")
+                    .on_press(Message::RenameStart(p.id.clone(), p.name.clone())),
+                primary_button("Apply").on_press(Message::Apply(p.id.clone())),
+            ]
+            .spacing(spacing::SM)
+            .align_y(iced::Alignment::Center),
+        )
+        .padding([spacing::SM, 0.0])
         .into()
     }
 }
@@ -344,7 +356,7 @@ impl SettingsModule for DisplaysModule {
         if !self.connected {
             return container(
                 column![
-                    scaled_text("Displays", 20.0, scale),
+                    scaled_text("Displays", 22.0, scale),
                     scaled_text(
                         self.error
                             .clone()
@@ -352,20 +364,20 @@ impl SettingsModule for DisplaysModule {
                         14.0,
                         scale,
                     ),
-                    scaled_text(
+                    meta_text(
                         "Start it with: systemctl --user start hyprforge-displayd",
                         13.0,
                         scale,
                     ),
-                    button("Retry").on_press(Message::Refresh),
+                    primary_button("Retry").on_press(Message::Refresh),
                 ]
                 .spacing(spacing::SM),
             )
-            .padding(spacing::LG)
+            .padding(spacing::XL)
             .into();
         }
 
-        let mut content = column![scaled_text("Displays", 20.0, scale)].spacing(spacing::MD);
+        let mut content = column![scaled_text("Displays", 22.0, scale)].spacing(spacing::LG);
 
         if !self.competing_monitor_rules.is_empty() {
             content = content.push(section(
@@ -384,13 +396,11 @@ impl SettingsModule for DisplaysModule {
             ));
         }
 
-        let status = column![
-            scaled_text(
-                format!("Current fingerprint: {}", self.current_fingerprint),
-                13.0,
-                scale,
-            ),
-        ]
+        let status = column![meta_text(
+            format!("Fingerprint: {}", self.current_fingerprint),
+            13.0,
+            scale,
+        )]
         .spacing(spacing::XS);
         let status = if let Some(event) = &self.last_event {
             status.push(scaled_text(event.clone(), 13.0, scale))
@@ -401,22 +411,26 @@ impl SettingsModule for DisplaysModule {
 
         let mut list = column![].spacing(spacing::SM);
         if self.profiles.is_empty() {
-            list = list.push(scaled_text(
+            list = list.push(meta_text(
                 "No profiles yet — connect a display configuration and Hyprforge will learn it.",
                 14.0,
                 scale,
             ));
         }
-        for p in &self.profiles {
+        for (i, p) in self.profiles.iter().enumerate() {
+            if i > 0 {
+                list = list.push(divider());
+            }
             let row_el: Element<'_, Message> = match &self.renaming {
                 Some((id, draft)) if id == &p.id => row![
                     text_input("Profile name", draft)
                         .on_input(Message::RenameInput)
                         .on_submit(Message::RenameSubmit),
-                    button("Save").on_press(Message::RenameSubmit),
-                    button("Cancel").on_press(Message::RenameCancelled),
+                    primary_button("Save").on_press(Message::RenameSubmit),
+                    secondary_button("Cancel").on_press(Message::RenameCancelled),
                 ]
                 .spacing(spacing::SM)
+                .padding([spacing::SM, 0.0])
                 .into(),
                 _ => self.profile_row(p, scale),
             };
@@ -425,10 +439,10 @@ impl SettingsModule for DisplaysModule {
         content = content.push(section(
             "Profiles",
             scale,
-            scrollable(list).height(Length::Fill),
+            container(scrollable(list).height(Length::Shrink)).max_height(360.0),
         ));
 
-        content = content.push(button("Refresh").on_press(Message::Refresh));
+        content = content.push(secondary_button("Refresh").on_press(Message::Refresh));
 
         container(content).padding(spacing::LG).into()
     }
@@ -476,7 +490,7 @@ impl DisplaysModule {
                     (&editor.swap_a, &editor.swap_b),
                     (Some(a), Some(b)) if a != b
                 );
-                let btn = button("Toggle Swap");
+                let btn = secondary_button("Toggle Swap");
                 if ready {
                     btn.on_press(Message::ToggleSwap)
                 } else {
@@ -489,11 +503,10 @@ impl DisplaysModule {
 
         let policy_button = |label: &'static str, value: &'static str| {
             let active = editor.profile.extra_output_policy == value;
-            let btn = button(label);
             let btn = if active {
-                btn.style(button::primary)
+                primary_button(label)
             } else {
-                btn.style(button::secondary)
+                secondary_button(label)
             };
             btn.on_press(Message::SetPolicy(value.to_string()))
         };
@@ -505,8 +518,8 @@ impl DisplaysModule {
         .spacing(spacing::SM);
 
         let mut content = column![
-            scaled_text("Edit Layout", 20.0, scale),
-            scaled_text(
+            scaled_text("Edit Layout", 22.0, scale),
+            meta_text(
                 "Drag heads to reposition them, then Save & Apply. Extra output \
                  policy governs any output this profile doesn't cover; head swap \
                  fixes assignment when two heads share an identical (often \
@@ -514,9 +527,9 @@ impl DisplaysModule {
                 13.0,
                 scale,
             ),
-            canvas,
+            section("Layout", scale, canvas),
         ]
-        .spacing(spacing::MD);
+        .spacing(spacing::LG);
 
         content = content.push(section("Extra output policy", scale, policy_row));
         content = content.push(section(
@@ -526,7 +539,7 @@ impl DisplaysModule {
         ));
 
         if let Some(status) = &editor.status {
-            content = content.push(scaled_text(status.clone(), 13.0, scale));
+            content = content.push(meta_text(status.clone(), 13.0, scale));
         }
         if let Some(err) = &editor.error {
             content = content.push(scaled_text(format!("Error: {err}"), 13.0, scale));
@@ -534,8 +547,8 @@ impl DisplaysModule {
 
         content = content.push(
             row![
-                button("Cancel").on_press(Message::CloseEditor),
-                button("Save & Apply").on_press(Message::SaveLayout),
+                secondary_button("Cancel").on_press(Message::CloseEditor),
+                primary_button("Save & Apply").on_press(Message::SaveLayout),
             ]
             .spacing(spacing::SM),
         );

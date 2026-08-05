@@ -1,6 +1,6 @@
-use crate::theme::{spacing, FontScale};
+use crate::theme::{spacing, surface, FontScale, TEXT_DIM};
 use iced::widget::{button, column, container, row, text, text::IntoFragment, Text};
-use iced::{Element, Length, Theme};
+use iced::{Background, Border, Color, Element, Length, Theme};
 
 /// `text(content).size(scale.apply(base_size))` — the one place every piece
 /// of Hyprforge UI text should go through, so `FontScale` (vision pillar
@@ -14,21 +14,62 @@ pub fn scaled_text<'a>(
     text(content).size(scale.apply(base_size))
 }
 
+/// Dim, secondary-emphasis text — timestamps, hints, IDs. Distinct from
+/// `scaled_text` alone so "this is metadata, not content" is visible at a
+/// glance rather than relying on size difference only.
+pub fn meta_text<'a>(content: impl IntoFragment<'a>, base_size: f32, scale: FontScale) -> Text<'a> {
+    scaled_text(content, base_size, scale).color(TEXT_DIM)
+}
+
+/// The raised-card look used for every section and dialog — a real step
+/// up from the root background plus a hairline border, not an auto-derived
+/// shade a few percent off the background (which reads as "no elevation
+/// at all" on a real monitor).
+fn card_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(surface::CARD)),
+        border: Border {
+            radius: 10.0.into(),
+            width: 1.0,
+            color: surface::CARD_BORDER,
+        },
+        ..container::Style::default()
+    }
+}
+
 /// A titled group of content — the standard way every Hyprforge settings
-/// screen breaks itself into blocks (vision pillar #2).
+/// screen breaks itself into blocks (vision pillar #2). Sized to its
+/// content; callers that need scrolling should cap a `max_height` on the
+/// `content` they pass in rather than have the card stretch to fill
+/// whatever space happens to be available.
 pub fn section<'a, Message: 'a>(
     title: &'a str,
     scale: FontScale,
     content: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     column![
-        scaled_text(title, 16.0, scale),
+        meta_text(title.to_uppercase(), 12.0, scale),
         container(content.into())
             .padding(spacing::MD)
-            .style(container::rounded_box)
+            .width(Length::Fill)
+            .style(card_style)
     ]
     .spacing(spacing::SM)
     .into()
+}
+
+/// A thin separator between list rows inside a card — the visual grammar
+/// used everywhere Hyprforge shows a list of things (profiles, rules) so
+/// rows read as distinct items rather than one unbroken block of text.
+pub fn divider<'a, Message: 'a>() -> Element<'a, Message> {
+    container(column![])
+        .width(Length::Fill)
+        .height(Length::Fixed(1.0))
+        .style(|_theme: &Theme| container::Style {
+            background: Some(Background::Color(surface::CARD_BORDER)),
+            ..container::Style::default()
+        })
+        .into()
 }
 
 /// A label paired with its control, aligned into a settings-style row.
@@ -45,14 +86,112 @@ pub fn row_field<'a, Message: 'a>(
     .into()
 }
 
-/// A button styled for destructive/irreversible actions.
+fn primary_style(theme: &Theme, status: button::Status) -> button::Style {
+    let palette = theme.extended_palette();
+    let base = button::Style {
+        background: Some(Background::Color(palette.primary.base.color)),
+        text_color: palette.primary.base.text,
+        border: Border {
+            radius: 8.0.into(),
+            ..Border::default()
+        },
+        ..button::Style::default()
+    };
+    match status {
+        button::Status::Hovered => button::Style {
+            background: Some(Background::Color(palette.primary.strong.color)),
+            ..base
+        },
+        button::Status::Disabled => button::Style {
+            background: base.background.map(|b| match b {
+                Background::Color(c) => Background::Color(Color { a: 0.4, ..c }),
+                other => other,
+            }),
+            text_color: Color {
+                a: 0.4,
+                ..base.text_color
+            },
+            ..base
+        },
+        _ => base,
+    }
+}
+
+fn secondary_style(_theme: &Theme, status: button::Status) -> button::Style {
+    let base = button::Style {
+        background: Some(Background::Color(surface::ROW)),
+        text_color: crate::theme::TEXT,
+        border: Border {
+            radius: 8.0.into(),
+            width: 1.0,
+            color: surface::CARD_BORDER,
+        },
+        ..button::Style::default()
+    };
+    match status {
+        button::Status::Hovered => button::Style {
+            background: Some(Background::Color(surface::CARD_BORDER)),
+            ..base
+        },
+        button::Status::Disabled => button::Style {
+            text_color: Color {
+                a: 0.4,
+                ..base.text_color
+            },
+            ..base
+        },
+        _ => base,
+    }
+}
+
+fn danger_style(theme: &Theme, status: button::Status) -> button::Style {
+    let palette = theme.extended_palette();
+    let base = button::Style {
+        background: Some(Background::Color(surface::ROW)),
+        text_color: palette.danger.base.color,
+        border: Border {
+            radius: 8.0.into(),
+            width: 1.0,
+            color: palette.danger.base.color,
+        },
+        ..button::Style::default()
+    };
+    match status {
+        button::Status::Hovered => button::Style {
+            background: Some(Background::Color(palette.danger.base.color)),
+            text_color: palette.danger.base.text,
+            ..base
+        },
+        _ => base,
+    }
+}
+
+/// The default action button — filled with the accent color. Use for the
+/// one primary action in a row or dialog (Apply, Save, Confirm).
+pub fn primary_button<'a, Message: Clone + 'a>(
+    label: impl IntoFragment<'a>,
+) -> button::Button<'a, Message> {
+    button(text(label)).style(primary_style)
+}
+
+/// A quiet, outlined button for secondary actions (Rename, Cancel, Edit) —
+/// visible without competing with the primary action in the same row.
+pub fn secondary_button<'a, Message: Clone + 'a>(
+    label: impl IntoFragment<'a>,
+) -> button::Button<'a, Message> {
+    button(text(label)).style(secondary_style)
+}
+
+/// A button styled for destructive/irreversible actions. Reserve for
+/// things that actually destroy data (Delete) — a plain Cancel/Close is
+/// `secondary_button`, not this.
 pub fn danger_button<'a, Message: Clone + 'a>(
     label: &'a str,
     on_press: Message,
 ) -> Element<'a, Message> {
     button(text(label))
         .on_press(on_press)
-        .style(button::danger)
+        .style(danger_style)
         .into()
 }
 
@@ -69,7 +208,15 @@ pub fn confirm_dialog<'a, Message: Clone + 'a>(
     let diff = container(text(diff_text).font(iced::Font::MONOSPACE).size(13))
         .padding(spacing::SM)
         .width(Length::Fill)
-        .style(container::rounded_box);
+        .style(|_theme: &Theme| container::Style {
+            background: Some(Background::Color(surface::ROW)),
+            border: Border {
+                radius: 6.0.into(),
+                width: 1.0,
+                color: surface::CARD_BORDER,
+            },
+            ..container::Style::default()
+        });
 
     container(
         column![
@@ -77,8 +224,8 @@ pub fn confirm_dialog<'a, Message: Clone + 'a>(
             text(body),
             diff,
             row![
-                button("Cancel").on_press(on_cancel).style(button::secondary),
-                button("Confirm").on_press(on_confirm).style(button::primary),
+                secondary_button("Cancel").on_press(on_cancel),
+                primary_button("Confirm").on_press(on_confirm),
             ]
             .spacing(spacing::SM),
         ]
@@ -86,17 +233,6 @@ pub fn confirm_dialog<'a, Message: Clone + 'a>(
         .padding(spacing::LG)
         .max_width(560.0),
     )
-    .style(|theme: &Theme| {
-        let palette = theme.extended_palette();
-        container::Style {
-            background: Some(iced::Background::Color(palette.background.base.color)),
-            border: iced::Border {
-                radius: 12.0.into(),
-                width: 1.0,
-                color: palette.background.strong.color,
-            },
-            ..Default::default()
-        }
-    })
+    .style(card_style)
     .into()
 }

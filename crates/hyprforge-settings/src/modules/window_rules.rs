@@ -1,10 +1,13 @@
 use hyprforge_core::theme::{spacing, FontScale};
-use hyprforge_core::widgets::{confirm_dialog, danger_button, row_field, scaled_text, section};
+use hyprforge_core::widgets::{
+    confirm_dialog, danger_button, divider, meta_text, primary_button, row_field, scaled_text,
+    secondary_button, section,
+};
 use hyprforge_core::SettingsModule;
 use hyprforge_windowrules::model::{generate_rule_name, Effects, Matcher};
 use hyprforge_windowrules::setup::SetupPlan;
 use hyprforge_windowrules::Rule;
-use iced::widget::{button, checkbox, column, container, row, scrollable, text_input};
+use iced::widget::{checkbox, column, container, row, scrollable, text_input};
 use iced::{Element, Length, Task};
 
 #[derive(Debug, Clone, Default)]
@@ -304,47 +307,58 @@ impl SettingsModule for WindowRulesModule {
             return self.draft_view(draft, scale);
         }
 
-        let mut content = column![scaled_text("Window Rules", 20.0, scale)].spacing(spacing::MD);
+        let mut content = column![scaled_text("Window Rules", 22.0, scale)].spacing(spacing::LG);
 
         if let Some(err) = &self.error {
             content = content.push(scaled_text(format!("Error: {err}"), 13.0, scale));
         }
         if let Some(status) = &self.status {
-            content = content.push(scaled_text(status.clone(), 13.0, scale));
+            content = content.push(meta_text(status.clone(), 13.0, scale));
         }
 
         let mut list = column![].spacing(spacing::SM);
         if self.rules.is_empty() {
-            list = list.push(scaled_text("No rules yet.", 14.0, scale));
+            list = list.push(meta_text("No rules yet.", 14.0, scale));
         }
         for (i, rule) in self.rules.iter().enumerate() {
+            if i > 0 {
+                list = list.push(divider());
+            }
             let summary = rule
                 .matcher
                 .class
                 .clone()
                 .or_else(|| rule.matcher.title.clone())
                 .unwrap_or_else(|| "(no match)".to_string());
+            let info = column![
+                scaled_text(summary, 14.0, scale),
+                meta_text(rule.name.clone(), 12.0, scale),
+            ]
+            .spacing(spacing::XS)
+            .width(Length::Fill);
             list = list.push(
-                row![
-                    checkbox(rule.enabled).on_toggle(move |_| Message::ToggleEnabled(i)),
-                    scaled_text(summary, 14.0, scale).width(Length::FillPortion(2)),
-                    scaled_text(rule.name.clone(), 12.0, scale).width(Length::FillPortion(2)),
-                    button("Up").on_press(Message::MoveUp(i)),
-                    button("Down").on_press(Message::MoveDown(i)),
-                    button("Edit").on_press(Message::Edit(i)),
-                    danger_button("Delete", Message::Delete(i)),
-                ]
-                .spacing(spacing::SM)
-                .align_y(iced::Alignment::Center),
+                container(
+                    row![
+                        checkbox(rule.enabled).on_toggle(move |_| Message::ToggleEnabled(i)),
+                        info,
+                        secondary_button("Up").on_press(Message::MoveUp(i)),
+                        secondary_button("Down").on_press(Message::MoveDown(i)),
+                        secondary_button("Edit").on_press(Message::Edit(i)),
+                        danger_button("Delete", Message::Delete(i)),
+                    ]
+                    .spacing(spacing::SM)
+                    .align_y(iced::Alignment::Center),
+                )
+                .padding([spacing::SM, 0.0]),
             );
         }
 
         content = content.push(section(
             "Rules",
             scale,
-            scrollable(list).height(Length::Fill),
+            container(scrollable(list).height(Length::Shrink)).max_height(360.0),
         ));
-        content = content.push(button("Add rule").on_press(Message::Add));
+        content = content.push(primary_button("Add rule").on_press(Message::Add));
 
         container(content).padding(spacing::LG).into()
     }
@@ -357,40 +371,43 @@ impl WindowRulesModule {
         } else {
             "New rule"
         };
+        let form = column![
+            row_field(
+                "Class",
+                text_input("Window class (regex)", &draft.class).on_input(Message::DraftClass),
+            ),
+            row_field(
+                "Title",
+                text_input("Window title (regex)", &draft.title).on_input(Message::DraftTitle),
+            ),
+            checkbox(draft.float).label("Float").on_toggle(Message::DraftFloat),
+            checkbox(draft.no_blur)
+                .label("Disable blur")
+                .on_toggle(Message::DraftNoBlur),
+            row_field(
+                "Rounding (px)",
+                text_input("e.g. 8", &draft.rounding).on_input(Message::DraftRounding),
+            ),
+            row_field(
+                "Border color",
+                text_input("e.g. rgb(FF0000)", &draft.border_color)
+                    .on_input(Message::DraftBorderColor),
+            ),
+        ]
+        .spacing(spacing::MD);
+
         container(
             column![
-                scaled_text(title, 18.0, scale),
-                row_field(
-                    "Class",
-                    text_input("Window class (regex)", &draft.class)
-                        .on_input(Message::DraftClass),
-                ),
-                row_field(
-                    "Title",
-                    text_input("Window title (regex)", &draft.title)
-                        .on_input(Message::DraftTitle),
-                ),
-                checkbox(draft.float).label("Float").on_toggle(Message::DraftFloat),
-                checkbox(draft.no_blur)
-                    .label("Disable blur")
-                    .on_toggle(Message::DraftNoBlur),
-                row_field(
-                    "Rounding (px)",
-                    text_input("e.g. 8", &draft.rounding).on_input(Message::DraftRounding),
-                ),
-                row_field(
-                    "Border color",
-                    text_input("e.g. rgb(FF0000)", &draft.border_color)
-                        .on_input(Message::DraftBorderColor),
-                ),
+                scaled_text(title, 22.0, scale),
+                section("Rule", scale, form),
                 row![
-                    danger_button("Cancel", Message::DraftCancel),
-                    button("Save").on_press(Message::DraftSave),
+                    secondary_button("Cancel").on_press(Message::DraftCancel),
+                    primary_button("Save").on_press(Message::DraftSave),
                 ]
                 .spacing(spacing::SM),
             ]
-            .spacing(spacing::MD)
-            .max_width(480.0),
+            .spacing(spacing::LG)
+            .max_width(520.0),
         )
         .padding(spacing::LG)
         .into()
