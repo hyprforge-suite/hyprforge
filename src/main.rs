@@ -1,13 +1,16 @@
 mod modules;
 
-use hyprforge_core::theme::{app_theme, spacing, FontScale};
-use hyprforge_core::widgets::scaled_text;
+use hyprforge_core::theme::{app_theme, spacing, surface, FontScale, TEXT_DIM};
+use hyprforge_core::widgets::{primary_button, scaled_text, secondary_button};
 use hyprforge_core::SettingsModule;
 use iced::keyboard::{self, key, Key};
-use iced::widget::{button, column, container, operation, row, text_input, Id};
-use iced::{Element, Length, Subscription, Task, Theme};
+use iced::widget::{column, container, operation, row, text_input, Id, Space};
+use iced::{window, Background, Element, Length, Size, Subscription, Task, Theme};
 use modules::displays::DisplaysModule;
 use modules::window_rules::WindowRulesModule;
+
+const SIDEBAR_WIDTH: f32 = 240.0;
+const CONTENT_MAX_WIDTH: f32 = 880.0;
 
 fn main() -> iced::Result {
     tracing_subscriber::fmt()
@@ -18,6 +21,12 @@ fn main() -> iced::Result {
         .title("Hyprforge Settings")
         .theme(App::theme)
         .subscription(App::subscription)
+        .window(window::Settings {
+            size: Size::new(1000.0, 700.0),
+            min_size: Some(Size::new(760.0, 520.0)),
+            position: window::Position::Centered,
+            ..window::Settings::default()
+        })
         .run()
 }
 
@@ -161,17 +170,18 @@ impl App {
         let scale = self.font_scale;
 
         let sidebar_button = |label: String, screen: Screen, active: bool| {
-            let btn = button(scaled_text(label, 14.0, scale)).width(Length::Fill);
             let btn = if active {
-                btn.style(button::primary)
+                primary_button(label)
             } else {
-                btn.style(button::secondary)
+                secondary_button(label)
             };
-            btn.on_press(Message::Navigate(screen))
+            btn.width(Length::Fill)
+                .padding([10, 12])
+                .on_press(Message::Navigate(screen))
         };
 
         let query = self.search_query.to_lowercase();
-        let mut nav = column![].spacing(spacing::SM);
+        let mut nav = column![].spacing(spacing::XS);
         let mut any_visible = false;
         for screen in Screen::ALL {
             if !query.is_empty() && !screen.title().to_lowercase().contains(&query) {
@@ -191,33 +201,58 @@ impl App {
             nav = nav.push(sidebar_button(label, screen, active));
         }
         if !any_visible {
-            nav = nav.push(scaled_text("No matches", 13.0, scale));
+            nav = nav.push(scaled_text("No matches", 13.0, scale).color(TEXT_DIM));
         }
+
+        let font_scale_controls = column![
+            scaled_text("TEXT SIZE", 11.0, scale).color(TEXT_DIM),
+            row![
+                secondary_button("A-").on_press(Message::DecreaseFontScale),
+                secondary_button("A+").on_press(Message::IncreaseFontScale),
+            ]
+            .spacing(spacing::SM),
+        ]
+        .spacing(spacing::SM);
 
         let sidebar = container(
             column![
-                scaled_text("Hyprforge", 18.0, scale),
-                text_input("Search modules... (Ctrl+F)", &self.search_query)
+                scaled_text("Hyprforge", 20.0, scale),
+                text_input("Search…", &self.search_query)
                     .id(self.search_id.clone())
-                    .on_input(Message::SearchChanged),
+                    .on_input(Message::SearchChanged)
+                    .padding(8),
                 nav,
-                row![
-                    button("A-").on_press(Message::DecreaseFontScale),
-                    button("A+").on_press(Message::IncreaseFontScale),
-                ]
-                .spacing(spacing::SM),
+                Space::new().height(Length::Fill),
+                font_scale_controls,
             ]
-            .spacing(spacing::SM)
+            .spacing(spacing::MD)
             .padding(spacing::MD)
-            .width(Length::Fixed(220.0)),
-        );
+            .width(Length::Fixed(SIDEBAR_WIDTH)),
+        )
+        .height(Length::Fill)
+        .style(|_theme: &Theme| container::Style {
+            background: Some(Background::Color(surface::SIDEBAR)),
+            ..container::Style::default()
+        });
 
         let content: Element<'_, Message> = match self.screen {
             Screen::Displays => self.displays.view(scale).map(Message::Displays),
             Screen::WindowRules => self.window_rules.view(scale).map(Message::WindowRules),
         };
+        let content = container(content)
+            .max_width(CONTENT_MAX_WIDTH)
+            .width(Length::Fill);
+        let content = container(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill);
 
-        row![sidebar, container(content).width(Length::Fill)].into()
+        container(row![sidebar, content])
+            .style(|_theme: &Theme| container::Style {
+                background: Some(Background::Color(surface::ROOT)),
+                ..container::Style::default()
+            })
+            .into()
     }
 
     /// The one keyboard grammar used across the whole app (vision pillar
