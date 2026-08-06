@@ -77,7 +77,39 @@ $BIN simulate-topology 'BOE:0x0BC9:'     # subset match — partial layout appli
 $BIN simulate-topology 'BOE:0x0BC9:,DELL:U2720Q:ABC123'   # back to exact match
 $BIN apply <profile-id>     # force-apply regardless of current fingerprint
 $BIN rename <profile-id> "Home dual monitor"
+$BIN delete <profile-id>    # see the caveat below
+$BIN get-profile <profile-id>   # full stored geometry, as JSON
+$BIN current-layout             # the live layout, as JSON
+$BIN modes MOCK-1               # modes a connected head advertises
+$BIN set-geometry <profile-id> MOCK-1 0 0 2560 1440 60000 1.25 Normal
+$BIN set-policy <profile-id> mirror        # extend_right | mirror | disable
+$BIN swap-heads <profile-id> MOCK-1 MOCK-2
 ```
+
+`delete` is a true forget only for topologies that **aren't** plugged in.
+Deleting the profile for your current monitors discards its saved
+arrangement, but auto-learn recreates one from the live layout on the next
+topology change — "no stored profile matches" is exactly the condition that
+triggers learning. The GUI's confirmation dialog says which of the two you're
+about to get.
+
+## The confirm/revert window on display changes
+
+Applying a layout from the Settings GUI is **provisional for 12 seconds**. A
+banner offers "Keep changes" / "Revert now", and if you do neither — because
+the change blanked or scrambled the screen the banner is on — the daemon rolls
+it back on its own.
+
+The timer lives in `hyprforge-displayd`, not the GUI, so it still fires if the
+GUI is killed or wedged. A revert restores **both** the compositor state and
+the stored profile: undoing only the former would leave the bad geometry saved,
+and the next hotplug would re-apply the layout you just escaped.
+
+On the wire this is `ApplyProfileReversible` (returns the number of seconds),
+`ConfirmLayout`, `RevertLayout`, plus the `RevertPending`/`RevertResolved`
+signals. Plain `ApplyProfile` stays immediate and irreversible — that's what
+`displayctl apply` uses, since a scripted caller has no banner to click and
+shouldn't have its change silently undone.
 
 `simulate-topology`'s spec format is a comma-separated list of
 `make:model:serial` triples; any field may be left blank (e.g. `BOE:0x0BC9:`
@@ -86,9 +118,13 @@ built-in panel reports an empty EDID serial).
 
 Automated coverage of the same flows (exact/superset/subset matching,
 tie-breaks, duplicate/blank-serial assignment + `SwapHeads`, auto-learn,
-the zero-enabled-outputs safety rail) lives in
-`crates/hyprforge-displayd/tests/matching.rs`, run via `cargo test
---workspace`. A separate, manual-only test
+the zero-enabled-outputs safety rail, profile deletion, and the
+confirm/revert window) lives in `crates/hyprforge-displayd/tests/matching.rs`,
+run via `cargo test --workspace`.
+
+The revert tests drive paused tokio time. Note they must `yield_now` *before*
+`tokio::time::advance` as well as after: a freshly `spawn`ed task hasn't been
+polled yet, so it has no registered `sleep` for `advance` to fire. A separate, manual-only test
 (`crates/hyprforge-displayd/tests/live_smoke.rs`, run with `cargo test
 --test live_smoke -- --ignored`) connects to whatever compositor is
 actually running and lists real outputs — read-only, never applies a
@@ -118,6 +154,38 @@ Rules module, and only after showing the exact line and its insertion
 point in a confirmation dialog — it never edits `hyprland.lua` silently. A
 backup (`hyprland.lua.hyprforge.bak`) is written first.
 
+### If you don't have a `hyprland.lua`
+
+Hyprland's config language became Lua in 0.55, and `require()` — how
+Hyprforge sources its generated rules — only exists there. The module checks
+which config you actually have before offering to insert anything:
+
+| What's in `~/.config/hypr/` | What the module does |
+|---|---|
+| `hyprland.lua` | The normal path: shows the require-line confirmation above. |
+| Neither file | Offers to create a minimal `hyprland.lua` containing only the require line, showing the exact contents first. Everything else stays at Hyprland's defaults. |
+| Only `hyprland.conf` | Explains that the generated rules are Lua and points at migrating. **It will not touch your `.conf`** — that's the "never round-trip the user's own config" rule. |
+
+Rules can be created and saved in all three cases; they're stored in the
+canonical TOML either way and take effect as soon as setup is finished.
+
+### Rule fields
+
+The basic form covers class/title matching plus float, blur, rounding, and
+border color. "Show advanced" adds the rest of what the generator supports:
+
+- **Match on more** — `initial_class`/`initial_title` (the class/title the
+  window had when it opened, for apps that rename themselves afterwards), and
+  three-way `fullscreen`/`floating`/`xwayland`. Three-way rather than a
+  checkbox because "don't match on this" and "match windows where this is
+  false" are different rules — `floating = false` selects tiled windows.
+- **Position & size** — `move` and `size`. A plain number is emitted as
+  pixels; anything else is passed through to Hyprland as an expression
+  (`cursor_x-(window_w*0.5)`, `60%`). Both halves of a pair are required,
+  since Hyprland's `{ x, y }` form can't express one without the other.
+- **Opacity** — per-state active/inactive/fullscreen, with the `override`
+  flag for absolute rather than multiplied values.
+
 ## Known interaction with nwg-displays / hand-written `hl.monitor()` rules
 
 If your `hyprland.lua` (or anything it `require()`s) contains `hl.monitor()`
@@ -138,7 +206,19 @@ the competing `hl.monitor()` rules yourself.
 Bus name `dev.hyprforge.Displayd`, object path `/dev/hyprforge/Displayd`,
 interface `dev.hyprforge.Displayd1`. See
 `crates/hyprforge-core/src/displayd_proxy.rs` for the full method/signal
-list (`ListProfiles`, `ApplyProfile`, `RenameProfile`, `SwapHeads`,
-`SetExtraOutputPolicy`, `GetCurrentFingerprint`, `GetCurrentLayout`, the
-`ProfileApplied`/`NewTopologySeen` signals, and the `CompetingMonitorRules`
-property).
+list (`ListProfiles`, `ApplyProfile`, `ApplyProfileReversible`,
+`ConfirmLayout`, `RevertLayout`, `RenameProfile`, `DeleteProfile`,
+`SwapHeads`, `SetExtraOutputPolicy`, `SetHeadGeometry`, `GetProfile`,
+`GetAvailableModes`, `GetCurrentFingerprint`, `GetCurrentLayout`, the
+`ProfileApplied`/`NewTopologySeen`/`RevertPending`/`RevertResolved` signals,
+and the `CompetingMonitorRules` property).
+
+`displayctl` covers all of these, which makes the mock-backend workflow above
+a complete exercise of the API rather than a subset.
+
+Note that `zbus` is pinned to its **tokio** executor
+(`default-features = false, features = ["tokio"]`) workspace-wide. With zbus's
+default `async-io` backend, D-Bus method handlers run on zbus's own thread,
+outside any tokio runtime — anything they spawn (the revert timer) then panics
+with "there is no reactor running". Keep that feature set if you add new
+handlers that spawn.
