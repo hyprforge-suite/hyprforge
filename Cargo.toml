@@ -5,13 +5,18 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-hyprforge-core = { workspace = true, features = ["dbus"] }
+hyprforge-core = { workspace = true, features = ["gui", "dbus"] }
 hyprforge-windowrules.workspace = true
-iced = { workspace = true, features = ["canvas"] }
+# "tokio" selects iced's tokio executor backend, which is what provides
+# `iced::time::every` (used for the revert countdown) — the app already runs
+# on tokio for its D-Bus work, so this aligns the two rather than adding a
+# second runtime.
+iced = { workspace = true, features = ["canvas", "tokio"] }
 zbus.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+# "process" for the hyprctl calls that float/pin the revert prompt.
+tokio = { workspace = true, features = ["process"] }
 futures-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
