@@ -28,8 +28,16 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Default to `info` rather than whatever `from_default_env` alone gives
+    // with RUST_LOG unset — which is nothing at all. A long-running daemon
+    // that prints zero output on start is indistinguishable from a hung one
+    // (vision pillar #4: nothing should require faith that it worked).
+    // RUST_LOG still overrides this when set.
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
         .init();
 
     let cli = Cli::parse();
@@ -67,6 +75,13 @@ async fn run(mock: bool) -> anyhow::Result<()> {
 
     if let Some(mock_backend) = mock_backend {
         register_mock_simulate_topology(&connection, mock_backend).await?;
+        // A mock daemon with no outputs does nothing until told to, which
+        // looks identical to a broken one. Say what the next move is.
+        tracing::info!(
+            "mock backend ready with no outputs connected — drive it from another \
+             terminal, e.g. `hyprforge-displayctl simulate-topology \
+             'BOE:0x0BC9:,DELL:U2720Q:ABC123'`, then `hyprforge-displayctl list-profiles`"
+        );
     }
 
     let signal_forwarder = tokio::spawn(dbus::forward_signals(connection, signal_rx));
