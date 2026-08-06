@@ -17,6 +17,7 @@ name = "hyprforge-displayctl"
 path = "src/bin/displayctl.rs"
 
 [dependencies]
+# No `gui`: the daemon has no UI, so it skips iced entirely.
 hyprforge-core = { workspace = true, features = ["dbus"] }
 zbus.workspace = true
 wayland-client.workspace = true
