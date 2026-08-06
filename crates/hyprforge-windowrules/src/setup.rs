@@ -9,9 +9,83 @@
 //! override them by default. Appending last would invert that and let
 //! Hyprforge silently beat the user's own named rules.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub const REQUIRE_LINE: &str = "require(\"hyprforge/window-rules\")";
+
+/// Contents written by [`create_lua_config`] when the user has no Hyprland
+/// config at all. Deliberately minimal: Hyprforge creates a file that does
+/// nothing except source its own rules, leaving every other setting at
+/// Hyprland's defaults for the user to fill in themselves.
+const MINIMAL_LUA_CONFIG: &str = concat!(
+    "-- Hyprland configuration.\n",
+    "-- Created by Hyprforge because no hyprland.lua existed yet. This file is\n",
+    "-- yours to edit — Hyprforge only ever manages the require() line below.\n",
+    "\n",
+    "require(\"hyprforge/window-rules\")\n",
+);
+
+/// Which Hyprland config the user actually has, established *before* any
+/// attempt to insert the require line.
+///
+/// Hyprforge generates Lua (`window-rules.lua`) and sources it with
+/// `require()`, which only exists in Hyprland's Lua config format. A user on
+/// the older `hyprland.conf` therefore can't be served by inserting a line —
+/// they need to know that up front rather than after a failed write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HyprConfig {
+    /// `hyprland.lua` exists — the normal path; pair with [`detect`].
+    Lua(PathBuf),
+    /// Only `hyprland.conf` exists. `require()` is not usable here.
+    ConfOnly(PathBuf),
+    /// Neither file exists; [`create_lua_config`] can make one.
+    Missing,
+}
+
+/// Looks for `hyprland.lua`, then `hyprland.conf`, directly in `hypr_dir`.
+/// `Lua` wins when both are present: Hyprland's config language is Lua as of
+/// 0.55, so a user who has a `.lua` at all has migrated, and a leftover
+/// `.conf` shouldn't drag them back onto the migration notice.
+pub fn discover(hypr_dir: &Path) -> HyprConfig {
+    let lua = hypr_dir.join("hyprland.lua");
+    if lua.is_file() {
+        return HyprConfig::Lua(lua);
+    }
+    let conf = hypr_dir.join("hyprland.conf");
+    if conf.is_file() {
+        return HyprConfig::ConfOnly(conf);
+    }
+    HyprConfig::Missing
+}
+
+/// Renders the file [`create_lua_config`] would write, so the GUI can show
+/// it before anything touches the disk (vision pillar #4).
+pub fn preview_lua_config() -> String {
+    MINIMAL_LUA_CONFIG.to_string()
+}
+
+/// Creates a minimal `hyprland.lua` sourcing the Hyprforge rules file.
+///
+/// Refuses if `path` already exists: this is the [`HyprConfig::Missing`]
+/// path only, and creating a config is not the same operation as editing
+/// one — an existing file must go through [`install`], which backs up first.
+pub fn create_lua_config(path: &Path) -> Result<(), SetupError> {
+    if path.exists() {
+        return Err(SetupError::AlreadyExists {
+            path: path.display().to_string(),
+        });
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| SetupError::Write {
+            path: parent.display().to_string(),
+            source,
+        })?;
+    }
+    std::fs::write(path, MINIMAL_LUA_CONFIG).map_err(|source| SetupError::Write {
+        path: path.display().to_string(),
+        source,
+    })
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SetupPlan {
@@ -93,6 +167,8 @@ pub enum SetupError {
         #[source]
         source: std::io::Error,
     },
+    #[error("{path} already exists — it must be edited via install(), not recreated")]
+    AlreadyExists { path: String },
 }
 
 /// Detects, then — only if a change is needed — backs up the current file
@@ -116,14 +192,11 @@ pub fn install(path: &Path) -> Result<SetupPlan, SetupError> {
     })?;
 
     let new_contents = apply(&contents, &plan);
-    let tmp = path.with_extension("lua.tmp");
-    std::fs::write(&tmp, &new_contents).map_err(|source| SetupError::Write {
-        path: tmp.display().to_string(),
-        source,
-    })?;
-    std::fs::rename(&tmp, path).map_err(|source| SetupError::Write {
-        path: path.display().to_string(),
-        source,
+    hyprforge_core::paths::write_atomic(path, &new_contents).map_err(|source| {
+        SetupError::Write {
+            path: path.display().to_string(),
+            source,
+        }
     })?;
 
     Ok(plan)

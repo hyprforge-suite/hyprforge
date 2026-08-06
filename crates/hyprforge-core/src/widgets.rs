@@ -72,14 +72,24 @@ pub fn divider<'a, Message: 'a>() -> Element<'a, Message> {
         .into()
 }
 
+/// Widest a settings control grows before it stops tracking the row.
+///
+/// Without a cap, a text input in an 880px content column stretches to
+/// ~590px — far wider than any value typed into it, which reads as an
+/// unfinished form. Windows and macOS both hold settings controls to
+/// roughly this width regardless of window size.
+const CONTROL_MAX_WIDTH: f32 = 340.0;
+
 /// A label paired with its control, aligned into a settings-style row.
 pub fn row_field<'a, Message: 'a>(
     label: &'a str,
     control: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     row![
-        text(label).width(Length::FillPortion(1)),
-        container(control.into()).width(Length::FillPortion(2)),
+        text(label).width(Length::FillPortion(2)),
+        container(control.into())
+            .max_width(CONTROL_MAX_WIDTH)
+            .width(Length::FillPortion(3)),
     ]
     .spacing(spacing::MD)
     .align_y(iced::Alignment::Center)
@@ -193,6 +203,31 @@ pub fn danger_button<'a, Message: Clone + 'a>(
         .on_press(on_press)
         .style(danger_style)
         .into()
+}
+
+/// A three-way "unset / true / false" selector, for the settings that have
+/// a real difference between "don't care" and "explicitly false" — a window
+/// -rule matcher of `floating = false` selects tiled windows, which a plain
+/// checkbox can't express separately from not matching on it at all.
+pub fn tri_state<'a, Message: Clone + 'a>(
+    value: Option<bool>,
+    on_select: impl Fn(Option<bool>) -> Message,
+) -> Element<'a, Message> {
+    let option = |label: &'a str, choice: Option<bool>| {
+        let button = if value == choice {
+            primary_button(label)
+        } else {
+            secondary_button(label)
+        };
+        button.on_press(on_select(choice))
+    };
+    row![
+        option("Any", None),
+        option("Yes", Some(true)),
+        option("No", Some(false)),
+    ]
+    .spacing(spacing::XS)
+    .into()
 }
 
 /// The standard "this is about to touch a file you own" confirmation dialog

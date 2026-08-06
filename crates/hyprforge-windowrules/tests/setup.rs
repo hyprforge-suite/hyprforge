@@ -1,4 +1,6 @@
-use hyprforge_windowrules::setup::{apply, detect, install, SetupPlan};
+use hyprforge_windowrules::setup::{
+    apply, create_lua_config, detect, discover, install, HyprConfig, SetupPlan, REQUIRE_LINE,
+};
 
 const NO_REQUIRES: &str = "hl.config({\n    debug = { disable_logs = false },\n})\n";
 
@@ -100,4 +102,83 @@ fn install_is_idempotent() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), ALREADY_INSTALLED);
     // No backup should have been made — nothing changed.
     assert!(!path.with_extension("lua.hyprforge.bak").exists());
+}
+
+// --- config discovery -------------------------------------------------
+//
+// These cover the dead-end this flow used to have: a user with no
+// hyprland.lua (or only a hyprland.conf) previously reached the confirm
+// dialog and then a hard read error from install(), with no way forward.
+
+#[test]
+fn discovers_lua_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let lua = dir.path().join("hyprland.lua");
+    std::fs::write(&lua, NO_REQUIRES).unwrap();
+    assert_eq!(discover(dir.path()), HyprConfig::Lua(lua));
+}
+
+#[test]
+fn discovers_conf_only_when_no_lua_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let conf = dir.path().join("hyprland.conf");
+    std::fs::write(&conf, "monitor=,preferred,auto,1\n").unwrap();
+    assert_eq!(discover(dir.path()), HyprConfig::ConfOnly(conf));
+}
+
+#[test]
+fn lua_wins_when_both_configs_exist() {
+    let dir = tempfile::tempdir().unwrap();
+    let lua = dir.path().join("hyprland.lua");
+    std::fs::write(&lua, NO_REQUIRES).unwrap();
+    std::fs::write(dir.path().join("hyprland.conf"), "monitor=,preferred,auto,1\n").unwrap();
+    assert_eq!(discover(dir.path()), HyprConfig::Lua(lua));
+}
+
+#[test]
+fn discovers_missing_on_empty_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(discover(dir.path()), HyprConfig::Missing);
+}
+
+#[test]
+fn discover_ignores_a_directory_named_like_the_config() {
+    // A `hyprland.lua/` directory must not be reported as a usable config.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("hyprland.lua")).unwrap();
+    assert_eq!(discover(dir.path()), HyprConfig::Missing);
+}
+
+#[test]
+fn create_lua_config_writes_a_config_that_needs_no_further_setup() {
+    let dir = tempfile::tempdir().unwrap();
+    let lua = dir.path().join("hyprland.lua");
+    create_lua_config(&lua).unwrap();
+
+    let contents = std::fs::read_to_string(&lua).unwrap();
+    assert!(contents.contains(REQUIRE_LINE));
+    // The whole point: the created file is already fully set up, so the GUI
+    // can skip straight past the insertion step.
+    assert_eq!(detect(&contents), SetupPlan::AlreadyPresent);
+    assert_eq!(discover(dir.path()), HyprConfig::Lua(lua));
+}
+
+#[test]
+fn create_lua_config_creates_missing_parent_directories() {
+    let dir = tempfile::tempdir().unwrap();
+    let lua = dir.path().join("hypr").join("hyprland.lua");
+    create_lua_config(&lua).unwrap();
+    assert!(lua.is_file());
+}
+
+#[test]
+fn create_lua_config_refuses_to_clobber_an_existing_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let lua = dir.path().join("hyprland.lua");
+    std::fs::write(&lua, NO_REQUIRES).unwrap();
+
+    assert!(create_lua_config(&lua).is_err());
+    // The user's config is untouched — editing an existing file is
+    // install()'s job, which backs up first.
+    assert_eq!(std::fs::read_to_string(&lua).unwrap(), NO_REQUIRES);
 }
