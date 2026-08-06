@@ -1,40 +1,85 @@
 use hyprforge_core::theme::{spacing, FontScale};
 use hyprforge_core::widgets::{
     confirm_dialog, danger_button, divider, meta_text, primary_button, row_field, scaled_text,
-    secondary_button, section,
+    secondary_button, section, tri_state,
 };
 use hyprforge_core::SettingsModule;
-use hyprforge_windowrules::model::{generate_rule_name, Effects, Matcher};
-use hyprforge_windowrules::setup::SetupPlan;
+use hyprforge_windowrules::model::{generate_rule_name, Effects, Matcher, Opacity};
+use hyprforge_windowrules::setup::{HyprConfig, SetupPlan};
 use hyprforge_windowrules::Rule;
 use iced::widget::{checkbox, column, container, row, scrollable, text_input};
 use iced::{Element, Length, Task};
 
+/// The edit form's state.
+///
+/// Everything is kept as a `String` while editing — including the numeric
+/// and expression fields — so a half-typed value stays on screen instead of
+/// being silently dropped by a failed parse. Conversion happens once, in
+/// [`RuleDraft::into_matcher_effects`].
+///
+/// Every field here must round-trip through [`RuleDraft::from_rule`]: a
+/// field that can be written but not read back gets silently erased the next
+/// time the user edits the rule.
 #[derive(Debug, Clone, Default)]
 struct RuleDraft {
     editing_index: Option<usize>,
     class: String,
     title: String,
+    initial_class: String,
+    initial_title: String,
+    /// Tri-state: `None` means "don't match on this at all", which is
+    /// distinct from `Some(false)` — `floating = false` is a real matcher
+    /// that selects tiled windows.
+    fullscreen: Option<bool>,
+    floating: Option<bool>,
+    xwayland: Option<bool>,
     float: bool,
     no_blur: bool,
     rounding: String,
     border_color: String,
+    move_x: String,
+    move_y: String,
+    size_w: String,
+    size_h: String,
+    opacity_active: String,
+    opacity_inactive: String,
+    opacity_fullscreen: String,
+    opacity_override: bool,
 }
 
 impl RuleDraft {
     fn from_rule(index: usize, rule: &Rule) -> Self {
+        let m = &rule.matcher;
+        let e = &rule.effects;
+        let pair = |v: &Option<[String; 2]>| match v {
+            Some([a, b]) => (a.clone(), b.clone()),
+            None => (String::new(), String::new()),
+        };
+        let (move_x, move_y) = pair(&e.r#move);
+        let (size_w, size_h) = pair(&e.size);
+        let opacity = |v: Option<f32>| v.map(|f| f.to_string()).unwrap_or_default();
+
         RuleDraft {
             editing_index: Some(index),
-            class: rule.matcher.class.clone().unwrap_or_default(),
-            title: rule.matcher.title.clone().unwrap_or_default(),
-            float: rule.effects.float.unwrap_or(false),
-            no_blur: rule.effects.no_blur.unwrap_or(false),
-            rounding: rule
-                .effects
-                .rounding
-                .map(|r| r.to_string())
-                .unwrap_or_default(),
-            border_color: rule.effects.border_color.clone().unwrap_or_default(),
+            class: m.class.clone().unwrap_or_default(),
+            title: m.title.clone().unwrap_or_default(),
+            initial_class: m.initial_class.clone().unwrap_or_default(),
+            initial_title: m.initial_title.clone().unwrap_or_default(),
+            fullscreen: m.fullscreen,
+            floating: m.floating,
+            xwayland: m.xwayland,
+            float: e.float.unwrap_or(false),
+            no_blur: e.no_blur.unwrap_or(false),
+            rounding: e.rounding.map(|r| r.to_string()).unwrap_or_default(),
+            border_color: e.border_color.clone().unwrap_or_default(),
+            move_x,
+            move_y,
+            size_w,
+            size_h,
+            opacity_active: opacity(e.opacity.active),
+            opacity_inactive: opacity(e.opacity.inactive),
+            opacity_fullscreen: opacity(e.opacity.fullscreen),
+            opacity_override: e.opacity.is_override,
         }
     }
 
@@ -42,14 +87,29 @@ impl RuleDraft {
         let matcher = Matcher {
             class: non_empty(self.class),
             title: non_empty(self.title),
-            ..Default::default()
+            initial_class: non_empty(self.initial_class),
+            initial_title: non_empty(self.initial_title),
+            fullscreen: self.fullscreen,
+            floating: self.floating,
+            xwayland: self.xwayland,
         };
         let effects = Effects {
             float: self.float.then_some(true),
             no_blur: self.no_blur.then_some(true),
             rounding: self.rounding.trim().parse().ok(),
             border_color: non_empty(self.border_color),
-            ..Default::default()
+            // move/size are two-part; a half-filled pair isn't expressible
+            // in Hyprland's `{ x, y }` form, so it's dropped rather than
+            // guessed at. Values pass through as typed — the codegen decides
+            // literal-vs-expression quoting.
+            r#move: pair_or_none(self.move_x, self.move_y),
+            size: pair_or_none(self.size_w, self.size_h),
+            opacity: Opacity {
+                active: parse_opacity(&self.opacity_active),
+                inactive: parse_opacity(&self.opacity_inactive),
+                fullscreen: parse_opacity(&self.opacity_fullscreen),
+                is_override: self.opacity_override,
+            },
         };
         (matcher, effects)
     }
@@ -64,6 +124,17 @@ fn non_empty(s: String) -> Option<String> {
     }
 }
 
+fn pair_or_none(a: String, b: String) -> Option<[String; 2]> {
+    match (non_empty(a), non_empty(b)) {
+        (Some(a), Some(b)) => Some([a, b]),
+        _ => None,
+    }
+}
+
+fn parse_opacity(s: &str) -> Option<f32> {
+    s.trim().parse().ok()
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     Add,
@@ -74,22 +145,46 @@ pub enum Message {
     ToggleEnabled(usize),
     DraftClass(String),
     DraftTitle(String),
+    DraftInitialClass(String),
+    DraftInitialTitle(String),
+    DraftFullscreen(Option<bool>),
+    DraftFloating(Option<bool>),
+    DraftXwayland(Option<bool>),
     DraftFloat(bool),
     DraftNoBlur(bool),
     DraftRounding(String),
     DraftBorderColor(String),
+    DraftMoveX(String),
+    DraftMoveY(String),
+    DraftSizeW(String),
+    DraftSizeH(String),
+    DraftOpacityActive(String),
+    DraftOpacityInactive(String),
+    DraftOpacityFullscreen(String),
+    DraftOpacityOverride(bool),
+    ToggleAdvanced,
     DraftSave,
     DraftCancel,
     ConfirmSetup,
     CancelSetup,
+    ConfirmCreateLuaConfig,
     Reloaded(Result<(), String>),
 }
 
 pub struct WindowRulesModule {
     rules: Vec<Rule>,
     draft: Option<RuleDraft>,
+    /// Which Hyprland config the user has. `None` of the non-`Lua` variants
+    /// can be served by inserting a require line, so this gates the whole
+    /// setup flow rather than being a detail inside it.
+    config: HyprConfig,
+    /// Only meaningful when `config` is [`HyprConfig::Lua`].
     setup_plan: SetupPlan,
     show_setup_confirm: bool,
+    /// Collapsed by default — the raw Hyprland vocabulary (move/size
+    /// expressions, per-state opacity, xwayland matching) is the power-user
+    /// surface, kept out of the way of "float Discord" (vision pillar #1).
+    show_advanced: bool,
     setup_diff_text: String,
     error: Option<String>,
     status: Option<String>,
@@ -99,9 +194,19 @@ impl WindowRulesModule {
     pub fn new() -> (Self, Task<Message>) {
         let rules = hyprforge_windowrules::storage::load(&hyprforge_core::paths::window_rules_toml_path())
             .unwrap_or_default();
-        let hyprland_lua = std::fs::read_to_string(hyprforge_core::paths::hyprland_lua_path())
-            .unwrap_or_default();
-        let setup_plan = hyprforge_windowrules::setup::detect(&hyprland_lua);
+        let config = hyprforge_windowrules::setup::discover(&hyprforge_core::paths::hypr_config_dir());
+        // Only a real hyprland.lua can be inspected for the require line;
+        // for the other variants this stays at the "not installed" default
+        // and the view routes to a recovery screen instead of the dialog.
+        let setup_plan = match &config {
+            HyprConfig::Lua(path) => {
+                let contents = std::fs::read_to_string(path).unwrap_or_default();
+                hyprforge_windowrules::setup::detect(&contents)
+            }
+            _ => SetupPlan::NeedsInsert {
+                insert_before_line: 1,
+            },
+        };
         let setup_diff_text = format!(
             "hyprland.lua:\n  {}   <- inserted before your existing require() calls",
             hyprforge_windowrules::setup::preview_line()
@@ -110,14 +215,25 @@ impl WindowRulesModule {
             WindowRulesModule {
                 rules,
                 draft: None,
+                config,
                 setup_plan,
                 show_setup_confirm: false,
+                show_advanced: false,
                 setup_diff_text,
                 error: None,
                 status: None,
             },
             Task::none(),
         )
+    }
+
+    /// Applies `f` to the open draft, if there is one. Keeps the ~19 field
+    /// -edit message arms to one line each.
+    fn edit_draft(&mut self, f: impl FnOnce(&mut RuleDraft)) -> Task<Message> {
+        if let Some(d) = &mut self.draft {
+            f(d);
+        }
+        Task::none()
     }
 
     fn commit_draft(&mut self) {
@@ -156,12 +272,66 @@ impl WindowRulesModule {
             self.error = Some(e.to_string());
             return Task::none();
         }
+        // Without a Lua config there is nothing to source the generated file
+        // from, so reloading would be a no-op dressed up as success. The TOML
+        // is still saved — rules authored now take effect as soon as the
+        // banner's setup step is done.
+        if !matches!(self.config, HyprConfig::Lua(_)) {
+            self.error = None;
+            self.status = Some("Saved. Rules take effect once Hyprland setup is finished — see above.".to_string());
+            return Task::none();
+        }
         if self.setup_plan == SetupPlan::AlreadyPresent {
             Task::perform(regenerate_and_reload(self.rules.clone()), Message::Reloaded)
         } else {
             self.show_setup_confirm = true;
             Task::none()
         }
+    }
+
+    /// The recovery banner for the two config shapes the require-line flow
+    /// can't serve. Never blocks rule editing — rules still save to TOML and
+    /// activate once setup is done (vision pillar #3: no dead ends).
+    fn setup_notice(&self, scale: FontScale) -> Option<Element<'_, Message>> {
+        let body = match &self.config {
+            HyprConfig::Lua(_) => return None,
+            HyprConfig::Missing => column![
+                scaled_text(
+                    "No Hyprland config found. Hyprforge can create a minimal \
+                     hyprland.lua that sources your window rules; everything else \
+                     stays at Hyprland's defaults for you to fill in.",
+                    13.0,
+                    scale,
+                ),
+                meta_text(
+                    hyprforge_core::paths::hyprland_lua_path().display().to_string(),
+                    12.0,
+                    scale,
+                ),
+                container(primary_button("Create hyprland.lua").on_press(Message::ConfirmCreateLuaConfig))
+                    .width(Length::Fill)
+                    .align_x(iced::alignment::Horizontal::Right),
+            ],
+            HyprConfig::ConfOnly(path) => column![
+                scaled_text(
+                    "You're using Hyprland's hyprland.conf format. Hyprforge \
+                     generates Lua rules and sources them with require(), which \
+                     only the Lua config supports — so it won't modify your .conf.",
+                    13.0,
+                    scale,
+                ),
+                meta_text(path.display().to_string(), 12.0, scale),
+                scaled_text(
+                    "Hyprland switched its config language from hyprlang to Lua \
+                     in 0.55. To use this module, port your settings into a \
+                     hyprland.lua; Hyprforge will pick it up automatically on \
+                     next launch. Your .conf is left untouched either way.",
+                    13.0,
+                    scale,
+                ),
+            ],
+        };
+        Some(section("Setup required", scale, body.spacing(spacing::SM)))
     }
 }
 
@@ -212,40 +382,29 @@ impl SettingsModule for WindowRulesModule {
                 }
                 self.save_and_maybe_reload()
             }
-            Message::DraftClass(v) => {
-                if let Some(d) = &mut self.draft {
-                    d.class = v;
-                }
-                Task::none()
-            }
-            Message::DraftTitle(v) => {
-                if let Some(d) = &mut self.draft {
-                    d.title = v;
-                }
-                Task::none()
-            }
-            Message::DraftFloat(v) => {
-                if let Some(d) = &mut self.draft {
-                    d.float = v;
-                }
-                Task::none()
-            }
-            Message::DraftNoBlur(v) => {
-                if let Some(d) = &mut self.draft {
-                    d.no_blur = v;
-                }
-                Task::none()
-            }
-            Message::DraftRounding(v) => {
-                if let Some(d) = &mut self.draft {
-                    d.rounding = v;
-                }
-                Task::none()
-            }
-            Message::DraftBorderColor(v) => {
-                if let Some(d) = &mut self.draft {
-                    d.border_color = v;
-                }
+            // Every draft field edit is the same shape: mutate the draft if
+            // one is open, never re-render anything else.
+            Message::DraftClass(v) => self.edit_draft(|d| d.class = v),
+            Message::DraftTitle(v) => self.edit_draft(|d| d.title = v),
+            Message::DraftInitialClass(v) => self.edit_draft(|d| d.initial_class = v),
+            Message::DraftInitialTitle(v) => self.edit_draft(|d| d.initial_title = v),
+            Message::DraftFullscreen(v) => self.edit_draft(|d| d.fullscreen = v),
+            Message::DraftFloating(v) => self.edit_draft(|d| d.floating = v),
+            Message::DraftXwayland(v) => self.edit_draft(|d| d.xwayland = v),
+            Message::DraftFloat(v) => self.edit_draft(|d| d.float = v),
+            Message::DraftNoBlur(v) => self.edit_draft(|d| d.no_blur = v),
+            Message::DraftRounding(v) => self.edit_draft(|d| d.rounding = v),
+            Message::DraftBorderColor(v) => self.edit_draft(|d| d.border_color = v),
+            Message::DraftMoveX(v) => self.edit_draft(|d| d.move_x = v),
+            Message::DraftMoveY(v) => self.edit_draft(|d| d.move_y = v),
+            Message::DraftSizeW(v) => self.edit_draft(|d| d.size_w = v),
+            Message::DraftSizeH(v) => self.edit_draft(|d| d.size_h = v),
+            Message::DraftOpacityActive(v) => self.edit_draft(|d| d.opacity_active = v),
+            Message::DraftOpacityInactive(v) => self.edit_draft(|d| d.opacity_inactive = v),
+            Message::DraftOpacityFullscreen(v) => self.edit_draft(|d| d.opacity_fullscreen = v),
+            Message::DraftOpacityOverride(v) => self.edit_draft(|d| d.opacity_override = v),
+            Message::ToggleAdvanced => {
+                self.show_advanced = !self.show_advanced;
                 Task::none()
             }
             Message::DraftSave => {
@@ -273,6 +432,24 @@ impl SettingsModule for WindowRulesModule {
             Message::CancelSetup => {
                 self.show_setup_confirm = false;
                 Task::none()
+            }
+            Message::ConfirmCreateLuaConfig => {
+                let path = hyprforge_core::paths::hyprland_lua_path();
+                match hyprforge_windowrules::setup::create_lua_config(&path) {
+                    Ok(()) => {
+                        // The file we just wrote already contains the require
+                        // line, so setup is complete — no insertion step.
+                        self.config = HyprConfig::Lua(path);
+                        self.setup_plan = SetupPlan::AlreadyPresent;
+                        self.error = None;
+                        self.status = Some("Created hyprland.lua.".to_string());
+                        Task::perform(regenerate_and_reload(self.rules.clone()), Message::Reloaded)
+                    }
+                    Err(e) => {
+                        self.error = Some(e.to_string());
+                        Task::none()
+                    }
+                }
             }
             Message::Reloaded(Ok(())) => {
                 self.status = Some("Saved and reloaded.".to_string());
@@ -308,6 +485,10 @@ impl SettingsModule for WindowRulesModule {
         }
 
         let mut content = column![scaled_text("Window Rules", 22.0, scale)].spacing(spacing::LG);
+
+        if let Some(notice) = self.setup_notice(scale) {
+            content = content.push(notice);
+        }
 
         if let Some(err) = &self.error {
             content = content.push(scaled_text(format!("Error: {err}"), 13.0, scale));
@@ -356,7 +537,8 @@ impl SettingsModule for WindowRulesModule {
         content = content.push(section(
             "Rules",
             scale,
-            container(scrollable(list).height(Length::Shrink)).max_height(360.0),
+            container(scrollable(list).width(Length::Fill).height(Length::Shrink))
+                .max_height(360.0),
         ));
         content = content.push(
             container(primary_button("Add rule").on_press(Message::Add))
@@ -400,25 +582,118 @@ impl WindowRulesModule {
         ]
         .spacing(spacing::MD);
 
-        container(
-            column![
-                scaled_text(title, 22.0, scale),
-                section("Rule", scale, form),
-                container(
+        let mut body = column![
+            scaled_text(title, 22.0, scale),
+            section("Rule", scale, form),
+        ]
+        .spacing(spacing::LG)
+        .max_width(520.0);
+
+        body = body.push(
+            container(
+                secondary_button(if self.show_advanced {
+                    "Hide advanced"
+                } else {
+                    "Show advanced"
+                })
+                .on_press(Message::ToggleAdvanced),
+            )
+            .width(Length::Fill),
+        );
+
+        if self.show_advanced {
+            body = body.push(section(
+                "Match on more",
+                scale,
+                column![
+                    // initial_* match the class/title the window had when it
+                    // opened, which is what you need for apps that rename
+                    // themselves after startup.
+                    row_field(
+                        "Initial class",
+                        text_input("Class at open time (regex)", &draft.initial_class)
+                            .on_input(Message::DraftInitialClass),
+                    ),
+                    row_field(
+                        "Initial title",
+                        text_input("Title at open time (regex)", &draft.initial_title)
+                            .on_input(Message::DraftInitialTitle),
+                    ),
+                    row_field("Fullscreen", tri_state(draft.fullscreen, Message::DraftFullscreen)),
+                    row_field("Floating", tri_state(draft.floating, Message::DraftFloating)),
+                    row_field("XWayland", tri_state(draft.xwayland, Message::DraftXwayland)),
+                ]
+                .spacing(spacing::MD),
+            ));
+
+            body = body.push(section(
+                "Position & size",
+                scale,
+                column![
+                    meta_text(
+                        "Plain numbers are pixels. Anything else is passed to Hyprland \
+                         as an expression, e.g. cursor_x-(window_w*0.5) or 60%.",
+                        12.0,
+                        scale,
+                    ),
                     row![
-                        secondary_button("Cancel").on_press(Message::DraftCancel),
-                        primary_button("Save").on_press(Message::DraftSave),
+                        text_input("x", &draft.move_x).on_input(Message::DraftMoveX),
+                        text_input("y", &draft.move_y).on_input(Message::DraftMoveY),
                     ]
                     .spacing(spacing::SM),
-                )
-                .width(Length::Fill)
-                .align_x(iced::alignment::Horizontal::Right),
-            ]
-            .spacing(spacing::LG)
-            .max_width(520.0),
-        )
-        .padding(spacing::LG)
-        .into()
+                    row![
+                        text_input("width", &draft.size_w).on_input(Message::DraftSizeW),
+                        text_input("height", &draft.size_h).on_input(Message::DraftSizeH),
+                    ]
+                    .spacing(spacing::SM),
+                    meta_text("Both halves of a pair are needed for it to apply.", 12.0, scale),
+                ]
+                .spacing(spacing::SM),
+            ));
+
+            body = body.push(section(
+                "Opacity",
+                scale,
+                column![
+                    row_field(
+                        "Active",
+                        text_input("1.0", &draft.opacity_active)
+                            .on_input(Message::DraftOpacityActive),
+                    ),
+                    row_field(
+                        "Inactive",
+                        text_input("1.0", &draft.opacity_inactive)
+                            .on_input(Message::DraftOpacityInactive),
+                    ),
+                    row_field(
+                        "Fullscreen",
+                        text_input("1.0", &draft.opacity_fullscreen)
+                            .on_input(Message::DraftOpacityFullscreen),
+                    ),
+                    checkbox(draft.opacity_override)
+                        .label("Absolute (override) rather than multiplied")
+                        .on_toggle(Message::DraftOpacityOverride),
+                ]
+                .spacing(spacing::MD),
+            ));
+        }
+
+        body = body.push(
+            container(
+                row![
+                    secondary_button("Cancel").on_press(Message::DraftCancel),
+                    primary_button("Save").on_press(Message::DraftSave),
+                ]
+                .spacing(spacing::SM),
+            )
+            .width(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Right),
+        );
+
+        // No scrollable here — the app shell already wraps every screen in
+        // one. A second, content-sized scrollable nested inside it puts a
+        // stray scrollbar partway across the window.
+        container(body).padding(spacing::LG).into()
     }
 }
 
@@ -429,4 +704,163 @@ async fn regenerate_and_reload(rules: Vec<Rule>) -> Result<(), String> {
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fully_populated_rule() -> Rule {
+        Rule {
+            name: "hyprforge-test-1".to_string(),
+            enabled: true,
+            matcher: Matcher {
+                class: Some("discord".to_string()),
+                title: Some("^Discord$".to_string()),
+                initial_class: Some("Discord".to_string()),
+                initial_title: Some("Starting".to_string()),
+                fullscreen: Some(true),
+                // Explicitly false, not unset — the case a plain checkbox
+                // can't represent.
+                floating: Some(false),
+                xwayland: Some(true),
+            },
+            effects: Effects {
+                float: Some(true),
+                r#move: Some(["cursor_x-(window_w*0.5)".to_string(), "40".to_string()]),
+                size: Some(["60%".to_string(), "480".to_string()]),
+                opacity: Opacity {
+                    active: Some(0.9),
+                    inactive: Some(0.7),
+                    fullscreen: Some(1.0),
+                    is_override: true,
+                },
+                border_color: Some("rgb(FF0000)".to_string()),
+                no_blur: Some(true),
+                rounding: Some(8),
+            },
+        }
+    }
+
+    /// The invariant that keeps editing non-destructive: anything the form
+    /// can hold must survive load → save unchanged. A field that's writable
+    /// but not readable silently erases itself on the user's next edit.
+    #[test]
+    fn draft_round_trips_every_field() {
+        let rule = fully_populated_rule();
+        let (matcher, effects) = RuleDraft::from_rule(0, &rule).into_matcher_effects();
+        assert_eq!(matcher, rule.matcher);
+        assert_eq!(effects, rule.effects);
+    }
+
+    #[test]
+    fn draft_preserves_explicitly_false_matchers() {
+        let mut rule = fully_populated_rule();
+        rule.matcher.floating = Some(false);
+        rule.matcher.fullscreen = None;
+
+        let (matcher, _) = RuleDraft::from_rule(0, &rule).into_matcher_effects();
+        assert_eq!(
+            matcher.floating,
+            Some(false),
+            "floating = false selects tiled windows; collapsing it to None would \
+             widen the rule to match everything"
+        );
+        assert_eq!(matcher.fullscreen, None);
+    }
+
+    #[test]
+    fn blank_fields_become_none_rather_than_empty_strings() {
+        let (matcher, effects) = RuleDraft::default().into_matcher_effects();
+        assert!(matcher.is_empty());
+        assert_eq!(effects, Effects::default());
+    }
+
+    #[test]
+    fn whitespace_only_input_counts_as_blank() {
+        let draft = RuleDraft {
+            class: "   ".to_string(),
+            rounding: "  ".to_string(),
+            ..Default::default()
+        };
+        let (matcher, effects) = draft.into_matcher_effects();
+        assert_eq!(matcher.class, None);
+        assert_eq!(effects.rounding, None);
+    }
+
+    #[test]
+    fn a_half_filled_move_pair_is_dropped() {
+        // Hyprland's move takes { x, y }; there is no way to express "x only",
+        // so a partial pair must not be emitted as a bogus rule.
+        let draft = RuleDraft {
+            move_x: "100".to_string(),
+            size_h: "480".to_string(),
+            ..Default::default()
+        };
+        let (_, effects) = draft.into_matcher_effects();
+        assert_eq!(effects.r#move, None);
+        assert_eq!(effects.size, None);
+    }
+
+    #[test]
+    fn unparseable_numbers_are_dropped_not_defaulted() {
+        // Mid-typing garbage must not silently become 0 — that would apply a
+        // real rounding of 0 the user never asked for.
+        let draft = RuleDraft {
+            rounding: "abc".to_string(),
+            opacity_active: "not-a-number".to_string(),
+            ..Default::default()
+        };
+        let (_, effects) = draft.into_matcher_effects();
+        assert_eq!(effects.rounding, None);
+        assert_eq!(effects.opacity.active, None);
+    }
+
+    /// The whole chain the GUI actually exercises: form state -> model ->
+    /// generated Lua. Guards the seam between this module and the codegen,
+    /// which the per-layer tests on either side don't cover.
+    #[test]
+    fn an_advanced_draft_reaches_the_generated_lua() {
+        let draft = RuleDraft {
+            class: "discord".to_string(),
+            floating: Some(false),
+            initial_class: "Discord".to_string(),
+            move_x: "cursor_x-(window_w*0.5)".to_string(),
+            move_y: "40".to_string(),
+            size_w: "60%".to_string(),
+            size_h: "480".to_string(),
+            opacity_active: "0.9".to_string(),
+            opacity_inactive: "0.7".to_string(),
+            opacity_override: true,
+            ..Default::default()
+        };
+        let (matcher, effects) = draft.into_matcher_effects();
+        let lua = hyprforge_windowrules::codegen::generate(&[Rule {
+            name: "hyprforge-discord-1".to_string(),
+            enabled: true,
+            matcher,
+            effects,
+        }]);
+
+        assert!(lua.contains("initial_class = [[Discord]]"), "{lua}");
+        assert!(lua.contains("floating = false"), "{lua}");
+        // A literal is emitted bare; an expression is quoted.
+        assert!(lua.contains("move = { [[cursor_x-(window_w*0.5)]], 40 }"), "{lua}");
+        assert!(lua.contains("size = { [[60%]], 480 }"), "{lua}");
+        assert!(lua.contains("opacity = [[0.9 override 0.7 override]]"), "{lua}");
+    }
+
+    #[test]
+    fn move_expressions_survive_verbatim_for_the_codegen_to_quote() {
+        let draft = RuleDraft {
+            move_x: "cursor_x-(window_w*0.5)".to_string(),
+            move_y: "100".to_string(),
+            ..Default::default()
+        };
+        let (_, effects) = draft.into_matcher_effects();
+        assert_eq!(
+            effects.r#move,
+            Some(["cursor_x-(window_w*0.5)".to_string(), "100".to_string()])
+        );
+    }
 }
