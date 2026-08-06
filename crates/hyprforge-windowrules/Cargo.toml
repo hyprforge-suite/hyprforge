@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# Only for paths::write_atomic — default-features = false keeps iced out of
+# this pure-logic crate.
+hyprforge-core.workspace = true
 serde.workspace = true
 toml.workspace = true
 thiserror.workspace = true

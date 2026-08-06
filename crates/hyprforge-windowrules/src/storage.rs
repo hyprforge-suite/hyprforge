@@ -56,20 +56,8 @@ pub fn save(path: &Path, rules: &[Rule]) -> Result<(), StorageError> {
         rules: rules.to_vec(),
     };
     let contents = toml::to_string_pretty(&file)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| StorageError::Write {
-            path: path.display().to_string(),
-            source,
-        })?;
-    }
-    let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, &contents).map_err(|source| StorageError::Write {
-        path: tmp.display().to_string(),
-        source,
-    })?;
-    std::fs::rename(&tmp, path).map_err(|source| StorageError::Write {
+    hyprforge_core::paths::write_atomic(path, &contents).map_err(|source| StorageError::Write {
         path: path.display().to_string(),
         source,
-    })?;
-    Ok(())
+    })
 }

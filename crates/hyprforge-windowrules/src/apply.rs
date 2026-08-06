@@ -23,18 +23,7 @@ pub enum ApplyError {
 /// ends).
 pub fn apply(lua_path: &Path, rules: &[Rule]) -> Result<(), ApplyError> {
     let lua = generate(rules);
-    if let Some(parent) = lua_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| ApplyError::Write {
-            path: parent.display().to_string(),
-            source,
-        })?;
-    }
-    let tmp = lua_path.with_extension("lua.tmp");
-    std::fs::write(&tmp, &lua).map_err(|source| ApplyError::Write {
-        path: tmp.display().to_string(),
-        source,
-    })?;
-    std::fs::rename(&tmp, lua_path).map_err(|source| ApplyError::Write {
+    hyprforge_core::paths::write_atomic(lua_path, &lua).map_err(|source| ApplyError::Write {
         path: lua_path.display().to_string(),
         source,
     })?;

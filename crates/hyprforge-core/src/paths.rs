@@ -62,3 +62,144 @@ pub fn write_atomic(path: &std::path::Path, contents: &str) -> std::io::Result<(
     std::fs::rename(&tmp, path)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// `set_var`/`remove_var` are process-global and Rust runs tests on
+    /// threads, so every test that touches the environment has to take this
+    /// first or they corrupt each other's reads.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Sets the two variables `config_home` reads, restoring whatever was
+    /// there when the guard drops — otherwise a test would leak its fake
+    /// `$HOME` into every test that runs after it.
+    struct EnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        xdg: Option<std::ffi::OsString>,
+        home: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(xdg: Option<&str>, home: Option<&str>) -> Self {
+            let guard = EnvGuard {
+                _lock: ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner()),
+                xdg: std::env::var_os("XDG_CONFIG_HOME"),
+                home: std::env::var_os("HOME"),
+            };
+            // SAFETY: ENV_LOCK serializes every env mutation in this module.
+            unsafe {
+                match xdg {
+                    Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                    None => std::env::remove_var("XDG_CONFIG_HOME"),
+                }
+                match home {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+            guard
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.xdg {
+                    Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                    None => std::env::remove_var("XDG_CONFIG_HOME"),
+                }
+                match &self.home {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn absolute_xdg_config_home_is_used_as_is() {
+        let _g = EnvGuard::set(Some("/custom/config"), Some("/home/someone"));
+        assert_eq!(config_home(), PathBuf::from("/custom/config"));
+    }
+
+    #[test]
+    fn unset_xdg_config_home_falls_back_to_home_dot_config() {
+        let _g = EnvGuard::set(None, Some("/home/someone"));
+        assert_eq!(config_home(), PathBuf::from("/home/someone/.config"));
+    }
+
+    #[test]
+    fn relative_xdg_config_home_is_ignored_per_the_xdg_spec() {
+        // The spec says a relative value is invalid and must be treated as
+        // unset — not resolved against the cwd, which would scatter config
+        // wherever the app happened to be launched from.
+        let _g = EnvGuard::set(Some("relative/path"), Some("/home/someone"));
+        assert_eq!(config_home(), PathBuf::from("/home/someone/.config"));
+    }
+
+    #[test]
+    fn empty_xdg_config_home_falls_back_too() {
+        let _g = EnvGuard::set(Some(""), Some("/home/someone"));
+        assert_eq!(config_home(), PathBuf::from("/home/someone/.config"));
+    }
+
+    #[test]
+    fn derived_paths_all_hang_off_config_home() {
+        let _g = EnvGuard::set(Some("/custom/config"), Some("/home/someone"));
+        assert_eq!(
+            display_profiles_path(),
+            PathBuf::from("/custom/config/hyprforge/display-profiles.toml")
+        );
+        assert_eq!(
+            window_rules_toml_path(),
+            PathBuf::from("/custom/config/hyprforge/window-rules.toml")
+        );
+        // The generated Lua lives under hypr/, not hyprforge/, because
+        // Hyprland's require() resolves relative to its own config dir.
+        assert_eq!(
+            window_rules_lua_path(),
+            PathBuf::from("/custom/config/hypr/hyprforge/window-rules.lua")
+        );
+        assert_eq!(
+            hyprland_lua_path(),
+            PathBuf::from("/custom/config/hypr/hyprland.lua")
+        );
+    }
+
+    #[test]
+    fn write_atomic_creates_parent_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a").join("b").join("file.toml");
+        write_atomic(&path, "hello").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+    }
+
+    #[test]
+    fn write_atomic_overwrites_and_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.toml");
+        write_atomic(&path, "first").unwrap();
+        write_atomic(&path, "second").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n.to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp file left behind: {leftovers:?}");
+    }
+
+    #[test]
+    fn write_atomic_handles_an_extensionless_path() {
+        // `with_extension` on a name with no extension is the easy way to
+        // accidentally produce a temp path that collides with the target.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("noext");
+        write_atomic(&path, "body").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "body");
+    }
+}

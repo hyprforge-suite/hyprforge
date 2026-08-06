@@ -5,10 +5,18 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = []
+# `gui` carries everything that needs iced (the SettingsModule trait, theme,
+# shared widgets). It's on by default for the apps, but non-GUI consumers —
+# the daemon, and hyprforge-windowrules, which only wants paths::write_atomic
+# — take this crate with default-features = false and skip iced entirely.
+default = ["gui"]
+gui = ["dep:iced"]
 dbus = ["dep:zbus"]
 
 [dependencies]
-iced.workspace = true
+iced = { workspace = true, optional = true }
 zbus = { workspace = true, optional = true }
 serde.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
