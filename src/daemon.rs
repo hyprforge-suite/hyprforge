@@ -2,7 +2,7 @@ use crate::backend::OutputBackend;
 use crate::fingerprint::fingerprint;
 use crate::matching::{build_layout_plan, find_match, MatchTier};
 use crate::profile::{generate_profile_name, ExtraOutputPolicy, Profile};
-use crate::types::{Head, Transform, TopologyEvent};
+use crate::types::{Head, HeadPlan, LayoutPlan, ModeSpec, TopologyEvent, Transform};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,6 +29,17 @@ pub enum DaemonSignal {
         id: String,
         name: String,
     },
+    /// A reversible layout change was just applied and is provisional for
+    /// `seconds` more. The GUI draws its countdown from this.
+    RevertPending {
+        seconds: u32,
+    },
+    /// A provisional change stopped being provisional: either the user kept
+    /// it (`reverted: false`) or it was rolled back, by the timer expiring
+    /// or an explicit request (`reverted: true`).
+    RevertResolved {
+        reverted: bool,
+    },
 }
 
 /// How long after the daemon's own `apply_configuration` call to suppress
@@ -42,12 +53,40 @@ const AUTO_LEARN_COOLDOWN: Duration = Duration::from_millis(1500);
 /// topology.
 pub const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(500);
 
+/// How long a reversible layout change stays provisional before rolling
+/// itself back. Long enough to read a banner and click, short enough that a
+/// blanked screen recovers on its own before the user reaches for a TTY.
+pub const REVERT_WINDOW: Duration = Duration::from_secs(12);
+
+/// The state captured before a layout edit, so it can be put back.
+///
+/// Both halves are needed: restoring only the compositor would leave the bad
+/// geometry sitting in the profile store, where the next hotplug would
+/// re-apply it — the change would come back on its own after being "undone".
+struct PendingRevert {
+    /// Live heads as they were before the edit.
+    heads: Vec<Head>,
+    /// The whole profile list as it was before the edit.
+    profiles: Vec<Profile>,
+    /// Distinguishes this revert from a later one that replaced it, so a
+    /// stale timer can't roll back a change it doesn't own.
+    generation: u64,
+    /// False until a timer is actually running (the snapshot is taken at the
+    /// first mutation, which may be several D-Bus calls before the apply).
+    armed: bool,
+}
+
 pub struct Daemon {
     backend: Arc<dyn OutputBackend>,
     storage_path: PathBuf,
     profiles: Mutex<Vec<Profile>>,
     competing_monitor_rules: Mutex<Vec<String>>,
     suppress_learn_until: Mutex<Option<tokio::time::Instant>>,
+    pending_revert: Mutex<Option<PendingRevert>>,
+    revert_generation: std::sync::atomic::AtomicU64,
+    /// Set once [`Daemon::run`] starts, so work spawned outside the run loop
+    /// (the revert timer) can still emit signals.
+    signal_tx: Mutex<Option<mpsc::UnboundedSender<DaemonSignal>>>,
     debounce: Duration,
 }
 
@@ -60,6 +99,9 @@ impl Daemon {
             profiles: Mutex::new(profiles),
             competing_monitor_rules: Mutex::new(Vec::new()),
             suppress_learn_until: Mutex::new(None),
+            pending_revert: Mutex::new(None),
+            revert_generation: std::sync::atomic::AtomicU64::new(0),
+            signal_tx: Mutex::new(None),
             debounce: DEFAULT_DEBOUNCE,
         })
     }
@@ -118,6 +160,143 @@ impl Daemon {
             .unwrap_or_default())
     }
 
+    // --- reversible layout changes (vision pillar #4) ---------------------
+
+    async fn emit(&self, signal: DaemonSignal) {
+        if let Some(tx) = self.signal_tx.lock().await.as_ref() {
+            let _ = tx.send(signal);
+        }
+    }
+
+    /// Records the pre-edit state, if nothing is pending already.
+    ///
+    /// Called by every profile-mutating method while it holds the profiles
+    /// lock. The first mutation of an edit wins: the GUI's "Save & Apply"
+    /// issues several `SetHeadGeometry` calls and *then* `ApplyProfile`, so
+    /// snapshotting at apply time would capture the already-edited profile
+    /// and revert to nothing.
+    async fn ensure_revert_snapshot(&self, profiles: &[Profile]) {
+        let mut pending = self.pending_revert.lock().await;
+        if pending.is_some() {
+            return;
+        }
+        let Ok(heads) = self.backend.list_outputs() else {
+            // No readable live state means nothing trustworthy to restore;
+            // better to leave the change irreversible than to "revert" into
+            // a layout we made up.
+            tracing::warn!("could not snapshot live outputs; this change won't be reversible");
+            return;
+        };
+        *pending = Some(PendingRevert {
+            heads,
+            profiles: profiles.to_vec(),
+            generation: self
+                .revert_generation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1,
+            armed: false,
+        });
+    }
+
+    /// Starts the countdown on an already-captured snapshot, and returns how
+    /// long the caller has to confirm. Idempotent within one edit: a second
+    /// apply before the first resolves keeps the original deadline and the
+    /// original (pre-edit) snapshot.
+    pub async fn arm_revert(self: &Arc<Self>) -> Option<Duration> {
+        let generation = {
+            let mut pending = self.pending_revert.lock().await;
+            let p = pending.as_mut()?;
+            if p.armed {
+                return Some(REVERT_WINDOW);
+            }
+            p.armed = true;
+            p.generation
+        };
+
+        self.emit(DaemonSignal::RevertPending {
+            seconds: REVERT_WINDOW.as_secs() as u32,
+        })
+        .await;
+
+        let daemon = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(REVERT_WINDOW).await;
+            daemon.expire_revert(generation).await;
+        });
+        Some(REVERT_WINDOW)
+    }
+
+    /// Keeps the provisional change: drops the snapshot so the timer, when
+    /// it fires, finds nothing of its generation to roll back.
+    pub async fn confirm_layout(&self) -> anyhow::Result<()> {
+        let had_pending = self.pending_revert.lock().await.take().is_some();
+        if had_pending {
+            self.emit(DaemonSignal::RevertResolved { reverted: false })
+                .await;
+        }
+        Ok(())
+    }
+
+    /// Rolls back to the snapshot immediately, without waiting out the
+    /// countdown.
+    pub async fn revert_layout(&self) -> anyhow::Result<()> {
+        let pending = self.pending_revert.lock().await.take();
+        let Some(pending) = pending else {
+            anyhow::bail!("no layout change is pending confirmation");
+        };
+        self.restore(pending).await?;
+        self.emit(DaemonSignal::RevertResolved { reverted: true })
+            .await;
+        Ok(())
+    }
+
+    /// Timer callback. Does nothing unless the snapshot still in place is
+    /// the one this timer was started for.
+    async fn expire_revert(&self, generation: u64) {
+        let pending = {
+            let mut guard = self.pending_revert.lock().await;
+            match guard.as_ref() {
+                Some(p) if p.generation == generation => guard.take(),
+                // Confirmed, reverted, or superseded — not ours to undo.
+                _ => None,
+            }
+        };
+        let Some(pending) = pending else {
+            return;
+        };
+        tracing::info!("layout change was not confirmed in time; reverting");
+        if let Err(e) = self.restore(pending).await {
+            tracing::error!(error = %e, "failed to revert layout");
+        }
+        self.emit(DaemonSignal::RevertResolved { reverted: true })
+            .await;
+    }
+
+    /// Puts back both halves of the snapshot: the profile store first (so a
+    /// later hotplug re-applies the good layout), then the live compositor
+    /// state.
+    async fn restore(&self, pending: PendingRevert) -> anyhow::Result<()> {
+        {
+            let mut profiles = self.profiles.lock().await;
+            *profiles = pending.profiles;
+            self.persist(&profiles);
+        }
+
+        let plan = plan_from_heads(&pending.heads);
+        // A snapshot with nothing enabled would trip the same safety rail as
+        // any other plan; there's no good restore to make, so leave the
+        // compositor alone rather than fail loudly at it.
+        if plan.validate().is_err() {
+            tracing::warn!("snapshot had no enabled outputs; restored profiles only");
+            return Ok(());
+        }
+        // The restore is our own change, so don't let its echo look like the
+        // user externally rearranging their displays.
+        *self.suppress_learn_until.lock().await =
+            Some(tokio::time::Instant::now() + AUTO_LEARN_COOLDOWN);
+        self.backend.apply_configuration(&plan)
+    }
+
     /// Force-applies `profile_id` regardless of whether it currently
     /// matches the connected fingerprint — used by `apply <profile-id>`
     /// and the D-Bus `ApplyProfile` method.
@@ -128,6 +307,8 @@ impl Daemon {
             .iter()
             .position(|p| p.id == profile_id)
             .ok_or_else(|| anyhow::anyhow!("no such profile: {profile_id}"))?;
+
+        self.ensure_revert_snapshot(&profiles).await;
 
         let plan = build_layout_plan(&profiles[idx], &heads);
         plan.validate()?;
@@ -148,6 +329,26 @@ impl Daemon {
         Ok(())
     }
 
+    /// Forgets a stored profile entirely.
+    ///
+    /// Note this is not permanent for the *currently connected* topology:
+    /// auto-learn (vision pillar #6) will re-learn a fresh profile for it on
+    /// the next topology settle, since "no stored profile matches" is
+    /// precisely the condition that triggers learning. Deleting is therefore
+    /// a reset-to-defaults for the current setup, and a true forget only for
+    /// topologies that aren't plugged in — callers should say so rather than
+    /// promising the entry stays gone.
+    pub async fn delete_profile(&self, profile_id: &str) -> anyhow::Result<()> {
+        let mut profiles = self.profiles.lock().await;
+        let idx = profiles
+            .iter()
+            .position(|p| p.id == profile_id)
+            .ok_or_else(|| anyhow::anyhow!("no such profile: {profile_id}"))?;
+        profiles.remove(idx);
+        self.persist(&profiles);
+        Ok(())
+    }
+
     /// Toggles a swap override: whichever connector the given pair of
     /// stored `connector_hint`s would each normally resolve to, resolve to
     /// the other's instead. Used for duplicate/blank-serial identities
@@ -164,6 +365,7 @@ impl Daemon {
         connector_b: &str,
     ) -> anyhow::Result<()> {
         let mut profiles = self.profiles.lock().await;
+        self.ensure_revert_snapshot(&profiles).await;
         let profile = profiles
             .iter_mut()
             .find(|p| p.id == profile_id)
@@ -182,37 +384,10 @@ impl Daemon {
         Ok(())
     }
 
-    /// Directly sets one head's stored position within a profile — used by
-    /// the Displays module's drag-arrange canvas. Positions only; mode/
-    /// scale/transform/enabled are edited elsewhere (or inherited as-is).
-    pub async fn set_head_position(
-        &self,
-        profile_id: &str,
-        connector_hint: &str,
-        x: i32,
-        y: i32,
-    ) -> anyhow::Result<()> {
-        let mut profiles = self.profiles.lock().await;
-        let profile = profiles
-            .iter_mut()
-            .find(|p| p.id == profile_id)
-            .ok_or_else(|| anyhow::anyhow!("no such profile: {profile_id}"))?;
-        let head = profile
-            .heads
-            .iter_mut()
-            .find(|h| h.connector_hint == connector_hint)
-            .ok_or_else(|| anyhow::anyhow!("no such head: {connector_hint}"))?;
-        head.x = x;
-        head.y = y;
-        self.persist(&profiles);
-        Ok(())
-    }
-
     /// Sets a head's full stored geometry within a profile — position,
-    /// mode, scale, and orientation — used by the Displays module's
-    /// per-head property panel (Windows-Display-Settings-style position/
-    /// size/refresh/scale/orientation editing), as opposed to
-    /// `set_head_position` which only covers drag-to-reposition.
+    /// mode, scale, and orientation. The single write path for everything
+    /// the Displays module edits: both the drag-arrange canvas and the
+    /// per-head property panel land here.
     #[allow(clippy::too_many_arguments)]
     pub async fn set_head_geometry(
         &self,
@@ -227,6 +402,7 @@ impl Daemon {
         transform: Transform,
     ) -> anyhow::Result<()> {
         let mut profiles = self.profiles.lock().await;
+        self.ensure_revert_snapshot(&profiles).await;
         let profile = profiles
             .iter_mut()
             .find(|p| p.id == profile_id)
@@ -265,6 +441,7 @@ impl Daemon {
         policy: ExtraOutputPolicy,
     ) -> anyhow::Result<()> {
         let mut profiles = self.profiles.lock().await;
+        self.ensure_revert_snapshot(&profiles).await;
         let profile = profiles
             .iter_mut()
             .find(|p| p.id == profile_id)
@@ -281,6 +458,11 @@ impl Daemon {
         mut events: mpsc::UnboundedReceiver<TopologyEvent>,
         signal_tx: mpsc::UnboundedSender<DaemonSignal>,
     ) {
+        // Share the sender with work that outlives a single loop iteration —
+        // specifically the revert timer, which is spawned from a D-Bus call
+        // rather than from here.
+        *self.signal_tx.lock().await = Some(signal_tx.clone());
+
         loop {
             let Some(TopologyEvent::Snapshot(mut heads)) = events.recv().await else {
                 return;
@@ -429,9 +611,49 @@ impl Daemon {
         let _ = signal_tx.send(DaemonSignal::ProfileAutoLearned { id, name });
     }
 
+    /// Reversible-apply entry point for the GUI: applies `profile_id`, then
+    /// starts the confirm/revert countdown. Returns the number of seconds
+    /// the caller has to confirm.
+    ///
+    /// The plain [`Daemon::apply_profile`] stays immediate and irreversible,
+    /// which is what a scripted `displayctl apply` wants — a CLI caller has
+    /// no banner to click and shouldn't have their change silently undone.
+    pub async fn apply_profile_reversible(self: &Arc<Self>, profile_id: &str) -> anyhow::Result<u32> {
+        self.apply_profile(profile_id).await?;
+        self.arm_revert().await;
+        Ok(REVERT_WINDOW.as_secs() as u32)
+    }
+
     fn persist(&self, profiles: &[Profile]) {
         if let Err(e) = crate::storage::save(&self.storage_path, profiles) {
             tracing::error!(error = %e, "failed to persist display profiles");
         }
+    }
+}
+
+/// Turns a live snapshot back into an applicable plan. Used only to restore
+/// a snapshot verbatim, so every field is carried across as observed rather
+/// than re-derived from a profile.
+fn plan_from_heads(heads: &[Head]) -> LayoutPlan {
+    LayoutPlan {
+        heads: heads
+            .iter()
+            .map(|h| HeadPlan {
+                connector: h.connector.clone(),
+                enabled: h.enabled,
+                mode: h.enabled.then(|| {
+                    h.current_mode
+                        .map(|m| ModeSpec::Exact {
+                            width: m.width,
+                            height: m.height,
+                            refresh_mhz: m.refresh_mhz,
+                        })
+                        .unwrap_or(ModeSpec::Preferred)
+                }),
+                position: h.position,
+                transform: h.transform,
+                scale: h.scale,
+            })
+            .collect(),
     }
 }
