@@ -77,3 +77,19 @@ fn palette() -> iced::theme::Palette {
 pub fn app_theme() -> iced::Theme {
     iced::Theme::custom("Hyprforge".to_string(), palette())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_font_scale_is_identity() {
+        assert_eq!(FontScale::default().apply(BASE_TEXT_SIZE), BASE_TEXT_SIZE);
+    }
+
+    #[test]
+    fn font_scale_multiplies_the_base_size() {
+        assert_eq!(FontScale(1.5).apply(16.0), 24.0);
+        assert_eq!(FontScale(0.5).apply(16.0), 8.0);
+    }
+}
