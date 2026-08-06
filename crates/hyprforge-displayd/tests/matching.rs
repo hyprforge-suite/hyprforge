@@ -1,9 +1,21 @@
 use hyprforge_displayd::backend::mock::MockBackend;
 use hyprforge_displayd::backend::OutputBackend;
-use hyprforge_displayd::daemon::{Daemon, DaemonSignal};
+use hyprforge_displayd::daemon::{Daemon, DaemonSignal, REVERT_WINDOW};
 use hyprforge_displayd::types::Identity;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Yields enough times for spawned work to be polled.
+///
+/// Needed on both sides of a `tokio::time::advance`: *before*, so the revert
+/// timer's task actually runs and registers its `sleep` (a freshly spawned
+/// task has no timer for `advance` to fire yet), and *after*, so the woken
+/// task runs through to its effects.
+async fn settle() {
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+}
 
 fn identity(make: &str, model: &str, serial: &str) -> Identity {
     Identity {
@@ -45,6 +57,10 @@ impl Harness {
             signal_rx,
             _dir: dir,
         }
+    }
+
+    fn storage_path(&self) -> std::path::PathBuf {
+        self._dir.path().join("display-profiles.toml")
     }
 
     async fn next_signal(&mut self) -> DaemonSignal {
@@ -274,7 +290,7 @@ async fn swap_heads_toggles_rather_than_accumulates() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn set_head_position_updates_stored_profile() {
+async fn set_head_geometry_position_round_trips_through_get_profile() {
     let mut h = Harness::new();
     let boe = identity("BOE", "0x0BC9", "");
 
@@ -284,7 +300,17 @@ async fn set_head_position_updates_stored_profile() {
 
     let id = h.daemon.profiles().await[0].id.clone();
     h.daemon
-        .set_head_position(&id, "MOCK-1", 500, 250)
+        .set_head_geometry(
+            &id,
+            "MOCK-1",
+            500,
+            250,
+            1920,
+            1080,
+            60000,
+            1.0,
+            hyprforge_displayd::types::Transform::Normal,
+        )
         .await
         .unwrap();
 
@@ -300,7 +326,7 @@ async fn set_head_position_updates_stored_profile() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn set_head_position_rejects_unknown_connector() {
+async fn set_head_geometry_rejects_unknown_connector() {
     let mut h = Harness::new();
     let boe = identity("BOE", "0x0BC9", "");
 
@@ -309,7 +335,20 @@ async fn set_head_position_rejects_unknown_connector() {
     h.next_signal().await;
 
     let id = h.daemon.profiles().await[0].id.clone();
-    let result = h.daemon.set_head_position(&id, "NOT-A-HEAD", 0, 0).await;
+    let result = h
+        .daemon
+        .set_head_geometry(
+            &id,
+            "NOT-A-HEAD",
+            0,
+            0,
+            1920,
+            1080,
+            60000,
+            1.0,
+            hyprforge_displayd::types::Transform::Normal,
+        )
+        .await;
     assert!(result.is_err());
 }
 
@@ -345,4 +384,212 @@ async fn set_head_geometry_updates_position_mode_and_scale() {
     assert_eq!(head.transform, hyprforge_displayd::types::Transform::Rotate90);
     assert_eq!(head.refresh_mhz, 144000);
     assert_eq!(head.scale, 1.5);
+}
+
+#[tokio::test(start_paused = true)]
+async fn delete_profile_removes_it_and_persists_the_removal() {
+    let mut h = Harness::new();
+    let boe = identity("BOE", "0x0BC9", "");
+    let dell = identity("DELL", "U2720Q", "ABC");
+
+    // Learn two profiles so there's something left after the delete — a
+    // delete that empties the list can't distinguish "removed the right one"
+    // from "removed everything". The two sets must be disjoint, not nested:
+    // [boe, dell] would superset-match the [boe] profile and extend it
+    // rather than learning a second one.
+    h.backend.set_topology(vec![boe]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await;
+    h.backend.set_topology(vec![dell]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await;
+
+    let profiles = h.daemon.profiles().await;
+    assert_eq!(profiles.len(), 2);
+    let doomed = profiles[0].id.clone();
+    let survivor = profiles[1].id.clone();
+
+    h.daemon.delete_profile(&doomed).await.unwrap();
+
+    let remaining = h.daemon.profiles().await;
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].id, survivor);
+
+    // The removal must have reached disk, not just the in-memory list.
+    let reloaded = hyprforge_displayd::storage::load(&h.storage_path()).unwrap();
+    assert_eq!(reloaded.len(), 1);
+    assert_eq!(reloaded[0].id, survivor);
+}
+
+#[tokio::test(start_paused = true)]
+async fn delete_profile_rejects_an_unknown_id() {
+    let h = Harness::new();
+    assert!(h.daemon.delete_profile("no-such-profile").await.is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn deleting_the_connected_topology_is_relearned_on_the_next_settle() {
+    // Documents the caveat the GUI's confirm dialog warns about: a profile
+    // for what's currently plugged in doesn't stay deleted, because "no
+    // stored profile matches" is exactly the auto-learn trigger.
+    let mut h = Harness::new();
+    let boe = identity("BOE", "0x0BC9", "");
+
+    h.backend.set_topology(vec![boe.clone()]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await;
+
+    let id = h.daemon.profiles().await[0].id.clone();
+    h.daemon.delete_profile(&id).await.unwrap();
+    assert!(h.daemon.profiles().await.is_empty());
+
+    // Any subsequent topology settle re-learns it.
+    h.backend.set_topology(vec![]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.backend.set_topology(vec![boe]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await;
+
+    assert_eq!(h.daemon.profiles().await.len(), 1);
+}
+
+// --- reversible layout changes ----------------------------------------
+
+/// Drives the GUI's "Save & Apply" shape: edit geometry (which persists
+/// immediately), then apply reversibly. The snapshot must come from the
+/// *first* mutation, not the apply, or there's nothing good to go back to.
+async fn edit_and_apply_reversibly(h: &Harness, id: &str) {
+    h.daemon
+        .set_head_geometry(
+            id,
+            "MOCK-1",
+            500,
+            600,
+            1920,
+            1080,
+            60000,
+            2.0,
+            hyprforge_displayd::types::Transform::Rotate180,
+        )
+        .await
+        .unwrap();
+    h.daemon.apply_profile_reversible(id).await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn unconfirmed_layout_change_reverts_when_the_window_lapses() {
+    let mut h = Harness::new();
+    h.backend.set_topology(vec![identity("BOE", "0x0BC9", "")]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await;
+
+    let id = h.daemon.profiles().await[0].id.clone();
+    let before = h.daemon.profiles().await[0].heads[0].clone();
+
+    edit_and_apply_reversibly(&h, &id).await;
+    assert_eq!(h.daemon.profiles().await[0].heads[0].x, 500);
+
+    // Say nothing and let the countdown run out.
+    settle().await;
+    tokio::time::advance(REVERT_WINDOW + Duration::from_secs(1)).await;
+    settle().await;
+
+    let after = h.daemon.profiles().await[0].heads[0].clone();
+    assert_eq!(
+        after, before,
+        "an unconfirmed change must restore the stored profile too, or the \
+         next hotplug would re-apply the layout the user just escaped"
+    );
+
+    let outputs = h.backend.list_outputs().unwrap();
+    assert_eq!(outputs[0].position, (0, 0));
+    assert_eq!(outputs[0].scale, 1.0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn confirmed_layout_change_sticks() {
+    let mut h = Harness::new();
+    h.backend.set_topology(vec![identity("BOE", "0x0BC9", "")]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await;
+
+    let id = h.daemon.profiles().await[0].id.clone();
+    edit_and_apply_reversibly(&h, &id).await;
+    h.daemon.confirm_layout().await.unwrap();
+
+    // Well past the deadline: the expired timer must find nothing to undo.
+    settle().await;
+    tokio::time::advance(REVERT_WINDOW * 3).await;
+    settle().await;
+
+    let head = h.daemon.profiles().await[0].heads[0].clone();
+    assert_eq!((head.x, head.y), (500, 600));
+    assert_eq!(head.scale, 2.0);
+    assert_eq!(h.backend.list_outputs().unwrap()[0].position, (500, 600));
+}
+
+#[tokio::test(start_paused = true)]
+async fn explicit_revert_rolls_back_without_waiting() {
+    let mut h = Harness::new();
+    h.backend.set_topology(vec![identity("BOE", "0x0BC9", "")]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await;
+
+    let id = h.daemon.profiles().await[0].id.clone();
+    let before = h.daemon.profiles().await[0].heads[0].clone();
+
+    edit_and_apply_reversibly(&h, &id).await;
+    h.daemon.revert_layout().await.unwrap();
+
+    assert_eq!(h.daemon.profiles().await[0].heads[0], before);
+    // Nothing is pending any more, so a second revert is an error rather
+    // than a silent no-op that rolls back an unrelated later change.
+    assert!(h.daemon.revert_layout().await.is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn confirming_when_nothing_is_pending_is_a_no_op() {
+    let h = Harness::new();
+    assert!(h.daemon.confirm_layout().await.is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_lapsed_timer_cannot_roll_back_a_later_unrelated_change() {
+    let mut h = Harness::new();
+    h.backend.set_topology(vec![identity("BOE", "0x0BC9", "")]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await;
+
+    let id = h.daemon.profiles().await[0].id.clone();
+
+    // First edit, confirmed.
+    edit_and_apply_reversibly(&h, &id).await;
+    h.daemon.confirm_layout().await.unwrap();
+
+    // Second, different edit — armed while the first timer is still asleep.
+    h.daemon
+        .set_head_geometry(
+            &id,
+            "MOCK-1",
+            10,
+            20,
+            1920,
+            1080,
+            60000,
+            1.0,
+            hyprforge_displayd::types::Transform::Normal,
+        )
+        .await
+        .unwrap();
+    h.daemon.apply_profile_reversible(&id).await.unwrap();
+    h.daemon.confirm_layout().await.unwrap();
+
+    settle().await;
+    tokio::time::advance(REVERT_WINDOW * 3).await;
+    settle().await;
+
+    // The first timer fired somewhere in there; generation matching must
+    // have kept it from undoing the second, confirmed change.
+    let head = h.daemon.profiles().await[0].heads[0].clone();
+    assert_eq!((head.x, head.y), (10, 20));
 }

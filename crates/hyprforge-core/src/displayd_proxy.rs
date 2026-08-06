@@ -20,7 +20,20 @@ pub trait Displayd {
 
     fn apply_profile(&self, profile_id: &str) -> zbus::Result<()>;
 
+    /// Applies provisionally, returning the seconds before it rolls back.
+    /// Pair with `confirm_layout` / `revert_layout`.
+    fn apply_profile_reversible(&self, profile_id: &str) -> zbus::Result<u32>;
+
+    fn confirm_layout(&self) -> zbus::Result<()>;
+
+    fn revert_layout(&self) -> zbus::Result<()>;
+
     fn rename_profile(&self, profile_id: &str, new_name: &str) -> zbus::Result<()>;
+
+    /// Forgets a profile. The currently-connected topology will be
+    /// auto-learned again on the next settle, so this reads as "reset this
+    /// setup" for what's plugged in and "forget" for what isn't.
+    fn delete_profile(&self, profile_id: &str) -> zbus::Result<()>;
 
     fn swap_heads(
         &self,
@@ -30,14 +43,6 @@ pub trait Displayd {
     ) -> zbus::Result<()>;
 
     fn set_extra_output_policy(&self, profile_id: &str, policy: &str) -> zbus::Result<()>;
-
-    fn set_head_position(
-        &self,
-        profile_id: &str,
-        connector_hint: &str,
-        x: i32,
-        y: i32,
-    ) -> zbus::Result<()>;
 
     #[allow(clippy::too_many_arguments)]
     fn set_head_geometry(
@@ -72,4 +77,10 @@ pub trait Displayd {
 
     #[zbus(signal)]
     fn new_topology_seen(&self, fingerprint: String, summary: String) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn revert_pending(&self, seconds: u32) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn revert_resolved(&self, reverted: bool) -> zbus::Result<()>;
 }

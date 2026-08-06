@@ -63,9 +63,41 @@ impl DisplaydService {
             .map_err(to_zbus_error)
     }
 
+    /// Applies `profile_id` provisionally and returns the number of seconds
+    /// before it rolls itself back. Call `ConfirmLayout` to keep it, or
+    /// `RevertLayout` to undo immediately. Intended for GUIs — a change that
+    /// blanks the screen recovers on its own.
+    async fn apply_profile_reversible(&self, profile_id: &str) -> zbus::fdo::Result<u32> {
+        self.daemon
+            .apply_profile_reversible(profile_id)
+            .await
+            .map_err(to_zbus_error)
+    }
+
+    /// Keeps a provisional change. No-op when nothing is pending.
+    async fn confirm_layout(&self) -> zbus::fdo::Result<()> {
+        self.daemon.confirm_layout().await.map_err(to_zbus_error)
+    }
+
+    /// Rolls a provisional change back now rather than waiting out the
+    /// countdown. Errors when nothing is pending.
+    async fn revert_layout(&self) -> zbus::fdo::Result<()> {
+        self.daemon.revert_layout().await.map_err(to_zbus_error)
+    }
+
     async fn rename_profile(&self, profile_id: &str, new_name: &str) -> zbus::fdo::Result<()> {
         self.daemon
             .rename_profile(profile_id, new_name)
+            .await
+            .map_err(to_zbus_error)
+    }
+
+    /// Forgets a profile. For the currently-connected topology the daemon
+    /// will auto-learn a fresh profile on the next settle — see
+    /// [`Daemon::delete_profile`].
+    async fn delete_profile(&self, profile_id: &str) -> zbus::fdo::Result<()> {
+        self.daemon
+            .delete_profile(profile_id)
             .await
             .map_err(to_zbus_error)
     }
@@ -91,19 +123,6 @@ impl DisplaydService {
             .map_err(|_| zbus::fdo::Error::InvalidArgs(format!("unknown policy: {policy}")))?;
         self.daemon
             .set_extra_output_policy(profile_id, policy)
-            .await
-            .map_err(to_zbus_error)
-    }
-
-    async fn set_head_position(
-        &self,
-        profile_id: &str,
-        connector_hint: &str,
-        x: i32,
-        y: i32,
-    ) -> zbus::fdo::Result<()> {
-        self.daemon
-            .set_head_position(profile_id, connector_hint, x, y)
             .await
             .map_err(to_zbus_error)
     }
@@ -167,6 +186,12 @@ impl DisplaydService {
         fingerprint: String,
         summary: String,
     ) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    pub async fn revert_pending(emitter: &SignalEmitter<'_>, seconds: u32) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    pub async fn revert_resolved(emitter: &SignalEmitter<'_>, reverted: bool) -> zbus::Result<()>;
 }
 
 impl FromStr for ExtraOutputPolicy {
@@ -231,6 +256,10 @@ pub async fn forward_signals(
                 fingerprint,
                 summary,
             } => iface_ref.new_topology_seen(fingerprint, summary).await,
+            DaemonSignal::RevertPending { seconds } => iface_ref.revert_pending(seconds).await,
+            DaemonSignal::RevertResolved { reverted } => {
+                iface_ref.revert_resolved(reverted).await
+            }
             DaemonSignal::ProfileAutoLearned { id, name } => {
                 // Auto-learn overwrites a profile's stored layout silently
                 // from the daemon's own perspective, but the GUI still
