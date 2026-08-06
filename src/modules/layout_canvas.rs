@@ -27,6 +27,9 @@ const SNAP_THRESHOLD_PX: f32 = 10.0;
 #[derive(Debug, Clone, PartialEq)]
 pub struct CanvasHead {
     pub connector_hint: String,
+    /// What to draw on the rectangle — the monitor's friendly name, not
+    /// its connector. `connector_hint` stays the identity used in messages.
+    pub label: String,
     pub x: i32,
     pub y: i32,
     pub width: i32,
@@ -255,7 +258,7 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for LayoutCanvas<Message
             );
 
             frame.fill_text(CanvasText {
-                content: head.connector_hint.clone(),
+                content: head.label.clone(),
                 position: Point::new(rect.x + 6.0, rect.y + 6.0),
                 color: palette.primary.base.text,
                 size: 12.0.into(),

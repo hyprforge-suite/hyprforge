@@ -17,17 +17,99 @@ fn main() -> iced::Result {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    iced::application(App::new, App::update, App::view)
-        .title("Hyprforge Settings")
+    // `daemon` rather than `application` because the revert countdown needs
+    // its own window: a change that blanks a screen may well leave the
+    // settings window itself invisible, so the prompt to undo it can't live
+    // inside that window.
+    iced::daemon(App::new, App::update, App::view)
+        .title(App::title)
         .theme(App::theme)
         .subscription(App::subscription)
-        .window(window::Settings {
-            size: Size::new(1000.0, 700.0),
-            min_size: Some(Size::new(760.0, 520.0)),
-            position: window::Position::Centered,
-            ..window::Settings::default()
-        })
         .run()
+}
+
+/// Settings for the main window, opened on boot.
+fn main_window_settings() -> window::Settings {
+    window::Settings {
+        size: Size::new(1000.0, 700.0),
+        min_size: Some(Size::new(760.0, 520.0)),
+        position: window::Position::Centered,
+        ..window::Settings::default()
+    }
+}
+
+/// The revert prompt's window title.
+///
+/// Also the handle Hyprland's dispatchers use to find it (see
+/// [`pin_revert_popup`]), so it must stay stable, unique, and free of regex
+/// metacharacters. The window is undecorated, so this is an identifier
+/// rather than a visible caption.
+const REVERT_POPUP_TITLE: &str = "Hyprforge Keep Display Settings";
+
+fn revert_popup_settings() -> window::Settings {
+    window::Settings {
+        size: Size::new(420.0, 190.0),
+        position: window::Position::Centered,
+        resizable: false,
+        decorations: false,
+        // Honoured on X11/Windows/macOS. Wayland has no always-on-top
+        // protocol, so this is a no-op there and `pin_revert_popup` does
+        // the real work — it's set anyway so the intent survives a port.
+        level: window::Level::AlwaysOnTop,
+        ..window::Settings::default()
+    }
+}
+
+/// Floats and pins the popup via Hyprland's IPC.
+///
+/// A Wayland client cannot ask to be kept above other windows — there's no
+/// protocol for it — so `window::Level::AlwaysOnTop` does nothing here.
+/// Hyprland can do it on our behalf: `float` lifts it out of the tiling
+/// layout, and `pin` keeps it visible on every workspace. Without this the
+/// prompt can end up tiled behind, or on a workspace the user isn't looking
+/// at, which defeats the entire point of a countdown you must answer.
+///
+/// Best-effort by design: if the dispatch fails the prompt is still a real
+/// window the user can reach, and the daemon reverts on its own regardless.
+async fn pin_revert_popup() {
+    // Give the compositor a moment to map the window before addressing it.
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    // Lua long-bracket strings pass their contents through verbatim, with no
+    // escape processing, so a selector can never break the dispatch's own
+    // parse — the same reason the window-rules codegen quotes regexes this
+    // way. (A `\?` inside a normal Lua "..." literal is a hard parse error.)
+    let selector = format!("[[title:^{REVERT_POPUP_TITLE}$]]");
+    for dispatcher in ["float", "pin"] {
+        let call =
+            format!("hl.dsp.window.{dispatcher}({{ action = \"set\", window = {selector} }})");
+        match tokio::process::Command::new("hyprctl")
+            .arg("dispatch")
+            .arg(&call)
+            .output()
+            .await
+        {
+            Ok(out) => {
+                // hyprctl exits 0 even when the Lua call itself errored, so
+                // the response body is what actually reports success.
+                let body = String::from_utf8_lossy(&out.stdout);
+                if !body.trim().eq_ignore_ascii_case("ok") {
+                    tracing::warn!(
+                        dispatcher,
+                        response = %body.trim(),
+                        "hyprctl rejected the dispatch; revert prompt may not stay on top"
+                    );
+                }
+            }
+            Err(e) => {
+                // Not running Hyprland, or hyprctl isn't installed. The
+                // prompt is still a real window the user can reach, and the
+                // daemon reverts on its own either way.
+                tracing::debug!(error = %e, "could not run hyprctl to pin the revert prompt");
+                return;
+            }
+        }
+    }
 }
 
 /// Reads the desktop's own accessibility text-scaling-factor once at
@@ -86,6 +168,10 @@ enum Message {
     RefreshActive,
     Displays(modules::displays::Message),
     WindowRules(modules::window_rules::Message),
+    WindowOpened(window::Id),
+    WindowClosed(window::Id),
+    RevertPopupOpened(window::Id),
+    Noop,
 }
 
 struct App {
@@ -95,6 +181,9 @@ struct App {
     search_query: String,
     search_id: Id,
     font_scale: FontScale,
+    main_window: Option<window::Id>,
+    /// The pinned countdown prompt, while a display change is provisional.
+    revert_popup: Option<window::Id>,
 }
 
 impl App {
@@ -109,16 +198,48 @@ impl App {
                 search_query: String::new(),
                 search_id: Id::unique(),
                 font_scale: read_global_font_scale(),
+                main_window: None,
+                revert_popup: None,
             },
             Task::batch([
+                window::open(main_window_settings()).1.map(Message::WindowOpened),
                 displays_task.map(Message::Displays),
                 window_rules_task.map(Message::WindowRules),
             ]),
         )
     }
 
-    fn theme(&self) -> Theme {
+    fn theme(&self, _window: window::Id) -> Theme {
         app_theme()
+    }
+
+    fn title(&self, window: window::Id) -> String {
+        if Some(window) == self.revert_popup {
+            REVERT_POPUP_TITLE.to_string()
+        } else {
+            "Hyprforge Settings".to_string()
+        }
+    }
+
+    /// Opens or closes the countdown prompt to match the module's state.
+    ///
+    /// Driven from the module rather than duplicated: `revert_seconds_left`
+    /// is set by the daemon's `RevertPending` signal and cleared by
+    /// `RevertResolved`, so the window's lifetime tracks the daemon's own
+    /// notion of "a change is provisional" instead of a second timer that
+    /// could drift out of sync with it.
+    fn sync_revert_popup(&mut self) -> Task<Message> {
+        match (self.displays.revert_seconds_left(), self.revert_popup) {
+            (Some(_), None) => {
+                let (_id, open) = window::open(revert_popup_settings());
+                open.map(Message::RevertPopupOpened)
+            }
+            (None, Some(id)) => {
+                self.revert_popup = None;
+                window::close(id)
+            }
+            _ => Task::none(),
+        }
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -146,6 +267,9 @@ impl App {
                         self.displays
                             .update(modules::displays::Message::RenameCancelled)
                             .map(Message::Displays),
+                        self.displays
+                            .update(modules::displays::Message::DeleteCancel)
+                            .map(Message::Displays),
                         self.window_rules
                             .update(modules::window_rules::Message::DraftCancel)
                             .map(Message::WindowRules),
@@ -165,12 +289,89 @@ impl App {
                 // current.
                 Screen::WindowRules => Task::none(),
             },
-            Message::Displays(msg) => self.displays.update(msg).map(Message::Displays),
+            Message::Displays(msg) => {
+                let task = self.displays.update(msg).map(Message::Displays);
+                Task::batch([task, self.sync_revert_popup()])
+            }
+            Message::WindowOpened(id) => {
+                if self.main_window.is_none() {
+                    self.main_window = Some(id);
+                }
+                Task::none()
+            }
+            Message::RevertPopupOpened(id) => {
+                self.revert_popup = Some(id);
+                // Ask Hyprland to float + pin it; see `pin_revert_popup`.
+                Task::perform(pin_revert_popup(), |()| Message::Noop)
+            }
+            Message::WindowClosed(id) => {
+                if Some(id) == self.revert_popup {
+                    self.revert_popup = None;
+                    // Closing the prompt is not an answer. The daemon keeps
+                    // its own countdown and still reverts, so the change
+                    // can't be silently kept by dismissing the window.
+                    return Task::none();
+                }
+                if Some(id) == self.main_window {
+                    return iced::exit();
+                }
+                Task::none()
+            }
+            Message::Noop => Task::none(),
             Message::WindowRules(msg) => self.window_rules.update(msg).map(Message::WindowRules),
         }
     }
 
-    fn view(&self) -> Element<'_, Message> {
+    fn view(&self, window: window::Id) -> Element<'_, Message> {
+        if Some(window) == self.revert_popup {
+            return self.revert_popup_view();
+        }
+        self.settings_view()
+    }
+
+    /// The countdown prompt. Deliberately tiny and self-contained: it may
+    /// be the only thing legible on a screen that a bad mode change just
+    /// scrambled, so it states what happened, how long is left, and the two
+    /// ways out — nothing else.
+    fn revert_popup_view(&self) -> Element<'_, Message> {
+        let scale = self.font_scale;
+        let left = self.displays.revert_seconds_left().unwrap_or(0);
+        container(
+            column![
+                scaled_text("Keep these display settings?", 17.0, scale),
+                scaled_text(
+                    format!("Reverting in {left}s if you don't choose."),
+                    13.0,
+                    scale,
+                )
+                .color(TEXT_DIM),
+                row![
+                    secondary_button("Revert now")
+                        .on_press(Message::Displays(modules::displays::Message::RevertLayoutNow)),
+                    primary_button("Keep changes")
+                        .on_press(Message::Displays(modules::displays::Message::KeepLayout)),
+                ]
+                .spacing(spacing::SM),
+            ]
+            .spacing(spacing::MD)
+            .padding(spacing::LG),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center(Length::Fill)
+        .style(|_theme: &Theme| container::Style {
+            background: Some(Background::Color(surface::CARD)),
+            border: iced::Border {
+                radius: 10.0.into(),
+                width: 1.0,
+                color: surface::CARD_BORDER,
+            },
+            ..container::Style::default()
+        })
+        .into()
+    }
+
+    fn settings_view(&self) -> Element<'_, Message> {
         let scale = self.font_scale;
 
         let sidebar_button = |label: String, screen: Screen, active: bool| {
@@ -262,16 +463,22 @@ impl App {
         // sections) routinely exceeds window height — without scrolling,
         // everything past the window edge was just clipped and silently
         // invisible, not merely off-screen.
-        let content = iced::widget::scrollable(content)
-            .width(Length::Fill)
-            .height(Length::Fill);
+        //
+        // Order matters here: the scrollable has to be the *outermost* of
+        // these three, so its scrollbar tracks the edge of the content pane.
+        // Nesting it inside the max-width/centering containers instead pins
+        // the bar to the right edge of the centered column, which on a wide
+        // window reads as a scrollbar floating in the middle of the screen.
         let content = container(content)
             .max_width(CONTENT_MAX_WIDTH)
             .width(Length::Fill);
-        let content = container(content)
+        // Centred in the pane, GNOME-style. Left-aligning a capped column in
+        // a very wide window dumps all the slack on one side, which reads as
+        // a broken layout; splitting it evenly reads as deliberate margin.
+        let content = container(content).width(Length::Fill).center_x(Length::Fill);
+        let content = iced::widget::scrollable(content)
             .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill);
+            .height(Length::Fill);
 
         container(row![sidebar, content])
             .style(|_theme: &Theme| container::Style {
@@ -309,6 +516,10 @@ impl App {
             }
         });
 
-        Subscription::batch([self.displays.subscription().map(Message::Displays), shortcuts])
+        Subscription::batch([
+            self.displays.subscription().map(Message::Displays),
+            shortcuts,
+            window::close_events().map(Message::WindowClosed),
+        ])
     }
 }
