@@ -769,3 +769,70 @@ async fn applying_an_edited_geometry_is_not_auto_learned_away() {
          pre-apply layout"
     );
 }
+
+/// A commit the compositor won't honour must not be retried forever.
+///
+/// `apply_configuration` succeeds once the request is sent, but the result
+/// can come back different — an output that can't run its advertised
+/// preferred mode settles on another one. The plan is then never satisfied,
+/// so every settle commits it again. Seen live when a second monitor
+/// advertising 2560x1440@180 came up at 60: one apply every debounce
+/// interval for as long as the daemon ran.
+#[tokio::test(start_paused = true)]
+async fn a_layout_the_compositor_refuses_is_not_retried_forever() {
+    use hyprforge_displayd::types::{Head, Mode, Transform};
+
+    let mut h = Harness::new();
+    let boe = identity("BOE", "0x0BC9", "");
+    let arzopa = identity("GWD", "ARZOPA", "2022110200001");
+
+    h.backend.set_topology(vec![boe.clone()]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await; // learned the single-panel profile
+
+    let preferred = Mode {
+        width: 2560,
+        height: 1440,
+        refresh_mhz: 180000,
+        preferred: true,
+    };
+    let actual = Mode {
+        width: 2560,
+        height: 1440,
+        refresh_mhz: 60000,
+        preferred: false,
+    };
+    // Second display advertises 180Hz as preferred but is stuck at 60 — so
+    // the extend-right plan's `Preferred` can never be satisfied.
+    let mut heads = h.backend.list_outputs().unwrap();
+    heads.push(Head {
+        connector: "DP-3".to_string(),
+        identity: arzopa,
+        description: "GWD ARZOPA".to_string(),
+        modes: vec![preferred, actual],
+        current_mode: Some(actual),
+        position: (4096, 0),
+        transform: Transform::Normal,
+        scale: 1.0,
+        enabled: true,
+    });
+    h.backend.lock_mode("DP-3");
+    h.backend.push_snapshot(heads);
+
+    tokio::time::advance(Duration::from_millis(50)).await;
+    settle().await;
+    let after_hotplug = h.backend.apply_count();
+
+    for _ in 0..20 {
+        settle().await;
+        tokio::time::advance(Duration::from_millis(50)).await;
+        settle().await;
+    }
+
+    let extra = h.backend.apply_count() - after_hotplug;
+    assert!(
+        extra <= 1,
+        "daemon kept re-committing a layout the compositor won't accept \
+         ({extra} further applies while nothing changed)"
+    );
+}
