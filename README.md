@@ -189,34 +189,37 @@ border color. "Show advanced" adds the rest of what the generator supports:
 - **Opacity** — per-state active/inactive/fullscreen, with the `override`
   flag for absolute rather than multiplied values.
 
-## Open bug: multi-monitor positions never converge
+## Unresolved: multi-monitor position readings disagree
 
-**Known broken.** With two displays at different scales, the position the
-daemon commits, the position `wlr-output-management` reports back, and the
-position `hyprctl monitors` reports are three different numbers. Observed on
-Hyprland 0.56.1 with a 2560x1600 laptop panel at scale 1.6 plus a 2560x1440
-external at scale 1.0, after committing the external at x=1600:
+With two displays at different scales, `wlr-output-management` (what the
+daemon reads) and `hyprctl monitors` have been seen reporting different
+positions and scales for the same output at the same instant, on Hyprland
+0.56.1 — and the daemon re-commits in a slow oscillation, because a layout
+that never looks satisfied gets applied again while auto-learn rewrites the
+profile from the read-back.
 
-| Source | Reported x |
-|---|---|
-| what the daemon committed | 1600 |
-| `wlr-output-management` (what the daemon reads back) | 4096 |
-| `hyprctl monitors` | 2560 |
+**This is not established as a Hyprforge bug, and the first measurements
+were taken under a confound.** The machine they came from has competing
+`hl.monitor()` rules in its own config — `monitors.lua` written by
+nwg-displays, *plus* a catch-all in `hyprland.lua`:
 
-Because the read-back never matches what was asked for, the layout never
-looks satisfied, so the daemon re-commits; auto-learn then rewrites the
-stored profile from the read-back value, so the next plan differs and the
-identical-plan guard added alongside this note doesn't catch it. The result
-is a slow oscillation that keeps moving the display.
+```lua
+hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 1 })
+```
 
-Note 4096 = 2560 × 1.6 and 2560 = 4096 ÷ 1.6, which points at a scale being
-applied in the wrong direction on one of the two paths — but which path, and
-whether `wlr-output-management` positions are logical or physical under
-Hyprland, is **not yet established**. Don't guess: confirm against the
-protocol and the compositor before changing the read or the write.
+An empty `output` matches every monitor, so that rule re-asserts `position =
+"auto"` and `scale = 1` over whatever else set them — exactly the scenario
+the section below warns about. Any oscillation measured with it in place may
+be Hyprforge and the compositor's own config fighting, not a coordinate bug.
 
-Until this is fixed, running the daemon with more than one display connected
-will fight your layout.
+A later reading on the same machine had the daemon's own view
+self-consistent and matching the user's intended layout (x=1600 at scale
+1.6015625, i.e. 2560/1.6), while `hyprctl` reported a scale and a position
+that don't agree with each other — the opposite of the first reading.
+
+Before concluding anything: remove the competing rules, restart Hyprland
+clean, and re-measure. Do not "fix" a scale direction on the strength of the
+numbers above.
 
 ## Known interaction with nwg-displays / hand-written `hl.monitor()` rules
 
