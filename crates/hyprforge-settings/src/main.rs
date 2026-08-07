@@ -231,7 +231,17 @@ impl App {
     fn sync_revert_popup(&mut self) -> Task<Message> {
         match (self.displays.revert_seconds_left(), self.revert_popup) {
             (Some(_), None) => {
-                let (_id, open) = window::open(revert_popup_settings());
+                // Record the id now, not on `RevertPopupOpened`. `window::open`
+                // hands it back before the window exists, and this runs on
+                // every message from the module — including the `RevertTick`
+                // that arrives every second while a countdown is live. Waiting
+                // for the open to round-trip leaves those ticks looking at a
+                // popup that is still `None`, so each one opens another window,
+                // and every window whose id isn't the one recorded here falls
+                // through `view` to the full settings UI, drawn at the prompt's
+                // 420x190.
+                let (id, open) = window::open(revert_popup_settings());
+                self.revert_popup = Some(id);
                 open.map(Message::RevertPopupOpened)
             }
             (None, Some(id)) => {
