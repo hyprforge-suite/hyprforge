@@ -119,6 +119,74 @@ pub fn assign_heads(profile: &Profile, connected: &[Head]) -> HashMap<String, St
     assignment
 }
 
+/// The layout space a planned head occupies, as `(width, height)`.
+fn plan_logical_size(plan: &HeadPlan, connected: &[Head]) -> (i32, i32) {
+    let dims = match plan.mode {
+        Some(ModeSpec::Exact { width, height, .. }) => Some((width, height)),
+        _ => connected
+            .iter()
+            .find(|c| c.connector == plan.connector)
+            .and_then(|c| c.effective_mode())
+            .map(|m| (m.width, m.height)),
+    };
+    let (w, h) = dims.unwrap_or((1920, 1080));
+    let (lw, lh) = (logical_width(w, plan.scale), logical_width(h, plan.scale));
+    match plan.transform {
+        Transform::Rotate90 | Transform::Rotate270 | Transform::Flipped90 | Transform::Flipped270 => {
+            (lh, lw)
+        }
+        _ => (lw, lh),
+    }
+}
+
+/// Slides overlapping heads apart, left to right, preserving their order.
+///
+/// Overlapping outputs give a desktop with a region owned by two monitors at
+/// once; Hyprland warns that it "will cause issues", and it is easy to
+/// arrive at without ever dragging anything — changing a head's scale
+/// changes the space it occupies while every position stays put, so a setup
+/// that was flush silently starts overlapping.
+///
+/// Heads placed by the mirror policy are exempt: sharing a position is the
+/// entire point there, not a mistake to correct.
+fn resolve_plan_overlaps(heads_plan: &mut [HeadPlan], connected: &[Head], exempt: &[String]) {
+    let mut order: Vec<usize> = (0..heads_plan.len())
+        .filter(|&i| heads_plan[i].enabled && !exempt.contains(&heads_plan[i].connector))
+        .collect();
+    order.sort_by_key(|&i| (heads_plan[i].position.0, heads_plan[i].position.1));
+
+    let mut placed: Vec<(i32, i32, i32, i32)> = Vec::new();
+    for &i in &order {
+        let (w, h) = plan_logical_size(&heads_plan[i], connected);
+        let (mut x, y) = heads_plan[i].position;
+        // Push right past anything already placed that this would sit on.
+        // Repeats because clearing one neighbour can run into the next.
+        for _ in 0..placed.len() + 1 {
+            let hit = placed
+                .iter()
+                .filter(|&&(px, py, pw, ph)| {
+                    x < px + pw && px < x + w && y < py + ph && py < y + h
+                })
+                .map(|&(px, _, pw, _)| px + pw)
+                .max();
+            match hit {
+                Some(edge) => x = edge,
+                None => break,
+            }
+        }
+        if x != heads_plan[i].position.0 {
+            tracing::debug!(
+                connector = %heads_plan[i].connector,
+                from = heads_plan[i].position.0,
+                to = x,
+                "nudged an output right to stop it overlapping another"
+            );
+            heads_plan[i].position.0 = x;
+        }
+        placed.push((x, y, w, h));
+    }
+}
+
 /// Builds the [`LayoutPlan`] to apply for a matched profile against the
 /// currently-connected heads. Heads covered by the profile keep their
 /// stored geometry; any connected head the profile doesn't cover (only
@@ -136,6 +204,9 @@ pub fn build_layout_plan(profile: &Profile, connected: &[Head]) -> LayoutPlan {
     let mut heads_plan = Vec::new();
     // (x, y, width_px, scale) of heads placed so far, for extend-right math.
     let mut placed: Vec<(i32, i32, i32, f64)> = Vec::new();
+    // Mirror-policy heads share a position deliberately, so they're excluded
+    // from overlap repair below.
+    let mut mirrored: Vec<String> = Vec::new();
 
     for head in connected {
         if let Some(rec) = connector_to_record.get(head.connector.as_str()) {
@@ -195,6 +266,7 @@ pub fn build_layout_plan(profile: &Profile, connected: &[Head]) -> LayoutPlan {
                 }
             }
             ExtraOutputPolicy::Mirror => {
+                mirrored.push(head.connector.clone());
                 let (x, y) = placed.first().map(|(x, y, ..)| (*x, *y)).unwrap_or((0, 0));
                 heads_plan.push(HeadPlan {
                     connector: head.connector.clone(),
@@ -208,6 +280,7 @@ pub fn build_layout_plan(profile: &Profile, connected: &[Head]) -> LayoutPlan {
         }
     }
 
+    resolve_plan_overlaps(&mut heads_plan, connected, &mirrored);
     LayoutPlan { heads: heads_plan }
 }
 
@@ -466,6 +539,98 @@ mod tests {
         assert_eq!(logical_width(2560, 1.0), 2560);
         // A malformed profile must not produce an infinite coordinate.
         assert_eq!(logical_width(2560, 0.0), 2560);
+    }
+
+    /// The way a user actually reaches an overlapping desktop: change a
+    /// monitor's scale and every position stays where it was, so a layout
+    /// that was flush now has two outputs claiming the same region.
+    /// Hyprland warns that this "will cause issues".
+    #[test]
+    fn raising_a_scale_does_not_leave_outputs_overlapping() {
+        let boe = identity("BOE", "0x0BC9", "");
+        let arzopa = identity("GWD", "ARZOPA", "2022110200001");
+
+        // eDP-2 was placed flush at scale 1.6 (2560/1.6 = 1600 wide), with
+        // the external starting exactly at 1600. Dropping the scale to 1.0
+        // widens it to 2560 and it swallows its neighbour.
+        let mut left = head_record("eDP-2", &boe, 0, 0, 2560, 1600);
+        left.scale = 1.0;
+        let mut right = head_record("DP-3", &arzopa, 1600, 0, 2560, 1440);
+        right.scale = 1.0;
+        let p = profile("p1", vec![left, right], "2020-01-01T00:00:00Z");
+
+        let connected = vec![
+            head("eDP-2", boe, 2560, 1600),
+            head("DP-3", arzopa, 2560, 1440),
+        ];
+        let plan = build_layout_plan(&p, &connected);
+
+        let a = plan.heads.iter().find(|h| h.connector == "eDP-2").unwrap();
+        let b = plan.heads.iter().find(|h| h.connector == "DP-3").unwrap();
+        assert_eq!(a.position.0, 0, "the leftmost head shouldn't move");
+        assert_eq!(
+            b.position.0, 2560,
+            "the external must be pushed clear of the now-wider panel"
+        );
+    }
+
+    #[test]
+    fn a_flush_layout_is_left_exactly_as_it_is() {
+        let boe = identity("BOE", "0x0BC9", "");
+        let arzopa = identity("GWD", "ARZOPA", "2022110200001");
+        let mut left = head_record("eDP-2", &boe, 0, 0, 2560, 1600);
+        left.scale = 1.6;
+        let mut right = head_record("DP-3", &arzopa, 1600, 0, 2560, 1440);
+        right.scale = 1.0;
+        let p = profile("p1", vec![left, right], "2020-01-01T00:00:00Z");
+        let connected = vec![
+            head("eDP-2", boe, 2560, 1600),
+            head("DP-3", arzopa, 2560, 1440),
+        ];
+        let plan = build_layout_plan(&p, &connected);
+        let b = plan.heads.iter().find(|h| h.connector == "DP-3").unwrap();
+        assert_eq!(b.position.0, 1600, "nothing overlapped, so nothing moves");
+    }
+
+    #[test]
+    fn stacked_monitors_are_left_alone() {
+        // Vertically stacked heads share an x range but not a y one, so
+        // they don't overlap and must not be shoved sideways.
+        let boe = identity("BOE", "0x0BC9", "");
+        let arzopa = identity("GWD", "ARZOPA", "2022110200001");
+        let mut top = head_record("eDP-2", &boe, 0, 0, 2560, 1600);
+        top.scale = 1.0;
+        let mut bottom = head_record("DP-3", &arzopa, 0, 1600, 2560, 1440);
+        bottom.scale = 1.0;
+        let p = profile("p1", vec![top, bottom], "2020-01-01T00:00:00Z");
+        let connected = vec![
+            head("eDP-2", boe, 2560, 1600),
+            head("DP-3", arzopa, 2560, 1440),
+        ];
+        let plan = build_layout_plan(&p, &connected);
+        let b = plan.heads.iter().find(|h| h.connector == "DP-3").unwrap();
+        assert_eq!(b.position, (0, 1600));
+    }
+
+    #[test]
+    fn mirroring_is_allowed_to_share_a_position() {
+        // Mirror puts an uncovered head on top of the first deliberately;
+        // the overlap repair must not undo that.
+        let boe = identity("BOE", "0x0BC9", "");
+        let dell = identity("DELL", "U2720Q", "ABC");
+        let mut p = profile(
+            "p1",
+            vec![head_record("eDP-2", &boe, 0, 0, 2560, 1600)],
+            "2020-01-01T00:00:00Z",
+        );
+        p.extra_output_policy = ExtraOutputPolicy::Mirror;
+        let connected = vec![
+            head("eDP-2", boe, 2560, 1600),
+            head("DP-4", dell, 1920, 1080),
+        ];
+        let plan = build_layout_plan(&p, &connected);
+        let mirror = plan.heads.iter().find(|h| h.connector == "DP-4").unwrap();
+        assert_eq!(mirror.position, (0, 0), "mirroring shares a position by design");
     }
 
     #[test]
