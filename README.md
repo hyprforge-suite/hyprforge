@@ -119,6 +119,22 @@ shouldn't have its change silently undone.
 for a blank-serial panel, mirroring real hardware — this machine's own
 built-in panel reports an empty EDID serial).
 
+## Plugging a new display into a setup Hyprforge already knows
+
+That's a *superset* match: a stored profile covers some of what's connected,
+so it's applied and the uncovered outputs are placed by the profile's
+extra-output policy. The daemon then learns a second profile describing the
+whole connected set, and that one exact-matches from then on.
+
+The learning step matters more than it sounds. Auto-learn is otherwise
+exact-only, so without it nothing ever records the new display — and because
+the Settings module edits *stored profiles*, a display absent from every
+profile cannot be seen or arranged in the UI at all. Plug in a second
+monitor and it would simply never appear.
+
+The original profile is left untouched, so unplugging still gets you the
+setup you had before.
+
 Automated coverage of the same flows (exact/superset/subset matching,
 tie-breaks, duplicate/blank-serial assignment + `SwapHeads`, auto-learn,
 the zero-enabled-outputs safety rail, profile deletion, and the

@@ -879,3 +879,53 @@ async fn current_profile_is_reported_for_a_superset_match() {
         "superset match should still name the governing profile"
     );
 }
+
+/// Plugging a new display into a known setup must end up remembered.
+///
+/// A superset match covers only some of what's connected, and auto-learn is
+/// exact-only, so the extra display was never written to any profile. Since
+/// the Settings module edits stored profiles, the user's second monitor was
+/// invisible in the UI — permanently, because nothing would ever adopt it.
+#[tokio::test(start_paused = true)]
+async fn a_display_added_to_a_known_setup_gets_learned() {
+    let mut h = Harness::new();
+    let boe = identity("BOE", "0x0BC9", "");
+    let arzopa = identity("GWD", "ARZOPA", "2022110200001");
+
+    h.backend.set_topology(vec![boe.clone()]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await;
+    let laptop_only = h.daemon.profiles().await[0].id.clone();
+
+    // Plug in a second, previously-unseen display: superset match.
+    h.backend.set_topology(vec![boe, arzopa]);
+    for _ in 0..6 {
+        tokio::time::advance(Duration::from_millis(50)).await;
+        settle().await;
+    }
+
+    let profiles = h.daemon.profiles().await;
+    assert_eq!(
+        profiles.len(),
+        2,
+        "expected the two-display setup to be learned alongside the laptop-only one"
+    );
+
+    let fp = h.daemon.current_fingerprint().unwrap();
+    let learned = profiles
+        .iter()
+        .find(|p| p.id == fp)
+        .expect("no profile for the connected set");
+    assert_eq!(
+        learned.heads.len(),
+        2,
+        "the learned profile must cover both displays, or the second stays \
+         invisible in the editor"
+    );
+
+    // The laptop-only profile is still there for when the external isn't.
+    assert!(profiles.iter().any(|p| p.id == laptop_only));
+
+    // And it is now the profile in effect.
+    assert_eq!(h.daemon.current_profile_id().await.unwrap(), Some(fp));
+}
