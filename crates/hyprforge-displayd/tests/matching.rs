@@ -819,9 +819,18 @@ async fn a_layout_the_compositor_refuses_is_not_retried_forever() {
     h.backend.lock_mode("DP-3");
     h.backend.push_snapshot(heads);
 
-    tokio::time::advance(Duration::from_millis(50)).await;
-    settle().await;
-    let after_hotplug = h.backend.apply_count();
+    // Let things run until the daemon has done whatever it is going to do.
+    // The count is deliberately not compared against a fixed number: a
+    // hotplug legitimately produces more than one plan (the matched profile,
+    // then the newly learned one for the connected set). What must hold is
+    // that it *stops* — so measure a quiet period, then another, and require
+    // them to agree.
+    for _ in 0..20 {
+        settle().await;
+        tokio::time::advance(Duration::from_millis(50)).await;
+        settle().await;
+    }
+    let settled = h.backend.apply_count();
 
     for _ in 0..20 {
         settle().await;
@@ -829,11 +838,10 @@ async fn a_layout_the_compositor_refuses_is_not_retried_forever() {
         settle().await;
     }
 
-    let extra = h.backend.apply_count() - after_hotplug;
-    assert!(
-        extra <= 1,
-        "daemon kept re-committing a layout the compositor won't accept \
-         ({extra} further applies while nothing changed)"
+    assert_eq!(
+        h.backend.apply_count(),
+        settled,
+        "daemon kept re-committing a layout the compositor won't accept"
     );
 }
 
@@ -928,4 +936,43 @@ async fn a_display_added_to_a_known_setup_gets_learned() {
 
     // And it is now the profile in effect.
     assert_eq!(h.daemon.current_profile_id().await.unwrap(), Some(fp));
+}
+
+/// Learning the connected set must not depend on the layout being
+/// achievable.
+///
+/// A profile can ask for something the compositor won't do — a scale whose
+/// logical size isn't a whole number of pixels (2560 at 1.75 wants 1462.86)
+/// is the easy way in. The layout then never matches the plan. Gating the
+/// learn on that meant one such profile blocked it forever: the user's
+/// second display stayed invisible no matter how many times they replugged
+/// or restarted, because the only path to it required a match that could
+/// never happen.
+#[tokio::test(start_paused = true)]
+async fn the_connected_set_is_learned_even_when_the_layout_never_matches() {
+    let mut h = Harness::new();
+    let boe = identity("BOE", "0x0BC9", "");
+    let arzopa = identity("GWD", "ARZOPA", "2022110200001");
+
+    h.backend.set_topology(vec![boe.clone()]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await;
+
+    // MOCK-2 will refuse every mode it's given, so no plan covering it can
+    // ever be satisfied.
+    h.backend.lock_mode("MOCK-2");
+    h.backend.set_topology(vec![boe, arzopa]);
+    for _ in 0..8 {
+        tokio::time::advance(Duration::from_millis(50)).await;
+        settle().await;
+    }
+
+    let profiles = h.daemon.profiles().await;
+    let fp = h.daemon.current_fingerprint().unwrap();
+    assert!(
+        profiles.iter().any(|p| p.id == fp && p.heads.len() == 2),
+        "the connected set was never learned, so the second display has no \
+         profile to appear in — profiles: {:?}",
+        profiles.iter().map(|p| (&p.name, p.heads.len())).collect::<Vec<_>>()
+    );
 }

@@ -654,11 +654,22 @@ impl Daemon {
         // that display is invisible there too — the user plugs in a second
         // monitor and simply cannot see or arrange it.
         //
-        // Learn a profile for the topology that's actually connected, once
-        // the layout has settled into the plan (so it records what is really
-        // on screen). The original profile is left alone for when this set
-        // isn't plugged in, and the new one exact-matches from here on.
-        if tier == MatchTier::Superset && already_satisfied {
+        // Learn a profile for the topology that's actually connected, from
+        // the live heads — which are the truth about what's on screen, even
+        // when that isn't what was asked for.
+        //
+        // Deliberately *not* conditional on the layout matching the plan. A
+        // stored profile can request something the compositor won't do — a
+        // scale whose logical size isn't a whole number of pixels is the easy
+        // way in, 2560 at 1.75 giving 1462.86 — and then no layout ever
+        // satisfies it. Gating on satisfaction meant such a profile blocked
+        // learning forever, which is precisely the state a user hits after
+        // setting a scale that didn't take: a second display that never
+        // appears anywhere, with no way to reach it.
+        //
+        // The original profile is left alone for when this set isn't plugged
+        // in, and the new one exact-matches from here on.
+        if tier == MatchTier::Superset {
             self.learn_current_topology(&mut profiles, &fp, &heads, signal_tx)
                 .await;
         }
