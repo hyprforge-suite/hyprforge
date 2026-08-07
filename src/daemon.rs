@@ -82,6 +82,10 @@ pub struct Daemon {
     profiles: Mutex<Vec<Profile>>,
     competing_monitor_rules: Mutex<Vec<String>>,
     suppress_learn_until: Mutex<Option<tokio::time::Instant>>,
+    /// The last plan that was committed and then *still* wasn't reflected in
+    /// the layout that came back. Stops the daemon retrying a configuration
+    /// the compositor won't accept — see [`Daemon::handle_settled_topology`].
+    unsatisfied_plan: Mutex<Option<LayoutPlan>>,
     pending_revert: Mutex<Option<PendingRevert>>,
     revert_generation: std::sync::atomic::AtomicU64,
     /// Set once [`Daemon::run`] starts, so work spawned outside the run loop
@@ -99,6 +103,7 @@ impl Daemon {
             profiles: Mutex::new(profiles),
             competing_monitor_rules: Mutex::new(Vec::new()),
             suppress_learn_until: Mutex::new(None),
+            unsatisfied_plan: Mutex::new(None),
             pending_revert: Mutex::new(None),
             revert_generation: std::sync::atomic::AtomicU64::new(0),
             signal_tx: Mutex::new(None),
@@ -544,11 +549,29 @@ impl Daemon {
         // so it's still touched, persisted and signalled. Those don't feed
         // back into the event loop, so they can't sustain the cycle.
         let already_satisfied = plan.is_satisfied_by(&heads);
-        if !already_satisfied {
+        if already_satisfied {
+            *self.unsatisfied_plan.lock().await = None;
+        } else {
+            // A commit that doesn't take is the other way to loop forever.
+            // `apply_configuration` reports success once the request is sent,
+            // but the compositor can decline the result — an output that
+            // won't run at its preferred mode comes back at a different one,
+            // so the plan is never satisfied and every settle commits it
+            // again. Retry a given plan once, then leave it alone until
+            // something actually changes.
+            let already_tried = self.unsatisfied_plan.lock().await.as_ref() == Some(&plan);
+            if already_tried {
+                tracing::warn!(
+                    profile = %profile_id,
+                    "compositor did not accept this layout; not retrying until the topology changes"
+                );
+                return;
+            }
             if let Err(e) = self.backend.apply_configuration(&plan) {
                 tracing::error!(error = %e, profile = %profile_id, "failed to apply layout");
                 return;
             }
+            *self.unsatisfied_plan.lock().await = Some(plan.clone());
         }
 
         // Check the cooldown left by our *previous* apply before

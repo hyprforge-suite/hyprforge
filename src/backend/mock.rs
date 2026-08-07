@@ -6,6 +6,8 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 struct MockState {
     heads: Vec<Head>,
     subscribers: Vec<UnboundedSender<TopologyEvent>>,
+    /// Connectors whose mode a commit cannot change.
+    mode_locked: std::collections::HashSet<String>,
 }
 
 /// Simulates a `wlr-output-management-v1` compositor entirely in memory:
@@ -30,6 +32,7 @@ impl MockBackend {
             state: Mutex::new(MockState {
                 heads: Vec::new(),
                 subscribers: Vec::new(),
+                mode_locked: std::collections::HashSet::new(),
             }),
             applies: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -80,6 +83,21 @@ impl MockBackend {
         self.push_snapshot(heads);
     }
 
+    /// Makes `connector` keep whatever mode it currently has, no matter what
+    /// is committed to it.
+    ///
+    /// Real hardware does this: an output that can't actually run its
+    /// advertised preferred mode (bandwidth, cable, adapter) comes back at a
+    /// different one, and the commit still reports success. The daemon has to
+    /// notice it asked for something it didn't get and stop asking.
+    pub fn lock_mode(&self, connector: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .mode_locked
+            .insert(connector.to_string());
+    }
+
     /// Directly pushes a full head snapshot, for tests that need specific
     /// geometry or connector names rather than the `set_topology` default.
     pub fn push_snapshot(&self, heads: Vec<Head>) {
@@ -101,6 +119,7 @@ impl OutputBackend for MockBackend {
         self.applies
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut state = self.state.lock().unwrap();
+        let locked = state.mode_locked.clone();
         for head_plan in &plan.heads {
             if let Some(head) = state
                 .heads
@@ -112,7 +131,9 @@ impl OutputBackend for MockBackend {
                 head.transform = head_plan.transform;
                 head.scale = head_plan.scale;
                 if let Some(spec) = head_plan.mode {
-                    head.current_mode = Some(resolve_mode(head, spec));
+                    if !locked.contains(&head.connector) {
+                        head.current_mode = Some(resolve_mode(head, spec));
+                    }
                 }
             }
         }
