@@ -28,6 +28,15 @@ const MAX_SCALE: f32 = 0.35;
 /// How close (in canvas/screen pixels) a dragged edge must get to another
 /// head's edge before it snaps to it.
 const SNAP_THRESHOLD_PX: f32 = 10.0;
+/// Empty layout space kept around the arrangement, as a fraction of its
+/// larger dimension.
+///
+/// Fitting the bounding box to the viewport exactly would leave a dragged
+/// head nowhere to go: it fills the canvas at rest, so every direction is
+/// immediately out of bounds, and dragging turns into shoving against a
+/// wall. This is the room to rearrange in — and it reads better at rest
+/// too, since monitors no longer sit flush against the card's edge.
+const SLACK_FRACTION: f32 = 0.2;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CanvasHead {
@@ -68,10 +77,16 @@ fn fit_transform(heads: &[CanvasHead], bounds: Size) -> Transform {
     let bbox_w = (max_x - min_x).max(1.0);
     let bbox_h = (max_y - min_y).max(1.0);
 
+    // Fit the arrangement *plus* room to move it in, keeping the content
+    // centred on the real bounding box rather than the inflated one.
+    let slack = bbox_w.max(bbox_h) * SLACK_FRACTION;
+    let fit_w = bbox_w + slack * 2.0;
+    let fit_h = bbox_h + slack * 2.0;
+
     let avail_w = (bounds.width - PADDING * 2.0).max(1.0);
     let avail_h = (bounds.height - PADDING * 2.0).max(1.0);
 
-    let scale = (avail_w / bbox_w).min(avail_h / bbox_h).min(MAX_SCALE);
+    let scale = (avail_w / fit_w).min(avail_h / fit_h).min(MAX_SCALE);
     let content_w = bbox_w * scale;
     let content_h = bbox_h * scale;
     let offset = Vector::new(
@@ -110,6 +125,82 @@ fn snap_axis(pos: i32, size: i32, others: &[(i32, i32)], threshold: f32) -> i32 
         consider(other_end - size, end - other_end); // my end <-> their end
     }
     best.map(|(candidate, _)| candidate).unwrap_or(pos)
+}
+
+/// A head's placement in logical units, as `(x, y, width, height)`.
+type Placement = (i32, i32, i32, i32);
+
+fn overlaps(a: Placement, b: Placement) -> bool {
+    let (ax, ay, aw, ah) = a;
+    let (bx, by, bw, bh) = b;
+    ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah
+}
+
+/// Pushes a placement clear of anything it overlaps, along whichever axis
+/// needs the least movement.
+///
+/// Compositors accept overlapping outputs, and the result is a desktop with
+/// a region that exists twice — a pointer crossing it lands somewhere
+/// unpredictable and windows straddle the seam. Snapping makes flush easy
+/// but does nothing to stop a monitor being dropped on top of another, so
+/// this makes overlap unrepresentable rather than merely discouraged.
+///
+/// Resolving one overlap can create another, so it iterates; the cap keeps
+/// a pathological arrangement from spinning, and settling for "still
+/// overlapping" is better than not returning.
+fn resolve_overlap(mut placement: Placement, others: &[Placement]) -> Placement {
+    const MAX_PASSES: usize = 8;
+    for _ in 0..MAX_PASSES {
+        let Some(&other) = others.iter().find(|&&o| overlaps(placement, o)) else {
+            return placement;
+        };
+        let (x, y, w, h) = placement;
+        let (ox, oy, ow, oh) = other;
+
+        // Distance to clear along each direction; pick the smallest, so a
+        // monitor nudged slightly into another pops back the way it came
+        // rather than leaping to the far side.
+        let left = (x + w) - ox; // move left by this
+        let right = (ox + ow) - x; // move right by this
+        let up = (y + h) - oy;
+        let down = (oy + oh) - y;
+
+        let dx = if left <= right { -left } else { right };
+        let dy = if up <= down { -up } else { down };
+
+        if dx.abs() <= dy.abs() {
+            placement = (x + dx, y, w, h);
+        } else {
+            placement = (x, y + dy, w, h);
+        }
+    }
+    placement
+}
+
+/// Keeps a dragged head inside the visible canvas, in logical units.
+///
+/// The transform is frozen for the drag, so nothing rescales to bring a
+/// head back into view — without this it can be dragged clear off the card
+/// and left somewhere the user has to guess at, with the diagram only
+/// snapping back to sanity on release.
+fn clamp_to_canvas(placement: Placement, t: Transform, bounds: Size) -> Placement {
+    let (x, y, w, h) = placement;
+    if t.scale <= 0.0 {
+        return placement;
+    }
+    let to_logical_x = |canvas_x: f32| ((canvas_x - t.offset.x) / t.scale).round() as i32;
+    let to_logical_y = |canvas_y: f32| ((canvas_y - t.offset.y) / t.scale).round() as i32;
+
+    let min_x = to_logical_x(PADDING);
+    let min_y = to_logical_y(PADDING);
+    let max_x = to_logical_x(bounds.width - PADDING) - w;
+    let max_y = to_logical_y(bounds.height - PADDING) - h;
+
+    // A head larger than the viewport would give max < min; leave it be
+    // rather than snapping it to a nonsense coordinate.
+    let x = if max_x >= min_x { x.clamp(min_x, max_x) } else { x };
+    let y = if max_y >= min_y { y.clamp(min_y, max_y) } else { y };
+    (x, y, w, h)
 }
 
 /// Logical coordinates where the dragged head's edges coincide exactly with
@@ -255,21 +346,43 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for LayoutCanvas<Message
                     .iter()
                     .find(|h| h.connector_hint == dragging.connector_hint)
                 {
+                    let others: Vec<&CanvasHead> = self
+                        .heads
+                        .iter()
+                        .filter(|h| h.connector_hint != dragging.connector_hint)
+                        .collect();
+
+                    // Keep it on the canvas first, so the pointer can't
+                    // strand it somewhere invisible.
+                    let placement = clamp_to_canvas(
+                        (new_x, new_y, dragged.width, dragged.height),
+                        t,
+                        bounds.size(),
+                    );
+                    let (cx, cy, w, h) = placement;
+
                     let threshold = SNAP_THRESHOLD_PX / t.scale;
-                    let others_x: Vec<(i32, i32)> = self
-                        .heads
+                    let others_x: Vec<(i32, i32)> =
+                        others.iter().map(|h| (h.x, h.width)).collect();
+                    let others_y: Vec<(i32, i32)> =
+                        others.iter().map(|h| (h.y, h.height)).collect();
+                    let snapped = (
+                        snap_axis(cx, w, &others_x, threshold),
+                        snap_axis(cy, h, &others_y, threshold),
+                        w,
+                        h,
+                    );
+
+                    // Overlap-freedom last: it's the invariant worth
+                    // holding even if honouring it costs a snap or nudges
+                    // slightly past the padding.
+                    let placements: Vec<Placement> = others
                         .iter()
-                        .filter(|h| h.connector_hint != dragging.connector_hint)
-                        .map(|h| (h.x, h.width))
+                        .map(|h| (h.x, h.y, h.width, h.height))
                         .collect();
-                    let others_y: Vec<(i32, i32)> = self
-                        .heads
-                        .iter()
-                        .filter(|h| h.connector_hint != dragging.connector_hint)
-                        .map(|h| (h.y, h.height))
-                        .collect();
-                    new_x = snap_axis(new_x, dragged.width, &others_x, threshold);
-                    new_y = snap_axis(new_y, dragged.height, &others_y, threshold);
+                    let (rx, ry, _, _) = resolve_overlap(snapped, &placements);
+                    new_x = rx;
+                    new_y = ry;
                 }
 
                 let message = (self.on_drag)(dragging.connector_hint.clone(), new_x, new_y);
@@ -484,6 +597,92 @@ mod tests {
         let one_out = head("DP-3", 1537, 1, 2560, 1440);
         let (xs, ys) = snap_guides(&one_out, &others);
         assert!(xs.is_empty() && ys.is_empty(), "not flush, so no guide");
+    }
+
+    #[test]
+    fn overlap_is_pushed_out_along_the_shorter_axis() {
+        // Neighbour occupies 0..1536 x 0..960. Dropping a head mostly on top
+        // of it, but only 36 units deep from the right, should pop it back
+        // out to the right rather than fling it vertically.
+        let others = [(0, 0, 1536, 960)];
+        let (x, y, _, _) = resolve_overlap((1500, 0, 2560, 1440), &others);
+        assert_eq!((x, y), (1536, 0));
+    }
+
+    #[test]
+    fn overlap_resolution_leaves_a_clear_placement_alone() {
+        let others = [(0, 0, 1536, 960)];
+        let placement = (1536, 0, 2560, 1440);
+        assert_eq!(resolve_overlap(placement, &others), placement);
+    }
+
+    #[test]
+    fn a_head_dropped_dead_centre_still_ends_up_clear() {
+        // Full containment has no "shorter axis" intuition, but it must
+        // still resolve rather than leave the desktop doubled.
+        let others = [(0, 0, 3000, 2000)];
+        let resolved = resolve_overlap((1000, 800, 500, 400), &others);
+        assert!(
+            !overlaps(resolved, others[0]),
+            "still overlapping after resolution: {resolved:?}"
+        );
+    }
+
+    #[test]
+    fn overlap_resolution_terminates_when_boxed_in() {
+        // Surrounded on all sides: the cap must return something rather
+        // than loop, even though no placement is clear.
+        let others = [
+            (0, 0, 100, 100),
+            (100, 0, 100, 100),
+            (0, 100, 100, 100),
+            (100, 100, 100, 100),
+        ];
+        let resolved = resolve_overlap((50, 50, 100, 100), &others);
+        let _ = resolved; // terminating at all is the assertion here.
+    }
+
+    #[test]
+    fn a_drag_cannot_strand_a_head_off_the_canvas() {
+        let heads = vec![head("eDP-2", 0, 0, 1536, 960), head("DP-3", 1536, 0, 2560, 1440)];
+        let t = fit_transform(&heads, BOUNDS);
+        // Try to fling it far to the right.
+        let (x, _, _, _) = clamp_to_canvas((100_000, 0, 2560, 1440), t, BOUNDS);
+        let right_edge_canvas = (x + 2560) as f32 * t.scale + t.offset.x;
+        assert!(
+            right_edge_canvas <= BOUNDS.width - PADDING + 1.0,
+            "clamped head still extends past the canvas: {right_edge_canvas}"
+        );
+    }
+
+    #[test]
+    fn the_fit_leaves_room_to_drag_into() {
+        // With the arrangement fitted flush there would be nowhere to move
+        // to; slack is what makes dragging possible at all.
+        //
+        // Wide enough that the fit is what limits the scale — a small
+        // arrangement is capped by MAX_SCALE instead, which leaves margin
+        // for its own reasons and would pass this whether or not slack
+        // exists.
+        let heads = vec![
+            head("eDP-2", 0, 0, 1536, 960),
+            head("DP-3", 1536, 0, 2560, 1440),
+        ];
+        let t = fit_transform(&heads, BOUNDS);
+        assert!(t.scale < MAX_SCALE, "test needs a fit-limited scale");
+
+        let left = heads[0].rect(t);
+        let right = heads[1].rect(t);
+        assert!(
+            left.x > PADDING + 1.0,
+            "no slack on the left: content starts at {}",
+            left.x
+        );
+        assert!(
+            right.x + right.width < BOUNDS.width - PADDING - 1.0,
+            "no slack on the right: content ends at {}",
+            right.x + right.width
+        );
     }
 
     #[test]
