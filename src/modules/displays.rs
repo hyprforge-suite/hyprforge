@@ -58,6 +58,28 @@ impl HeadDetail {
     /// demotes the connector to metadata, so this does too. Built-in panels
     /// get a generic label because their EDID model is typically a part
     /// number (`0x0BC9`), which is no more meaningful than the connector.
+    /// The size this head occupies in layout space, which is what the
+    /// arrangement canvas has to draw.
+    ///
+    /// `width`/`height` are physical pixels, but `x`/`y` are logical, so
+    /// drawing the pixel figures mixes two coordinate systems: a 2560x1600
+    /// panel at scale 1.67 covers 1536x960 of layout, not 2560x1600. Sizing
+    /// the rectangles in pixels made a heavily-scaled laptop panel look
+    /// bigger than a physically larger external, and overlapped monitors
+    /// that don't overlap.
+    ///
+    /// A quarter-turn transform swaps the two, as it does for the
+    /// compositor.
+    fn logical_size(&self) -> (i32, i32) {
+        let scale = if self.scale > 0.0 { self.scale } else { 1.0 };
+        let w = (self.width as f64 / scale).round() as i32;
+        let h = (self.height as f64 / scale).round() as i32;
+        match self.transform.as_str() {
+            "Rotate90" | "Rotate270" | "Flipped90" | "Flipped270" => (h, w),
+            _ => (w, h),
+        }
+    }
+
     fn display_name(&self) -> String {
         let connector = self.connector_hint.to_ascii_lowercase();
         if BUILTIN_CONNECTOR_PREFIXES
@@ -1268,14 +1290,18 @@ impl DisplaysModule {
             .profile
             .heads
             .iter()
-            .map(|h| CanvasHead {
-                connector_hint: h.connector_hint.clone(),
-                label: h.display_name(),
-                x: h.x,
-                y: h.y,
-                width: h.width,
-                height: h.height,
-                enabled: h.enabled,
+            .map(|h| {
+                // Logical, to match x/y — see `HeadDetail::logical_size`.
+                let (width, height) = h.logical_size();
+                CanvasHead {
+                    connector_hint: h.connector_hint.clone(),
+                    label: h.display_name(),
+                    x: h.x,
+                    y: h.y,
+                    width,
+                    height,
+                    enabled: h.enabled,
+                }
             })
             .collect();
 
@@ -1908,6 +1934,49 @@ mod tests {
         assert_eq!(head("eDP-2", "BOE", "0x0BC9").display_name(), "Built-in display");
         assert_eq!(head("LVDS-1", "", "").display_name(), "Built-in display");
         assert_eq!(head("DSI-1", "", "").display_name(), "Built-in display");
+    }
+
+    #[test]
+    fn canvas_geometry_is_logical_so_scaled_panels_draw_at_their_real_size() {
+        // The real pair that exposed this: a heavily-scaled 2560x1600 laptop
+        // panel next to an unscaled 2560x1440 external. In pixels they look
+        // near-identical in width, with the laptop *taller*; in layout space
+        // the external is much the larger of the two, which is what every
+        // other display arranger draws.
+        let mut laptop = head("eDP-2", "BOE", "0x0BC9");
+        laptop.width = 2560;
+        laptop.height = 1600;
+        laptop.scale = 1.66796875;
+        assert_eq!(laptop.logical_size(), (1535, 959));
+
+        let mut external = head("DP-3", "GWD", "ARZOPA");
+        external.width = 2560;
+        external.height = 1440;
+        external.scale = 1.0;
+        assert_eq!(external.logical_size(), (2560, 1440));
+
+        let (lw, _) = laptop.logical_size();
+        let (ew, _) = external.logical_size();
+        assert!(ew > lw, "the external covers more layout space than the panel");
+    }
+
+    #[test]
+    fn canvas_geometry_swaps_axes_for_a_quarter_turn() {
+        let mut portrait = head("DP-4", "DELL", "U2720Q");
+        portrait.width = 2560;
+        portrait.height = 1440;
+        portrait.scale = 1.0;
+        portrait.transform = "Rotate90".to_string();
+        assert_eq!(portrait.logical_size(), (1440, 2560));
+    }
+
+    #[test]
+    fn canvas_geometry_survives_a_zero_scale() {
+        let mut h = head("DP-4", "DELL", "U2720Q");
+        h.width = 1920;
+        h.height = 1080;
+        h.scale = 0.0;
+        assert_eq!(h.logical_size(), (1920, 1080));
     }
 
     #[test]
