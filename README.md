@@ -189,6 +189,35 @@ border color. "Show advanced" adds the rest of what the generator supports:
 - **Opacity** — per-state active/inactive/fullscreen, with the `override`
   flag for absolute rather than multiplied values.
 
+## Open bug: multi-monitor positions never converge
+
+**Known broken.** With two displays at different scales, the position the
+daemon commits, the position `wlr-output-management` reports back, and the
+position `hyprctl monitors` reports are three different numbers. Observed on
+Hyprland 0.56.1 with a 2560x1600 laptop panel at scale 1.6 plus a 2560x1440
+external at scale 1.0, after committing the external at x=1600:
+
+| Source | Reported x |
+|---|---|
+| what the daemon committed | 1600 |
+| `wlr-output-management` (what the daemon reads back) | 4096 |
+| `hyprctl monitors` | 2560 |
+
+Because the read-back never matches what was asked for, the layout never
+looks satisfied, so the daemon re-commits; auto-learn then rewrites the
+stored profile from the read-back value, so the next plan differs and the
+identical-plan guard added alongside this note doesn't catch it. The result
+is a slow oscillation that keeps moving the display.
+
+Note 4096 = 2560 × 1.6 and 2560 = 4096 ÷ 1.6, which points at a scale being
+applied in the wrong direction on one of the two paths — but which path, and
+whether `wlr-output-management` positions are logical or physical under
+Hyprland, is **not yet established**. Don't guess: confirm against the
+protocol and the compositor before changing the read or the write.
+
+Until this is fixed, running the daemon with more than one display connected
+will fight your layout.
+
 ## Known interaction with nwg-displays / hand-written `hl.monitor()` rules
 
 If your `hyprland.lua` (or anything it `require()`s) contains `hl.monitor()`
