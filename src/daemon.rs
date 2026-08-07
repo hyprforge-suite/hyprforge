@@ -645,6 +645,54 @@ impl Daemon {
             self.maybe_auto_learn(&mut profiles, profile_idx, &heads, signal_tx)
                 .await;
         }
+
+        // A superset match means a profile covers *some* of what's plugged
+        // in. The uncovered outputs get placed by the extra-output policy,
+        // but nothing ever remembers them: auto-learn above is exact-only, so
+        // the profile stays as it was and the extra display exists nowhere in
+        // the profile store. The Settings module edits the stored profile, so
+        // that display is invisible there too — the user plugs in a second
+        // monitor and simply cannot see or arrange it.
+        //
+        // Learn a profile for the topology that's actually connected, once
+        // the layout has settled into the plan (so it records what is really
+        // on screen). The original profile is left alone for when this set
+        // isn't plugged in, and the new one exact-matches from here on.
+        if tier == MatchTier::Superset && already_satisfied {
+            self.learn_current_topology(&mut profiles, &fp, &heads, signal_tx)
+                .await;
+        }
+    }
+
+    /// Stores a profile describing exactly what's connected now, if there
+    /// isn't one already.
+    async fn learn_current_topology(
+        &self,
+        profiles: &mut Vec<Profile>,
+        fingerprint: &str,
+        heads: &[Head],
+        signal_tx: &mpsc::UnboundedSender<DaemonSignal>,
+    ) {
+        if profiles.iter().any(|p| p.id == fingerprint) {
+            return;
+        }
+        let existing_names: Vec<String> = profiles.iter().map(|p| p.name.clone()).collect();
+        let name = generate_profile_name(heads, &existing_names);
+        profiles.push(Profile::from_heads(
+            fingerprint.to_string(),
+            name.clone(),
+            heads,
+        ));
+        tracing::info!(
+            fingerprint = %fingerprint,
+            profile_name = %name,
+            "learned a profile for the connected set, which a stored profile only partly covered"
+        );
+        self.persist(profiles);
+        let _ = signal_tx.send(DaemonSignal::NewTopologySeen {
+            fingerprint: fingerprint.to_string(),
+            summary: format!("{name} (learned)"),
+        });
     }
 
     async fn maybe_auto_learn(
