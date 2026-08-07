@@ -84,6 +84,9 @@ $BIN modes MOCK-1               # modes a connected head advertises
 $BIN set-geometry <profile-id> MOCK-1 0 0 2560 1440 60000 1.25 Normal
 $BIN set-policy <profile-id> mirror        # extend_right | mirror | disable
 $BIN swap-heads <profile-id> MOCK-1 MOCK-2
+$BIN apply-reversible <profile-id>  # provisional; reverts unless confirmed
+$BIN confirm                        # keep it
+$BIN revert                         # roll back now, without waiting
 ```
 
 `delete` is a true forget only for topologies that **aren't** plugged in.

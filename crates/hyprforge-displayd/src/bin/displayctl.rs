@@ -16,6 +16,14 @@ enum Command {
     CurrentFingerprint,
     /// Force-apply a profile regardless of the current fingerprint.
     Apply { profile_id: String },
+    /// Apply provisionally: the daemon rolls the change back on its own
+    /// unless `confirm` arrives first. Prints the seconds you have.
+    ApplyReversible { profile_id: String },
+    /// Keep the layout a reversible apply put in place, cancelling the
+    /// rollback.
+    Confirm,
+    /// Roll back a provisional layout now, without waiting out the timer.
+    Revert,
     /// Rename a stored profile.
     Rename {
         profile_id: String,
@@ -89,6 +97,27 @@ async fn main() -> anyhow::Result<()> {
         Command::ListProfiles => list_profiles(&connection).await,
         Command::CurrentFingerprint => current_fingerprint(&connection).await,
         Command::Apply { profile_id } => apply(&connection, &profile_id).await,
+        Command::ApplyReversible { profile_id } => {
+            let seconds = proxy(&connection)
+                .await?
+                .apply_profile_reversible(&profile_id)
+                .await?;
+            println!(
+                "applied {profile_id} provisionally — reverting in {seconds}s unless you run \
+                 `hyprforge-displayctl confirm`"
+            );
+            Ok(())
+        }
+        Command::Confirm => {
+            proxy(&connection).await?.confirm_layout().await?;
+            println!("layout kept");
+            Ok(())
+        }
+        Command::Revert => {
+            proxy(&connection).await?.revert_layout().await?;
+            println!("layout reverted");
+            Ok(())
+        }
         Command::Rename {
             profile_id,
             new_name,
