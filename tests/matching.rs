@@ -836,3 +836,46 @@ async fn a_layout_the_compositor_refuses_is_not_retried_forever() {
          ({extra} further applies while nothing changed)"
     );
 }
+
+/// The daemon must be able to name the profile in effect for a superset
+/// match, not just an exact one.
+///
+/// A profile only shares its id with the fingerprint when the match is
+/// exact, so a client that compares the two sees "nothing matches" the
+/// moment a display is added to a known setup. The Settings GUI did exactly
+/// that and reported "hasn't matched a saved profile" while the daemon had
+/// already matched and applied one.
+#[tokio::test(start_paused = true)]
+async fn current_profile_is_reported_for_a_superset_match() {
+    let mut h = Harness::new();
+    let boe = identity("BOE", "0x0BC9", "");
+    let arzopa = identity("GWD", "ARZOPA", "2022110200001");
+
+    h.backend.set_topology(vec![boe.clone()]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await;
+    let learned = h.daemon.profiles().await[0].id.clone();
+
+    assert_eq!(
+        h.daemon.current_profile_id().await.unwrap(),
+        Some(learned.clone()),
+        "exact match should report the profile"
+    );
+
+    // Add a second, never-seen display: still a superset match on the same
+    // profile, but the fingerprint no longer equals its id.
+    h.backend.set_topology(vec![boe, arzopa]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    settle().await;
+
+    assert_ne!(
+        h.daemon.current_fingerprint().unwrap(),
+        learned,
+        "test is meaningless if the fingerprint still matches the id"
+    );
+    assert_eq!(
+        h.daemon.current_profile_id().await.unwrap(),
+        Some(learned),
+        "superset match should still name the governing profile"
+    );
+}

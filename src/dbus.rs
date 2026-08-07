@@ -41,6 +41,17 @@ impl DisplaydService {
         self.daemon.current_fingerprint().map_err(to_zbus_error)
     }
 
+    /// The id of the profile currently in effect, or `""` if none matches.
+    /// Empty rather than an error because "nothing matches yet" is a normal
+    /// state, not a failure.
+    async fn get_current_profile(&self) -> zbus::fdo::Result<String> {
+        self.daemon
+            .current_profile_id()
+            .await
+            .map(|id| id.unwrap_or_default())
+            .map_err(to_zbus_error)
+    }
+
     async fn get_current_layout(&self) -> zbus::fdo::Result<String> {
         self.daemon.current_layout_json().map_err(to_zbus_error)
     }
