@@ -125,4 +125,65 @@ impl LayoutPlan {
         }
         Ok(())
     }
+
+    /// Whether `heads` already describes this plan, i.e. applying it would
+    /// change nothing.
+    ///
+    /// This is what stops the daemon re-applying forever. Hyprland emits a
+    /// fresh `done` event for *every* configuration commit, including one
+    /// that sets each property to the value it already had — so an
+    /// unconditional apply feeds its own event back into the debounce loop
+    /// and re-applies at the debounce interval indefinitely. Checking
+    /// before applying breaks the cycle at the source, and skips a pointless
+    /// mode set on every hotplug besides.
+    pub fn is_satisfied_by(&self, heads: &[Head]) -> bool {
+        self.heads.iter().all(|plan| {
+            let Some(live) = heads.iter().find(|h| h.connector == plan.connector) else {
+                return false;
+            };
+            if live.enabled != plan.enabled {
+                return false;
+            }
+            // A disabled head's geometry is unobservable, so nothing else
+            // about it can be out of date.
+            if !plan.enabled {
+                return true;
+            }
+            let mode_matches = match plan.mode {
+                None => true,
+                Some(ModeSpec::Exact {
+                    width,
+                    height,
+                    refresh_mhz,
+                }) => live.current_mode.is_some_and(|m| {
+                    m.width == width && m.height == height && m.refresh_mhz == refresh_mhz
+                }),
+                Some(ModeSpec::Preferred) => match (live.current_mode, live.preferred_mode()) {
+                    (Some(current), Some(preferred)) => {
+                        current.width == preferred.width
+                            && current.height == preferred.height
+                            && current.refresh_mhz == preferred.refresh_mhz
+                    }
+                    _ => false,
+                },
+            };
+            mode_matches
+                && live.position == plan.position
+                && live.transform == plan.transform
+                && same_scale(live.scale, plan.scale)
+        })
+    }
+}
+
+/// Compares scales at the precision the protocol actually carries.
+///
+/// `wlr-output-management` transports scale as a `wl_fixed` — 1/256ths — so
+/// a profile storing 1.6 reads back as 1.6015625 (410/256) once the
+/// compositor has quantized it. Comparing the raw f64s would call those
+/// unequal forever, which would defeat [`LayoutPlan::is_satisfied_by`] for
+/// any scale that isn't already a multiple of 1/256 and reinstate the
+/// re-apply loop it exists to prevent.
+fn same_scale(a: f64, b: f64) -> bool {
+    const WL_FIXED_DENOMINATOR: f64 = 256.0;
+    (a * WL_FIXED_DENOMINATOR).round() == (b * WL_FIXED_DENOMINATOR).round()
 }

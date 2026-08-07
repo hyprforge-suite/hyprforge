@@ -15,6 +15,7 @@ struct MockState {
 /// path against this, not just unit-level pure functions.
 pub struct MockBackend {
     state: Mutex<MockState>,
+    applies: std::sync::atomic::AtomicUsize,
 }
 
 impl Default for MockBackend {
@@ -30,7 +31,17 @@ impl MockBackend {
                 heads: Vec::new(),
                 subscribers: Vec::new(),
             }),
+            applies: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// How many times `apply_configuration` has been called.
+    ///
+    /// Exists so tests can assert the daemon *stops* applying. A count that
+    /// keeps climbing while nothing is plugged or unplugged is the signature
+    /// of the daemon re-applying its own echo.
+    pub fn apply_count(&self) -> usize {
+        self.applies.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Replaces the connected set with synthetic heads for `identities`,
@@ -87,8 +98,9 @@ impl OutputBackend for MockBackend {
 
     fn apply_configuration(&self, plan: &LayoutPlan) -> anyhow::Result<()> {
         plan.validate()?;
+        self.applies
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut state = self.state.lock().unwrap();
-        let before = state.heads.clone();
         for head_plan in &plan.heads {
             if let Some(head) = state
                 .heads
@@ -104,13 +116,14 @@ impl OutputBackend for MockBackend {
                 }
             }
         }
-        // A real compositor only sends a fresh `done` event for the
-        // properties that actually changed; mirror that here so applying
-        // an already-matching configuration doesn't manufacture endless
-        // self-triggered echo events.
-        if state.heads == before {
-            return Ok(());
-        }
+        // Echo unconditionally, *including* when the commit changed nothing.
+        // This used to return early on an unchanged state, on the assumption
+        // that a real compositor only signals properties that actually
+        // changed. Hyprland 0.56.1 does not: it emits a fresh `done` for
+        // every commit, so suppressing the no-op echo here hid a live
+        // re-apply loop from every test in the suite. The daemon is what has
+        // to break that cycle (`LayoutPlan::is_satisfied_by`), so the mock
+        // reproduces the compositor's actual behaviour and lets it.
         let heads = state.heads.clone();
         state
             .subscribers
