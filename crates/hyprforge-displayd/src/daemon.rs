@@ -526,9 +526,21 @@ impl Daemon {
             return;
         }
 
-        if let Err(e) = self.backend.apply_configuration(&plan) {
-            tracing::error!(error = %e, profile = %profile_id, "failed to apply layout");
-            return;
+        // Commit only if the compositor isn't already in this state. Every
+        // commit produces a `done` event, which settles back here as a fresh
+        // snapshot still matching the same profile — so committing
+        // unconditionally re-commits on its own echo, forever (see
+        // `LayoutPlan::is_satisfied_by`).
+        //
+        // Everything below still runs: the profile is in effect either way,
+        // so it's still touched, persisted and signalled. Those don't feed
+        // back into the event loop, so they can't sustain the cycle.
+        let already_satisfied = plan.is_satisfied_by(&heads);
+        if !already_satisfied {
+            if let Err(e) = self.backend.apply_configuration(&plan) {
+                tracing::error!(error = %e, profile = %profile_id, "failed to apply layout");
+                return;
+            }
         }
 
         // Check the cooldown left by our *previous* apply before
@@ -553,14 +565,22 @@ impl Daemon {
             MatchTier::Superset => "superset",
             MatchTier::Subset => "subset",
         };
-        tracing::info!(
-            fingerprint = %fp,
-            profile_id = %profile_id,
-            profile_name = %name,
-            tier = tier_str,
-            heads = ?plan.heads,
-            "applied layout"
-        );
+        if already_satisfied {
+            tracing::debug!(
+                profile_id = %profile_id,
+                profile_name = %name,
+                "live layout already matches this profile; nothing to commit"
+            );
+        } else {
+            tracing::info!(
+                fingerprint = %fp,
+                profile_id = %profile_id,
+                profile_name = %name,
+                tier = tier_str,
+                heads = ?plan.heads,
+                "applied layout"
+            );
+        }
         self.persist(&profiles);
         let _ = signal_tx.send(DaemonSignal::ProfileApplied {
             id: profile_id.clone(),

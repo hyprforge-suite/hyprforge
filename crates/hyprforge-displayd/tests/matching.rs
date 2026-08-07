@@ -593,3 +593,121 @@ async fn a_lapsed_timer_cannot_roll_back_a_later_unrelated_change() {
     let head = h.daemon.profiles().await[0].heads[0].clone();
     assert_eq!((head.x, head.y), (10, 20));
 }
+
+/// The daemon must not re-apply its own echo.
+///
+/// Every commit makes the compositor emit a fresh `done` event, which
+/// arrives back here as a snapshot that now exact-matches the profile just
+/// applied. Committing unconditionally at that point re-commits, which
+/// echoes again, forever — observed live against Hyprland 0.56.1 as one
+/// apply every debounce interval until the daemon was killed. Nothing is
+/// plugged or unplugged after the forced apply below, so a count that keeps
+/// climbing means the loop is back.
+#[tokio::test(start_paused = true)]
+async fn an_applied_layout_does_not_retrigger_itself() {
+    let mut h = Harness::new();
+    let boe = identity("BOE", "0x0BC9", "");
+
+    h.backend.set_topology(vec![boe]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await; // learned
+
+    // Move the stored geometry away from what's live, so there is a real
+    // change to commit — reconnecting an already-matching topology commits
+    // nothing at all, which would test the wrong thing.
+    let id = h.daemon.profiles().await[0].id.clone();
+    h.daemon
+        .set_head_geometry(
+            &id,
+            "MOCK-1",
+            100,
+            50,
+            1920,
+            1080,
+            60000,
+            1.0,
+            hyprforge_displayd::types::Transform::Normal,
+        )
+        .await
+        .unwrap();
+    h.daemon.apply_profile(&id).await.unwrap();
+
+    settle().await;
+    tokio::time::advance(Duration::from_millis(50)).await;
+    settle().await;
+
+    let after_apply = h.backend.apply_count();
+    assert!(
+        after_apply >= 1,
+        "expected the forced apply to commit the new geometry at least once"
+    );
+
+    // Let many debounce windows pass without touching the topology.
+    for _ in 0..20 {
+        settle().await;
+        tokio::time::advance(Duration::from_millis(50)).await;
+        settle().await;
+    }
+
+    assert_eq!(
+        h.backend.apply_count(),
+        after_apply,
+        "daemon re-applied a layout that was already in effect — it is \
+         feeding its own `done` events back into the apply path"
+    );
+}
+
+/// The quantization guard behind the loop fix.
+///
+/// A scale is carried as a `wl_fixed` (1/256ths), so a profile storing 1.6
+/// reads back from the compositor as 1.6015625. If those compare unequal
+/// the layout never looks satisfied and the re-apply loop returns for every
+/// fractional scale, which is the common case on a HiDPI laptop panel.
+#[tokio::test(start_paused = true)]
+async fn a_wl_fixed_rounded_scale_still_counts_as_satisfied() {
+    use hyprforge_displayd::types::{HeadPlan, LayoutPlan, ModeSpec, Transform};
+
+    let live = hyprforge_displayd::types::Head {
+        connector: "eDP-2".to_string(),
+        identity: identity("BOE", "0x0BC9", ""),
+        description: "BOE 0x0BC9".to_string(),
+        modes: vec![hyprforge_displayd::types::Mode {
+            width: 2560,
+            height: 1600,
+            refresh_mhz: 165000,
+            preferred: true,
+        }],
+        current_mode: Some(hyprforge_displayd::types::Mode {
+            width: 2560,
+            height: 1600,
+            refresh_mhz: 165000,
+            preferred: true,
+        }),
+        position: (0, 0),
+        transform: Transform::Normal,
+        // What the compositor reports back after being asked for 1.6.
+        scale: 1.6015625,
+        enabled: true,
+    };
+    let plan = LayoutPlan {
+        heads: vec![HeadPlan {
+            connector: "eDP-2".to_string(),
+            enabled: true,
+            mode: Some(ModeSpec::Exact {
+                width: 2560,
+                height: 1600,
+                refresh_mhz: 165000,
+            }),
+            position: (0, 0),
+            transform: Transform::Normal,
+            scale: 1.6,
+        }],
+    };
+
+    assert!(plan.is_satisfied_by(std::slice::from_ref(&live)));
+
+    // A genuinely different scale must still register as needing an apply.
+    let mut different = plan.clone();
+    different.heads[0].scale = 2.0;
+    assert!(!different.is_satisfied_by(std::slice::from_ref(&live)));
+}
