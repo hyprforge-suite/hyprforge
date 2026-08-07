@@ -55,6 +55,19 @@ fn head_record_identity(rec: &HeadRecord) -> Identity {
     rec.identity()
 }
 
+/// How much layout space a `width_px` output at `scale` occupies.
+///
+/// Compositor coordinates are logical, not physical: scaling a display *up*
+/// makes everything bigger and so covers *less* layout space, which is why
+/// this divides. A guard on non-positive scales keeps a malformed profile
+/// from producing a divide-by-zero position.
+fn logical_width(width_px: i32, scale: f64) -> i32 {
+    if scale <= 0.0 {
+        return width_px;
+    }
+    (width_px as f64 / scale).round() as i32
+}
+
 /// Resolves which connected connector each profile head record should
 /// configure. Matching is unaffected by duplicate/blank-serial identities
 /// (it works on the multiset), but *assignment* — which stored role goes to
@@ -160,9 +173,13 @@ pub fn build_layout_plan(profile: &Profile, connected: &[Head]) -> LayoutPlan {
                 });
             }
             ExtraOutputPolicy::ExtendRight => {
+                // Logical width is pixels *divided* by scale: a 2560px panel
+                // at scale 1.6 occupies 1600 units of layout space, not 4096.
+                // Multiplying here parked the new output far off the right of
+                // everything else, with a dead gap the pointer had to cross.
                 let rightmost = placed
                     .iter()
-                    .map(|(x, _, w, s)| x + ((*w as f64) * s) as i32)
+                    .map(|(x, _, w, s)| x + logical_width(*w, *s))
                     .max()
                     .unwrap_or(0);
                 heads_plan.push(HeadPlan {
@@ -421,6 +438,34 @@ mod tests {
         let dp4 = plan.heads.iter().find(|h| h.connector == "DP-4").unwrap();
         assert!(dp4.enabled);
         assert_eq!(dp4.position, (2560, 0));
+    }
+
+    #[test]
+    fn extend_right_accounts_for_the_scale_of_what_it_places_beside() {
+        // A 2560px panel at scale 1.6 occupies 1600 units of layout space,
+        // so the second output belongs at x=1600. Multiplying instead put it
+        // at 4096 — off past a dead gap two thirds the width of the desktop.
+        let boe = identity("BOE", "0x0BC9", "");
+        let arzopa = identity("GWD", "ARZOPA", "2022110200001");
+        let mut rec = head_record("eDP-2", &boe, 0, 0, 2560, 1600);
+        rec.scale = 1.6;
+        let p = profile("p1", vec![rec], "2020-01-01T00:00:00Z");
+        let connected = vec![
+            head("eDP-2", boe, 2560, 1600),
+            head("DP-3", arzopa, 2560, 1440),
+        ];
+        let plan = build_layout_plan(&p, &connected);
+        plan.validate().unwrap();
+        let dp3 = plan.heads.iter().find(|h| h.connector == "DP-3").unwrap();
+        assert_eq!(dp3.position, (1600, 0));
+    }
+
+    #[test]
+    fn logical_width_survives_a_zero_scale() {
+        assert_eq!(logical_width(2560, 1.6), 1600);
+        assert_eq!(logical_width(2560, 1.0), 2560);
+        // A malformed profile must not produce an infinite coordinate.
+        assert_eq!(logical_width(2560, 0.0), 2560);
     }
 
     #[test]
