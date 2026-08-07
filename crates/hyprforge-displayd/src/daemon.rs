@@ -136,6 +136,24 @@ impl Daemon {
         Ok(fingerprint(&identities))
     }
 
+    /// The profile that currently governs the connected outputs, if any.
+    ///
+    /// This is the daemon's own match, so it covers superset and subset
+    /// matches — which a caller cannot work out for itself, since a profile
+    /// only shares its id with the fingerprint when the match is *exact*.
+    /// Without this, a client starting up after the daemon has already
+    /// settled has no way to learn which profile is in effect short of
+    /// waiting for the next `ProfileApplied` signal, which may never come.
+    pub async fn current_profile_id(&self) -> anyhow::Result<Option<String>> {
+        let heads = self.backend.list_outputs()?;
+        if heads.is_empty() {
+            return Ok(None);
+        }
+        let connected: Vec<_> = heads.iter().map(|h| h.identity.clone()).collect();
+        let profiles = self.profiles.lock().await;
+        Ok(find_match(&profiles, &connected).map(|m| m.profile.id.clone()))
+    }
+
     /// JSON-encoded snapshot of the currently-applied layout, for the
     /// `GetCurrentLayout` D-Bus method.
     pub fn current_layout_json(&self) -> anyhow::Result<String> {

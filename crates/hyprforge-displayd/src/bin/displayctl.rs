@@ -14,6 +14,9 @@ enum Command {
     ListProfiles,
     /// Print the fingerprint of the currently-connected output set.
     CurrentFingerprint,
+    /// Print the profile currently in effect, including superset/subset
+    /// matches that the fingerprint alone can't reveal.
+    CurrentProfile,
     /// Force-apply a profile regardless of the current fingerprint.
     Apply { profile_id: String },
     /// Apply provisionally: the daemon rolls the change back on its own
@@ -96,6 +99,15 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::ListProfiles => list_profiles(&connection).await,
         Command::CurrentFingerprint => current_fingerprint(&connection).await,
+        Command::CurrentProfile => {
+            let id = proxy(&connection).await?.get_current_profile().await?;
+            if id.is_empty() {
+                println!("no profile matches the connected outputs");
+            } else {
+                println!("{id}");
+            }
+            Ok(())
+        }
         Command::Apply { profile_id } => apply(&connection, &profile_id).await,
         Command::ApplyReversible { profile_id } => {
             let seconds = proxy(&connection)

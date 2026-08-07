@@ -351,6 +351,10 @@ pub struct LoadedState {
     profiles: Vec<ProfileInfo>,
     current_fingerprint: String,
     competing_monitor_rules: Vec<String>,
+    /// The daemon's own match, empty when nothing matches. Asked for
+    /// directly because a superset/subset match can't be derived from the
+    /// fingerprint — only an exact match shares its id with one.
+    current_profile: String,
 }
 
 #[derive(Debug, Clone)]
@@ -589,7 +593,9 @@ impl SettingsModule for DisplaysModule {
                 // a ProfileApplied signal arrives. Never clobber an already
                 // -known current profile with "unknown" just because this
                 // particular load can't derive it.
-                if let Some(p) = self
+                if !state.current_profile.is_empty() {
+                    self.current_profile_id = Some(state.current_profile.clone());
+                } else if let Some(p) = self
                     .profiles
                     .iter()
                     .find(|p| p.id == self.current_fingerprint)
@@ -1646,10 +1652,15 @@ async fn load() -> Result<LoadedState, String> {
         .competing_monitor_rules()
         .await
         .map_err(|e| e.to_string())?;
+    let current_profile = proxy
+        .get_current_profile()
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(LoadedState {
         profiles,
         current_fingerprint,
         competing_monitor_rules,
+        current_profile,
     })
 }
 

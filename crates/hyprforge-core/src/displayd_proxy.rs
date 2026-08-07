@@ -78,6 +78,11 @@ pub trait Displayd {
     #[zbus(signal)]
     fn new_topology_seen(&self, fingerprint: String, summary: String) -> zbus::Result<()>;
 
+    /// Id of the profile currently in effect, `""` when none matches.
+    /// Covers superset/subset matches, which a client can't derive from the
+    /// fingerprint alone.
+    fn get_current_profile(&self) -> zbus::Result<String>;
+
     #[zbus(signal)]
     fn revert_pending(&self, seconds: u32) -> zbus::Result<()>;
 
