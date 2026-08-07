@@ -312,6 +312,14 @@ impl Daemon {
 
         let plan = build_layout_plan(&profiles[idx], &heads);
         plan.validate()?;
+        // Same reasoning as `restore`: this commit is our own, so its echo
+        // must not read as the user externally rearranging their displays.
+        // Without this, the settle that follows compares the *pre-commit*
+        // snapshot against the profile it just applied, sees them diverge,
+        // and "learns" the old layout straight back over the new one —
+        // making a deliberate mode or scale change appear to do nothing.
+        *self.suppress_learn_until.lock().await =
+            Some(tokio::time::Instant::now() + AUTO_LEARN_COOLDOWN);
         self.backend.apply_configuration(&plan)?;
         profiles[idx].touch();
         self.persist(&profiles);

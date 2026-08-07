@@ -711,3 +711,61 @@ async fn a_wl_fixed_rounded_scale_still_counts_as_satisfied() {
     different.heads[0].scale = 2.0;
     assert!(!different.is_satisfied_by(std::slice::from_ref(&live)));
 }
+
+/// A deliberate geometry change must survive being applied.
+///
+/// A commit does not stop snapshots that were already in flight. When one of
+/// those pre-commit snapshots is what the debounce loop settles on, it
+/// diverges from the profile just applied — and auto-learn reads divergence
+/// as the user having rearranged their displays externally, writing the old
+/// geometry back over the new one. Observed live as a 1920x1200 apply that
+/// snapped back to 2560x1600 and left the stored profile reset, so a mode
+/// change looked like it did nothing at all. The cooldown the apply arms is
+/// what tells our own echo apart from a real external change.
+#[tokio::test(start_paused = true)]
+async fn applying_an_edited_geometry_is_not_auto_learned_away() {
+    let mut h = Harness::new();
+    let boe = identity("BOE", "0x0BC9", "");
+
+    h.backend.set_topology(vec![boe]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await; // learned at the mock's default 1920x1080
+
+    // The layout as it stands before the edit — this is what a snapshot
+    // already in flight when the commit lands would carry.
+    let stale = h.backend.list_outputs().unwrap();
+
+    let id = h.daemon.profiles().await[0].id.clone();
+    h.daemon
+        .set_head_geometry(
+            &id,
+            "MOCK-1",
+            0,
+            0,
+            1280,
+            720,
+            60000,
+            1.0,
+            hyprforge_displayd::types::Transform::Normal,
+        )
+        .await
+        .unwrap();
+    h.daemon.apply_profile(&id).await.unwrap();
+
+    // Deliver the stale, pre-commit snapshot *after* the commit.
+    h.backend.push_snapshot(stale);
+
+    for _ in 0..5 {
+        settle().await;
+        tokio::time::advance(Duration::from_millis(50)).await;
+        settle().await;
+    }
+
+    let head = h.daemon.profiles().await[0].heads[0].clone();
+    assert_eq!(
+        (head.width, head.height),
+        (1280, 720),
+        "the applied geometry was auto-learned away and replaced with the \
+         pre-apply layout"
+    );
+}
