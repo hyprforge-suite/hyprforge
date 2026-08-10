@@ -205,37 +205,74 @@ border color. "Show advanced" adds the rest of what the generator supports:
 - **Opacity** — per-state active/inactive/fullscreen, with the `override`
   flag for absolute rather than multiplied values.
 
-## Unresolved: multi-monitor position readings disagree
+## Scales are 120ths, and most of the ones you'd want don't exist
 
-With two displays at different scales, `wlr-output-management` (what the
-daemon reads) and `hyprctl monitors` have been seen reporting different
-positions and scales for the same output at the same instant, on Hyprland
-0.56.1 — and the daemon re-commits in a slow oscillation, because a layout
-that never looks satisfied gets applied again while auto-learn rewrites the
-profile from the read-back.
+This is the single most surprising thing about display handling here, and it
+explains a whole family of symptoms: positions that disagree with `hyprctl`,
+monitors the compositor calls overlapping when the arithmetic says they're
+flush, and a layout that quietly refuses to apply.
 
-**This is not established as a Hyprforge bug, and the first measurements
-were taken under a confound.** The machine they came from has competing
-`hl.monitor()` rules in its own config — `monitors.lua` written by
-nwg-displays, *plus* a catch-all in `hyprland.lua`:
+Hyprland rounds an incoming scale onto a grid of **120ths** — the unit
+`wp_fractional_scale_v1` is defined in — *before* it checks anything, and
+only then requires that the resolution divide cleanly. So a usable scale is
+`k/120` where `k` divides both `width*120` and `height*120`. Nothing else
+qualifies, however cleanly it divides on paper.
 
-```lua
-hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 1 })
+On a 2560x1600 panel, `gcd(2560*120, 1600*120)` is 38400, so the achievable
+scales are the divisors of 38400 over 120 — 1.25, 1.6, 5/3, 2.0 and so on.
+**150% and 175% are not among them.** Ask for either and Hyprland refuses,
+picks its own replacement, and says so only in its log:
+
+```
+ERR ]: Invalid scale passed to monitor, 1.5       found suggestion 1.6
+ERR ]: Invalid scale passed to monitor, 1.7460938 found suggestion 1.6666666
 ```
 
-An empty `output` matches every monitor, so that rule re-asserts `position =
-"auto"` and `scale = 1` over whatever else set them — exactly the scenario
-the section below warns about. Any oscillation measured with it in place may
-be Hyprforge and the compositor's own config fighting, not a coordinate bug.
+The failure that follows is indirect, which is what makes it confusing. The
+setting now disagrees with what the hardware is doing, every position derived
+from it is computed against a logical width nothing is using, and neighbours
+computed as flush end up a few pixels inside each other — at which point the
+daemon refuses to apply the layout at all (see "Never apply a layout with
+outputs on top of each other"). Auto-learn then rewrites the profile from the
+read-back, and the pair can chase each other in a slow oscillation.
 
-A later reading on the same machine had the daemon's own view
-self-consistent and matching the user's intended layout (x=1600 at scale
-1.6015625, i.e. 2560/1.6), while `hyprctl` reported a scale and a position
-that don't agree with each other — the opposite of the first reading.
+Note the trap: requiring only that `width/scale` and `height/scale` be whole
+is *not* the rule, and it's a plausible-looking mistake. It admits any
+`gcd(w,h)/k` — for 175% that's 320/183, which divides 2560 into exactly 1464
+and is rejected all the same, because it isn't a 120th.
 
-Before concluding anything: remove the competing rules, restart Hyprland
-clean, and re-measure. Do not "fix" a scale direction on the strength of the
-numbers above.
+`hyprforge-core::geometry` owns both halves of this:
+
+- `nearest_valid_scale(w, h, nominal)` — the nearest achievable `k/120`. The
+  Displays module runs every dropdown step through it, so the scales offered
+  are only ones the selected panel can genuinely take (which is why a
+  2560x1600 panel offers 160% where you might expect 150%). `build_layout_plan`
+  applies it again to whatever a profile asks for, so a scale arriving from
+  `displayctl`, a hand-edited TOML, or auto-learn can't get through either. A
+  substitution is logged at `warn`.
+- `logical_size(pixels, scale)` — the layout space an output occupies. It
+  snaps to the nearest 120th first, which matters because a scale can't
+  survive `wl_fixed` intact: 1.6 arrives as 1.6015625, and dividing by *that*
+  gives 1598.4 for a panel the compositor lays out 1600 wide. Snapping
+  recovers the compositor's own integer exactly.
+
+Snapping is idempotent on an already-valid scale, so a read-back-and-reapply
+cycle settles instead of walking.
+
+### Earlier readings, now explained
+
+Before the above was understood, this README carried an unresolved section
+about `wlr-output-management` and `hyprctl monitors` reporting scales and
+positions that didn't agree at the same instant. That is the substitution
+above: the daemon's view was self-consistent with the scale it *asked* for,
+`hyprctl` reported the one Hyprland had swapped in.
+
+One caveat is worth keeping. Those measurements were taken on a machine that
+also has competing `hl.monitor()` rules (see the next section), including a
+catch-all `hl.monitor({ output = "", ..., scale = 1 })` that re-asserts itself
+on every reload. That confound was never removed, so while the scale
+substitution accounts for what was seen, it hasn't been proven to be the
+*only* thing that was happening.
 
 ## Known interaction with nwg-displays / hand-written `hl.monitor()` rules
 
