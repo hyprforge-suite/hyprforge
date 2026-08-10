@@ -157,6 +157,47 @@ impl PartialEq for ScaleChoice {
 
 impl Eq for ScaleChoice {}
 
+/// The scale dropdown's contents for a `width`x`height` head, and which
+/// entry is selected, given the draft field's percentage.
+///
+/// Every value offered is one the panel can genuinely take: the standard
+/// steps are moved to the nearest achievable scale, and so is the head's
+/// current one. Snapping the current value matters as much as snapping the
+/// presets — a profile can hold a scale this panel can't take (hand-edited,
+/// learned from different hardware, or written by a Hyprforge that had the
+/// rule wrong), and offering it unchanged would let someone pick a value the
+/// compositor is guaranteed to replace.
+///
+/// An achievable off-preset scale is still offered, so an existing 160%
+/// profile stays representable rather than being dropped to the nearest
+/// preset and silently rescaling a working setup.
+fn scale_choices(width: i32, height: i32, field_scale: &str) -> (Vec<ScaleChoice>, Option<f64>) {
+    let current = field_scale
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|pct| *pct > 0.0)
+        .map(|pct| nearest_valid_scale(width, height, pct / 100.0) * 100.0);
+
+    let mut options: Vec<ScaleChoice> = SCALE_PRESETS
+        .iter()
+        .map(|nominal| ScaleChoice {
+            percent: nearest_valid_scale(width, height, *nominal) * 100.0,
+        })
+        .collect();
+    if let Some(current) = current {
+        if !options.iter().any(|c| (c.percent - current).abs() < 0.5) {
+            options.push(ScaleChoice { percent: current });
+        }
+    }
+    options.sort_by(|a, b| a.percent.total_cmp(&b.percent));
+    // Several presets can snap onto the same achievable scale — on a
+    // 2560x1600 panel both 150% and 160% land on 1.6 — and the list must not
+    // show it twice.
+    options.dedup_by(|a, b| (a.percent - b.percent).abs() < 0.5);
+    (options, current)
+}
+
 impl std::fmt::Display for ScaleChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let rounded = self.percent.round() as i64;
@@ -1490,31 +1531,11 @@ impl DisplaysModule {
                 ),
             );
 
-            // Offer the standard steps, each moved to the nearest scale this
-            // head can actually take, plus whatever it's already set to —
-            // dropping to the nearest preset would silently rescale
-            // someone's working setup.
             let (px_w, px_h) = editor
                 .selected_head()
                 .map(|h| (h.width, h.height))
                 .unwrap_or((1920, 1080));
-            let current_scale = editor.field_scale.trim().parse::<f64>().ok();
-            let mut scale_options: Vec<ScaleChoice> = SCALE_PRESETS
-                .iter()
-                .map(|nominal| ScaleChoice {
-                    percent: nearest_valid_scale(px_w, px_h, *nominal) * 100.0,
-                })
-                .collect();
-            if let Some(current) = current_scale {
-                let known = scale_options
-                    .iter()
-                    .any(|c| (c.percent - current).abs() < 0.5);
-                if !known {
-                    scale_options.push(ScaleChoice { percent: current });
-                }
-            }
-            scale_options.sort_by(|a, b| a.percent.total_cmp(&b.percent));
-            scale_options.dedup_by(|a, b| (a.percent - b.percent).abs() < 0.5);
+            let (scale_options, current_scale) = scale_choices(px_w, px_h, &editor.field_scale);
             let scale_field = row_field(
                 "Scale",
                 iced::widget::pick_list(
@@ -2075,6 +2096,72 @@ mod tests {
         // rate their monitor doesn't have.
         assert_eq!(RefreshOption { mhz: 165000 }.to_string(), "165 Hz");
         assert_eq!(RefreshOption { mhz: 59940 }.to_string(), "59.94 Hz");
+    }
+
+    /// Every entry in the dropdown has to be one the panel can take, or
+    /// picking it hands the compositor something it will swap out.
+    #[test]
+    fn the_scale_dropdown_only_offers_achievable_scales() {
+        let (options, _) = scale_choices(2560, 1600, "100");
+        assert!(!options.is_empty());
+        for c in &options {
+            let s = c.percent / 100.0;
+            assert!(
+                (nearest_valid_scale(2560, 1600, s) - s).abs() < 1e-9,
+                "{}% isn't achievable on a 2560x1600 panel",
+                c.percent
+            );
+        }
+    }
+
+    /// 150% doesn't exist on this panel — 180 doesn't divide 38400 — so the
+    /// preset has to show up as the 160% it will really be.
+    #[test]
+    fn a_preset_the_panel_cannot_take_is_offered_as_the_one_it_becomes() {
+        let (options, _) = scale_choices(2560, 1600, "100");
+        assert!(
+            options.iter().any(|c| (c.percent - 160.0).abs() < 0.5),
+            "expected a 160% entry, got {:?}",
+            options.iter().map(|c| c.percent).collect::<Vec<_>>()
+        );
+        assert!(
+            !options.iter().any(|c| (c.percent - 150.0).abs() < 0.5),
+            "150% is not achievable here and must not be offered"
+        );
+    }
+
+    /// A profile written before the 120ths rule was understood holds
+    /// 150.23%. It must come back as the 160% the compositor will actually
+    /// run, not as a selectable 150%.
+    #[test]
+    fn a_stored_scale_the_panel_cannot_take_is_shown_as_what_will_run() {
+        let (options, current) = scale_choices(2560, 1600, "150.2347");
+        let current = current.expect("a parseable field should select something");
+        assert!((current - 160.0).abs() < 0.5, "selected {current}%, expected 160%");
+        assert_eq!(
+            options.iter().filter(|c| (c.percent - current).abs() < 0.5).count(),
+            1,
+            "the selected value must appear exactly once"
+        );
+    }
+
+    /// Presets collapsing onto the same achievable scale must not produce
+    /// two identical-looking rows.
+    #[test]
+    fn snapped_presets_are_not_offered_twice() {
+        let (options, _) = scale_choices(2560, 1600, "100");
+        let mut labels: Vec<String> = options.iter().map(|c| c.to_string()).collect();
+        labels.sort();
+        let before = labels.len();
+        labels.dedup();
+        assert_eq!(before, labels.len(), "duplicate entries: {labels:?}");
+    }
+
+    #[test]
+    fn a_mid_edit_scale_field_selects_nothing_rather_than_panicking() {
+        let (options, current) = scale_choices(2560, 1600, "");
+        assert!(current.is_none());
+        assert!(!options.is_empty(), "the steps are still offered");
     }
 
     #[test]
