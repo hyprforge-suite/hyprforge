@@ -55,17 +55,34 @@ fn head_record_identity(rec: &HeadRecord) -> Identity {
     rec.identity()
 }
 
-/// How much layout space a `width_px` output at `scale` occupies.
+use hyprforge_core::geometry::{logical_size, nearest_valid_scale};
+
+/// The scale this record will really run at, which is not always the one
+/// it stores.
 ///
-/// Compositor coordinates are logical, not physical: scaling a display *up*
-/// makes everything bigger and so covers *less* layout space, which is why
-/// this divides. A guard on non-positive scales keeps a malformed profile
-/// from producing a divide-by-zero position.
-fn logical_width(width_px: i32, scale: f64) -> i32 {
-    if scale <= 0.0 {
-        return width_px;
+/// Hyprland takes a scale only if it divides the resolution cleanly in both
+/// axes; asked for anything else it substitutes one that does, without
+/// saying so. Every position in the plan is computed from the scale, so a
+/// stored value the hardware can't take leaves the layout built against a
+/// width nothing is using — and since we refuse to apply overlapping
+/// outputs, that surfaces as a layout that just won't go on.
+///
+/// Snapping here rather than in `set_head_geometry` keeps the stored TOML
+/// exactly as the user wrote it, and means the planned positions and the
+/// value handed to the compositor agree on one number.
+fn snapped_scale(rec: &HeadRecord) -> f64 {
+    let snapped = nearest_valid_scale(rec.width, rec.height, rec.scale);
+    if (snapped - rec.scale).abs() > 1e-9 {
+        tracing::warn!(
+            connector = %rec.connector_hint,
+            asked = rec.scale,
+            using = snapped,
+            "scale doesn't divide {}x{} cleanly; the compositor would substitute one that does",
+            rec.width,
+            rec.height,
+        );
     }
-    (width_px as f64 / scale).round() as i32
+    snapped
 }
 
 /// Resolves which connected connector each profile head record should
@@ -130,7 +147,7 @@ fn plan_logical_size(plan: &HeadPlan, connected: &[Head]) -> (i32, i32) {
             .map(|m| (m.width, m.height)),
     };
     let (w, h) = dims.unwrap_or((1920, 1080));
-    let (lw, lh) = (logical_width(w, plan.scale), logical_width(h, plan.scale));
+    let (lw, lh) = (logical_size(w, plan.scale), logical_size(h, plan.scale));
     match plan.transform {
         Transform::Rotate90 | Transform::Rotate270 | Transform::Flipped90 | Transform::Flipped270 => {
             (lh, lw)
@@ -210,6 +227,10 @@ pub fn build_layout_plan(profile: &Profile, connected: &[Head]) -> LayoutPlan {
 
     for head in connected {
         if let Some(rec) = connector_to_record.get(head.connector.as_str()) {
+            // Snapped before anything is derived from it, so the positions
+            // below, the overlap repair, and the compositor all work from
+            // the same scale.
+            let scale = snapped_scale(rec);
             heads_plan.push(HeadPlan {
                 connector: head.connector.clone(),
                 enabled: rec.enabled,
@@ -220,10 +241,10 @@ pub fn build_layout_plan(profile: &Profile, connected: &[Head]) -> LayoutPlan {
                 }),
                 position: (rec.x, rec.y),
                 transform: rec.transform,
-                scale: rec.scale,
+                scale,
             });
             if rec.enabled {
-                placed.push((rec.x, rec.y, rec.width, rec.scale));
+                placed.push((rec.x, rec.y, rec.width, scale));
             }
         }
     }
@@ -250,7 +271,7 @@ pub fn build_layout_plan(profile: &Profile, connected: &[Head]) -> LayoutPlan {
                 // everything else, with a dead gap the pointer had to cross.
                 let rightmost = placed
                     .iter()
-                    .map(|(x, _, w, s)| x + logical_width(*w, *s))
+                    .map(|(x, _, w, s)| x + logical_size(*w, *s))
                     .max()
                     .unwrap_or(0);
                 heads_plan.push(HeadPlan {
@@ -533,14 +554,6 @@ mod tests {
         assert_eq!(dp3.position, (1600, 0));
     }
 
-    #[test]
-    fn logical_width_survives_a_zero_scale() {
-        assert_eq!(logical_width(2560, 1.6), 1600);
-        assert_eq!(logical_width(2560, 1.0), 2560);
-        // A malformed profile must not produce an infinite coordinate.
-        assert_eq!(logical_width(2560, 0.0), 2560);
-    }
-
     /// The way a user actually reaches an overlapping desktop: change a
     /// monitor's scale and every position stays where it was, so a layout
     /// that was flush now has two outputs claiming the same region.
@@ -572,6 +585,54 @@ mod tests {
             b.position.0, 2560,
             "the external must be pushed clear of the now-wider panel"
         );
+    }
+
+    /// A scale can reach a profile from `displayctl set-geometry` or a
+    /// hand-edited TOML without ever passing the GUI's dropdown. 175% on a
+    /// 2560x1600 panel is one the hardware can't take: left alone, the
+    /// compositor substitutes a scale of its own while every position is
+    /// computed against 1463, and the layout comes back refused for
+    /// overlapping.
+    #[test]
+    fn a_scale_the_panel_cannot_take_is_snapped_before_anything_uses_it() {
+        let boe = identity("BOE", "0x0BC9", "");
+        let mut rec = head_record("eDP-2", &boe, 0, 0, 2560, 1600);
+        rec.scale = 1.75;
+        let p = profile("p1", vec![rec], "2020-01-01T00:00:00Z");
+        let connected = vec![head("eDP-2", boe, 2560, 1600)];
+
+        let plan = build_layout_plan(&p, &connected);
+        let s = plan.heads[0].scale;
+        assert!((s - 1.75).abs() < 0.02, "should stay near what was asked: {s}");
+        assert!(
+            (2560.0 / s).fract().abs() < 1e-9 && (1600.0 / s).fract().abs() < 1e-9,
+            "{s} doesn't divide 2560x1600 cleanly, so the compositor would substitute"
+        );
+    }
+
+    /// The consequence of the above: two heads laid out flush against the
+    /// snapped width stay flush, instead of the second landing inside the
+    /// first because it was placed against a width nothing is using.
+    #[test]
+    fn a_layout_flush_against_a_snapped_scale_does_not_overlap() {
+        let boe = identity("BOE", "0x0BC9", "");
+        let arzopa = identity("GWD", "ARZOPA", "2022110200001");
+        let mut left = head_record("eDP-2", &boe, 0, 0, 2560, 1600);
+        left.scale = 1.75;
+        // Flush against the width 1.75 really becomes: the nearest scale
+        // this panel can take is 320/183, laying it out 1464 wide.
+        let mut right = head_record("DP-3", &arzopa, 1464, 0, 2560, 1440);
+        right.scale = 1.0;
+        let p = profile("p1", vec![left, right], "2020-01-01T00:00:00Z");
+        let connected = vec![
+            head("eDP-2", boe, 2560, 1600),
+            head("DP-3", arzopa, 2560, 1440),
+        ];
+
+        let plan = build_layout_plan(&p, &connected);
+        plan.validate().unwrap();
+        let b = plan.heads.iter().find(|h| h.connector == "DP-3").unwrap();
+        assert_eq!(b.position.0, 1464, "a flush neighbour shouldn't be pushed");
     }
 
     #[test]

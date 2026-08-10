@@ -1,3 +1,4 @@
+pub mod geometry;
 pub mod paths;
 
 #[cfg(feature = "gui")]
