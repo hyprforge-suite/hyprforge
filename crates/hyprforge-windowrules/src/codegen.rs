@@ -26,6 +26,15 @@ fn render_rule(rule: &Rule) -> String {
     fields.push(format!("match = {}", render_matcher(&rule.matcher)));
 
     let e = &rule.effects;
+    if !e.workspace.is_empty() {
+        fields.push(format!(
+            "workspace = {}",
+            lua_string(&e.workspace.to_lua_value())
+        ));
+    }
+    if let Some(v) = &e.tag {
+        fields.push(format!("tag = {}", lua_string(v)));
+    }
     if let Some(v) = e.float {
         fields.push(format!("float = {v}"));
     }
@@ -73,6 +82,12 @@ fn render_matcher(m: &crate::model::Matcher) -> String {
     }
     if let Some(v) = m.xwayland {
         parts.push(format!("xwayland = {v}"));
+    }
+    if let Some(v) = &m.tag {
+        parts.push(format!("tag = {}", lua_string(v)));
+    }
+    if let Some(v) = &m.content {
+        parts.push(format!("content = {}", lua_string(v)));
     }
     format!("{{ {} }}", parts.join(", "))
 }

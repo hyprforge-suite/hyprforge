@@ -19,6 +19,13 @@ pub struct Matcher {
     pub floating: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub xwayland: Option<bool>,
+    /// Matches windows carrying a tag. `term` matches the bare tag and any
+    /// dynamic `term*`; `term*` matches only the dynamic form.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    /// Content type the window declares, e.g. `game`, `video`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
 }
 
 impl Matcher {
@@ -67,11 +74,53 @@ impl Opacity {
     }
 }
 
+/// Which workspace a matching window opens on.
+///
+/// Hyprland takes this as one string, so the `silent` flag isn't a separate
+/// field there — it's a suffix. Modelling it as a bool keeps the GUI a
+/// checkbox and keeps the suffix from being something a user has to know to
+/// type.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Workspace {
+    /// A workspace ID (`3`), a name (`name:coding`), a special workspace
+    /// (`special:scratchpad`), or the literal `unset`.
+    pub name: String,
+    /// Open the window there without following it. Worth defaulting on for
+    /// anything that launches in the background, which is most of what
+    /// people write this rule for.
+    #[serde(default)]
+    pub silent: bool,
+}
+
+impl Workspace {
+    pub fn is_empty(&self) -> bool {
+        self.name.trim().is_empty()
+    }
+
+    /// Renders Hyprland's single-string form, e.g. `3 silent`. `unset` is a
+    /// keyword rather than a workspace, so it never takes the suffix.
+    pub fn to_lua_value(&self) -> String {
+        let name = self.name.trim();
+        if self.silent && name != "unset" {
+            format!("{name} silent")
+        } else {
+            name.to_string()
+        }
+    }
+}
+
 /// Effects applied by the rule. Additive by design — new fields should be
 /// `Option`s with `#[serde(skip_serializing_if = "Option::is_none")]`, never
 /// a rewrite of this struct or the codegen match arms below it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Effects {
+    /// Where the window opens. The rule people reach for first — "Discord on
+    /// workspace 3" — and the one this module went longest without.
+    #[serde(skip_serializing_if = "Workspace::is_empty", default)]
+    pub workspace: Workspace,
+    /// Applies a tag: `+name` sets, `-name` unsets, bare toggles.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub float: Option<bool>,
     /// `[x, y]` — literal pixels or Hyprland move-expression strings.

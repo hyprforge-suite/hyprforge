@@ -190,14 +190,27 @@ canonical TOML either way and take effect as soon as setup is finished.
 
 ### Rule fields
 
-The basic form covers class/title matching plus float, blur, rounding, and
-border color. "Show advanced" adds the rest of what the generator supports:
+The basic form covers class/title matching plus workspace assignment, float,
+blur, rounding, and border color. "Show advanced" adds the rest of what the
+generator supports:
 
+- **Workspace** — which workspace a matching window opens on: an ID (`3`), a
+  name (`name:coding`), or a special workspace (`special:scratchpad`). This
+  is in the *basic* form, not behind "advanced", because it's the rule most
+  people come here to write. "Open there without switching to it" emits
+  Hyprland's ` silent` suffix; it's a checkbox rather than something you type,
+  since the suffix is an encoding detail of Hyprland taking the whole thing as
+  one string. The suffix is never applied to the `unset` keyword, which isn't
+  a workspace, and the flag is dropped entirely if the field is left blank.
 - **Match on more** — `initial_class`/`initial_title` (the class/title the
-  window had when it opened, for apps that rename themselves afterwards), and
-  three-way `fullscreen`/`floating`/`xwayland`. Three-way rather than a
-  checkbox because "don't match on this" and "match windows where this is
-  false" are different rules — `floating = false` selects tiled windows.
+  window had when it opened, for apps that rename themselves afterwards),
+  three-way `fullscreen`/`floating`/`xwayland`, plus `tag` and `content`
+  (e.g. `game`). Three-way rather than a checkbox because "don't match on
+  this" and "match windows where this is false" are different rules —
+  `floating = false` selects tiled windows.
+- **Tag** — applies a tag: `+name` adds, `-name` removes, bare toggles.
+  Tagged windows can then be selected by another rule's `tag` matcher, which
+  is how one rule's effect becomes another's criteria.
 - **Position & size** — `move` and `size`. A plain number is emitted as
   pixels; anything else is passed through to Hyprland as an expression
   (`cursor_x-(window_w*0.5)`, `60%`). Both halves of a pair are required,

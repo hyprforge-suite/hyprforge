@@ -4,7 +4,7 @@ use hyprforge_core::widgets::{
     secondary_button, section, tri_state,
 };
 use hyprforge_core::SettingsModule;
-use hyprforge_windowrules::model::{generate_rule_name, Effects, Matcher, Opacity};
+use hyprforge_windowrules::model::{generate_rule_name, Effects, Matcher, Opacity, Workspace};
 use hyprforge_windowrules::setup::{HyprConfig, SetupPlan};
 use hyprforge_windowrules::Rule;
 use iced::widget::{checkbox, column, container, row, scrollable, text_input};
@@ -33,6 +33,11 @@ struct RuleDraft {
     fullscreen: Option<bool>,
     floating: Option<bool>,
     xwayland: Option<bool>,
+    match_tag: String,
+    content: String,
+    workspace: String,
+    workspace_silent: bool,
+    tag: String,
     float: bool,
     no_blur: bool,
     rounding: String,
@@ -68,6 +73,11 @@ impl RuleDraft {
             fullscreen: m.fullscreen,
             floating: m.floating,
             xwayland: m.xwayland,
+            match_tag: m.tag.clone().unwrap_or_default(),
+            content: m.content.clone().unwrap_or_default(),
+            workspace: e.workspace.name.clone(),
+            workspace_silent: e.workspace.silent,
+            tag: e.tag.clone().unwrap_or_default(),
             float: e.float.unwrap_or(false),
             no_blur: e.no_blur.unwrap_or(false),
             rounding: e.rounding.map(|r| r.to_string()).unwrap_or_default(),
@@ -92,8 +102,18 @@ impl RuleDraft {
             fullscreen: self.fullscreen,
             floating: self.floating,
             xwayland: self.xwayland,
+            tag: non_empty(self.match_tag),
+            content: non_empty(self.content),
         };
         let effects = Effects {
+            // The silent flag is meaningless without a workspace, so it's
+            // dropped along with a blank one rather than persisting as a
+            // setting with nothing to apply to.
+            workspace: Workspace {
+                name: non_empty(self.workspace).unwrap_or_default(),
+                silent: self.workspace_silent,
+            },
+            tag: non_empty(self.tag),
             float: self.float.then_some(true),
             no_blur: self.no_blur.then_some(true),
             rounding: self.rounding.trim().parse().ok(),
@@ -150,6 +170,11 @@ pub enum Message {
     DraftFullscreen(Option<bool>),
     DraftFloating(Option<bool>),
     DraftXwayland(Option<bool>),
+    DraftMatchTag(String),
+    DraftContent(String),
+    DraftWorkspace(String),
+    DraftWorkspaceSilent(bool),
+    DraftTag(String),
     DraftFloat(bool),
     DraftNoBlur(bool),
     DraftRounding(String),
@@ -391,6 +416,11 @@ impl SettingsModule for WindowRulesModule {
             Message::DraftFullscreen(v) => self.edit_draft(|d| d.fullscreen = v),
             Message::DraftFloating(v) => self.edit_draft(|d| d.floating = v),
             Message::DraftXwayland(v) => self.edit_draft(|d| d.xwayland = v),
+            Message::DraftMatchTag(v) => self.edit_draft(|d| d.match_tag = v),
+            Message::DraftContent(v) => self.edit_draft(|d| d.content = v),
+            Message::DraftWorkspace(v) => self.edit_draft(|d| d.workspace = v),
+            Message::DraftWorkspaceSilent(v) => self.edit_draft(|d| d.workspace_silent = v),
+            Message::DraftTag(v) => self.edit_draft(|d| d.tag = v),
             Message::DraftFloat(v) => self.edit_draft(|d| d.float = v),
             Message::DraftNoBlur(v) => self.edit_draft(|d| d.no_blur = v),
             Message::DraftRounding(v) => self.edit_draft(|d| d.rounding = v),
@@ -566,6 +596,18 @@ impl WindowRulesModule {
                 "Title",
                 text_input("Window title (regex)", &draft.title).on_input(Message::DraftTitle),
             ),
+            // Workspace assignment sits in the primary form rather than
+            // behind "advanced": it's the rule most people are here to
+            // write, and burying it would make the common case the hidden
+            // one.
+            row_field(
+                "Workspace",
+                text_input("e.g. 3, name:coding, special:scratchpad", &draft.workspace)
+                    .on_input(Message::DraftWorkspace),
+            ),
+            checkbox(draft.workspace_silent)
+                .label("Open there without switching to it")
+                .on_toggle(Message::DraftWorkspaceSilent),
             checkbox(draft.float).label("Float").on_toggle(Message::DraftFloat),
             checkbox(draft.no_blur)
                 .label("Disable blur")
@@ -622,8 +664,36 @@ impl WindowRulesModule {
                     row_field("Fullscreen", tri_state(draft.fullscreen, Message::DraftFullscreen)),
                     row_field("Floating", tri_state(draft.floating, Message::DraftFloating)),
                     row_field("XWayland", tri_state(draft.xwayland, Message::DraftXwayland)),
+                    row_field(
+                        "Tag",
+                        text_input("e.g. term — also matches term*", &draft.match_tag)
+                            .on_input(Message::DraftMatchTag),
+                    ),
+                    row_field(
+                        "Content type",
+                        text_input("e.g. game, video", &draft.content)
+                            .on_input(Message::DraftContent),
+                    ),
                 ]
                 .spacing(spacing::MD),
+            ));
+
+            body = body.push(section(
+                "Tag",
+                scale,
+                column![
+                    row_field(
+                        "Apply tag",
+                        text_input("e.g. +code", &draft.tag).on_input(Message::DraftTag),
+                    ),
+                    meta_text(
+                        "Prefix + to add and - to remove; no prefix toggles. Tagged \
+                         windows can then be matched by other rules.",
+                        12.0,
+                        scale,
+                    ),
+                ]
+                .spacing(spacing::SM),
             ));
 
             body = body.push(section(
@@ -724,8 +794,12 @@ mod tests {
                 // can't represent.
                 floating: Some(false),
                 xwayland: Some(true),
+                tag: Some("term".to_string()),
+                content: Some("game".to_string()),
             },
             effects: Effects {
+                workspace: Workspace { name: "name:coding".to_string(), silent: true },
+                tag: Some("+code".to_string()),
                 float: Some(true),
                 r#move: Some(["cursor_x-(window_w*0.5)".to_string(), "40".to_string()]),
                 size: Some(["60%".to_string(), "480".to_string()]),
@@ -848,6 +922,48 @@ mod tests {
         assert!(lua.contains("move = { [[cursor_x-(window_w*0.5)]], 40 }"), "{lua}");
         assert!(lua.contains("size = { [[60%]], 480 }"), "{lua}");
         assert!(lua.contains("opacity = [[0.9 override 0.7 override]]"), "{lua}");
+    }
+
+    /// The headline case, end to end: what a user types into the form
+    /// becomes the Lua that puts Discord on workspace 3 without yanking
+    /// them to it.
+    #[test]
+    fn a_typed_workspace_reaches_the_generated_lua() {
+        let draft = RuleDraft {
+            class: "discord".to_string(),
+            workspace: "3".to_string(),
+            workspace_silent: true,
+            ..Default::default()
+        };
+        let (matcher, effects) = draft.into_matcher_effects();
+        let lua = hyprforge_windowrules::codegen::generate(&[Rule {
+            name: "hyprforge-discord-1".to_string(),
+            enabled: true,
+            matcher,
+            effects,
+        }]);
+        assert!(lua.contains("workspace = [[3 silent]]"), "{lua}");
+    }
+
+    /// The checkbox can be left on with the field cleared. "Silently open on
+    /// no workspace at all" isn't a rule, so it must not be written.
+    #[test]
+    fn silent_without_a_workspace_applies_nothing() {
+        let draft = RuleDraft {
+            class: "discord".to_string(),
+            workspace: "   ".to_string(),
+            workspace_silent: true,
+            ..Default::default()
+        };
+        let (matcher, effects) = draft.into_matcher_effects();
+        assert!(effects.workspace.is_empty());
+        let lua = hyprforge_windowrules::codegen::generate(&[Rule {
+            name: "hyprforge-discord-1".to_string(),
+            enabled: true,
+            matcher,
+            effects,
+        }]);
+        assert!(!lua.contains("workspace"), "{lua}");
     }
 
     #[test]
