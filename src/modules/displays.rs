@@ -1,4 +1,5 @@
 use crate::modules::layout_canvas::{CanvasHead, LayoutCanvas};
+use hyprforge_core::geometry::{logical_size, nearest_valid_scale};
 use hyprforge_core::displayd_proxy::DisplaydProxy;
 use hyprforge_core::theme::{spacing, FontScale};
 use hyprforge_core::widgets::{
@@ -71,9 +72,8 @@ impl HeadDetail {
     /// A quarter-turn transform swaps the two, as it does for the
     /// compositor.
     fn logical_size(&self) -> (i32, i32) {
-        let scale = if self.scale > 0.0 { self.scale } else { 1.0 };
-        let w = (self.width as f64 / scale).round() as i32;
-        let h = (self.height as f64 / scale).round() as i32;
+        let w = logical_size(self.width, self.scale);
+        let h = logical_size(self.height, self.scale);
         match self.transform.as_str() {
             "Rotate90" | "Rotate270" | "Flipped90" | "Flipped270" => (h, w),
             _ => (w, h),
@@ -129,20 +129,41 @@ impl std::fmt::Display for HeadChoice {
     }
 }
 
-/// The scale factors offered in the dropdown, matching the steps Windows
-/// exposes. The head's current value is inserted if it isn't one of these,
-/// so an existing 160% profile stays representable and editable.
-const SCALE_PRESETS: [u32; 6] = [100, 125, 150, 175, 200, 225];
+/// The scale steps offered in the dropdown, matching what Windows exposes.
+///
+/// These are only the *targets*: each is moved to the nearest scale the
+/// head can actually be set to before it's offered, because most of them
+/// don't divide a given resolution cleanly and the compositor would
+/// silently substitute one that does (see
+/// [`hyprforge_core::geometry::nearest_valid_scale`]).
+const SCALE_PRESETS: [f64; 6] = [1.0, 1.25, 1.5, 1.75, 2.0, 2.25];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ScaleChoice(u32);
+/// A scale the selected head can genuinely be set to. `percent` is the
+/// exact value; the label rounds it for display only — the two differ,
+/// since an achievable scale is rarely a whole percentage.
+#[derive(Debug, Clone, Copy)]
+struct ScaleChoice {
+    percent: f64,
+}
+
+impl PartialEq for ScaleChoice {
+    fn eq(&self, other: &Self) -> bool {
+        // Whole-percent tolerance: the pick_list only needs to recognise
+        // which entry is selected, and the stored value round-trips through
+        // a formatted string.
+        (self.percent - other.percent).abs() < 0.5
+    }
+}
+
+impl Eq for ScaleChoice {}
 
 impl std::fmt::Display for ScaleChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.0 == 100 {
+        let rounded = self.percent.round() as i64;
+        if rounded == 100 {
             write!(f, "100% (recommended)")
         } else {
-            write!(f, "{}%", self.0)
+            write!(f, "{rounded}%")
         }
     }
 }
@@ -268,7 +289,11 @@ fn fields_from_head(h: &HeadDetail) -> (String, String, String, String, String, 
         h.width.to_string(),
         h.height.to_string(),
         format!("{:.0}", h.refresh_mhz as f64 / 1000.0),
-        format!("{:.0}", h.scale * 100.0),
+        // Full precision, not a whole percent: an achievable scale is rarely
+        // round (5/3 is 166.796875%), and seeding "167" here meant editing
+        // any *other* field committed 1.67 back onto the head — a scale the
+        // panel can't take. The dropdown shows this rounded regardless.
+        format!("{:.4}", h.scale * 100.0),
         transform_to_label(&h.transform).to_string(),
     )
 }
@@ -304,7 +329,13 @@ fn commit_selected_head(editor: &mut LayoutEditor) {
                 head.width = width;
                 head.height = height;
                 head.refresh_mhz = (refresh_hz * 1000.0).round() as i32;
-                head.scale = scale_pct / 100.0;
+                // Snapped at the one point a scale is written, so the head
+                // always holds a value the panel can genuinely take. The
+                // draft field is text and an achievable scale is rarely
+                // round — 5/3 is 166.796875% — so round-tripping through it
+                // drifts, and drift is exactly what the compositor answers
+                // by silently substituting a scale of its own.
+                head.scale = nearest_valid_scale(width, height, scale_pct / 100.0);
                 head.transform = label_to_transform(&editor.field_transform).to_string();
             }
         }
@@ -1036,6 +1067,15 @@ impl SettingsModule for DisplaysModule {
                             editor.field_refresh = format!("{:.0}", best as f64 / 1000.0);
                         }
                     }
+                    // Which scales are achievable depends on the resolution
+                    // — they're the divisors of its gcd — so one that was
+                    // valid a moment ago need not be at the new size. Same
+                    // reasoning as the refresh rate above.
+                    if let Ok(pct) = editor.field_scale.trim().parse::<f64>() {
+                        let snapped =
+                            nearest_valid_scale(res.width, res.height, pct / 100.0) * 100.0;
+                        editor.field_scale = format!("{snapped:.4}");
+                    }
                     commit_selected_head(editor);
                 }
                 self.schedule_apply()
@@ -1449,24 +1489,39 @@ impl DisplaysModule {
                 ),
             );
 
-            // Offer the standard steps, plus whatever this head is already
-            // set to if it's off-preset — dropping to the nearest preset
-            // would silently rescale someone's working setup.
-            let current_scale = editor.field_scale.trim().parse::<u32>().ok();
-            let mut scale_options: Vec<ScaleChoice> =
-                SCALE_PRESETS.iter().copied().map(ScaleChoice).collect();
+            // Offer the standard steps, each moved to the nearest scale this
+            // head can actually take, plus whatever it's already set to —
+            // dropping to the nearest preset would silently rescale
+            // someone's working setup.
+            let (px_w, px_h) = editor
+                .selected_head()
+                .map(|h| (h.width, h.height))
+                .unwrap_or((1920, 1080));
+            let current_scale = editor.field_scale.trim().parse::<f64>().ok();
+            let mut scale_options: Vec<ScaleChoice> = SCALE_PRESETS
+                .iter()
+                .map(|nominal| ScaleChoice {
+                    percent: nearest_valid_scale(px_w, px_h, *nominal) * 100.0,
+                })
+                .collect();
             if let Some(current) = current_scale {
-                if !SCALE_PRESETS.contains(&current) {
-                    scale_options.push(ScaleChoice(current));
-                    scale_options.sort_by_key(|c| c.0);
+                let known = scale_options
+                    .iter()
+                    .any(|c| (c.percent - current).abs() < 0.5);
+                if !known {
+                    scale_options.push(ScaleChoice { percent: current });
                 }
             }
+            scale_options.sort_by(|a, b| a.percent.total_cmp(&b.percent));
+            scale_options.dedup_by(|a, b| (a.percent - b.percent).abs() < 0.5);
             let scale_field = row_field(
                 "Scale",
                 iced::widget::pick_list(
                     scale_options,
-                    current_scale.map(ScaleChoice),
-                    |c: ScaleChoice| Message::FieldScale(c.0.to_string()),
+                    current_scale.map(|percent| ScaleChoice { percent }),
+                    // Keep the exact value: rounding to a whole percent here
+                    // is what made a valid scale invalid again.
+                    |c: ScaleChoice| Message::FieldScale(format!("{:.4}", c.percent)),
                 )
                 .placeholder("Select a scale"),
             );
@@ -1946,8 +2001,16 @@ mod tests {
         let mut laptop = head("eDP-2", "BOE", "0x0BC9");
         laptop.width = 2560;
         laptop.height = 1600;
+        // 5/3 as it arrives over wl_fixed. The compositor lays this panel
+        // out as 1536x960; the drawn size must not come out under that, or
+        // a monitor snapped to its edge lands inside it.
         laptop.scale = 1.66796875;
-        assert_eq!(laptop.logical_size(), (1535, 959));
+        let (lw, lh) = laptop.logical_size();
+        assert!(
+            (1536..=1539).contains(&lw),
+            "width {lw} should cover the compositor's 1536 without overshooting"
+        );
+        assert!((960..=963).contains(&lh), "height {lh} should cover 960");
 
         let mut external = head("DP-3", "GWD", "ARZOPA");
         external.width = 2560;
@@ -2028,7 +2091,44 @@ mod tests {
         assert_eq!(editor.field_width, "1920");
         // mHz is shown as Hz, and scale as a percentage.
         assert_eq!(editor.field_refresh, "60");
-        assert_eq!(editor.field_scale, "100");
+        assert_eq!(editor.field_scale.trim().parse::<f64>().unwrap(), 100.0);
+    }
+
+    /// Seeding the scale field used to round it to a whole percent, so
+    /// touching an unrelated field wrote a scale the panel can't take back
+    /// onto the head — and the compositor would silently run something else.
+    #[test]
+    fn editing_another_field_leaves_an_off_round_scale_achievable() {
+        let mut editor = LayoutEditor::new(detail());
+        let head = &mut editor.profile.heads[0];
+        head.width = 2560;
+        head.height = 1600;
+        // What 175% actually becomes on this panel: 320/183, an unroundable
+        // 174.86%.
+        head.scale = nearest_valid_scale(2560, 1600, 1.75);
+        let expected = head.scale;
+        let (x, y, w, h, r, s, t) = fields_from_head(&editor.profile.heads[0].clone());
+        editor.field_x = x;
+        editor.field_y = y;
+        editor.field_width = w;
+        editor.field_height = h;
+        editor.field_refresh = r;
+        editor.field_scale = s;
+        editor.field_transform = t;
+
+        // Nudge the position, as dragging on the canvas does.
+        editor.field_x = "10".to_string();
+        commit_selected_head(&mut editor);
+
+        let got = editor.profile.heads[0].scale;
+        assert!(
+            (got - expected).abs() < 1e-6,
+            "committed {got}, which the compositor would replace with {expected}"
+        );
+        assert!(
+            (2560.0 / got).fract().abs() < 1e-9,
+            "{got} doesn't divide 2560 cleanly"
+        );
     }
 
     #[test]
