@@ -332,9 +332,10 @@ fn commit_selected_head(editor: &mut LayoutEditor) {
                 // Snapped at the one point a scale is written, so the head
                 // always holds a value the panel can genuinely take. The
                 // draft field is text and an achievable scale is rarely
-                // round — 5/3 is 166.796875% — so round-tripping through it
-                // drifts, and drift is exactly what the compositor answers
-                // by silently substituting a scale of its own.
+                // round — 175% on a 2560x1600 panel is really 5/3 — so
+                // round-tripping through it drifts, and drift is exactly
+                // what the compositor answers by silently substituting a
+                // scale of its own.
                 head.scale = nearest_valid_scale(width, height, scale_pct / 100.0);
                 head.transform = label_to_transform(&editor.field_transform).to_string();
             }
@@ -2103,8 +2104,8 @@ mod tests {
         let head = &mut editor.profile.heads[0];
         head.width = 2560;
         head.height = 1600;
-        // What 175% actually becomes on this panel: 320/183, an unroundable
-        // 174.86%.
+        // What 175% actually becomes on this panel: 5/3, an unroundable
+        // 166.67%.
         head.scale = nearest_valid_scale(2560, 1600, 1.75);
         let expected = head.scale;
         let (x, y, w, h, r, s, t) = fields_from_head(&editor.profile.heads[0].clone());

@@ -60,9 +60,10 @@ use hyprforge_core::geometry::{logical_size, nearest_valid_scale};
 /// The scale this record will really run at, which is not always the one
 /// it stores.
 ///
-/// Hyprland takes a scale only if it divides the resolution cleanly in both
-/// axes; asked for anything else it substitutes one that does, without
-/// saying so. Every position in the plan is computed from the scale, so a
+/// Hyprland rounds an incoming scale to the nearest 120th and takes it only
+/// if it then divides the resolution cleanly; asked for anything else it
+/// logs "Invalid scale passed to monitor" and substitutes a suggestion of
+/// its own. Every position in the plan is computed from the scale, so a
 /// stored value the hardware can't take leaves the layout built against a
 /// width nothing is using — and since we refuse to apply overlapping
 /// outputs, that surfaces as a layout that just won't go on.
@@ -77,7 +78,7 @@ fn snapped_scale(rec: &HeadRecord) -> f64 {
             connector = %rec.connector_hint,
             asked = rec.scale,
             using = snapped,
-            "scale doesn't divide {}x{} cleanly; the compositor would substitute one that does",
+            "{}x{} can't take this scale; the compositor would substitute one it can",
             rec.width,
             rec.height,
         );
@@ -603,10 +604,11 @@ mod tests {
 
         let plan = build_layout_plan(&p, &connected);
         let s = plan.heads[0].scale;
-        assert!((s - 1.75).abs() < 0.02, "should stay near what was asked: {s}");
+        // The scale Hyprland itself suggests for this panel at 175%.
+        assert!((s - 5.0 / 3.0).abs() < 1e-9, "expected 5/3, got {s}");
         assert!(
-            (2560.0 / s).fract().abs() < 1e-9 && (1600.0 / s).fract().abs() < 1e-9,
-            "{s} doesn't divide 2560x1600 cleanly, so the compositor would substitute"
+            ((s * 120.0).round() / 120.0 - s).abs() < 1e-9,
+            "{s} isn't a 120th, so the compositor would substitute"
         );
     }
 
@@ -620,8 +622,8 @@ mod tests {
         let mut left = head_record("eDP-2", &boe, 0, 0, 2560, 1600);
         left.scale = 1.75;
         // Flush against the width 1.75 really becomes: the nearest scale
-        // this panel can take is 320/183, laying it out 1464 wide.
-        let mut right = head_record("DP-3", &arzopa, 1464, 0, 2560, 1440);
+        // this panel can take is 5/3, laying it out 2560/(5/3) = 1536 wide.
+        let mut right = head_record("DP-3", &arzopa, 1536, 0, 2560, 1440);
         right.scale = 1.0;
         let p = profile("p1", vec![left, right], "2020-01-01T00:00:00Z");
         let connected = vec![
@@ -632,7 +634,7 @@ mod tests {
         let plan = build_layout_plan(&p, &connected);
         plan.validate().unwrap();
         let b = plan.heads.iter().find(|h| h.connector == "DP-3").unwrap();
-        assert_eq!(b.position.0, 1464, "a flush neighbour shouldn't be pushed");
+        assert_eq!(b.position.0, 1536, "a flush neighbour shouldn't be pushed");
     }
 
     #[test]
