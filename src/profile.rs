@@ -1,4 +1,5 @@
 use crate::types::{Head, Identity, Transform};
+use hyprforge_core::geometry::nearest_valid_scale;
 use serde::{Deserialize, Serialize};
 
 /// What to do with a currently-connected output that a matched profile
@@ -46,6 +47,10 @@ impl HeadRecord {
 
     fn from_head(head: &Head) -> Self {
         let mode = head.effective_mode();
+        let (width, height) = (
+            mode.map(|m| m.width).unwrap_or(0),
+            mode.map(|m| m.height).unwrap_or(0),
+        );
         HeadRecord {
             make: head.identity.make.clone(),
             model: head.identity.model.clone(),
@@ -53,10 +58,17 @@ impl HeadRecord {
             connector_hint: head.connector.clone(),
             x: head.position.0,
             y: head.position.1,
-            width: mode.map(|m| m.width).unwrap_or(0),
-            height: mode.map(|m| m.height).unwrap_or(0),
+            width,
+            height,
             refresh_mhz: mode.map(|m| m.refresh_mhz).unwrap_or(0),
-            scale: head.scale,
+            // The scale a head reports is a `wl_fixed`, so it's never quite
+            // the one in force: a monitor running 1.6 reads back as
+            // 1.6015625, and 5/3 as 1.66796875. Recording the wire value
+            // would write a number into the canonical, hand-editable profile
+            // that is neither what the user chose nor what the compositor is
+            // running, and would show up in the GUI as an odd off-preset
+            // scale. Snapping recovers the real one.
+            scale: nearest_valid_scale(width, height, head.scale),
             transform: head.transform,
             enabled: head.enabled,
         }
@@ -230,6 +242,43 @@ mod tests {
         let existing = vec!["1 display incl. BOE 0x0BC9".to_string()];
         let name = generate_profile_name(&heads, &existing);
         assert_eq!(name, "1 display incl. BOE 0x0BC9 (2)");
+    }
+
+    /// A scale arrives as a `wl_fixed` and is never quite the one in force.
+    /// Learning the wire value verbatim wrote 1.66796875 into the canonical
+    /// profile for a panel the compositor runs at exactly 5/3.
+    #[test]
+    fn learning_records_the_scale_in_force_not_the_one_on_the_wire() {
+        let mut h = head("eDP-2", "BOE", "0x0BC9", 2560, 1600);
+        // 5/3 and 1.6 as they read back over the wire.
+        h.scale = 1.66796875;
+        assert!((HeadRecord::from_head(&h).scale - 5.0 / 3.0).abs() < 1e-9);
+        h.scale = 1.6015625;
+        assert!((HeadRecord::from_head(&h).scale - 1.6).abs() < 1e-9);
+    }
+
+    /// Learning must not walk a scale: read back, store, re-apply, read back
+    /// again has to settle on the first value.
+    #[test]
+    fn learning_a_learned_scale_changes_nothing() {
+        let mut h = head("eDP-2", "BOE", "0x0BC9", 2560, 1600);
+        h.scale = 1.66796875;
+        let once = HeadRecord::from_head(&h).scale;
+        h.scale = once;
+        assert_eq!(once, HeadRecord::from_head(&h).scale);
+    }
+
+    /// A head with no mode reports 0x0, and no scale is knowable from that
+    /// — it must pass through rather than being snapped against nonsense.
+    #[test]
+    fn a_head_with_no_mode_keeps_its_scale() {
+        let mut h = head("eDP-2", "BOE", "0x0BC9", 2560, 1600);
+        h.modes.clear();
+        h.current_mode = None;
+        h.scale = 1.6015625;
+        let rec = HeadRecord::from_head(&h);
+        assert_eq!(rec.width, 0);
+        assert_eq!(rec.scale, 1.6015625);
     }
 
     #[test]
