@@ -1,4 +1,5 @@
 pub mod geometry;
+pub mod lua_setup;
 pub mod paths;
 
 #[cfg(feature = "gui")]
