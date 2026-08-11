@@ -4,6 +4,7 @@ use hyprforge_core::widgets::{
     secondary_button, section, tri_state,
 };
 use hyprforge_core::SettingsModule;
+use hyprforge_windowrules::clients::Client;
 use hyprforge_windowrules::model::{generate_rule_name, Effects, Matcher, Opacity, Workspace};
 use hyprforge_windowrules::setup::{HyprConfig, SetupPlan};
 use hyprforge_windowrules::Rule;
@@ -188,6 +189,14 @@ pub enum Message {
     DraftOpacityFullscreen(String),
     DraftOpacityOverride(bool),
     ToggleAdvanced,
+    OpenPicker,
+    ClosePicker,
+    ClientsLoaded(Result<Vec<Client>, String>),
+    /// Index into `picker`'s loaded list — the class is taken from there
+    /// rather than carried in the message, so a stale click can't inject a
+    /// class that isn't on screen.
+    PickClass(usize),
+    PickTitle(usize),
     DraftSave,
     DraftCancel,
     ConfirmSetup,
@@ -210,9 +219,24 @@ pub struct WindowRulesModule {
     /// expressions, per-state opacity, xwayland matching) is the power-user
     /// surface, kept out of the way of "float Discord" (vision pillar #1).
     show_advanced: bool,
+    /// The open-window picker, when it's showing. `None` means closed, which
+    /// is distinct from `Some(Loading)` — the panel has to be on screen while
+    /// the `hyprctl` call is in flight or the button looks dead.
+    picker: Option<PickerState>,
     setup_diff_text: String,
     error: Option<String>,
     status: Option<String>,
+}
+
+/// Where the window picker is in its one-shot load.
+enum PickerState {
+    Loading,
+    Loaded(Vec<Client>),
+    /// Hyprland isn't running, or `hyprctl` isn't installed. Not an error
+    /// dialog: the class and title fields still work by hand, so this is a
+    /// note in the panel and nothing more (vision pillar #3 — the dead end
+    /// would be a modal you can't get past to type the class yourself).
+    Unavailable(String),
 }
 
 impl WindowRulesModule {
@@ -244,6 +268,7 @@ impl WindowRulesModule {
                 setup_plan,
                 show_setup_confirm: false,
                 show_advanced: false,
+                picker: None,
                 setup_diff_text,
                 error: None,
                 status: None,
@@ -254,6 +279,16 @@ impl WindowRulesModule {
 
     /// Applies `f` to the open draft, if there is one. Keeps the ~19 field
     /// -edit message arms to one line each.
+    /// The window at `index` in the picker's loaded list, if the picker is
+    /// still showing that list. Indices are only meaningful against the
+    /// snapshot they were rendered from.
+    fn picked_client(&self, index: usize) -> Option<&Client> {
+        match &self.picker {
+            Some(PickerState::Loaded(clients)) => clients.get(index),
+            _ => None,
+        }
+    }
+
     fn edit_draft(&mut self, f: impl FnOnce(&mut RuleDraft)) -> Task<Message> {
         if let Some(d) = &mut self.draft {
             f(d);
@@ -433,6 +468,41 @@ impl SettingsModule for WindowRulesModule {
             Message::DraftOpacityInactive(v) => self.edit_draft(|d| d.opacity_inactive = v),
             Message::DraftOpacityFullscreen(v) => self.edit_draft(|d| d.opacity_fullscreen = v),
             Message::DraftOpacityOverride(v) => self.edit_draft(|d| d.opacity_override = v),
+            Message::OpenPicker => {
+                self.picker = Some(PickerState::Loading);
+                Task::perform(load_clients(), Message::ClientsLoaded)
+            }
+            Message::ClosePicker => {
+                self.picker = None;
+                Task::none()
+            }
+            Message::ClientsLoaded(result) => {
+                // Dropped entirely if the picker was closed while the call
+                // was in flight — reopening it starts a fresh load, and
+                // letting this land would put the old list under the new
+                // spinner.
+                if self.picker.is_some() {
+                    self.picker = Some(match result {
+                        Ok(clients) => PickerState::Loaded(clients),
+                        Err(e) => PickerState::Unavailable(e),
+                    });
+                }
+                Task::none()
+            }
+            Message::PickClass(i) => {
+                let class = self.picked_client(i).map(|c| c.class.clone());
+                match class {
+                    Some(class) => self.edit_draft(|d| d.class = class),
+                    None => Task::none(),
+                }
+            }
+            Message::PickTitle(i) => {
+                let title = self.picked_client(i).map(|c| c.title.clone());
+                match title {
+                    Some(title) => self.edit_draft(|d| d.title = title),
+                    None => Task::none(),
+                }
+            }
             Message::ToggleAdvanced => {
                 self.show_advanced = !self.show_advanced;
                 Task::none()
@@ -581,6 +651,83 @@ impl SettingsModule for WindowRulesModule {
 }
 
 impl WindowRulesModule {
+    /// The open-window list, inline under the form rather than as a modal —
+    /// you're choosing a value *for* a field, and the field should stay
+    /// visible while you do it.
+    fn picker_view<'a>(
+        &'a self,
+        picker: &'a PickerState,
+        scale: FontScale,
+    ) -> Element<'a, Message> {
+        let inner: Element<'_, Message> = match picker {
+            PickerState::Loading => meta_text("Reading open windows…", 13.0, scale).into(),
+            PickerState::Unavailable(why) => column![
+                meta_text(
+                    "Couldn't read the open windows — is Hyprland running? \
+                     You can still type the class in by hand.",
+                    13.0,
+                    scale,
+                ),
+                meta_text(why.as_str(), 12.0, scale),
+            ]
+            .spacing(spacing::SM)
+            .into(),
+            PickerState::Loaded(clients) if clients.is_empty() => {
+                meta_text("No open windows to pick from.", 13.0, scale).into()
+            }
+            PickerState::Loaded(clients) => {
+                let mut list = column![].spacing(spacing::SM);
+                for (i, client) in clients.iter().enumerate() {
+                    // Class is the whole row: it's the choice you almost
+                    // always want. The title is a separate, smaller action
+                    // because a title-matched rule quietly stops working when
+                    // the app renames its window — a browser tab, a file path
+                    // — and that should be deliberate.
+                    let mut actions = row![secondary_button(client.label()).on_press(
+                        Message::PickClass(i)
+                    )]
+                    .spacing(spacing::SM);
+                    if !client.title.trim().is_empty() {
+                        actions = actions
+                            .push(secondary_button("+ title").on_press(Message::PickTitle(i)));
+                    }
+                    list = list.push(
+                        column![
+                            actions,
+                            meta_text(
+                                format!(
+                                    "workspace {}{}",
+                                    client.workspace.name,
+                                    if client.xwayland { " · XWayland" } else { "" }
+                                ),
+                                11.0,
+                                scale,
+                            ),
+                        ]
+                        .spacing(2),
+                    );
+                }
+                column![
+                    meta_text("Fills the class. Add the title only if you want the rule to apply to this one window.", 12.0, scale),
+                    container(scrollable(list).width(Length::Fill)).max_height(240.0),
+                ]
+                .spacing(spacing::SM)
+                .into()
+            }
+        };
+
+        section(
+            "Open windows",
+            scale,
+            column![
+                inner,
+                container(secondary_button("Close").on_press(Message::ClosePicker))
+                    .width(Length::Fill),
+            ]
+            .spacing(spacing::MD),
+        )
+    }
+
     fn draft_view(&self, draft: &RuleDraft, scale: FontScale) -> Element<'_, Message> {
         let title = if draft.editing_index.is_some() {
             "Edit rule"
@@ -590,7 +737,12 @@ impl WindowRulesModule {
         let form = column![
             row_field(
                 "Class",
-                text_input("Window class (regex)", &draft.class).on_input(Message::DraftClass),
+                row![
+                    text_input("Window class (regex)", &draft.class)
+                        .on_input(Message::DraftClass),
+                    secondary_button("Pick a window…").on_press(Message::OpenPicker),
+                ]
+                .spacing(spacing::SM),
             ),
             row_field(
                 "Title",
@@ -630,6 +782,10 @@ impl WindowRulesModule {
         ]
         .spacing(spacing::LG)
         .max_width(520.0);
+
+        if let Some(picker) = &self.picker {
+            body = body.push(self.picker_view(picker, scale));
+        }
 
         body = body.push(
             container(
@@ -765,6 +921,16 @@ impl WindowRulesModule {
         // stray scrollbar partway across the window.
         container(body).padding(spacing::LG).into()
     }
+}
+
+/// Reads the open windows off the compositor. Blocking work (it shells out to
+/// `hyprctl`), so it goes on the blocking pool rather than stalling the UI
+/// thread — same treatment `regenerate_and_reload` gets below.
+async fn load_clients() -> Result<Vec<Client>, String> {
+    tokio::task::spawn_blocking(hyprforge_windowrules::clients::list_clients)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
 }
 
 async fn regenerate_and_reload(rules: Vec<Rule>) -> Result<(), String> {
@@ -966,6 +1132,85 @@ mod tests {
             effects,
         }]);
         assert!(!lua.contains("workspace"), "{lua}");
+    }
+
+    fn client(class: &str, title: &str) -> Client {
+        Client {
+            class: class.to_string(),
+            title: title.to_string(),
+            mapped: true,
+            ..Default::default()
+        }
+    }
+
+    /// A module with a draft open and the picker showing two windows.
+    fn module_with_picker() -> WindowRulesModule {
+        let (mut m, _) = WindowRulesModule::new();
+        m.draft = Some(RuleDraft::default());
+        m.picker = Some(PickerState::Loaded(vec![
+            client("com.mitchellh.ghostty", "hyprforge"),
+            client("dev.zed.Zed", "hyprland.lua"),
+        ]));
+        m
+    }
+
+    #[test]
+    fn picking_a_window_fills_the_class_and_leaves_the_title_alone() {
+        let mut m = module_with_picker();
+        let _ = m.update(Message::PickClass(1));
+        let draft = m.draft.as_ref().unwrap();
+        assert_eq!(draft.class, "dev.zed.Zed");
+        assert_eq!(draft.title, "", "the title is a separate, deliberate choice");
+    }
+
+    #[test]
+    fn adding_the_title_is_a_second_explicit_action() {
+        let mut m = module_with_picker();
+        let _ = m.update(Message::PickClass(0));
+        let _ = m.update(Message::PickTitle(0));
+        let draft = m.draft.as_ref().unwrap();
+        assert_eq!(draft.class, "com.mitchellh.ghostty");
+        assert_eq!(draft.title, "hyprforge");
+    }
+
+    /// An index only means anything against the list it was rendered from.
+    /// Out of range must be dropped, not panic — indexing a Vec here would
+    /// take the whole app down.
+    #[test]
+    fn a_stale_index_is_ignored_rather_than_panicking() {
+        let mut m = module_with_picker();
+        let _ = m.update(Message::PickClass(99));
+        assert_eq!(m.draft.as_ref().unwrap().class, "");
+    }
+
+    #[test]
+    fn picking_while_the_picker_is_closed_does_nothing() {
+        let (mut m, _) = WindowRulesModule::new();
+        m.draft = Some(RuleDraft::default());
+        m.picker = None;
+        let _ = m.update(Message::PickClass(0));
+        assert_eq!(m.draft.as_ref().unwrap().class, "");
+    }
+
+    /// Closing the picker while the hyprctl call is still running must not
+    /// have the result reopen it underneath the user.
+    #[test]
+    fn a_response_arriving_after_close_is_discarded() {
+        let mut m = module_with_picker();
+        let _ = m.update(Message::ClosePicker);
+        let _ = m.update(Message::ClientsLoaded(Ok(vec![client("late", "arrival")])));
+        assert!(m.picker.is_none(), "a closed picker must stay closed");
+    }
+
+    /// No Hyprland is not an error dialog — the fields still work by hand.
+    #[test]
+    fn an_unavailable_compositor_leaves_the_form_usable() {
+        let (mut m, _) = WindowRulesModule::new();
+        m.draft = Some(RuleDraft::default());
+        let _ = m.update(Message::OpenPicker);
+        let _ = m.update(Message::ClientsLoaded(Err("could not run hyprctl".into())));
+        assert!(matches!(m.picker, Some(PickerState::Unavailable(_))));
+        assert!(m.error.is_none(), "this must not surface as a module-level error");
     }
 
     #[test]
