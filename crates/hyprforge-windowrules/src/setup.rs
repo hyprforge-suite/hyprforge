@@ -22,6 +22,9 @@ pub use hyprforge_core::lua_setup::{HyprConfig, SetupError, SetupPlan};
 /// Window rules go first, so the user's own rules win. See the module docs.
 const PLACEMENT: Placement = Placement::BeforeUserRequires;
 
+/// Only the drift test needs this separately from [`REQUIRE_LINE`] — in
+/// production the const below is what's used.
+#[cfg(test)]
 const MODULE: &str = "window-rules";
 
 /// The exact line inserted into `hyprland.lua`. Spelled out rather than
