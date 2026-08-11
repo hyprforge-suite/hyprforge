@@ -207,7 +207,9 @@ generator supports:
   three-way `fullscreen`/`floating`/`xwayland`, plus `tag` and `content`
   (e.g. `game`). Three-way rather than a checkbox because "don't match on
   this" and "match windows where this is false" are different rules —
-  `floating = false` selects tiled windows.
+  `floating = false` selects tiled windows. (Hyprland spells that matcher
+  `float`, same as the effect; the TOML key stays `floating` for readability
+  and the generator translates.)
 - **Tag** — applies a tag: `+name` adds, `-name` removes, bare toggles.
   Tagged windows can then be selected by another rule's `tag` matcher, which
   is how one rule's effect becomes another's criteria.

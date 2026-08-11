@@ -917,7 +917,9 @@ mod tests {
         }]);
 
         assert!(lua.contains("initial_class = [[Discord]]"), "{lua}");
-        assert!(lua.contains("floating = false"), "{lua}");
+        // Emitted as `float`, which is what Hyprland calls the matcher —
+        // the draft field and TOML key stay `floating`.
+        assert!(lua.contains("float = false"), "{lua}");
         // A literal is emitted bare; an expression is quoted.
         assert!(lua.contains("move = { [[cursor_x-(window_w*0.5)]], 40 }"), "{lua}");
         assert!(lua.contains("size = { [[60%]], 480 }"), "{lua}");

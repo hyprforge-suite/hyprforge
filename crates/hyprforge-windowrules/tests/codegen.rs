@@ -82,6 +82,20 @@ fn generates_tag_as_both_a_matcher_and_an_effect() {
     assert!(lua.contains("tag = [[+code]]"), "effect tag missing: {lua}");
 }
 
+/// Hyprland has no `floating` match property — it's `float`, same as the
+/// effect. Emitting the wrong one aborts the whole file with "unknown match
+/// property", so every other rule in it stops working too. Caught by
+/// `tests/live_lua.rs` against a real compositor; pinned here so it can't
+/// come back without a live run.
+#[test]
+fn the_floating_matcher_is_emitted_as_float() {
+    let mut rule = discord_rule();
+    rule.matcher.floating = Some(false);
+    let lua = generate(&[rule]);
+    assert!(lua.contains("float = false"), "got: {lua}");
+    assert!(!lua.contains("floating"), "there is no `floating` match property: {lua}");
+}
+
 #[test]
 fn generates_a_content_matcher() {
     let mut rule = discord_rule();

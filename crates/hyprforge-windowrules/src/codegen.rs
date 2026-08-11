@@ -78,7 +78,13 @@ fn render_matcher(m: &crate::model::Matcher) -> String {
         parts.push(format!("fullscreen = {v}"));
     }
     if let Some(v) = m.floating {
-        parts.push(format!("floating = {v}"));
+        // Hyprland spells the *matcher* `float`, same as the effect — there
+        // is no `floating` match property, and emitting one aborts the whole
+        // file with "unknown match property", taking every other rule in it
+        // down too. The model keeps `floating` because that's the TOML key
+        // users may already have written, and because `Effects::float` next
+        // to a `Matcher::float` would read as the same thing.
+        parts.push(format!("float = {v}"));
     }
     if let Some(v) = m.xwayland {
         parts.push(format!("xwayland = {v}"));
