@@ -4,6 +4,7 @@ members = [
     "crates/hyprforge-core",
     "crates/hyprforge-displayd",
     "crates/hyprforge-windowrules",
+    "crates/hyprforge-shortcuts",
     "crates/hyprforge-settings",
 ]
 
@@ -17,6 +18,7 @@ license = "MIT"
 # explicitly; only hyprforge-settings actually wants it.
 hyprforge-core = { path = "crates/hyprforge-core", default-features = false }
 hyprforge-windowrules = { path = "crates/hyprforge-windowrules" }
+hyprforge-shortcuts = { path = "crates/hyprforge-shortcuts" }
 
 iced = "0.14"
 # Run zbus on tokio rather than its default async-io executor. Without this

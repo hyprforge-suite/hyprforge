@@ -1354,6 +1354,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyprforge-shortcuts"
+version = "0.1.0"
+dependencies = [
+ "hyprforge-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "toml",
+]
+
+[[package]]
 name = "hyprforge-windowrules"
 version = "0.1.0"
 dependencies = [
