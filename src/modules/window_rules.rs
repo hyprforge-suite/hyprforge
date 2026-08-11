@@ -69,6 +69,17 @@ struct RuleDraft {
     /// Empty means "don't set it". Never free text in the view — Hyprland
     /// rejects an unknown mode and that aborts the whole generated file.
     idle_inhibit: String,
+    tile: bool,
+    fullscreen_effect: bool,
+    maximize: bool,
+    pin: bool,
+    center: bool,
+    no_initial_focus: bool,
+    /// A `desc:`-style selector, empty for "wherever it would open anyway".
+    monitor: String,
+    suppress_event: String,
+    group: String,
+    no_close_for: String,
 }
 
 impl RuleDraft {
@@ -122,6 +133,16 @@ impl RuleDraft {
             max_h: int_pair(&e.max_size).1,
             animation: e.animation.clone().unwrap_or_default(),
             idle_inhibit: e.idle_inhibit.clone().unwrap_or_default(),
+            tile: e.tile.unwrap_or(false),
+            fullscreen_effect: e.fullscreen.unwrap_or(false),
+            maximize: e.maximize.unwrap_or(false),
+            pin: e.pin.unwrap_or(false),
+            center: e.center.unwrap_or(false),
+            no_initial_focus: e.no_initial_focus.unwrap_or(false),
+            monitor: e.monitor.clone().unwrap_or_default(),
+            suppress_event: e.suppress_event.clone().unwrap_or_default(),
+            group: e.group.clone().unwrap_or_default(),
+            no_close_for: e.no_close_for.map(|v| v.to_string()).unwrap_or_default(),
         }
     }
 
@@ -173,6 +194,16 @@ impl RuleDraft {
             max_size: int_pair_or_none(&self.max_w, &self.max_h),
             animation: non_empty(self.animation),
             idle_inhibit: non_empty(self.idle_inhibit),
+            tile: self.tile.then_some(true),
+            fullscreen: self.fullscreen_effect.then_some(true),
+            maximize: self.maximize.then_some(true),
+            pin: self.pin.then_some(true),
+            center: self.center.then_some(true),
+            no_initial_focus: self.no_initial_focus.then_some(true),
+            monitor: non_empty(self.monitor),
+            suppress_event: non_empty(self.suppress_event),
+            group: non_empty(self.group),
+            no_close_for: self.no_close_for.trim().parse().ok(),
         };
         (matcher, effects)
     }
@@ -275,6 +306,15 @@ impl MonitorChoice {
         }
     }
 
+    /// "Wherever it would open anyway" — the absence of a monitor rule,
+    /// which has to be selectable so a chosen monitor can be un-chosen.
+    fn any() -> Self {
+        MonitorChoice {
+            label: "(any monitor)".to_string(),
+            selector: String::new(),
+        }
+    }
+
     /// A selector already stored in a pin, for a monitor that isn't connected
     /// right now. Shown as-is so unplugging a display doesn't make its pin
     /// look empty — or worse, let an edit silently clear it.
@@ -331,6 +371,16 @@ pub enum Message {
     DraftMaxH(String),
     DraftAnimation(String),
     DraftIdleInhibit(IdleInhibitChoice),
+    DraftTile(bool),
+    DraftFullscreenEffect(bool),
+    DraftMaximize(bool),
+    DraftPin(bool),
+    DraftCenter(bool),
+    DraftNoInitialFocus(bool),
+    DraftMonitor(MonitorChoice),
+    DraftSuppressEvent(String),
+    DraftGroup(String),
+    DraftNoCloseFor(String),
     ToggleAdvanced,
     OpenPicker,
     ClosePicker,
@@ -670,6 +720,16 @@ impl SettingsModule for WindowRulesModule {
             Message::DraftMaxH(v) => self.edit_draft(|d| d.max_h = v),
             Message::DraftAnimation(v) => self.edit_draft(|d| d.animation = v),
             Message::DraftIdleInhibit(c) => self.edit_draft(|d| d.idle_inhibit = c.mode),
+            Message::DraftTile(v) => self.edit_draft(|d| d.tile = v),
+            Message::DraftFullscreenEffect(v) => self.edit_draft(|d| d.fullscreen_effect = v),
+            Message::DraftMaximize(v) => self.edit_draft(|d| d.maximize = v),
+            Message::DraftPin(v) => self.edit_draft(|d| d.pin = v),
+            Message::DraftCenter(v) => self.edit_draft(|d| d.center = v),
+            Message::DraftNoInitialFocus(v) => self.edit_draft(|d| d.no_initial_focus = v),
+            Message::DraftMonitor(c) => self.edit_draft(|d| d.monitor = c.selector),
+            Message::DraftSuppressEvent(v) => self.edit_draft(|d| d.suppress_event = v),
+            Message::DraftGroup(v) => self.edit_draft(|d| d.group = v),
+            Message::DraftNoCloseFor(v) => self.edit_draft(|d| d.no_close_for = v),
             Message::OpenPicker => {
                 self.picker = Some(PickerState::Loading);
                 Task::perform(load_clients(), Message::ClientsLoaded)
@@ -1282,6 +1342,87 @@ impl WindowRulesModule {
                 ]
                 .spacing(spacing::MD),
             ));
+
+            // How the window comes up, as distinct from how it behaves once
+            // it's up — these are applied as it opens.
+            let mut monitor_choices = vec![MonitorChoice::any()];
+            monitor_choices.extend(self.monitors.iter().map(MonitorChoice::from_monitor));
+            let selected_monitor = if draft.monitor.trim().is_empty() {
+                MonitorChoice::any()
+            } else {
+                monitor_choices
+                    .iter()
+                    .find(|c| c.selector == draft.monitor)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        let stored = MonitorChoice::from_stored(&draft.monitor);
+                        monitor_choices.push(stored.clone());
+                        stored
+                    })
+            };
+
+            body = body.push(section(
+                "How it opens",
+                scale,
+                column![
+                    checkbox(draft.tile).label("Open tiled").on_toggle(Message::DraftTile),
+                    checkbox(draft.fullscreen_effect)
+                        .label("Open fullscreen")
+                        .on_toggle(Message::DraftFullscreenEffect),
+                    checkbox(draft.maximize)
+                        .label("Open maximized")
+                        .on_toggle(Message::DraftMaximize),
+                    checkbox(draft.center)
+                        .label("Center it")
+                        .on_toggle(Message::DraftCenter),
+                    checkbox(draft.pin)
+                        .label("Pin above workspaces (floating windows only)")
+                        .on_toggle(Message::DraftPin),
+                    checkbox(draft.no_initial_focus)
+                        .label("Don't focus it when it opens")
+                        .on_toggle(Message::DraftNoInitialFocus),
+                    row_field(
+                        "Monitor",
+                        iced::widget::pick_list(
+                            monitor_choices,
+                            Some(selected_monitor),
+                            Message::DraftMonitor,
+                        ),
+                    ),
+                    meta_text(
+                        "Matched by description, so it survives a replug. For a whole \
+                         workspace rather than one window, use Workspaces on monitors below.",
+                        12.0,
+                        scale,
+                    ),
+                    row_field(
+                        "Suppress event",
+                        text_input(
+                            "fullscreen, maximize, activate, activatefocus",
+                            &draft.suppress_event,
+                        )
+                        .on_input(Message::DraftSuppressEvent),
+                    ),
+                    row_field(
+                        "Group",
+                        text_input("new, lock, deny, barred", &draft.group)
+                            .on_input(Message::DraftGroup),
+                    ),
+                    meta_text(
+                        "Hyprland accepts any text for those two without complaining, \
+                         so a value it doesn't recognise does nothing rather than \
+                         reporting an error — the listed ones are the ones that act.",
+                        12.0,
+                        scale,
+                    ),
+                    row_field(
+                        "Refuse close requests for",
+                        text_input("no_close_for, in Hyprland's own units", &draft.no_close_for)
+                            .on_input(Message::DraftNoCloseFor),
+                    ),
+                ]
+                .spacing(spacing::MD),
+            ));
         }
 
         body = body.push(
@@ -1414,6 +1555,16 @@ mod tests {
                 max_size: Some([800, 600]),
                 animation: Some("popin 80%".to_string()),
                 idle_inhibit: Some("focus".to_string()),
+                tile: Some(true),
+                fullscreen: Some(true),
+                maximize: Some(true),
+                pin: Some(true),
+                center: Some(true),
+                no_initial_focus: Some(true),
+                monitor: Some("desc:hyprforge-live-probe-monitor".to_string()),
+                suppress_event: Some("maximize".to_string()),
+                group: Some("deny".to_string()),
+                no_close_for: Some(5),
             },
         }
     }
