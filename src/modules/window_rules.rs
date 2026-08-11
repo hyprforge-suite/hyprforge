@@ -54,6 +54,21 @@ struct RuleDraft {
     opacity_inactive: String,
     opacity_fullscreen: String,
     opacity_override: bool,
+    opaque: bool,
+    no_anim: bool,
+    no_focus: bool,
+    stay_focused: bool,
+    dim_around: bool,
+    keep_aspect_ratio: bool,
+    border_size: String,
+    min_w: String,
+    min_h: String,
+    max_w: String,
+    max_h: String,
+    animation: String,
+    /// Empty means "don't set it". Never free text in the view — Hyprland
+    /// rejects an unknown mode and that aborts the whole generated file.
+    idle_inhibit: String,
 }
 
 impl RuleDraft {
@@ -94,6 +109,19 @@ impl RuleDraft {
             opacity_inactive: opacity(e.opacity.inactive),
             opacity_fullscreen: opacity(e.opacity.fullscreen),
             opacity_override: e.opacity.is_override,
+            opaque: e.opaque.unwrap_or(false),
+            no_anim: e.no_anim.unwrap_or(false),
+            no_focus: e.no_focus.unwrap_or(false),
+            stay_focused: e.stay_focused.unwrap_or(false),
+            dim_around: e.dim_around.unwrap_or(false),
+            keep_aspect_ratio: e.keep_aspect_ratio.unwrap_or(false),
+            border_size: e.border_size.map(|v| v.to_string()).unwrap_or_default(),
+            min_w: int_pair(&e.min_size).0,
+            min_h: int_pair(&e.min_size).1,
+            max_w: int_pair(&e.max_size).0,
+            max_h: int_pair(&e.max_size).1,
+            animation: e.animation.clone().unwrap_or_default(),
+            idle_inhibit: e.idle_inhibit.clone().unwrap_or_default(),
         }
     }
 
@@ -134,6 +162,17 @@ impl RuleDraft {
                 fullscreen: parse_opacity(&self.opacity_fullscreen),
                 is_override: self.opacity_override,
             },
+            opaque: self.opaque.then_some(true),
+            no_anim: self.no_anim.then_some(true),
+            no_focus: self.no_focus.then_some(true),
+            stay_focused: self.stay_focused.then_some(true),
+            dim_around: self.dim_around.then_some(true),
+            keep_aspect_ratio: self.keep_aspect_ratio.then_some(true),
+            border_size: self.border_size.trim().parse().ok(),
+            min_size: int_pair_or_none(&self.min_w, &self.min_h),
+            max_size: int_pair_or_none(&self.max_w, &self.max_h),
+            animation: non_empty(self.animation),
+            idle_inhibit: non_empty(self.idle_inhibit),
         };
         (matcher, effects)
     }
@@ -148,6 +187,23 @@ fn non_empty(s: String) -> Option<String> {
     }
 }
 
+/// Splits a stored integer pair back into two draft strings.
+fn int_pair(v: &Option<[i32; 2]>) -> (String, String) {
+    match v {
+        Some([a, b]) => (a.to_string(), b.to_string()),
+        None => (String::new(), String::new()),
+    }
+}
+
+/// Both halves or neither: Hyprland's `{ w, h }` can't express one without
+/// the other, same as `move`/`size`.
+fn int_pair_or_none(a: &str, b: &str) -> Option<[i32; 2]> {
+    match (a.trim().parse().ok(), b.trim().parse().ok()) {
+        (Some(a), Some(b)) => Some([a, b]),
+        _ => None,
+    }
+}
+
 fn pair_or_none(a: String, b: String) -> Option<[String; 2]> {
     match (non_empty(a), non_empty(b)) {
         (Some(a), Some(b)) => Some([a, b]),
@@ -157,6 +213,40 @@ fn pair_or_none(a: String, b: String) -> Option<[String; 2]> {
 
 fn parse_opacity(s: &str) -> Option<f32> {
     s.trim().parse().ok()
+}
+
+/// One entry in the idle-inhibit dropdown.
+///
+/// A dropdown rather than a text field because Hyprland validates this one:
+/// an unrecognised mode is rejected outright, and a rejected field aborts the
+/// whole generated file, taking every other rule down with it. The empty
+/// `mode` is the "leave it unset" entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdleInhibitChoice {
+    mode: String,
+}
+
+impl std::fmt::Display for IdleInhibitChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.mode.is_empty() {
+            write!(f, "(not set)")
+        } else {
+            write!(f, "{}", self.mode)
+        }
+    }
+}
+
+impl IdleInhibitChoice {
+    fn all() -> Vec<IdleInhibitChoice> {
+        std::iter::once(String::new())
+            .chain(
+                hyprforge_windowrules::model::IDLE_INHIBIT_MODES
+                    .iter()
+                    .map(|m| m.to_string()),
+            )
+            .map(|mode| IdleInhibitChoice { mode })
+            .collect()
+    }
 }
 
 /// One entry in a pin's monitor dropdown.
@@ -228,6 +318,19 @@ pub enum Message {
     DraftOpacityInactive(String),
     DraftOpacityFullscreen(String),
     DraftOpacityOverride(bool),
+    DraftOpaque(bool),
+    DraftNoAnim(bool),
+    DraftNoFocus(bool),
+    DraftStayFocused(bool),
+    DraftDimAround(bool),
+    DraftKeepAspectRatio(bool),
+    DraftBorderSize(String),
+    DraftMinW(String),
+    DraftMinH(String),
+    DraftMaxW(String),
+    DraftMaxH(String),
+    DraftAnimation(String),
+    DraftIdleInhibit(IdleInhibitChoice),
     ToggleAdvanced,
     OpenPicker,
     ClosePicker,
@@ -554,6 +657,19 @@ impl SettingsModule for WindowRulesModule {
             Message::DraftOpacityInactive(v) => self.edit_draft(|d| d.opacity_inactive = v),
             Message::DraftOpacityFullscreen(v) => self.edit_draft(|d| d.opacity_fullscreen = v),
             Message::DraftOpacityOverride(v) => self.edit_draft(|d| d.opacity_override = v),
+            Message::DraftOpaque(v) => self.edit_draft(|d| d.opaque = v),
+            Message::DraftNoAnim(v) => self.edit_draft(|d| d.no_anim = v),
+            Message::DraftNoFocus(v) => self.edit_draft(|d| d.no_focus = v),
+            Message::DraftStayFocused(v) => self.edit_draft(|d| d.stay_focused = v),
+            Message::DraftDimAround(v) => self.edit_draft(|d| d.dim_around = v),
+            Message::DraftKeepAspectRatio(v) => self.edit_draft(|d| d.keep_aspect_ratio = v),
+            Message::DraftBorderSize(v) => self.edit_draft(|d| d.border_size = v),
+            Message::DraftMinW(v) => self.edit_draft(|d| d.min_w = v),
+            Message::DraftMinH(v) => self.edit_draft(|d| d.min_h = v),
+            Message::DraftMaxW(v) => self.edit_draft(|d| d.max_w = v),
+            Message::DraftMaxH(v) => self.edit_draft(|d| d.max_h = v),
+            Message::DraftAnimation(v) => self.edit_draft(|d| d.animation = v),
+            Message::DraftIdleInhibit(c) => self.edit_draft(|d| d.idle_inhibit = c.mode),
             Message::OpenPicker => {
                 self.picker = Some(PickerState::Loading);
                 Task::perform(load_clients(), Message::ClientsLoaded)
@@ -1103,6 +1219,69 @@ impl WindowRulesModule {
                 ]
                 .spacing(spacing::MD),
             ));
+
+            body = body.push(section(
+                "Appearance",
+                scale,
+                column![
+                    checkbox(draft.opaque)
+                        .label("Force opaque")
+                        .on_toggle(Message::DraftOpaque),
+                    checkbox(draft.no_anim)
+                        .label("Disable animations")
+                        .on_toggle(Message::DraftNoAnim),
+                    checkbox(draft.dim_around)
+                        .label("Dim everything around it")
+                        .on_toggle(Message::DraftDimAround),
+                    row_field(
+                        "Border size (px)",
+                        text_input("e.g. 4 — 0 removes the border", &draft.border_size)
+                            .on_input(Message::DraftBorderSize),
+                    ),
+                    row_field(
+                        "Animation",
+                        text_input("e.g. popin, or popin 80%", &draft.animation)
+                            .on_input(Message::DraftAnimation),
+                    ),
+                ]
+                .spacing(spacing::MD),
+            ));
+
+            body = body.push(section(
+                "Focus & sizing",
+                scale,
+                column![
+                    checkbox(draft.no_focus)
+                        .label("Never focus this window")
+                        .on_toggle(Message::DraftNoFocus),
+                    checkbox(draft.stay_focused)
+                        .label("Keep focus while visible")
+                        .on_toggle(Message::DraftStayFocused),
+                    checkbox(draft.keep_aspect_ratio)
+                        .label("Keep aspect ratio when resizing")
+                        .on_toggle(Message::DraftKeepAspectRatio),
+                    row_field(
+                        "Idle inhibit",
+                        iced::widget::pick_list(
+                            IdleInhibitChoice::all(),
+                            Some(IdleInhibitChoice { mode: draft.idle_inhibit.clone() }),
+                            Message::DraftIdleInhibit,
+                        ),
+                    ),
+                    meta_text("Minimum and maximum size, in pixels. Floating windows only.", 12.0, scale),
+                    row![
+                        text_input("min width", &draft.min_w).on_input(Message::DraftMinW),
+                        text_input("min height", &draft.min_h).on_input(Message::DraftMinH),
+                    ]
+                    .spacing(spacing::SM),
+                    row![
+                        text_input("max width", &draft.max_w).on_input(Message::DraftMaxW),
+                        text_input("max height", &draft.max_h).on_input(Message::DraftMaxH),
+                    ]
+                    .spacing(spacing::SM),
+                ]
+                .spacing(spacing::MD),
+            ));
         }
 
         body = body.push(
@@ -1224,6 +1403,17 @@ mod tests {
                 border_color: Some("rgb(FF0000)".to_string()),
                 no_blur: Some(true),
                 rounding: Some(8),
+                opaque: Some(true),
+                no_anim: Some(true),
+                no_focus: Some(true),
+                stay_focused: Some(true),
+                dim_around: Some(true),
+                keep_aspect_ratio: Some(true),
+                border_size: Some(4),
+                min_size: Some([200, 150]),
+                max_size: Some([800, 600]),
+                animation: Some("popin 80%".to_string()),
+                idle_inhibit: Some("focus".to_string()),
             },
         }
     }
