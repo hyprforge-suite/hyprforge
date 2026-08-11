@@ -1345,6 +1345,7 @@ dependencies = [
  "iced",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

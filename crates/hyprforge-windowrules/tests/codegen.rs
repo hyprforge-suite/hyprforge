@@ -1,4 +1,4 @@
-use hyprforge_windowrules::model::{Effects, Matcher, Opacity, Rule, Workspace};
+use hyprforge_windowrules::model::{Effects, Matcher, Opacity, Rule, Workspace, WorkspaceRule};
 use hyprforge_windowrules::{codegen::generate, storage};
 
 fn discord_rule() -> Rule {
@@ -18,7 +18,7 @@ fn discord_rule() -> Rule {
 
 #[test]
 fn generates_basic_rule() {
-    let lua = generate(&[discord_rule()]);
+    let lua = generate(&[discord_rule()], &[]);
     assert!(lua.contains("name = [[hyprforge-discord-1]]"));
     assert!(lua.contains("match = { class = [[discord]] }"));
     assert!(lua.contains("float = true"));
@@ -31,7 +31,7 @@ fn generates_basic_rule() {
 fn generates_a_workspace_assignment() {
     let mut rule = discord_rule();
     rule.effects.workspace = Workspace { name: "3".to_string(), silent: false };
-    let lua = generate(&[rule]);
+    let lua = generate(&[rule], &[]);
     assert!(lua.contains("workspace = [[3]]"), "got: {lua}");
 }
 
@@ -41,7 +41,7 @@ fn generates_a_workspace_assignment() {
 fn silent_is_emitted_as_a_suffix_not_a_field() {
     let mut rule = discord_rule();
     rule.effects.workspace = Workspace { name: "name:coding".to_string(), silent: true };
-    let lua = generate(&[rule]);
+    let lua = generate(&[rule], &[]);
     assert!(lua.contains("workspace = [[name:coding silent]]"), "got: {lua}");
     assert!(!lua.contains("silent = true"), "silent is not its own field");
 }
@@ -52,13 +52,13 @@ fn silent_is_emitted_as_a_suffix_not_a_field() {
 fn unset_never_takes_the_silent_suffix() {
     let mut rule = discord_rule();
     rule.effects.workspace = Workspace { name: "unset".to_string(), silent: true };
-    let lua = generate(&[rule]);
+    let lua = generate(&[rule], &[]);
     assert!(lua.contains("workspace = [[unset]]"), "got: {lua}");
 }
 
 #[test]
 fn an_unset_workspace_emits_no_field_at_all() {
-    let lua = generate(&[discord_rule()]);
+    let lua = generate(&[discord_rule()], &[]);
     assert!(!lua.contains("workspace"), "got: {lua}");
 }
 
@@ -68,7 +68,7 @@ fn an_unset_workspace_emits_no_field_at_all() {
 fn a_workspace_name_is_trimmed() {
     let mut rule = discord_rule();
     rule.effects.workspace = Workspace { name: "  3  ".to_string(), silent: true };
-    let lua = generate(&[rule]);
+    let lua = generate(&[rule], &[]);
     assert!(lua.contains("workspace = [[3 silent]]"), "got: {lua}");
 }
 
@@ -77,7 +77,7 @@ fn generates_tag_as_both_a_matcher_and_an_effect() {
     let mut rule = discord_rule();
     rule.matcher.tag = Some("term".to_string());
     rule.effects.tag = Some("+code".to_string());
-    let lua = generate(&[rule]);
+    let lua = generate(&[rule], &[]);
     assert!(lua.contains("tag = [[term]]"), "matcher tag missing: {lua}");
     assert!(lua.contains("tag = [[+code]]"), "effect tag missing: {lua}");
 }
@@ -91,7 +91,7 @@ fn generates_tag_as_both_a_matcher_and_an_effect() {
 fn the_floating_matcher_is_emitted_as_float() {
     let mut rule = discord_rule();
     rule.matcher.floating = Some(false);
-    let lua = generate(&[rule]);
+    let lua = generate(&[rule], &[]);
     assert!(lua.contains("float = false"), "got: {lua}");
     assert!(!lua.contains("floating"), "there is no `floating` match property: {lua}");
 }
@@ -100,7 +100,7 @@ fn the_floating_matcher_is_emitted_as_float() {
 fn generates_a_content_matcher() {
     let mut rule = discord_rule();
     rule.matcher.content = Some("game".to_string());
-    let lua = generate(&[rule]);
+    let lua = generate(&[rule], &[]);
     assert!(lua.contains("content = [[game]]"), "got: {lua}");
 }
 
@@ -112,7 +112,7 @@ fn skips_empty_matcher() {
         matcher: Matcher::default(),
         effects: Effects::default(),
     };
-    let lua = generate(&[rule]);
+    let lua = generate(&[rule], &[]);
     assert!(!lua.contains("hyprforge-empty-1"));
 }
 
@@ -123,7 +123,7 @@ fn preserves_order() {
     let mut b = discord_rule();
     b.name = "hyprforge-b-1".to_string();
 
-    let lua = generate(&[a, b]);
+    let lua = generate(&[a, b], &[]);
     let pos_a = lua.find("hyprforge-a-1").unwrap();
     let pos_b = lua.find("hyprforge-b-1").unwrap();
     assert!(pos_a < pos_b);
@@ -148,7 +148,7 @@ fn opacity_override_serializes_with_suffix() {
             ..Default::default()
         },
     };
-    let lua = generate(&[rule]);
+    let lua = generate(&[rule], &[]);
     assert!(lua.contains("opacity = [[0.8 override 0.8 override 1 override]]"));
 }
 
@@ -163,7 +163,7 @@ fn regex_strings_pass_through_verbatim() {
         },
         effects: Effects::default(),
     };
-    let lua = generate(&[rule]);
+    let lua = generate(&[rule], &[]);
     assert!(lua.contains(r"title = [[^(foo|bar)\.exe$]]"));
 }
 
@@ -184,7 +184,7 @@ fn move_expression_vs_literal() {
             ..Default::default()
         },
     };
-    let lua = generate(&[rule]);
+    let lua = generate(&[rule], &[]);
     assert!(lua.contains("move = { 100, [[cursor_y-(window_h*0.5)]] }"));
 }
 
@@ -201,9 +201,10 @@ fn toml_round_trip_preserves_order_and_fields() {
         r
     }];
 
-    storage::save(&path, &rules).unwrap();
+    let stored = storage::Rules { rules: rules.clone(), workspace_rules: Vec::new() };
+    storage::save(&path, &stored).unwrap();
     let loaded = storage::load(&path).unwrap();
-    assert_eq!(loaded, rules);
+    assert_eq!(loaded.rules, rules);
 }
 
 #[test]
@@ -211,5 +212,80 @@ fn load_missing_file_is_empty_not_error() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nope.toml");
     let rules = storage::load(&path).unwrap();
-    assert!(rules.is_empty());
+    assert!(rules.rules.is_empty());
+    assert!(rules.workspace_rules.is_empty());
+}
+
+/// "Steam on the external display", the thing window rules alone can't say.
+#[test]
+fn generates_a_workspace_to_monitor_pin() {
+    let wr = WorkspaceRule {
+        workspace: "name:gaming".to_string(),
+        monitor: "desc:GWD ARZOPA".to_string(),
+        default: true,
+        persistent: false,
+    };
+    let lua = generate(&[], &[wr]);
+    assert!(
+        lua.contains("hl.workspace_rule({ workspace = [[name:gaming]], monitor = [[desc:GWD ARZOPA]], default = true })"),
+        "got: {lua}"
+    );
+}
+
+/// A pin with no monitor is "no opinion about where this lives". Emitting
+/// `monitor = [[]]` would instead ask Hyprland to find a monitor named "".
+#[test]
+fn a_blank_monitor_emits_no_monitor_field() {
+    let wr = WorkspaceRule { workspace: "3".to_string(), ..Default::default() };
+    let lua = generate(&[], &[wr]);
+    assert!(lua.contains("hl.workspace_rule({ workspace = [[3]] })"), "got: {lua}");
+    assert!(!lua.contains("monitor"), "got: {lua}");
+}
+
+#[test]
+fn a_workspace_rule_naming_no_workspace_is_skipped() {
+    let wr = WorkspaceRule { monitor: "desc:X".to_string(), ..Default::default() };
+    let lua = generate(&[], &[wr]);
+    assert!(!lua.contains("workspace_rule"), "got: {lua}");
+}
+
+/// Workspace rules lead, so the file reads as "where workspaces live, then
+/// what windows do".
+#[test]
+fn workspace_rules_are_emitted_before_window_rules() {
+    let wr = WorkspaceRule { workspace: "3".to_string(), ..Default::default() };
+    let lua = generate(&[discord_rule()], &[wr]);
+    assert!(lua.find("workspace_rule").unwrap() < lua.find("window_rule").unwrap());
+}
+
+#[test]
+fn both_rule_kinds_round_trip_through_one_toml() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("window-rules.toml");
+    let stored = storage::Rules {
+        rules: vec![discord_rule()],
+        workspace_rules: vec![WorkspaceRule {
+            workspace: "name:gaming".to_string(),
+            monitor: "desc:GWD ARZOPA".to_string(),
+            default: true,
+            persistent: true,
+        }],
+    };
+    storage::save(&path, &stored).unwrap();
+    assert_eq!(storage::load(&path).unwrap(), stored);
+}
+
+/// A TOML written before workspace rules existed must still load.
+#[test]
+fn a_file_without_workspace_rules_still_loads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.toml");
+    std::fs::write(
+        &path,
+        "[[rule]]\nname = \"hyprforge-old-1\"\nenabled = true\n\n[rule.matcher]\nclass = \"old\"\n",
+    )
+    .unwrap();
+    let loaded = storage::load(&path).unwrap();
+    assert_eq!(loaded.rules.len(), 1);
+    assert!(loaded.workspace_rules.is_empty());
 }

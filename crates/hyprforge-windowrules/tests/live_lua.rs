@@ -13,8 +13,20 @@
 //! `hyprctl keyword`-free means (see below), and never edits `hyprland.lua`.
 
 use hyprforge_windowrules::codegen::generate;
-use hyprforge_windowrules::model::{Effects, Matcher, Opacity, Rule, Workspace};
+use hyprforge_windowrules::model::{Effects, Matcher, Opacity, Rule, Workspace, WorkspaceRule};
 use std::process::Command;
+
+/// Every field a workspace rule can emit. The workspace is named rather than
+/// numbered so evaluating this can't disturb a workspace the user is on, and
+/// `persistent` is left off for the same reason — it would outlive the test.
+fn every_supported_workspace_rule() -> Vec<WorkspaceRule> {
+    vec![WorkspaceRule {
+        workspace: "name:hyprforge-live-probe".to_string(),
+        monitor: "desc:hyprforge-live-probe-monitor".to_string(),
+        default: true,
+        persistent: false,
+    }]
+}
 
 /// Every field the codegen can emit, in one rule set. Add to this whenever a
 /// field is added to the model — a field absent here is a field this test
@@ -94,7 +106,7 @@ fn hyprland_accepts_every_field_the_codegen_emits() {
     let dir = std::env::temp_dir().join("hyprforge-live-lua");
     std::fs::create_dir_all(&dir).expect("could not create temp dir");
     let path = dir.join("probe.lua");
-    let lua = generate(&every_supported_field());
+    let lua = generate(&every_supported_field(), &every_supported_workspace_rule());
     std::fs::write(&path, &lua).expect("could not write probe file");
     eprintln!("--- generated ---\n{lua}");
 

@@ -210,6 +210,11 @@ generator supports:
   `floating = false` selects tiled windows. (Hyprland spells that matcher
   `float`, same as the effect; the TOML key stays `floating` for readability
   and the generator translates.)
+- **Pick a window…** — next to the Class field. Lists what's currently open
+  (read from `hyprctl clients -j`) and fills the class from whichever you
+  choose. The title is a separate click, because a title-matched rule stops
+  matching as soon as the app renames its window. Without Hyprland running
+  the button reports that in the panel and the fields still work by hand.
 - **Tag** — applies a tag: `+name` adds, `-name` removes, bare toggles.
   Tagged windows can then be selected by another rule's `tag` matcher, which
   is how one rule's effect becomes another's criteria.
@@ -219,6 +224,25 @@ generator supports:
   since Hyprland's `{ x, y }` form can't express one without the other.
 - **Opacity** — per-state active/inactive/fullscreen, with the `override`
   flag for absolute rather than multiplied values.
+
+### Workspaces on monitors
+
+A window rule can say which workspace a window opens on, but not which
+*monitor*. Hyprland spells that as a separate call, `hl.workspace_rule`, and
+the "Workspaces on monitors" section of the module writes it. The two compose:
+the rule sends Steam to `name:gaming`, the pin puts `name:gaming` on the
+external display.
+
+Monitors are stored as `desc:<description>` rather than as a connector.
+Connectors are assigned in probe order and can move between boots, while the
+description comes from the EDID and identifies the physical panel — so a pin
+still applies after a replug. The description has to be exactly what `hyprctl
+monitors` reports (`BOE 0x0BC9`), which is why the dropdown is populated from
+there rather than from displayd, whose own formatting differs.
+
+Both rule kinds live in the same `window-rules.toml`, as `[[rule]]` and
+`[[workspace_rule]]` arrays. A file written before workspace rules existed
+loads fine — it simply has none.
 
 ## Scales are 120ths, and most of the ones you'd want don't exist
 

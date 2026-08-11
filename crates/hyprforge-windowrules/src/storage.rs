@@ -1,4 +1,4 @@
-use crate::model::Rule;
+use crate::model::{Rule, WorkspaceRule};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -30,13 +30,26 @@ pub enum StorageError {
 struct RuleFile {
     #[serde(rename = "rule", default)]
     rules: Vec<Rule>,
+    /// Workspace→monitor pins. One file for both kinds: they're one
+    /// user-facing concept ("my window rules"), and a file that predates this
+    /// field simply has none.
+    #[serde(rename = "workspace_rule", default)]
+    workspace_rules: Vec<WorkspaceRule>,
 }
 
-/// Loads the ordered rule list from `path`. A missing file is treated as an
+/// Everything the module persists. Returned as a struct rather than a tuple
+/// so adding a third rule kind doesn't churn every call site.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Rules {
+    pub rules: Vec<Rule>,
+    pub workspace_rules: Vec<WorkspaceRule>,
+}
+
+/// Loads the ordered rule lists from `path`. A missing file is treated as an
 /// empty rule set (first run), not an error.
-pub fn load(path: &Path) -> Result<Vec<Rule>, StorageError> {
+pub fn load(path: &Path) -> Result<Rules, StorageError> {
     if !path.exists() {
-        return Ok(Vec::new());
+        return Ok(Rules::default());
     }
     let contents = std::fs::read_to_string(path).map_err(|source| StorageError::Read {
         path: path.display().to_string(),
@@ -46,14 +59,18 @@ pub fn load(path: &Path) -> Result<Vec<Rule>, StorageError> {
         path: path.display().to_string(),
         source,
     })?;
-    Ok(file.rules)
+    Ok(Rules {
+        rules: file.rules,
+        workspace_rules: file.workspace_rules,
+    })
 }
 
-/// Writes the ordered rule list to `path`, atomically (temp file + rename),
+/// Writes the ordered rule lists to `path`, atomically (temp file + rename),
 /// so a crash mid-write never corrupts the canonical TOML.
-pub fn save(path: &Path, rules: &[Rule]) -> Result<(), StorageError> {
+pub fn save(path: &Path, rules: &Rules) -> Result<(), StorageError> {
     let file = RuleFile {
-        rules: rules.to_vec(),
+        rules: rules.rules.clone(),
+        workspace_rules: rules.workspace_rules.clone(),
     };
     let contents = toml::to_string_pretty(&file)?;
     hyprforge_core::paths::write_atomic(path, &contents).map_err(|source| StorageError::Write {

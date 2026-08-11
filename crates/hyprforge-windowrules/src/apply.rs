@@ -1,5 +1,5 @@
 use crate::codegen::generate;
-use crate::model::Rule;
+use crate::storage::Rules;
 use std::path::Path;
 use std::process::Command;
 
@@ -45,14 +45,14 @@ pub enum ApplyError {
 /// and lingers in `configerrors` until the next reload, which is what puts
 /// Hyprland's error overlay on screen. Neither check subsumes the other, so
 /// both are here.
-pub fn apply(lua_path: &Path, rules: &[Rule]) -> Result<(), ApplyError> {
+pub fn apply(lua_path: &Path, rules: &Rules) -> Result<(), ApplyError> {
     // Snapshot first: the user's own config may already have errors that
     // aren't ours, and failing their save over someone else's typo would be
     // its own dead end. Only errors that appear between here and the reload
     // are attributable to what we just wrote.
     let before = config_errors();
 
-    let lua = generate(rules);
+    let lua = generate(&rules.rules, &rules.workspace_rules);
     hyprforge_core::paths::write_atomic(lua_path, &lua).map_err(|source| ApplyError::Write {
         path: lua_path.display().to_string(),
         source,

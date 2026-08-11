@@ -139,6 +139,41 @@ pub struct Effects {
     pub rounding: Option<i32>,
 }
 
+/// Pins a workspace to a monitor, via Hyprland's `hl.workspace_rule`.
+///
+/// This is how "Steam on the external display" is actually expressed: a
+/// window rule puts the window on a workspace, and this puts the workspace on
+/// a monitor. Kept separate from [`Rule`] because it's a different Lua call
+/// with different semantics — merging the two into one ordered list would
+/// make that ordering meaningless, since only window rules override each
+/// other.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct WorkspaceRule {
+    /// A workspace ID (`3`), a name (`name:coding`), or a special workspace.
+    pub workspace: String,
+    /// How Hyprland should find the monitor. Prefer `desc:<description>` over
+    /// a connector name: connectors are assigned in probe order and can move
+    /// between boots or replugs, while the description comes from the EDID
+    /// and identifies the physical panel. Must be the description exactly as
+    /// `hyprctl monitors` reports it, since that's what Hyprland compares
+    /// against.
+    pub monitor: String,
+    /// Make this the workspace that opens on that monitor by default.
+    #[serde(default)]
+    pub default: bool,
+    /// Keep the workspace alive even while empty.
+    #[serde(default)]
+    pub persistent: bool,
+}
+
+impl WorkspaceRule {
+    /// A rule with no workspace names nothing and is skipped rather than
+    /// emitted — the same treatment an empty matcher gets.
+    pub fn is_empty(&self) -> bool {
+        self.workspace.trim().is_empty()
+    }
+}
+
 /// One ordered rule. Order is semantically meaningful in Hyprland (later
 /// rules override earlier ones for the same window) and is preserved by
 /// TOML array order and Lua emission order alike — never resorted.
