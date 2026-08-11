@@ -85,6 +85,35 @@ fn render_rule(rule: &Rule) -> String {
     if let Some(v) = e.rounding {
         fields.push(format!("rounding = {v}"));
     }
+    for (name, value) in [
+        ("opaque", e.opaque),
+        ("no_anim", e.no_anim),
+        ("no_focus", e.no_focus),
+        ("stay_focused", e.stay_focused),
+        ("dim_around", e.dim_around),
+        ("keep_aspect_ratio", e.keep_aspect_ratio),
+    ] {
+        if let Some(v) = value {
+            fields.push(format!("{name} = {v}"));
+        }
+    }
+    if let Some(v) = e.border_size {
+        fields.push(format!("border_size = {v}"));
+    }
+    // Plain integers, not expressions — unlike `move`/`size`, these two take
+    // no `monitor_w * 0.5` form, so there's nothing to quote.
+    if let Some([w, h]) = e.min_size {
+        fields.push(format!("min_size = {{ {w}, {h} }}"));
+    }
+    if let Some([w, h]) = e.max_size {
+        fields.push(format!("max_size = {{ {w}, {h} }}"));
+    }
+    if let Some(v) = &e.animation {
+        fields.push(format!("animation = {}", lua_string(v)));
+    }
+    if let Some(v) = &e.idle_inhibit {
+        fields.push(format!("idle_inhibit = {}", lua_string(v)));
+    }
 
     format!("hl.window_rule({{ {} }})\n", fields.join(", "))
 }

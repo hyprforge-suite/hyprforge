@@ -137,7 +137,39 @@ pub struct Effects {
     pub no_blur: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rounding: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opaque: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_anim: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_focus: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stay_focused: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dim_around: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_aspect_ratio: Option<bool>,
+    /// Hyprland has no `no_border` effect — this set to 0 is how that's said.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_size: Option<i32>,
+    /// `[width, height]` in pixels. Unlike `size`, these take no expressions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_size: Option<[i32; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_size: Option<[i32; 2]>,
+    /// An animation style, optionally with a percentage: `popin`, `popin 80%`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub animation: Option<String>,
+    /// One of [`IDLE_INHIBIT_MODES`]. Hyprland validates this and rejects
+    /// anything else outright — which aborts the whole generated file — so it
+    /// must never be free text in the UI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_inhibit: Option<String>,
 }
+
+/// The only values `idle_inhibit` accepts, confirmed against Hyprland 0.56.1
+/// — anything else fails with `idle_inhibit rule has unknown mode`.
+pub const IDLE_INHIBIT_MODES: [&str; 4] = ["none", "always", "focus", "fullscreen"];
 
 /// Pins a workspace to a monitor, via Hyprland's `hl.workspace_rule`.
 ///

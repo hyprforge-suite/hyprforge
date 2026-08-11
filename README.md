@@ -224,6 +224,14 @@ generator supports:
   since Hyprland's `{ x, y }` form can't express one without the other.
 - **Opacity** — per-state active/inactive/fullscreen, with the `override`
   flag for absolute rather than multiplied values.
+- **Appearance** — `opaque`, `no_anim`, `dim_around`, `border_size` and
+  `animation`. Hyprland has no `no_border` effect; a border size of 0 is how
+  that's spelled, so 0 is kept rather than treated as unset.
+- **Focus & sizing** — `no_focus`, `stay_focused`, `keep_aspect_ratio`,
+  `min_size`/`max_size` (plain pixels, no expressions — unlike move/size),
+  and `idle_inhibit`. That last one is a dropdown rather than a text field
+  because Hyprland validates it: an unknown mode is rejected outright, and a
+  rejected field aborts the entire generated file.
 
 ### Workspaces on monitors
 

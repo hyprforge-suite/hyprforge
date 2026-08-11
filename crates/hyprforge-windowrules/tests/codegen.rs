@@ -104,6 +104,82 @@ fn generates_a_content_matcher() {
     assert!(lua.contains("content = [[game]]"), "got: {lua}");
 }
 
+/// Every boolean effect, spelled as Hyprland spells it. Names confirmed
+/// against a running 0.56.1 before being generated; `tests/live_lua.rs`
+/// re-checks them.
+#[test]
+fn generates_the_boolean_effects() {
+    let mut rule = discord_rule();
+    rule.effects.opaque = Some(true);
+    rule.effects.no_anim = Some(true);
+    rule.effects.no_focus = Some(true);
+    rule.effects.stay_focused = Some(true);
+    rule.effects.dim_around = Some(true);
+    rule.effects.keep_aspect_ratio = Some(true);
+    let lua = generate(&[rule], &[]);
+    for expected in [
+        "opaque = true",
+        "no_anim = true",
+        "no_focus = true",
+        "stay_focused = true",
+        "dim_around = true",
+        "keep_aspect_ratio = true",
+    ] {
+        assert!(lua.contains(expected), "missing {expected}: {lua}");
+    }
+}
+
+/// Hyprland has no `no_border` effect; zero here is how that gets said, so
+/// it must survive rather than being treated as "unset".
+#[test]
+fn a_border_size_of_zero_is_emitted() {
+    let mut rule = discord_rule();
+    rule.effects.border_size = Some(0);
+    let lua = generate(&[rule], &[]);
+    assert!(lua.contains("border_size = 0"), "got: {lua}");
+}
+
+/// Unlike move/size these take no expressions, so they're emitted bare.
+#[test]
+fn min_and_max_size_are_plain_integer_pairs() {
+    let mut rule = discord_rule();
+    rule.effects.min_size = Some([200, 150]);
+    rule.effects.max_size = Some([800, 600]);
+    let lua = generate(&[rule], &[]);
+    assert!(lua.contains("min_size = { 200, 150 }"), "got: {lua}");
+    assert!(lua.contains("max_size = { 800, 600 }"), "got: {lua}");
+}
+
+/// An animation may carry a percentage, so it's a quoted string rather than
+/// a bare token.
+#[test]
+fn an_animation_keeps_its_style_argument() {
+    let mut rule = discord_rule();
+    rule.effects.animation = Some("popin 80%".to_string());
+    let lua = generate(&[rule], &[]);
+    assert!(lua.contains("animation = [[popin 80%]]"), "got: {lua}");
+}
+
+/// Only these four are accepted; Hyprland rejects anything else outright,
+/// and a rejected field aborts the whole file.
+#[test]
+fn every_idle_inhibit_mode_is_one_hyprland_accepts() {
+    for mode in hyprforge_windowrules::model::IDLE_INHIBIT_MODES {
+        let mut rule = discord_rule();
+        rule.effects.idle_inhibit = Some(mode.to_string());
+        let lua = generate(&[rule], &[]);
+        assert!(lua.contains(&format!("idle_inhibit = [[{mode}]]")), "got: {lua}");
+    }
+}
+
+#[test]
+fn unset_effects_emit_nothing() {
+    let lua = generate(&[discord_rule()], &[]);
+    for absent in ["opaque", "no_anim", "stay_focused", "border_size", "min_size", "idle_inhibit"] {
+        assert!(!lua.contains(absent), "{absent} should not appear: {lua}");
+    }
+}
+
 #[test]
 fn skips_empty_matcher() {
     let rule = Rule {
