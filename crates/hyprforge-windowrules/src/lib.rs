@@ -1,4 +1,5 @@
 pub mod apply;
+pub mod clients;
 pub mod codegen;
 pub mod model;
 pub mod setup;
