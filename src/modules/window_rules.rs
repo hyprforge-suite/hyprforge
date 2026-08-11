@@ -5,7 +5,10 @@ use hyprforge_core::widgets::{
 };
 use hyprforge_core::SettingsModule;
 use hyprforge_windowrules::clients::Client;
-use hyprforge_windowrules::model::{generate_rule_name, Effects, Matcher, Opacity, Workspace};
+use hyprforge_windowrules::model::{
+    generate_rule_name, Effects, Matcher, Opacity, Workspace, WorkspaceRule,
+};
+use hyprforge_windowrules::monitors::Monitor;
 use hyprforge_windowrules::setup::{HyprConfig, SetupPlan};
 use hyprforge_windowrules::Rule;
 use iced::widget::{checkbox, column, container, row, scrollable, text_input};
@@ -156,6 +159,43 @@ fn parse_opacity(s: &str) -> Option<f32> {
     s.trim().parse().ok()
 }
 
+/// One entry in a pin's monitor dropdown.
+///
+/// Carries the `desc:`-style selector that gets stored alongside the label
+/// that gets shown, so the widget never has to reconstruct one from the
+/// other — reconstructing is where a description that Hyprland won't
+/// recognise would creep in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorChoice {
+    label: String,
+    selector: String,
+}
+
+impl std::fmt::Display for MonitorChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.label)
+    }
+}
+
+impl MonitorChoice {
+    fn from_monitor(m: &Monitor) -> Self {
+        MonitorChoice {
+            label: m.label(),
+            selector: m.rule_selector(),
+        }
+    }
+
+    /// A selector already stored in a pin, for a monitor that isn't connected
+    /// right now. Shown as-is so unplugging a display doesn't make its pin
+    /// look empty — or worse, let an edit silently clear it.
+    fn from_stored(selector: &str) -> Self {
+        MonitorChoice {
+            label: format!("{selector} (not connected)"),
+            selector: selector.to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     Add,
@@ -197,6 +237,13 @@ pub enum Message {
     /// class that isn't on screen.
     PickClass(usize),
     PickTitle(usize),
+    AddWorkspacePin,
+    DeleteWorkspacePin(usize),
+    PinWorkspace(usize, String),
+    PinMonitor(usize, MonitorChoice),
+    PinDefault(usize, bool),
+    PinPersistent(usize, bool),
+    MonitorsLoaded(Vec<Monitor>),
     DraftSave,
     DraftCancel,
     ConfirmSetup,
@@ -207,6 +254,10 @@ pub enum Message {
 
 pub struct WindowRulesModule {
     rules: Vec<Rule>,
+    /// Workspace→monitor pins. Held beside `rules` rather than inside a
+    /// `storage::Rules` so the list operations below can keep indexing one
+    /// flat Vec; the two are recombined on save.
+    workspace_rules: Vec<WorkspaceRule>,
     draft: Option<RuleDraft>,
     /// Which Hyprland config the user has. `None` of the non-`Lua` variants
     /// can be served by inserting a require line, so this gates the whole
@@ -219,6 +270,10 @@ pub struct WindowRulesModule {
     /// expressions, per-state opacity, xwayland matching) is the power-user
     /// surface, kept out of the way of "float Discord" (vision pillar #1).
     show_advanced: bool,
+    /// Monitors to choose from when pinning a workspace. Empty until the
+    /// `hyprctl` read returns, or if it fails — the pin's monitor is then
+    /// simply not selectable, which beats blocking the whole section.
+    monitors: Vec<Monitor>,
     /// The open-window picker, when it's showing. `None` means closed, which
     /// is distinct from `Some(Loading)` — the panel has to be on screen while
     /// the `hyprctl` call is in flight or the button looks dead.
@@ -241,8 +296,9 @@ enum PickerState {
 
 impl WindowRulesModule {
     pub fn new() -> (Self, Task<Message>) {
-        let rules = hyprforge_windowrules::storage::load(&hyprforge_core::paths::window_rules_toml_path())
+        let stored = hyprforge_windowrules::storage::load(&hyprforge_core::paths::window_rules_toml_path())
             .unwrap_or_default();
+        let (rules, workspace_rules) = (stored.rules, stored.workspace_rules);
         let config = hyprforge_windowrules::setup::discover(&hyprforge_core::paths::hypr_config_dir());
         // Only a real hyprland.lua can be inspected for the require line;
         // for the other variants this stays at the "not installed" default
@@ -263,22 +319,49 @@ impl WindowRulesModule {
         (
             WindowRulesModule {
                 rules,
+                workspace_rules,
                 draft: None,
                 config,
                 setup_plan,
                 show_setup_confirm: false,
                 show_advanced: false,
+                monitors: Vec::new(),
                 picker: None,
                 setup_diff_text,
                 error: None,
                 status: None,
             },
-            Task::none(),
+            // Read the monitors up front: the workspace-pin dropdown needs
+            // them, and a failure here is silent by design — the section
+            // still lists existing pins, it just can't offer new monitors.
+            Task::perform(load_monitors(), Message::MonitorsLoaded),
         )
     }
 
     /// Applies `f` to the open draft, if there is one. Keeps the ~19 field
     /// -edit message arms to one line each.
+    /// Applies `f` to the pin at `index`, then persists.
+    ///
+    /// A blank pin is legitimate mid-edit — you add a row before you've typed
+    /// a workspace into it — so an incomplete one is saved as-is and simply
+    /// skipped by the codegen rather than blocking the save.
+    fn edit_pin(&mut self, index: usize, f: impl FnOnce(&mut WorkspaceRule)) -> Task<Message> {
+        let Some(pin) = self.workspace_rules.get_mut(index) else {
+            return Task::none();
+        };
+        f(pin);
+        self.save_and_maybe_reload()
+    }
+
+    /// Both rule kinds as storage and codegen want them. The module keeps
+    /// them apart while editing because only window rules are reorderable.
+    fn stored_rules(&self) -> hyprforge_windowrules::storage::Rules {
+        hyprforge_windowrules::storage::Rules {
+            rules: self.rules.clone(),
+            workspace_rules: self.workspace_rules.clone(),
+        }
+    }
+
     /// The window at `index` in the picker's loaded list, if the picker is
     /// still showing that list. Indices are only meaningful against the
     /// snapshot they were rendered from.
@@ -327,7 +410,10 @@ impl WindowRulesModule {
 
     fn save_and_maybe_reload(&mut self) -> Task<Message> {
         if let Err(e) =
-            hyprforge_windowrules::storage::save(&hyprforge_core::paths::window_rules_toml_path(), &self.rules)
+            hyprforge_windowrules::storage::save(
+                &hyprforge_core::paths::window_rules_toml_path(),
+                &self.stored_rules(),
+            )
         {
             self.error = Some(e.to_string());
             return Task::none();
@@ -342,7 +428,7 @@ impl WindowRulesModule {
             return Task::none();
         }
         if self.setup_plan == SetupPlan::AlreadyPresent {
-            Task::perform(regenerate_and_reload(self.rules.clone()), Message::Reloaded)
+            Task::perform(regenerate_and_reload(self.stored_rules()), Message::Reloaded)
         } else {
             self.show_setup_confirm = true;
             Task::none()
@@ -503,6 +589,25 @@ impl SettingsModule for WindowRulesModule {
                     None => Task::none(),
                 }
             }
+            Message::MonitorsLoaded(monitors) => {
+                self.monitors = monitors;
+                Task::none()
+            }
+            Message::AddWorkspacePin => {
+                self.workspace_rules.push(WorkspaceRule::default());
+                Task::none()
+            }
+            Message::DeleteWorkspacePin(i) => {
+                if i < self.workspace_rules.len() {
+                    self.workspace_rules.remove(i);
+                    return self.save_and_maybe_reload();
+                }
+                Task::none()
+            }
+            Message::PinWorkspace(i, v) => self.edit_pin(i, |p| p.workspace = v),
+            Message::PinMonitor(i, choice) => self.edit_pin(i, |p| p.monitor = choice.selector),
+            Message::PinDefault(i, v) => self.edit_pin(i, |p| p.default = v),
+            Message::PinPersistent(i, v) => self.edit_pin(i, |p| p.persistent = v),
             Message::ToggleAdvanced => {
                 self.show_advanced = !self.show_advanced;
                 Task::none()
@@ -521,7 +626,7 @@ impl SettingsModule for WindowRulesModule {
                 {
                     Ok(plan) => {
                         self.setup_plan = plan;
-                        Task::perform(regenerate_and_reload(self.rules.clone()), Message::Reloaded)
+                        Task::perform(regenerate_and_reload(self.stored_rules()), Message::Reloaded)
                     }
                     Err(e) => {
                         self.error = Some(e.to_string());
@@ -543,7 +648,7 @@ impl SettingsModule for WindowRulesModule {
                         self.setup_plan = SetupPlan::AlreadyPresent;
                         self.error = None;
                         self.status = Some("Created hyprland.lua.".to_string());
-                        Task::perform(regenerate_and_reload(self.rules.clone()), Message::Reloaded)
+                        Task::perform(regenerate_and_reload(self.stored_rules()), Message::Reloaded)
                     }
                     Err(e) => {
                         self.error = Some(e.to_string());
@@ -646,11 +751,107 @@ impl SettingsModule for WindowRulesModule {
                 .align_x(iced::alignment::Horizontal::Right),
         );
 
+        content = content.push(self.workspace_pins_view(scale));
+
         container(content).padding(spacing::LG).into()
     }
 }
 
 impl WindowRulesModule {
+    /// Workspace→monitor pins.
+    ///
+    /// A separate section from the rules list because it's a different kind
+    /// of statement: a rule says what a *window* does, a pin says where a
+    /// *workspace* lives. Together they're how "Steam on the external
+    /// display" gets expressed — the rule sends Steam to a workspace, the pin
+    /// puts that workspace on the monitor.
+    fn workspace_pins_view(&self, scale: FontScale) -> Element<'_, Message> {
+        let mut choices: Vec<MonitorChoice> =
+            self.monitors.iter().map(MonitorChoice::from_monitor).collect();
+
+        let mut list = column![].spacing(spacing::MD);
+        if self.workspace_rules.is_empty() {
+            list = list.push(meta_text(
+                "No workspaces pinned. Pin one to a monitor, then send windows \
+                 to that workspace with a rule's Workspace field.",
+                13.0,
+                scale,
+            ));
+        }
+
+        for (i, pin) in self.workspace_rules.iter().enumerate() {
+            // A pin for a monitor that isn't plugged in right now still has
+            // to show what it points at, or editing anything else on the row
+            // would look like the monitor was never set.
+            let selected = if pin.monitor.trim().is_empty() {
+                None
+            } else {
+                let known = choices.iter().find(|c| c.selector == pin.monitor).cloned();
+                Some(known.unwrap_or_else(|| {
+                    let stored = MonitorChoice::from_stored(&pin.monitor);
+                    if !choices.contains(&stored) {
+                        choices.push(stored.clone());
+                    }
+                    stored
+                }))
+            };
+
+            list = list.push(
+                column![
+                    row![
+                        text_input("workspace, e.g. 3 or name:gaming", &pin.workspace)
+                            .on_input(move |v| Message::PinWorkspace(i, v)),
+                        iced::widget::pick_list(choices.clone(), selected, move |c| {
+                            Message::PinMonitor(i, c)
+                        })
+                        .placeholder("on monitor…"),
+                        danger_button("Remove", Message::DeleteWorkspacePin(i)),
+                    ]
+                    .spacing(spacing::SM)
+                    .align_y(iced::Alignment::Center),
+                    row![
+                        checkbox(pin.default)
+                            .label("Default workspace for that monitor")
+                            .on_toggle(move |v| Message::PinDefault(i, v)),
+                        checkbox(pin.persistent)
+                            .label("Keep alive when empty")
+                            .on_toggle(move |v| Message::PinPersistent(i, v)),
+                    ]
+                    .spacing(spacing::MD),
+                ]
+                .spacing(spacing::XS),
+            );
+        }
+
+        let note = if self.monitors.is_empty() {
+            Some(meta_text(
+                "Couldn't read the connected monitors, so there's nothing to \
+                 choose from — existing pins are still listed and kept.",
+                12.0,
+                scale,
+            ))
+        } else {
+            // Worth saying out loud: this is why a pin survives a replug.
+            Some(meta_text(
+                "Monitors are matched by their description rather than their \
+                 connector, so a pin still applies after replugging.",
+                12.0,
+                scale,
+            ))
+        };
+
+        let mut body = column![list].spacing(spacing::MD);
+        if let Some(note) = note {
+            body = body.push(note);
+        }
+        body = body.push(
+            container(secondary_button("Pin a workspace").on_press(Message::AddWorkspacePin))
+                .width(Length::Fill),
+        );
+
+        section("Workspaces on monitors", scale, body)
+    }
+
     /// The open-window list, inline under the form rather than as a modal —
     /// you're choosing a value *for* a field, and the field should stay
     /// visible while you do it.
@@ -923,6 +1124,17 @@ impl WindowRulesModule {
     }
 }
 
+/// Reads the connected monitors. A failure is flattened to an empty list
+/// rather than surfaced: the pin section still works without it, and the
+/// module already reports a missing `hyprctl` when a save actually needs one.
+async fn load_monitors() -> Vec<Monitor> {
+    tokio::task::spawn_blocking(hyprforge_windowrules::monitors::list_monitors)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default()
+}
+
 /// Reads the open windows off the compositor. Blocking work (it shells out to
 /// `hyprctl`), so it goes on the blocking pool rather than stalling the UI
 /// thread — same treatment `regenerate_and_reload` gets below.
@@ -933,7 +1145,7 @@ async fn load_clients() -> Result<Vec<Client>, String> {
         .map_err(|e| e.to_string())
 }
 
-async fn regenerate_and_reload(rules: Vec<Rule>) -> Result<(), String> {
+async fn regenerate_and_reload(rules: hyprforge_windowrules::storage::Rules) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         hyprforge_windowrules::apply::apply(&hyprforge_core::paths::window_rules_lua_path(), &rules)
             .map_err(|e| e.to_string())
@@ -945,6 +1157,40 @@ async fn regenerate_and_reload(rules: Vec<Rule>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs `f` against a module whose config lives in a throwaway directory.
+    ///
+    /// `WindowRulesModule::new()` reads the canonical TOML and several update
+    /// arms write it straight back, so a test that skips this loads — and
+    /// *saves over* — the real `~/.config/hyprforge/window-rules.toml`. That
+    /// happened: a run wrote its fixture pins into the developer's own
+    /// config, and the tests then failed because each one loaded what the
+    /// last had left behind.
+    ///
+    /// A fresh directory per test, because sharing one just moves the
+    /// contamination from the real config into a shared temp one. The lock
+    /// is what makes that safe: `$XDG_CONFIG_HOME` is process-global and
+    /// these tests run on parallel threads, so only one may own it at a time.
+    /// Same reasoning as the `ENV_LOCK` in `hyprforge-core`'s `paths` tests.
+    fn with_isolated_module(f: impl FnOnce(&mut WindowRulesModule)) {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        // A test that panics while holding the lock poisons it; the next
+        // test still needs to run, and there's no shared state to corrupt.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let dir = tempfile::tempdir().expect("could not make a temp config dir");
+        let previous = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", dir.path());
+
+        let mut module = WindowRulesModule::new().0;
+        f(&mut module);
+
+        match previous {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+    }
 
     fn fully_populated_rule() -> Rule {
         Rule {
@@ -1080,7 +1326,7 @@ mod tests {
             enabled: true,
             matcher,
             effects,
-        }]);
+        }], &[]);
 
         assert!(lua.contains("initial_class = [[Discord]]"), "{lua}");
         // Emitted as `float`, which is what Hyprland calls the matcher —
@@ -1109,7 +1355,7 @@ mod tests {
             enabled: true,
             matcher,
             effects,
-        }]);
+        }], &[]);
         assert!(lua.contains("workspace = [[3 silent]]"), "{lua}");
     }
 
@@ -1130,7 +1376,7 @@ mod tests {
             enabled: true,
             matcher,
             effects,
-        }]);
+        }], &[]);
         assert!(!lua.contains("workspace"), "{lua}");
     }
 
@@ -1143,34 +1389,38 @@ mod tests {
         }
     }
 
-    /// A module with a draft open and the picker showing two windows.
-    fn module_with_picker() -> WindowRulesModule {
-        let (mut m, _) = WindowRulesModule::new();
-        m.draft = Some(RuleDraft::default());
-        m.picker = Some(PickerState::Loaded(vec![
-            client("com.mitchellh.ghostty", "hyprforge"),
-            client("dev.zed.Zed", "hyprland.lua"),
-        ]));
-        m
+    /// Opens a draft and shows the picker with two windows, one of which
+    /// shares nothing with the other so a mixed-up index is visible.
+    fn with_picker(f: impl FnOnce(&mut WindowRulesModule)) {
+        with_isolated_module(|m| {
+            m.draft = Some(RuleDraft::default());
+            m.picker = Some(PickerState::Loaded(vec![
+                client("com.mitchellh.ghostty", "hyprforge"),
+                client("dev.zed.Zed", "hyprland.lua"),
+            ]));
+            f(m);
+        });
     }
 
     #[test]
     fn picking_a_window_fills_the_class_and_leaves_the_title_alone() {
-        let mut m = module_with_picker();
-        let _ = m.update(Message::PickClass(1));
-        let draft = m.draft.as_ref().unwrap();
-        assert_eq!(draft.class, "dev.zed.Zed");
-        assert_eq!(draft.title, "", "the title is a separate, deliberate choice");
+        with_picker(|m| {
+            let _ = m.update(Message::PickClass(1));
+            let draft = m.draft.as_ref().unwrap();
+            assert_eq!(draft.class, "dev.zed.Zed");
+            assert_eq!(draft.title, "", "the title is a separate, deliberate choice");
+        });
     }
 
     #[test]
     fn adding_the_title_is_a_second_explicit_action() {
-        let mut m = module_with_picker();
-        let _ = m.update(Message::PickClass(0));
-        let _ = m.update(Message::PickTitle(0));
-        let draft = m.draft.as_ref().unwrap();
-        assert_eq!(draft.class, "com.mitchellh.ghostty");
-        assert_eq!(draft.title, "hyprforge");
+        with_picker(|m| {
+            let _ = m.update(Message::PickClass(0));
+            let _ = m.update(Message::PickTitle(0));
+            let draft = m.draft.as_ref().unwrap();
+            assert_eq!(draft.class, "com.mitchellh.ghostty");
+            assert_eq!(draft.title, "hyprforge");
+        });
     }
 
     /// An index only means anything against the list it was rendered from.
@@ -1178,39 +1428,114 @@ mod tests {
     /// take the whole app down.
     #[test]
     fn a_stale_index_is_ignored_rather_than_panicking() {
-        let mut m = module_with_picker();
-        let _ = m.update(Message::PickClass(99));
-        assert_eq!(m.draft.as_ref().unwrap().class, "");
+        with_picker(|m| {
+            let _ = m.update(Message::PickClass(99));
+            assert_eq!(m.draft.as_ref().unwrap().class, "");
+        });
     }
 
     #[test]
     fn picking_while_the_picker_is_closed_does_nothing() {
-        let (mut m, _) = WindowRulesModule::new();
-        m.draft = Some(RuleDraft::default());
-        m.picker = None;
-        let _ = m.update(Message::PickClass(0));
-        assert_eq!(m.draft.as_ref().unwrap().class, "");
+        with_isolated_module(|m| {
+            m.draft = Some(RuleDraft::default());
+            m.picker = None;
+            let _ = m.update(Message::PickClass(0));
+            assert_eq!(m.draft.as_ref().unwrap().class, "");
+        });
     }
 
     /// Closing the picker while the hyprctl call is still running must not
     /// have the result reopen it underneath the user.
     #[test]
     fn a_response_arriving_after_close_is_discarded() {
-        let mut m = module_with_picker();
-        let _ = m.update(Message::ClosePicker);
-        let _ = m.update(Message::ClientsLoaded(Ok(vec![client("late", "arrival")])));
-        assert!(m.picker.is_none(), "a closed picker must stay closed");
+        with_picker(|m| {
+            let _ = m.update(Message::ClosePicker);
+            let _ = m.update(Message::ClientsLoaded(Ok(vec![client("late", "arrival")])));
+            assert!(m.picker.is_none(), "a closed picker must stay closed");
+        });
     }
 
     /// No Hyprland is not an error dialog — the fields still work by hand.
     #[test]
     fn an_unavailable_compositor_leaves_the_form_usable() {
-        let (mut m, _) = WindowRulesModule::new();
-        m.draft = Some(RuleDraft::default());
-        let _ = m.update(Message::OpenPicker);
-        let _ = m.update(Message::ClientsLoaded(Err("could not run hyprctl".into())));
-        assert!(matches!(m.picker, Some(PickerState::Unavailable(_))));
-        assert!(m.error.is_none(), "this must not surface as a module-level error");
+        with_isolated_module(|m| {
+            m.draft = Some(RuleDraft::default());
+            let _ = m.update(Message::OpenPicker);
+            let _ = m.update(Message::ClientsLoaded(Err("could not run hyprctl".into())));
+            assert!(matches!(m.picker, Some(PickerState::Unavailable(_))));
+            assert!(m.error.is_none(), "this must not surface as a module-level error");
+        });
+    }
+
+    fn monitor(name: &str, desc: &str) -> Monitor {
+        Monitor { name: name.to_string(), description: desc.to_string() }
+    }
+
+    /// A pin must store the EDID description, not the connector — that's the
+    /// whole reason it survives a replug.
+    #[test]
+    fn choosing_a_monitor_stores_its_description_not_its_connector() {
+        with_isolated_module(|m| {
+            m.monitors = vec![monitor("DP-3", "GWD ARZOPA")];
+            let _ = m.update(Message::AddWorkspacePin);
+            let choice = MonitorChoice::from_monitor(&m.monitors[0]);
+            let _ = m.update(Message::PinMonitor(0, choice));
+            assert_eq!(m.workspace_rules[0].monitor, "desc:GWD ARZOPA");
+        });
+    }
+
+    /// A monitor that reports no description can only be named by connector;
+    /// a bare `desc:` would match nothing at all.
+    #[test]
+    fn a_monitor_without_a_description_is_pinned_by_connector() {
+        let choice = MonitorChoice::from_monitor(&monitor("HDMI-A-1", ""));
+        assert_eq!(choice.selector, "HDMI-A-1");
+    }
+
+    /// Unplugging the monitor a pin points at must not make the pin look
+    /// blank — editing anything else on the row would then quietly clear it.
+    #[test]
+    fn a_pin_for_a_disconnected_monitor_still_shows_what_it_points_at() {
+        let stored = MonitorChoice::from_stored("desc:GWD ARZOPA");
+        assert_eq!(stored.selector, "desc:GWD ARZOPA");
+        assert!(stored.to_string().contains("not connected"));
+    }
+
+    #[test]
+    fn pins_can_be_added_and_removed() {
+        with_isolated_module(|m| {
+            let _ = m.update(Message::AddWorkspacePin);
+            let _ = m.update(Message::AddWorkspacePin);
+            assert_eq!(m.workspace_rules.len(), 2);
+            let _ = m.update(Message::PinWorkspace(1, "name:gaming".into()));
+            let _ = m.update(Message::DeleteWorkspacePin(0));
+            assert_eq!(m.workspace_rules.len(), 1);
+            assert_eq!(m.workspace_rules[0].workspace, "name:gaming");
+        });
+    }
+
+    /// Deleting past the end has to be inert rather than panicking — the
+    /// same stale-index hazard the picker has.
+    #[test]
+    fn editing_a_pin_that_is_gone_does_nothing() {
+        with_isolated_module(|m| {
+            let _ = m.update(Message::DeleteWorkspacePin(3));
+            let _ = m.update(Message::PinWorkspace(3, "x".into()));
+            assert!(m.workspace_rules.is_empty());
+        });
+    }
+
+    /// Adding a row before typing into it is the normal flow, so a blank pin
+    /// must be storable and simply not emitted.
+    #[test]
+    fn a_half_filled_pin_is_kept_but_generates_nothing() {
+        with_isolated_module(|m| {
+            let _ = m.update(Message::AddWorkspacePin);
+            let _ = m.update(Message::PinDefault(0, true));
+            assert_eq!(m.workspace_rules.len(), 1);
+            let lua = hyprforge_windowrules::codegen::generate(&[], &m.workspace_rules);
+            assert!(!lua.contains("workspace_rule"), "{lua}");
+        });
     }
 
     #[test]
