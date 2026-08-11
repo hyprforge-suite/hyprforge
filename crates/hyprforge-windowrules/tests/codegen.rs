@@ -172,6 +172,67 @@ fn every_idle_inhibit_mode_is_one_hyprland_accepts() {
     }
 }
 
+/// The static effects — how a window comes up, rather than how it behaves
+/// once it's up. Names probed against a running 0.56.1; the wiki page this
+/// project otherwise relies on documents the dynamic table only.
+#[test]
+fn generates_the_static_effects() {
+    let mut rule = discord_rule();
+    rule.effects.tile = Some(true);
+    rule.effects.fullscreen = Some(true);
+    rule.effects.maximize = Some(true);
+    rule.effects.pin = Some(true);
+    rule.effects.center = Some(true);
+    rule.effects.no_initial_focus = Some(true);
+    rule.effects.no_close_for = Some(5);
+    let lua = generate(&[rule], &[]);
+    for expected in [
+        "tile = true",
+        "fullscreen = true",
+        "maximize = true",
+        "pin = true",
+        "center = true",
+        "no_initial_focus = true",
+        "no_close_for = 5",
+    ] {
+        assert!(lua.contains(expected), "missing {expected}: {lua}");
+    }
+}
+
+/// Per-window monitor assignment, stored the same way a workspace pin stores
+/// it — by description, so it survives a replug.
+#[test]
+fn a_window_can_be_sent_to_a_monitor_by_description() {
+    let mut rule = discord_rule();
+    rule.effects.monitor = Some("desc:GWD ARZOPA".to_string());
+    let lua = generate(&[rule], &[]);
+    assert!(lua.contains("monitor = [[desc:GWD ARZOPA]]"), "got: {lua}");
+}
+
+/// Hyprland accepts any string for these two and silently does nothing with
+/// one it doesn't know, so the generator must pass them through untouched
+/// rather than "helpfully" normalising a value it can't validate either.
+#[test]
+fn unvalidated_string_effects_pass_through_verbatim() {
+    let mut rule = discord_rule();
+    rule.effects.suppress_event = Some("maximizefullscreen".to_string());
+    rule.effects.group = Some("barred".to_string());
+    let lua = generate(&[rule], &[]);
+    assert!(lua.contains("suppress_event = [[maximizefullscreen]]"), "got: {lua}");
+    assert!(lua.contains("group = [[barred]]"), "got: {lua}");
+}
+
+/// The lists offered in the UI are a convenience, not a constraint — but
+/// they still have to be values the compositor acts on.
+#[test]
+fn the_offered_suppress_and_group_values_are_the_documented_ones() {
+    use hyprforge_windowrules::model::{GROUP_MODES, SUPPRESS_EVENTS};
+    assert!(SUPPRESS_EVENTS.contains(&"fullscreen"));
+    assert!(SUPPRESS_EVENTS.contains(&"activatefocus"));
+    assert!(GROUP_MODES.contains(&"new"));
+    assert!(GROUP_MODES.contains(&"deny"));
+}
+
 #[test]
 fn unset_effects_emit_nothing() {
     let lua = generate(&[discord_rule()], &[]);

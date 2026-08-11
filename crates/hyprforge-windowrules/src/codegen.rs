@@ -114,6 +114,30 @@ fn render_rule(rule: &Rule) -> String {
     if let Some(v) = &e.idle_inhibit {
         fields.push(format!("idle_inhibit = {}", lua_string(v)));
     }
+    for (name, value) in [
+        ("tile", e.tile),
+        ("fullscreen", e.fullscreen),
+        ("maximize", e.maximize),
+        ("pin", e.pin),
+        ("center", e.center),
+        ("no_initial_focus", e.no_initial_focus),
+    ] {
+        if let Some(v) = value {
+            fields.push(format!("{name} = {v}"));
+        }
+    }
+    if let Some(v) = &e.monitor {
+        fields.push(format!("monitor = {}", lua_string(v)));
+    }
+    if let Some(v) = &e.suppress_event {
+        fields.push(format!("suppress_event = {}", lua_string(v)));
+    }
+    if let Some(v) = &e.group {
+        fields.push(format!("group = {}", lua_string(v)));
+    }
+    if let Some(v) = e.no_close_for {
+        fields.push(format!("no_close_for = {v}"));
+    }
 
     format!("hl.window_rule({{ {} }})\n", fields.join(", "))
 }

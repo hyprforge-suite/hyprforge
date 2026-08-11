@@ -227,6 +227,16 @@ generator supports:
 - **Appearance** — `opaque`, `no_anim`, `dim_around`, `border_size` and
   `animation`. Hyprland has no `no_border` effect; a border size of 0 is how
   that's spelled, so 0 is kept rather than treated as unset.
+- **How it opens** — the *static* effects, applied as the window appears
+  rather than toggled on one already up: `tile`, `fullscreen`, `maximize`,
+  `center`, `pin`, `no_initial_focus`, per-window `monitor`, plus
+  `suppress_event`, `group` and `no_close_for`. The monitor is stored as
+  `desc:<description>` like a workspace pin, so it survives a replug.
+
+  `suppress_event` and `group` are the two fields Hyprland does **not**
+  validate: it accepts any string and silently does nothing with one it
+  doesn't recognise, so a typo there reports no error at all. The known-good
+  values are shown as placeholders for that reason.
 - **Focus & sizing** — `no_focus`, `stay_focused`, `keep_aspect_ratio`,
   `min_size`/`max_size` (plain pixels, no expressions — unlike move/size),
   and `idle_inhibit`. That last one is a dropdown rather than a text field

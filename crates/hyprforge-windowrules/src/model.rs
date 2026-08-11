@@ -165,7 +165,61 @@ pub struct Effects {
     /// must never be free text in the UI.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idle_inhibit: Option<String>,
+
+    // --- Static effects: applied as the window opens, rather than being
+    // toggled on a window already up.
+    /// Open tiled. The counterpart to `float`; setting both is contradictory
+    /// and Hyprland resolves it, so the UI offers them as separate opt-ins
+    /// rather than pretending to know which wins.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tile: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fullscreen: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maximize: Option<bool>,
+    /// Floating windows only — Hyprland ignores it otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pin: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub center: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_initial_focus: Option<bool>,
+    /// Which monitor the window opens on. Same `desc:<description>` form as
+    /// [`WorkspaceRule::monitor`], and preferred for the same reason: a
+    /// connector name can move between boots.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monitor: Option<String>,
+    /// Events from the window to ignore, e.g. `maximize`, `fullscreen`,
+    /// `activate`, `activatefocus`.
+    ///
+    /// Hyprland accepts *any* string here without complaint, so an
+    /// unrecognised value is not an error — it simply does nothing. That
+    /// makes a typo invisible, which is why the UI shows the known values.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suppress_event: Option<String>,
+    /// Grouping behaviour, e.g. `new`, `lock`, `deny`, `barred`. Unvalidated
+    /// in the same way as `suppress_event`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Refuse close requests for this long after the window opens. Hyprland
+    /// takes a bare integer; the units are its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_close_for: Option<i32>,
 }
+
+/// Values `suppress_event` is known to act on. Hyprland does *not* reject
+/// anything else, so this list is a convenience rather than a constraint —
+/// treat it as "the ones that do something", not "the ones that parse".
+pub const SUPPRESS_EVENTS: [&str; 5] = [
+    "fullscreen",
+    "maximize",
+    "maximizefullscreen",
+    "activate",
+    "activatefocus",
+];
+
+/// Values `group` is known to act on. Unvalidated by Hyprland, as above.
+pub const GROUP_MODES: [&str; 4] = ["new", "lock", "deny", "barred"];
 
 /// The only values `idle_inhibit` accepts, confirmed against Hyprland 0.56.1
 /// — anything else fails with `idle_inhibit rule has unknown mode`.
