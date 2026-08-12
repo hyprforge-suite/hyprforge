@@ -15,3 +15,8 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+# Dev-only: exercises import.rs against the real sandboxed evaluator rather
+# than hand-built JSON, without adding mlua to this crate's own dependency
+# graph — see import.rs's module docs for why production code never
+# depends on this crate directly.
+hyprforge-lua-import.workspace = true
