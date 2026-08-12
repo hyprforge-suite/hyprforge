@@ -61,6 +61,24 @@ pub enum SetupPlan {
     NeedsInsert { insert_before_line: usize },
 }
 
+/// The closing marker of a Hyprforge-managed require block, shared by both
+/// placements — which block a given `-- end...` line closes is determined
+/// by which start marker precedes it, not by its own text.
+const MARKER_END: &str = "-- end Hyprforge-managed requires";
+
+/// The opening marker for `placement`'s block. Two placements, two blocks:
+/// grouping every `BeforeUserRequires` module's line together (and likewise
+/// for `AtEnd`) is what stops a second module landing in an arbitrary
+/// position relative to the first — see [`detect`].
+fn marker_start(placement: Placement) -> &'static str {
+    match placement {
+        Placement::BeforeUserRequires => {
+            "-- Hyprforge-managed requires (evaluated first) — do not edit by hand."
+        }
+        Placement::AtEnd => "-- Hyprforge-managed requires (evaluated last) — do not edit by hand.",
+    }
+}
+
 /// Where a module's require line belongs among the user's own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placement {
@@ -73,6 +91,12 @@ pub enum Placement {
 
 /// Detects whether `hyprland_lua` already sources `line`, and where it would
 /// go if not.
+///
+/// A require already grouped under `placement`'s marker block is found
+/// first and reuses that block (see [`apply`]) — so a second
+/// `BeforeUserRequires` module lands inside the first one's block, not in
+/// an arbitrary position determined by whichever require happened to be
+/// textually first at install time.
 pub fn detect(hyprland_lua: &str, line: &str, placement: Placement) -> SetupPlan {
     if hyprland_lua
         .lines()
@@ -81,11 +105,19 @@ pub fn detect(hyprland_lua: &str, line: &str, placement: Placement) -> SetupPlan
         return SetupPlan::AlreadyPresent;
     }
 
-    let end = hyprland_lua.lines().count() + 1;
+    let lines: Vec<&str> = hyprland_lua.lines().collect();
+    if let Some(start_idx) = lines.iter().position(|l| l.trim() == marker_start(placement)) {
+        if let Some(offset) = lines[start_idx..].iter().position(|l| l.trim() == MARKER_END) {
+            let end_idx = start_idx + offset;
+            return SetupPlan::NeedsInsert { insert_before_line: end_idx + 1 };
+        }
+    }
+
+    let end = lines.len() + 1;
     let insert_before_line = match placement {
         Placement::AtEnd => end,
-        Placement::BeforeUserRequires => hyprland_lua
-            .lines()
+        Placement::BeforeUserRequires => lines
+            .iter()
             .enumerate()
             .find(|(_, l)| l.trim_start().starts_with("require("))
             .map(|(i, _)| i + 1)
@@ -97,14 +129,28 @@ pub fn detect(hyprland_lua: &str, line: &str, placement: Placement) -> SetupPlan
 
 /// Applies `plan` to `hyprland_lua`, returning the new full contents.
 /// Returns the input unchanged for [`SetupPlan::AlreadyPresent`].
-pub fn apply(hyprland_lua: &str, plan: &SetupPlan, line: &str) -> String {
+///
+/// When `plan`'s insertion point sits right before an existing
+/// `-- end Hyprforge-managed requires` line, only `line` itself is
+/// inserted — [`detect`] already found `placement`'s block and is asking
+/// for `line` to join it. Otherwise there's no block yet, so this creates
+/// one: `line` gets its own opening/closing markers rather than being
+/// dropped in bare.
+pub fn apply(hyprland_lua: &str, plan: &SetupPlan, line: &str, placement: Placement) -> String {
     let SetupPlan::NeedsInsert { insert_before_line } = plan else {
         return hyprland_lua.to_string();
     };
 
     let mut lines: Vec<&str> = hyprland_lua.lines().collect();
     let idx = (*insert_before_line - 1).min(lines.len());
-    lines.insert(idx, line);
+    let joins_existing_block = lines.get(idx).is_some_and(|l| l.trim() == MARKER_END);
+    if joins_existing_block {
+        lines.insert(idx, line);
+    } else {
+        for (offset, new_line) in [marker_start(placement), line, MARKER_END].into_iter().enumerate() {
+            lines.insert(idx + offset, new_line);
+        }
+    }
     let mut out = lines.join("\n");
     if hyprland_lua.ends_with('\n') || hyprland_lua.is_empty() {
         out.push('\n');
@@ -163,7 +209,7 @@ pub fn install(path: &Path, line: &str, placement: Placement) -> Result<SetupPla
         })?;
     }
 
-    let new_contents = apply(&contents, &plan, line);
+    let new_contents = apply(&contents, &plan, line, placement);
     crate::paths::write_atomic(path, &new_contents).map_err(|source| SetupError::Write {
         path: path.display().to_string(),
         source,
@@ -174,25 +220,27 @@ pub fn install(path: &Path, line: &str, placement: Placement) -> Result<SetupPla
 
 /// The file [`create_lua_config`] would write, so a GUI can show it before
 /// anything touches the disk.
-pub fn preview_lua_config(lines: &[String]) -> String {
+pub fn preview_lua_config(line: &str, placement: Placement) -> String {
     let mut out = String::from(
         "-- Hyprland configuration.\n\
          -- Created by Hyprforge because no hyprland.lua existed yet. This file is\n\
          -- yours to edit — Hyprforge only ever manages the require() lines below.\n\n",
     );
-    for line in lines {
-        out.push_str(line);
-        out.push('\n');
-    }
+    out.push_str(marker_start(placement));
+    out.push('\n');
+    out.push_str(line);
+    out.push('\n');
+    out.push_str(MARKER_END);
+    out.push('\n');
     out
 }
 
-/// Creates a minimal `hyprland.lua` sourcing the given require lines.
+/// Creates a minimal `hyprland.lua` sourcing `line`.
 ///
 /// Refuses if `path` exists: this is the [`HyprConfig::Missing`] path only,
 /// and creating a config is not the same operation as editing one — an
 /// existing file must go through [`install`], which backs up first.
-pub fn create_lua_config(path: &Path, lines: &[String]) -> Result<(), SetupError> {
+pub fn create_lua_config(path: &Path, line: &str, placement: Placement) -> Result<(), SetupError> {
     if path.exists() {
         return Err(SetupError::AlreadyExists {
             path: path.display().to_string(),
@@ -204,10 +252,71 @@ pub fn create_lua_config(path: &Path, lines: &[String]) -> Result<(), SetupError
             source,
         })?;
     }
-    std::fs::write(path, preview_lua_config(lines)).map_err(|source| SetupError::Write {
+    std::fs::write(path, preview_lua_config(line, placement)).map_err(|source| SetupError::Write {
         path: path.display().to_string(),
         source,
     })
+}
+
+/// Removes specific lines from specific files, after a successful import
+/// (see `hyprforge-lua-import`) — but only lines that, right now, still
+/// look exactly like a single-line `hl.*(...)` call: trimmed, starts with
+/// `hl.` and ends with `)`. `targets` is `(file, 1-indexed line)` pairs.
+///
+/// This is deliberately conservative rather than clever. The importer
+/// only ever knows where a call *starts* (see `RecordedCall::line`'s doc
+/// comment), so a multi-line call's recorded line never satisfies "starts
+/// with `hl.` *and* ends with `)`" on its own — it's excluded by the same
+/// check that confirms a single-line call, not by a separate case. A file
+/// edited since the import ran is handled the same way: re-reading and
+/// re-checking here (rather than trusting what was true at import time)
+/// means a line that no longer matches is just skipped, never force
+/// -removed.
+///
+/// Multiple targets in the same file are handled together — each file is
+/// read and rewritten at most once — and a fresh backup
+/// (`<file>.hyprforge-import.bak`, always overwritten) is written first
+/// for any file that has at least one real match. Returns how many lines
+/// were actually removed, which may be less than `targets.len()`.
+pub fn remove_matched_lines(targets: &[(PathBuf, usize)]) -> std::io::Result<usize> {
+    let mut by_file: std::collections::HashMap<&Path, Vec<usize>> = std::collections::HashMap::new();
+    for (path, line) in targets {
+        by_file.entry(path.as_path()).or_default().push(*line);
+    }
+
+    let mut total_removed = 0;
+    for (path, target_lines) in by_file {
+        let Ok(contents) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let original: Vec<&str> = contents.lines().collect();
+        let mut kept = Vec::with_capacity(original.len());
+        let mut removed_here = 0;
+        for (i, text) in original.iter().enumerate() {
+            let line_no = i + 1;
+            let trimmed = text.trim();
+            let matches = target_lines.contains(&line_no)
+                && trimmed.starts_with("hl.")
+                && trimmed.ends_with(')');
+            if matches {
+                removed_here += 1;
+            } else {
+                kept.push(*text);
+            }
+        }
+        if removed_here == 0 {
+            continue;
+        }
+        let backup = path.with_extension("lua.hyprforge-import.bak");
+        std::fs::copy(path, &backup)?;
+        let mut out = kept.join("\n");
+        if contents.ends_with('\n') {
+            out.push('\n');
+        }
+        crate::paths::write_atomic(path, &out)?;
+        total_removed += removed_here;
+    }
+    Ok(total_removed)
 }
 
 #[cfg(test)]
@@ -225,8 +334,14 @@ mod tests {
         let line = require_line("keybinds");
         let plan = detect(cfg, &line, Placement::BeforeUserRequires);
         assert_eq!(plan, SetupPlan::NeedsInsert { insert_before_line: 2 });
-        let out = apply(cfg, &plan, &line);
-        assert!(out.lines().nth(1).unwrap().contains("hyprforge/keybinds"));
+        let out = apply(cfg, &plan, &line, Placement::BeforeUserRequires);
+        // A fresh block: opening marker, the line itself, closing marker —
+        // all before the user's own first require.
+        let out_lines: Vec<&str> = out.lines().collect();
+        assert_eq!(out_lines[1], marker_start(Placement::BeforeUserRequires));
+        assert!(out_lines[2].contains("hyprforge/keybinds"));
+        assert_eq!(out_lines[3], MARKER_END);
+        assert_eq!(out_lines[4], "require(\"mine\")");
     }
 
     #[test]
@@ -234,8 +349,11 @@ mod tests {
         let cfg = "require(\"mine\")\n";
         let line = require_line("keybinds");
         let plan = detect(cfg, &line, Placement::AtEnd);
-        let out = apply(cfg, &plan, &line);
-        assert!(out.lines().last().unwrap().contains("hyprforge/keybinds"));
+        let out = apply(cfg, &plan, &line, Placement::AtEnd);
+        let out_lines: Vec<&str> = out.lines().collect();
+        assert_eq!(out_lines[1], marker_start(Placement::AtEnd));
+        assert!(out_lines[2].contains("hyprforge/keybinds"));
+        assert_eq!(out_lines[3], MARKER_END);
     }
 
     /// With no requires at all, both placements mean "the end" — there's
@@ -245,9 +363,37 @@ mod tests {
         let cfg = "hl.config({})\n";
         let line = require_line("keybinds");
         for placement in [Placement::BeforeUserRequires, Placement::AtEnd] {
-            let out = apply(cfg, &detect(cfg, &line, placement), &line);
-            assert!(out.lines().last().unwrap().contains("hyprforge/keybinds"));
+            let out = apply(cfg, &detect(cfg, &line, placement), &line, placement);
+            assert!(out.contains("hyprforge/keybinds"));
+            assert_eq!(out.lines().last().unwrap(), MARKER_END);
         }
+    }
+
+    /// A second module sharing a placement must join the first module's
+    /// block, not create a new one above/below it based on whichever
+    /// require happened to be textually first.
+    #[test]
+    fn a_second_module_at_the_same_placement_joins_the_first_ones_block() {
+        let cfg = "require(\"mine\")\n";
+        let first = require_line("window-rules");
+        let plan1 = detect(cfg, &first, Placement::BeforeUserRequires);
+        let out = apply(cfg, &plan1, &first, Placement::BeforeUserRequires);
+
+        let second = require_line("monitors");
+        let plan2 = detect(&out, &second, Placement::BeforeUserRequires);
+        let out = apply(&out, &plan2, &second, Placement::BeforeUserRequires);
+
+        let out_lines: Vec<&str> = out.lines().collect();
+        assert_eq!(out_lines[0], marker_start(Placement::BeforeUserRequires));
+        assert!(out_lines[1].contains("hyprforge/window-rules"));
+        assert!(out_lines[2].contains("hyprforge/monitors"));
+        assert_eq!(out_lines[3], MARKER_END);
+        assert_eq!(out_lines[4], "require(\"mine\")");
+        // Only one block, not two.
+        assert_eq!(
+            out.lines().filter(|l| *l == marker_start(Placement::BeforeUserRequires)).count(),
+            1
+        );
     }
 
     /// Two modules must not see each other as "already present".
@@ -301,18 +447,119 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hyprland.lua");
         std::fs::write(&path, "theirs\n").unwrap();
-        assert!(create_lua_config(&path, &[require_line("keybinds")]).is_err());
+        assert!(create_lua_config(&path, &require_line("keybinds"), Placement::AtEnd).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs\n");
     }
 
+    /// A freshly created config already uses the marker-block format, so it
+    /// looks the same whether it was created empty or grown from an
+    /// existing file.
     #[test]
-    fn a_created_config_sources_every_module_asked_for() {
+    fn a_created_config_wraps_its_line_in_a_marker_block() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("hyprland.lua");
-        let lines = [require_line("window-rules"), require_line("keybinds")];
-        create_lua_config(&path, &lines).unwrap();
+        create_lua_config(&path, &require_line("window-rules"), Placement::BeforeUserRequires).unwrap();
         let out = std::fs::read_to_string(&path).unwrap();
+        assert!(out.contains(marker_start(Placement::BeforeUserRequires)));
         assert!(out.contains("hyprforge/window-rules"));
+        assert!(out.contains(MARKER_END));
+    }
+
+    /// A second module, installed later into a config `create_lua_config`
+    /// made, still joins its own block correctly rather than treating the
+    /// freshly-created file's marker block as unrecognised text.
+    #[test]
+    fn a_module_installed_after_creation_joins_the_created_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hyprland.lua");
+        create_lua_config(&path, &require_line("window-rules"), Placement::BeforeUserRequires).unwrap();
+
+        install(&path, &require_line("monitors"), Placement::BeforeUserRequires).unwrap();
+        install(&path, &require_line("keybinds"), Placement::AtEnd).unwrap();
+
+        let out = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            out.matches(marker_start(Placement::BeforeUserRequires)).count(),
+            1,
+            "window-rules and monitors should share one block"
+        );
+        assert!(out.contains("hyprforge/monitors"));
         assert!(out.contains("hyprforge/keybinds"));
+    }
+
+    #[test]
+    fn remove_matched_lines_deletes_an_exact_single_line_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("binds.lua");
+        std::fs::write(
+            &path,
+            "local mainMod = \"SUPER\"\nhl.bind(mainMod .. \" + Q\", hl.dsp.window.close())\n",
+        )
+        .unwrap();
+
+        let removed = remove_matched_lines(&[(path.clone(), 2)]).unwrap();
+        assert_eq!(removed, 1);
+        let out = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(out, "local mainMod = \"SUPER\"\n");
+    }
+
+    #[test]
+    fn remove_matched_lines_skips_a_line_that_no_longer_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hyprland.lua");
+        // The user edited this line since the import ran — it's no longer
+        // a bare `hl.*(...)` call, so it must survive.
+        std::fs::write(&path, "-- hl.bind(\"SUPER + Q\", hl.dsp.window.close()) disabled\n").unwrap();
+
+        let removed = remove_matched_lines(&[(path.clone(), 1)]).unwrap();
+        assert_eq!(removed, 0);
+        assert!(std::fs::read_to_string(&path).unwrap().contains("disabled"));
+    }
+
+    /// A multi-line call's recorded line is only its start — which never
+    /// ends with `)` on its own — so it's left alone rather than having
+    /// just its opening line deleted and the rest orphaned.
+    #[test]
+    fn remove_matched_lines_never_touches_a_multi_line_calls_start_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hyprland.lua");
+        std::fs::write(&path, "hl.window_rule({\n  class = \"^discord$\",\n})\n").unwrap();
+
+        let removed = remove_matched_lines(&[(path.clone(), 1)]).unwrap();
+        assert_eq!(removed, 0);
+        assert!(std::fs::read_to_string(&path).unwrap().contains("hl.window_rule({"));
+    }
+
+    #[test]
+    fn remove_matched_lines_writes_a_fresh_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hyprland.lua");
+        let original = "hl.bind(\"SUPER + Q\", hl.dsp.window.close())\n";
+        std::fs::write(&path, original).unwrap();
+
+        remove_matched_lines(&[(path.clone(), 1)]).unwrap();
+
+        let backup = path.with_extension("lua.hyprforge-import.bak");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), original);
+    }
+
+    #[test]
+    fn remove_matched_lines_handles_multiple_files_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.lua");
+        let b = dir.path().join("b.lua");
+        std::fs::write(&a, "hl.bind(\"SUPER + Q\", hl.dsp.window.close())\n").unwrap();
+        std::fs::write(&b, "hl.bind(\"SUPER + C\", hl.dsp.window.close())\nrequire(\"x\")\n").unwrap();
+
+        let removed = remove_matched_lines(&[(a.clone(), 1), (b.clone(), 1)]).unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(std::fs::read_to_string(&a).unwrap().trim(), "");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "require(\"x\")\n");
+    }
+
+    #[test]
+    fn remove_matched_lines_is_a_noop_for_an_unreadable_file() {
+        let removed = remove_matched_lines(&[(PathBuf::from("/nonexistent/path.lua"), 1)]).unwrap();
+        assert_eq!(removed, 0);
     }
 }

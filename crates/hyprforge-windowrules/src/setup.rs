@@ -47,7 +47,7 @@ pub fn detect(hyprland_lua: &str) -> SetupPlan {
 
 /// Applies `plan`, returning the new full file contents.
 pub fn apply(hyprland_lua: &str, plan: &SetupPlan) -> String {
-    lua_setup::apply(hyprland_lua, plan, &require_line_string())
+    lua_setup::apply(hyprland_lua, plan, &require_line_string(), PLACEMENT)
 }
 
 /// Renders the line to be inserted, for the GUI's confirmation dialog.
@@ -57,12 +57,12 @@ pub fn preview_line() -> String {
 
 /// Renders the file [`create_lua_config`] would write.
 pub fn preview_lua_config() -> String {
-    lua_setup::preview_lua_config(&[require_line_string()])
+    lua_setup::preview_lua_config(&require_line_string(), PLACEMENT)
 }
 
 /// Creates a minimal `hyprland.lua` sourcing the window-rules file.
 pub fn create_lua_config(path: &Path) -> Result<(), SetupError> {
-    lua_setup::create_lua_config(path, &[require_line_string()])
+    lua_setup::create_lua_config(path, &require_line_string(), PLACEMENT)
 }
 
 /// Backs up and inserts the require line, if it isn't already there.
@@ -88,6 +88,8 @@ mod tests {
     fn the_line_goes_before_the_users_own_requires() {
         let cfg = "require(\"theirs\")\n";
         let out = apply(cfg, &detect(cfg));
-        assert_eq!(out.lines().next().unwrap(), REQUIRE_LINE);
+        let out_lines: Vec<&str> = out.lines().collect();
+        assert!(out_lines[1].contains(REQUIRE_LINE));
+        assert_eq!(out_lines[3], "require(\"theirs\")");
     }
 }

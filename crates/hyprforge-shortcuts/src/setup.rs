@@ -33,11 +33,21 @@ pub fn detect(hyprland_lua: &str) -> SetupPlan {
 }
 
 pub fn apply(hyprland_lua: &str, plan: &SetupPlan) -> String {
-    lua_setup::apply(hyprland_lua, plan, REQUIRE_LINE)
+    lua_setup::apply(hyprland_lua, plan, REQUIRE_LINE, PLACEMENT)
 }
 
 pub fn preview_line() -> String {
     REQUIRE_LINE.to_string()
+}
+
+/// Renders the file [`create_lua_config`] would write.
+pub fn preview_lua_config() -> String {
+    lua_setup::preview_lua_config(REQUIRE_LINE, PLACEMENT)
+}
+
+/// Creates a minimal `hyprland.lua` sourcing the keybinds file.
+pub fn create_lua_config(path: &Path) -> Result<(), SetupError> {
+    lua_setup::create_lua_config(path, REQUIRE_LINE, PLACEMENT)
 }
 
 pub fn install(path: &Path) -> Result<SetupPlan, SetupError> {
@@ -59,6 +69,8 @@ mod tests {
     fn the_line_goes_after_the_users_own_requires() {
         let cfg = "require(\"theirs\")\n";
         let out = apply(cfg, &detect(cfg));
-        assert_eq!(out.lines().last().unwrap(), REQUIRE_LINE);
+        let out_lines: Vec<&str> = out.lines().collect();
+        assert_eq!(out_lines[0], "require(\"theirs\")");
+        assert!(out_lines[2].contains(REQUIRE_LINE));
     }
 }
