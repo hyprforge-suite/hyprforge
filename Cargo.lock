@@ -1380,6 +1380,8 @@ dependencies = [
  "anyhow",
  "futures-util",
  "hyprforge-core",
+ "hyprforge-lua-import",
+ "hyprforge-shortcuts",
  "hyprforge-windowrules",
  "iced",
  "serde",
