@@ -1396,6 +1396,7 @@ name = "hyprforge-shortcuts"
 version = "0.1.0"
 dependencies = [
  "hyprforge-core",
+ "hyprforge-lua-import",
  "serde",
  "serde_json",
  "tempfile",
@@ -1408,6 +1409,7 @@ name = "hyprforge-windowrules"
 version = "0.1.0"
 dependencies = [
  "hyprforge-core",
+ "hyprforge-lua-import",
  "serde",
  "serde_json",
  "tempfile",
