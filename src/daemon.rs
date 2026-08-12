@@ -569,6 +569,16 @@ impl Daemon {
         let already_satisfied = plan.is_satisfied_by(&heads);
         if already_satisfied {
             *self.unsatisfied_plan.lock().await = None;
+            // Only once `heads` are confirmed to already match the plan
+            // currently in effect — never from a plan we just sent but
+            // haven't seen echoed back yet, which the `else` branch below
+            // handles. That echo arrives as a later settle, which re-enters
+            // here and writes the fallback then.
+            //
+            // Spawned rather than awaited: it shells out to `hyprctl`, and
+            // this settle's own signal emission below must never wait on
+            // that round-trip.
+            tokio::spawn(write_monitors_fallback(heads.clone()));
         } else {
             // A commit that doesn't take is the other way to loop forever.
             // `apply_configuration` reports success once the request is sent,
@@ -756,6 +766,28 @@ impl Daemon {
         if let Err(e) = crate::storage::save(&self.storage_path, profiles) {
             tracing::error!(error = %e, "failed to persist display profiles");
         }
+    }
+}
+
+/// Best-effort regenerates the static, Hyprland-native fallback
+/// (`monitors.lua`) from the live, settled heads — see the
+/// `monitors_codegen` module docs. Unlike everything else this daemon
+/// does, this file is applied by Hyprland itself on its own
+/// startup/reload, so it's what keeps a layout from reverting when the
+/// daemon isn't the one running.
+///
+/// A free function taking owned `heads`, not a `&self` method: it's
+/// spawned as a detached background task (it shells out to `hyprctl`, and
+/// the settle path that triggers it must never wait on that round-trip),
+/// so its future has to be `'static` and touches no daemon state.
+async fn write_monitors_fallback(heads: Vec<Head>) {
+    let descriptions = crate::hyprctl_monitors::connector_descriptions().await;
+    let entries = crate::monitors_codegen::entries_from_heads(&heads, &descriptions);
+    let lua = crate::monitors_codegen::generate(&entries);
+    if let Err(e) =
+        hyprforge_core::paths::write_atomic(&hyprforge_core::paths::monitors_lua_path(), &lua)
+    {
+        tracing::warn!(error = %e, "failed to write the monitors.lua fallback");
     }
 }
 

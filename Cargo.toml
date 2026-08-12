@@ -22,7 +22,10 @@ hyprforge-core = { workspace = true, features = ["dbus"] }
 zbus.workspace = true
 wayland-client.workspace = true
 wayland-protocols-wlr.workspace = true
-tokio.workspace = true
+# "process" for the best-effort `hyprctl monitors -j` call that gets
+# Hyprland's own connector descriptions for the static monitors.lua
+# fallback — see src/hyprctl_monitors.rs.
+tokio = { workspace = true, features = ["process"] }
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
