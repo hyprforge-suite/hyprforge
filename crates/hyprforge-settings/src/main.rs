@@ -7,6 +7,7 @@ use iced::keyboard::{self, key, Key};
 use iced::widget::{column, container, operation, row, text_input, Id};
 use iced::{window, Background, Element, Length, Size, Subscription, Task, Theme};
 use modules::displays::DisplaysModule;
+use modules::shortcuts::ShortcutsModule;
 use modules::window_rules::WindowRulesModule;
 
 const SIDEBAR_WIDTH: f32 = 240.0;
@@ -134,6 +135,7 @@ fn read_global_font_scale() -> FontScale {
 enum Screen {
     Monitors,
     WindowRules,
+    Shortcuts,
 }
 
 impl Screen {
@@ -141,23 +143,32 @@ impl Screen {
         match self {
             Screen::Monitors => "Monitors",
             Screen::WindowRules => "Window Rules",
+            Screen::Shortcuts => "Shortcuts",
         }
     }
 }
 
-/// A top-level sidebar grouping. Both current screens live under the same
-/// "Displays" category today (they're both about how windows/outputs are
-/// arranged) — later categories (Network, Bluetooth, ...) each get their
-/// own entry here rather than flattening everything into one nav list.
+/// A top-level sidebar grouping. Monitors and Window Rules share the
+/// "Displays" category (both are about how windows/outputs are arranged);
+/// Shortcuts gets its own category since keybindings are a different kind
+/// of setting entirely — later categories (Network, Bluetooth, ...) each
+/// get their own entry here too, rather than flattening everything into
+/// one nav list.
 struct NavCategory {
     label: &'static str,
     screens: &'static [Screen],
 }
 
-const NAV: &[NavCategory] = &[NavCategory {
-    label: "Displays",
-    screens: &[Screen::Monitors, Screen::WindowRules],
-}];
+const NAV: &[NavCategory] = &[
+    NavCategory {
+        label: "Displays",
+        screens: &[Screen::Monitors, Screen::WindowRules],
+    },
+    NavCategory {
+        label: "Shortcuts",
+        screens: &[Screen::Shortcuts],
+    },
+];
 
 #[derive(Debug, Clone)]
 enum Message {
@@ -168,6 +179,7 @@ enum Message {
     RefreshActive,
     Displays(modules::displays::Message),
     WindowRules(modules::window_rules::Message),
+    Shortcuts(modules::shortcuts::Message),
     WindowOpened(window::Id),
     WindowClosed(window::Id),
     RevertPopupOpened(window::Id),
@@ -178,6 +190,7 @@ struct App {
     screen: Screen,
     displays: DisplaysModule,
     window_rules: WindowRulesModule,
+    shortcuts: ShortcutsModule,
     search_query: String,
     search_id: Id,
     font_scale: FontScale,
@@ -190,11 +203,13 @@ impl App {
     fn new() -> (Self, Task<Message>) {
         let (displays, displays_task) = DisplaysModule::new();
         let (window_rules, window_rules_task) = WindowRulesModule::new();
+        let (shortcuts, shortcuts_task) = ShortcutsModule::new();
         (
             App {
                 screen: Screen::Monitors,
                 displays,
                 window_rules,
+                shortcuts,
                 search_query: String::new(),
                 search_id: Id::unique(),
                 font_scale: read_global_font_scale(),
@@ -205,6 +220,7 @@ impl App {
                 window::open(main_window_settings()).1.map(Message::WindowOpened),
                 displays_task.map(Message::Displays),
                 window_rules_task.map(Message::WindowRules),
+                shortcuts_task.map(Message::Shortcuts),
             ]),
         )
     }
@@ -280,12 +296,21 @@ impl App {
                         self.displays
                             .update(modules::displays::Message::DeleteCancel)
                             .map(Message::Displays),
+                        self.displays
+                            .update(modules::displays::Message::ImportClose)
+                            .map(Message::Displays),
                         self.window_rules
                             .update(modules::window_rules::Message::DraftCancel)
                             .map(Message::WindowRules),
                         self.window_rules
-                            .update(modules::window_rules::Message::CancelSetup)
+                            .update(modules::window_rules::Message::ImportCancel)
                             .map(Message::WindowRules),
+                        self.shortcuts
+                            .update(modules::shortcuts::Message::DraftCancel)
+                            .map(Message::Shortcuts),
+                        self.shortcuts
+                            .update(modules::shortcuts::Message::ImportCancel)
+                            .map(Message::Shortcuts),
                     ])
                 }
             }
@@ -294,10 +319,11 @@ impl App {
                     .displays
                     .update(modules::displays::Message::Refresh)
                     .map(Message::Displays),
-                // Window Rules has no external state to refresh — it's the
-                // sole writer of its own TOML, so it's always already
-                // current.
+                // Window Rules and Shortcuts have no external state to
+                // refresh — each is the sole writer of its own TOML, so
+                // it's always already current.
                 Screen::WindowRules => Task::none(),
+                Screen::Shortcuts => Task::none(),
             },
             Message::Displays(msg) => {
                 let task = self.displays.update(msg).map(Message::Displays);
@@ -329,6 +355,7 @@ impl App {
             }
             Message::Noop => Task::none(),
             Message::WindowRules(msg) => self.window_rules.update(msg).map(Message::WindowRules),
+            Message::Shortcuts(msg) => self.shortcuts.update(msg).map(Message::Shortcuts),
         }
     }
 
@@ -398,6 +425,7 @@ impl App {
         let icon_for = |screen: Screen| match screen {
             Screen::Monitors => self.displays.icon(),
             Screen::WindowRules => self.window_rules.icon(),
+            Screen::Shortcuts => self.shortcuts.icon(),
         };
 
         let query = self.search_query.to_lowercase();
@@ -468,6 +496,7 @@ impl App {
         let content: Element<'_, Message> = match self.screen {
             Screen::Monitors => self.displays.view(scale).map(Message::Displays),
             Screen::WindowRules => self.window_rules.view(scale).map(Message::WindowRules),
+            Screen::Shortcuts => self.shortcuts.view(scale).map(Message::Shortcuts),
         };
         // The Monitors editor (canvas + full property panel + policy/swap
         // sections) routinely exceeds window height — without scrolling,
@@ -501,7 +530,8 @@ impl App {
     /// The one keyboard grammar used across the whole app (vision pillar
     /// #9 — pick once, document it, never diverge per-module):
     ///
-    /// - `Ctrl+1` / `Ctrl+2` — switch to Displays / Window Rules
+    /// - `Ctrl+1` / `Ctrl+2` / `Ctrl+3` — switch to Monitors / Window Rules /
+    ///   Shortcuts
     /// - `Ctrl+F` — focus the sidebar search box
     /// - `Ctrl+R` — refresh the active module
     /// - `Escape` — clear the search box if it has text, else cancel
@@ -520,6 +550,7 @@ impl App {
             match key.as_ref() {
                 Key::Character("1") => Some(Message::Navigate(Screen::Monitors)),
                 Key::Character("2") => Some(Message::Navigate(Screen::WindowRules)),
+                Key::Character("3") => Some(Message::Navigate(Screen::Shortcuts)),
                 Key::Character("f") => Some(Message::FocusSearch),
                 Key::Character("r") => Some(Message::RefreshActive),
                 _ => None,

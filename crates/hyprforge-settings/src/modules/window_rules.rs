@@ -1,7 +1,8 @@
+use hyprforge_core::lua_setup;
 use hyprforge_core::theme::{spacing, FontScale};
 use hyprforge_core::widgets::{
-    confirm_dialog, danger_button, divider, meta_text, primary_button, row_field, scaled_text,
-    secondary_button, section, tri_state,
+    danger_button, divider, meta_text, primary_button, row_field, scaled_text, secondary_button,
+    section, tri_state,
 };
 use hyprforge_core::SettingsModule;
 use hyprforge_windowrules::clients::Client;
@@ -399,10 +400,52 @@ pub enum Message {
     MonitorsLoaded(Vec<Monitor>),
     DraftSave,
     DraftCancel,
-    ConfirmSetup,
-    CancelSetup,
-    ConfirmCreateLuaConfig,
     Reloaded(Result<(), String>),
+    ImportFromConfig,
+    ImportEvaluated(hyprforge_lua_import::ImportResult),
+    ImportToggleRule(usize, bool),
+    ImportToggleWorkspaceRule(usize, bool),
+    ImportConfirm,
+    ImportCancel,
+}
+
+/// A window rule found in the user's own `hyprland.lua`, pending review
+/// before it's added to the store. Kept separate from `Rule` — it has no
+/// name yet (never trusted from the captured call; always freshly
+/// generated on confirm, same as any other new rule) and carries the
+/// checkbox state the review list needs.
+struct ImportCandidateRule {
+    matcher: Matcher,
+    effects: Effects,
+    enabled: bool,
+    checked: bool,
+    /// Where the original call came from — kept so a checked-and-added
+    /// candidate's hand-written source line can be removed after a
+    /// successful import (see [`Message::ImportConfirm`]'s handler).
+    /// `line: None` means the interpreter couldn't place it (shouldn't
+    /// happen in practice), which is treated the same as "don't remove
+    /// anything" rather than guessed at.
+    source_path: std::path::PathBuf,
+    line: Option<usize>,
+}
+
+struct ImportCandidateWorkspaceRule {
+    rule: WorkspaceRule,
+    checked: bool,
+    source_path: std::path::PathBuf,
+    line: Option<usize>,
+}
+
+/// The result of the last "Import from config" run, awaiting the user's
+/// review before anything is added to the store.
+#[derive(Default)]
+struct ImportReview {
+    rules: Vec<ImportCandidateRule>,
+    workspace_rules: Vec<ImportCandidateWorkspaceRule>,
+    /// `(file, reason)` — files that didn't evaluate cleanly. Shown as-is
+    /// rather than dropped (vision pillar #3: no dead ends, no silent
+    /// partial results).
+    failures: Vec<(std::path::PathBuf, String)>,
 }
 
 pub struct WindowRulesModule {
@@ -418,7 +461,6 @@ pub struct WindowRulesModule {
     config: HyprConfig,
     /// Only meaningful when `config` is [`HyprConfig::Lua`].
     setup_plan: SetupPlan,
-    show_setup_confirm: bool,
     /// Collapsed by default — the raw Hyprland vocabulary (move/size
     /// expressions, per-state opacity, xwayland matching) is the power-user
     /// surface, kept out of the way of "float Discord" (vision pillar #1).
@@ -431,9 +473,12 @@ pub struct WindowRulesModule {
     /// is distinct from `Some(Loading)` — the panel has to be on screen while
     /// the `hyprctl` call is in flight or the button looks dead.
     picker: Option<PickerState>,
-    setup_diff_text: String,
     error: Option<String>,
     status: Option<String>,
+    /// `None` when no import is in progress or under review. `Some(None)`
+    /// while the evaluator is running; `Some(Some(_))` once results are
+    /// ready for the user to check through.
+    import_review: Option<Option<ImportReview>>,
 }
 
 /// Where the window picker is in its one-shot load.
@@ -452,10 +497,31 @@ impl WindowRulesModule {
         let stored = hyprforge_windowrules::storage::load(&hyprforge_core::paths::window_rules_toml_path())
             .unwrap_or_default();
         let (rules, workspace_rules) = (stored.rules, stored.workspace_rules);
-        let config = hyprforge_windowrules::setup::discover(&hyprforge_core::paths::hypr_config_dir());
-        // Only a real hyprland.lua can be inspected for the require line;
-        // for the other variants this stays at the "not installed" default
-        // and the view routes to a recovery screen instead of the dialog.
+        let mut config = hyprforge_windowrules::setup::discover(&hyprforge_core::paths::hypr_config_dir());
+        // No confirm dialog: the require line is Hyprforge's own file
+        // (never the user's own rules/content), so there's nothing to ask
+        // permission for beyond what installing this module already
+        // implies. A real write failure (permissions, read-only fs) still
+        // surfaces as an error rather than being silently swallowed.
+        let mut error = None;
+        match &config {
+            HyprConfig::Missing => {
+                let path = hyprforge_core::paths::hyprland_lua_path();
+                match hyprforge_windowrules::setup::create_lua_config(&path) {
+                    Ok(()) => config = HyprConfig::Lua(path),
+                    Err(e) => error = Some(e.to_string()),
+                }
+            }
+            HyprConfig::Lua(_) => {
+                if let Err(e) =
+                    hyprforge_windowrules::setup::install(&hyprforge_core::paths::hyprland_lua_path())
+                {
+                    error = Some(e.to_string());
+                }
+            }
+            // Nothing to automate: require() doesn't exist in this format.
+            HyprConfig::ConfOnly(_) => {}
+        }
         let setup_plan = match &config {
             HyprConfig::Lua(path) => {
                 let contents = std::fs::read_to_string(path).unwrap_or_default();
@@ -465,10 +531,21 @@ impl WindowRulesModule {
                 insert_before_line: 1,
             },
         };
-        let setup_diff_text = format!(
-            "hyprland.lua:\n  {}   <- inserted before your existing require() calls",
-            hyprforge_windowrules::setup::preview_line()
-        );
+        // The require line can exist (just installed above, or from a
+        // prior session) before this module has ever written its own
+        // generated file — e.g. before the first rule is ever saved. A
+        // require() pointing at a file that doesn't exist yet errors on
+        // the user's next `hyprctl reload`, so this ensures it's at least
+        // present and empty until a real save writes real content.
+        if matches!(config, HyprConfig::Lua(_)) {
+            let lua_path = hyprforge_core::paths::window_rules_lua_path();
+            if !lua_path.exists() {
+                let _ = hyprforge_core::paths::write_atomic(
+                    &lua_path,
+                    &hyprforge_windowrules::codegen::generate(&[], &[]),
+                );
+            }
+        }
         (
             WindowRulesModule {
                 rules,
@@ -476,13 +553,12 @@ impl WindowRulesModule {
                 draft: None,
                 config,
                 setup_plan,
-                show_setup_confirm: false,
                 show_advanced: false,
                 monitors: Vec::new(),
                 picker: None,
-                setup_diff_text,
-                error: None,
+                error,
                 status: None,
+                import_review: None,
             },
             // Read the monitors up front: the workspace-pin dropdown needs
             // them, and a failure here is silent by design — the section
@@ -573,44 +649,45 @@ impl WindowRulesModule {
         }
         // Without a Lua config there is nothing to source the generated file
         // from, so reloading would be a no-op dressed up as success. The TOML
-        // is still saved — rules authored now take effect as soon as the
-        // banner's setup step is done.
+        // is still saved — rules authored now take effect as soon as this
+        // is resolved (informational notice only, nothing to click).
         if !matches!(self.config, HyprConfig::Lua(_)) {
             self.error = None;
             self.status = Some("Saved. Rules take effect once Hyprland setup is finished — see above.".to_string());
             return Task::none();
         }
-        if self.setup_plan == SetupPlan::AlreadyPresent {
-            Task::perform(regenerate_and_reload(self.stored_rules()), Message::Reloaded)
-        } else {
-            self.show_setup_confirm = true;
-            Task::none()
+        // The require line is installed automatically on open; this only
+        // retries if that attempt failed (e.g. a transient permission
+        // issue) rather than asking the user to confirm anything.
+        if self.setup_plan != SetupPlan::AlreadyPresent {
+            match hyprforge_windowrules::setup::install(&hyprforge_core::paths::hyprland_lua_path()) {
+                Ok(plan) => self.setup_plan = plan,
+                Err(e) => {
+                    self.error = Some(e.to_string());
+                    return Task::none();
+                }
+            }
         }
+        Task::perform(regenerate_and_reload(self.stored_rules()), Message::Reloaded)
     }
 
     /// The recovery banner for the two config shapes the require-line flow
     /// can't serve. Never blocks rule editing — rules still save to TOML and
     /// activate once setup is done (vision pillar #3: no dead ends).
+    ///
+    /// `Missing` normally never reaches here — `new()` creates a minimal
+    /// `hyprland.lua` automatically — so seeing it means that attempt
+    /// failed; the reason is already in `self.error`, shown generically
+    /// above this.
     fn setup_notice(&self, scale: FontScale) -> Option<Element<'_, Message>> {
         let body = match &self.config {
             HyprConfig::Lua(_) => return None,
-            HyprConfig::Missing => column![
-                scaled_text(
-                    "No Hyprland config found. Hyprforge can create a minimal \
-                     hyprland.lua that sources your window rules; everything else \
-                     stays at Hyprland's defaults for you to fill in.",
-                    13.0,
-                    scale,
-                ),
-                meta_text(
-                    hyprforge_core::paths::hyprland_lua_path().display().to_string(),
-                    12.0,
-                    scale,
-                ),
-                container(primary_button("Create hyprland.lua").on_press(Message::ConfirmCreateLuaConfig))
-                    .width(Length::Fill)
-                    .align_x(iced::alignment::Horizontal::Right),
-            ],
+            HyprConfig::Missing => column![scaled_text(
+                "No Hyprland config found, and Hyprforge couldn't create one \
+                 automatically — see the error above.",
+                13.0,
+                scale,
+            )],
             HyprConfig::ConfOnly(path) => column![
                 scaled_text(
                     "You're using Hyprland's hyprland.conf format. Hyprforge \
@@ -796,42 +873,6 @@ impl SettingsModule for WindowRulesModule {
                 self.draft = None;
                 Task::none()
             }
-            Message::ConfirmSetup => {
-                self.show_setup_confirm = false;
-                match hyprforge_windowrules::setup::install(&hyprforge_core::paths::hyprland_lua_path())
-                {
-                    Ok(plan) => {
-                        self.setup_plan = plan;
-                        Task::perform(regenerate_and_reload(self.stored_rules()), Message::Reloaded)
-                    }
-                    Err(e) => {
-                        self.error = Some(e.to_string());
-                        Task::none()
-                    }
-                }
-            }
-            Message::CancelSetup => {
-                self.show_setup_confirm = false;
-                Task::none()
-            }
-            Message::ConfirmCreateLuaConfig => {
-                let path = hyprforge_core::paths::hyprland_lua_path();
-                match hyprforge_windowrules::setup::create_lua_config(&path) {
-                    Ok(()) => {
-                        // The file we just wrote already contains the require
-                        // line, so setup is complete — no insertion step.
-                        self.config = HyprConfig::Lua(path);
-                        self.setup_plan = SetupPlan::AlreadyPresent;
-                        self.error = None;
-                        self.status = Some("Created hyprland.lua.".to_string());
-                        Task::perform(regenerate_and_reload(self.stored_rules()), Message::Reloaded)
-                    }
-                    Err(e) => {
-                        self.error = Some(e.to_string());
-                        Task::none()
-                    }
-                }
-            }
             Message::Reloaded(Ok(())) => {
                 self.status = Some("Saved and reloaded.".to_string());
                 self.error = None;
@@ -841,28 +882,122 @@ impl SettingsModule for WindowRulesModule {
                 self.error = Some(e);
                 Task::none()
             }
+            Message::ImportFromConfig => {
+                self.import_review = Some(None);
+                Task::perform(import_from_config(), Message::ImportEvaluated)
+            }
+            Message::ImportEvaluated(result) => {
+                let hyprforge_dir = hyprforge_core::paths::hypr_hyprforge_dir();
+                let mut rules = Vec::new();
+                let mut workspace_rules = Vec::new();
+                for call in &result.calls {
+                    // Hyprforge's own generated file is `require()`d from
+                    // hyprland.lua too, so it gets evaluated right along
+                    // with the user's own — excluded here, or every
+                    // existing rule would show up as importable again.
+                    if call.source_path.starts_with(&hyprforge_dir) {
+                        continue;
+                    }
+                    if let Some((matcher, effects, enabled)) =
+                        hyprforge_windowrules::import::rule_from_call(&call.kind, &call.args)
+                    {
+                        rules.push(ImportCandidateRule {
+                            matcher,
+                            effects,
+                            enabled,
+                            checked: true,
+                            source_path: call.source_path.clone(),
+                            line: call.line,
+                        });
+                    } else if let Some(rule) =
+                        hyprforge_windowrules::import::workspace_rule_from_call(&call.kind, &call.args)
+                    {
+                        workspace_rules.push(ImportCandidateWorkspaceRule {
+                            rule,
+                            checked: true,
+                            source_path: call.source_path.clone(),
+                            line: call.line,
+                        });
+                    }
+                }
+                self.import_review = Some(Some(ImportReview {
+                    rules,
+                    workspace_rules,
+                    failures: result.failures,
+                }));
+                Task::none()
+            }
+            Message::ImportToggleRule(i, checked) => {
+                if let Some(Some(review)) = &mut self.import_review {
+                    if let Some(candidate) = review.rules.get_mut(i) {
+                        candidate.checked = checked;
+                    }
+                }
+                Task::none()
+            }
+            Message::ImportToggleWorkspaceRule(i, checked) => {
+                if let Some(Some(review)) = &mut self.import_review {
+                    if let Some(candidate) = review.workspace_rules.get_mut(i) {
+                        candidate.checked = checked;
+                    }
+                }
+                Task::none()
+            }
+            Message::ImportCancel => {
+                self.import_review = None;
+                Task::none()
+            }
+            Message::ImportConfirm => {
+                // Collected as we go, so removal only ever targets a line
+                // that actually became a stored rule — never a checked
+                // -but-somehow-not-added candidate.
+                let mut to_remove: Vec<(std::path::PathBuf, usize)> = Vec::new();
+                if let Some(Some(review)) = self.import_review.take() {
+                    for candidate in review.rules.into_iter().filter(|c| c.checked) {
+                        let existing: Vec<String> = self.rules.iter().map(|r| r.name.clone()).collect();
+                        let label = candidate
+                            .matcher
+                            .class
+                            .clone()
+                            .or_else(|| candidate.matcher.title.clone())
+                            .unwrap_or_else(|| "rule".to_string());
+                        let name = generate_rule_name(&label, &existing);
+                        if let Some(line) = candidate.line {
+                            to_remove.push((candidate.source_path.clone(), line));
+                        }
+                        self.rules.push(Rule {
+                            name,
+                            enabled: candidate.enabled,
+                            matcher: candidate.matcher,
+                            effects: candidate.effects,
+                        });
+                    }
+                    for candidate in review.workspace_rules.into_iter().filter(|c| c.checked) {
+                        if let Some(line) = candidate.line {
+                            to_remove.push((candidate.source_path.clone(), line));
+                        }
+                        self.workspace_rules.push(candidate.rule);
+                    }
+                }
+                // Best-effort and silent on failure: the entries are
+                // already safely in the store either way, and
+                // `remove_matched_lines` itself only ever removes a line
+                // that still verifiably looks like the exact call it
+                // recorded — see its doc comment for why that's safe to
+                // not gate behind another confirmation.
+                let _ = lua_setup::remove_matched_lines(&to_remove);
+                self.save_and_maybe_reload()
+            }
         }
     }
 
     fn view(&self, scale: FontScale) -> Element<'_, Message> {
-        if self.show_setup_confirm {
-            return container(confirm_dialog(
-                "Enable Hyprforge window rules",
-                "This is a one-time change to your hyprland.lua: Hyprforge needs to \
-                 source its generated window-rules file. Placing it first means your \
-                 own rules — named or anonymous — still override Hyprforge's by \
-                 default, since Hyprland evaluates named rules first and the last \
-                 match wins. A backup is saved as hyprland.lua.hyprforge.bak.",
-                &self.setup_diff_text,
-                Message::ConfirmSetup,
-                Message::CancelSetup,
-            ))
-            .center(Length::Fill)
-            .into();
-        }
-
         if let Some(draft) = &self.draft {
             return self.draft_view(draft, scale);
+        }
+
+        if let Some(review) = &self.import_review {
+            return self.import_review_view(review.as_ref(), scale);
         }
 
         let mut content = column![scaled_text("Window Rules", 22.0, scale)].spacing(spacing::LG);
@@ -922,9 +1057,15 @@ impl SettingsModule for WindowRulesModule {
                 .max_height(360.0),
         ));
         content = content.push(
-            container(primary_button("Add rule").on_press(Message::Add))
-                .width(Length::Fill)
-                .align_x(iced::alignment::Horizontal::Right),
+            container(
+                row![
+                    secondary_button("Import from config").on_press(Message::ImportFromConfig),
+                    primary_button("Add rule").on_press(Message::Add),
+                ]
+                .spacing(spacing::SM),
+            )
+            .width(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Right),
         );
 
         content = content.push(self.workspace_pins_view(scale));
@@ -934,6 +1075,111 @@ impl SettingsModule for WindowRulesModule {
 }
 
 impl WindowRulesModule {
+    /// The "Import from config" flow's loading state and review list.
+    /// Reachable any time, not just on first run — unlike the setup
+    /// banner, this is opt-in and re-runnable whenever the user wants to
+    /// pick up hand-written rules added since the last import.
+    fn import_review_view(&self, review: Option<&ImportReview>, scale: FontScale) -> Element<'_, Message> {
+        let Some(review) = review else {
+            return container(scaled_text("Reading your hyprland.lua…", 14.0, scale))
+                .padding(spacing::LG)
+                .into();
+        };
+
+        let mut body = column![scaled_text("Import from config", 22.0, scale)].spacing(spacing::LG);
+
+        if !review.failures.is_empty() {
+            let mut failures = column![meta_text(
+                format!(
+                    "{} file{} couldn't be imported:",
+                    review.failures.len(),
+                    if review.failures.len() == 1 { "" } else { "s" }
+                ),
+                13.0,
+                scale,
+            )]
+            .spacing(spacing::XS);
+            for (path, reason) in &review.failures {
+                failures = failures.push(meta_text(
+                    format!("{} — {reason}", path.display()),
+                    12.0,
+                    scale,
+                ));
+            }
+            body = body.push(section("Couldn't import", scale, failures.spacing(spacing::XS)));
+        }
+
+        if review.rules.is_empty() && review.workspace_rules.is_empty() {
+            body = body.push(meta_text(
+                "No importable window rules or workspace pins found.",
+                14.0,
+                scale,
+            ));
+        }
+
+        if !review.rules.is_empty() {
+            let mut list = column![].spacing(spacing::SM);
+            for (i, candidate) in review.rules.iter().enumerate() {
+                let summary = candidate
+                    .matcher
+                    .class
+                    .clone()
+                    .or_else(|| candidate.matcher.title.clone())
+                    .unwrap_or_else(|| "(no match)".to_string());
+                list = list.push(
+                    row![
+                        checkbox(candidate.checked)
+                            .on_toggle(move |v| Message::ImportToggleRule(i, v)),
+                        scaled_text(summary, 14.0, scale).width(Length::Fill),
+                    ]
+                    .spacing(spacing::SM)
+                    .align_y(iced::Alignment::Center),
+                );
+            }
+            body = body.push(section("Window rules", scale, list));
+        }
+
+        if !review.workspace_rules.is_empty() {
+            let mut list = column![].spacing(spacing::SM);
+            for (i, candidate) in review.workspace_rules.iter().enumerate() {
+                list = list.push(
+                    row![
+                        checkbox(candidate.checked)
+                            .on_toggle(move |v| Message::ImportToggleWorkspaceRule(i, v)),
+                        scaled_text(candidate.rule.workspace.clone(), 14.0, scale).width(Length::Fill),
+                    ]
+                    .spacing(spacing::SM)
+                    .align_y(iced::Alignment::Center),
+                );
+            }
+            body = body.push(section("Workspace pins", scale, list));
+        }
+
+        body = body.push(meta_text(
+            "Checked entries are added here and their original line is removed \
+             from your config — only when it still matches exactly what was \
+             imported, and only after it's safely added. A multi-line entry, or \
+             one edited since this list was generated, is left in place instead \
+             of guessed at.",
+            12.0,
+            scale,
+        ));
+
+        body = body.push(
+            container(
+                row![
+                    secondary_button("Cancel").on_press(Message::ImportCancel),
+                    primary_button("Add checked").on_press(Message::ImportConfirm),
+                ]
+                .spacing(spacing::SM),
+            )
+            .width(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Right),
+        );
+
+        container(body).padding(spacing::LG).into()
+    }
+
     /// Workspace→monitor pins.
     ///
     /// A separate section from the rules list because it's a different kind
@@ -1472,6 +1718,17 @@ async fn regenerate_and_reload(rules: hyprforge_windowrules::storage::Rules) -> 
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Evaluates the user's own `hyprland.lua` for importable rules. Blocking
+/// work (a synchronous Lua VM run), so it goes on the blocking pool rather
+/// than stalling the UI thread — same treatment every other `hyprctl`-
+/// adjacent call in this module gets.
+async fn import_from_config() -> hyprforge_lua_import::ImportResult {
+    let hypr_dir = hyprforge_core::paths::hypr_config_dir();
+    tokio::task::spawn_blocking(move || hyprforge_lua_import::evaluate(&hypr_dir))
+        .await
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

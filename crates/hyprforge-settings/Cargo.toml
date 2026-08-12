@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 hyprforge-core = { workspace = true, features = ["gui", "dbus"] }
 hyprforge-windowrules.workspace = true
+hyprforge-shortcuts.workspace = true
+hyprforge-lua-import.workspace = true
 # "tokio" selects iced's tokio executor backend, which is what provides
 # `iced::time::every` (used for the revert countdown) — the app already runs
 # on tokio for its D-Bus work, so this aligns the two rather than adding a
