@@ -5,6 +5,7 @@ members = [
     "crates/hyprforge-displayd",
     "crates/hyprforge-windowrules",
     "crates/hyprforge-shortcuts",
+    "crates/hyprforge-lua-import",
     "crates/hyprforge-settings",
 ]
 
@@ -19,6 +20,14 @@ license = "MIT"
 hyprforge-core = { path = "crates/hyprforge-core", default-features = false }
 hyprforge-windowrules = { path = "crates/hyprforge-windowrules" }
 hyprforge-shortcuts = { path = "crates/hyprforge-shortcuts" }
+hyprforge-lua-import = { path = "crates/hyprforge-lua-import" }
+
+# Only hyprforge-lua-import depends on this — evaluating a user's own
+# hyprland.lua (with hl.* stubbed to record calls) to import hand-written
+# rules/binds/monitor config, rather than text-parsing it, which breaks on
+# the near-universal `mainMod .. " + Q"` variable pattern. Vendored so it
+# doesn't need a system Lua install.
+mlua = { version = "0.12", features = ["lua54", "vendored", "serde"] }
 
 iced = "0.14"
 # Run zbus on tokio rather than its default async-io executor. Without this

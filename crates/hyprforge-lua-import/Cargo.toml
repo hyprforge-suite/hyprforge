@@ -1,0 +1,20 @@
+[package]
+name = "hyprforge-lua-import"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "hyprforge_lua_import"
+path = "src/lib.rs"
+
+[dependencies]
+# Only for paths — kept out of the `gui`/`dbus` feature surface, since this
+# crate has no UI and talks to no daemon.
+hyprforge-core.workspace = true
+mlua.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
