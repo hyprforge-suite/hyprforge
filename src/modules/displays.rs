@@ -1,12 +1,25 @@
 use crate::modules::layout_canvas::{CanvasHead, LayoutCanvas};
 use hyprforge_core::geometry::{logical_size, nearest_valid_scale};
 use hyprforge_core::displayd_proxy::DisplaydProxy;
+use hyprforge_core::lua_setup::{self, HyprConfig, Placement, SetupPlan};
 use hyprforge_core::theme::{spacing, FontScale};
 use hyprforge_core::widgets::{
     confirm_dialog, danger_button, divider, meta_text, primary_button, row_field, scaled_text,
     secondary_button, section,
 };
 use hyprforge_core::SettingsModule;
+
+/// Monitors goes first among the user's own `require()` calls, same
+/// reasoning as window rules: the exact precedence of repeated
+/// `hl.monitor()` calls for one output isn't documented, so the safer
+/// default is the one that can't silently beat something the user wrote
+/// themselves — theirs stays reachable either way `hl.monitor()` actually
+/// resolves ties.
+const MONITORS_PLACEMENT: Placement = Placement::BeforeUserRequires;
+
+fn monitors_require_line() -> String {
+    lua_setup::require_line("monitors")
+}
 use iced::widget::{column, container, row, scrollable, text_input};
 use iced::{Element, Length, Subscription, Task};
 use serde::Deserialize;
@@ -508,6 +521,9 @@ pub enum Message {
     ResolutionSelected(ResolutionOption),
     RefreshSelected(RefreshOption),
     ToggleWarnings,
+    ImportFromConfig,
+    ImportEvaluated(hyprforge_lua_import::ImportResult),
+    ImportClose,
 }
 
 /// A profile delete the user has asked for but not yet confirmed.
@@ -560,14 +576,104 @@ pub struct DisplaysModule {
     /// it stops following so an unrelated apply/auto-learn elsewhere
     /// can't yank their in-progress edit out from under them.
     editor: Option<LayoutEditor>,
+    /// Which Hyprland config the user has, for the `monitors.lua` fallback
+    /// setup banner. Unlike Window Rules/Shortcuts, nothing here blocks on
+    /// this — Displays works fully without it, since the daemon applies
+    /// layouts live regardless. This only controls whether the daemon's
+    /// generated `monitors.lua` is actually sourced by Hyprland, i.e.
+    /// whether a layout survives the daemon simply not running.
+    config: HyprConfig,
+    /// Only meaningful when `config` is [`HyprConfig::Lua`].
+    setup_plan: SetupPlan,
+    /// Separate from `error` deliberately: `error` reflects live D-Bus/
+    /// daemon connectivity and gets reset on every successful `Loaded`,
+    /// which would otherwise wipe out a setup failure noticed once at
+    /// startup before the user ever saw it.
+    setup_error: Option<String>,
+    /// `None` when no import is in progress or under review. `Some(None)`
+    /// while the evaluator is running; `Some(Some(_))` once results are
+    /// ready to show.
+    import_review: Option<Option<ImportSummary>>,
+}
+
+/// A hand-written `hl.monitor({...})` call, summarised for display.
+///
+/// Deliberately a local, GUI-owned type rather than a dependency on
+/// `hyprforge-displayd` (which this module otherwise avoids entirely,
+/// talking to the daemon only over D-Bus — the same reason
+/// [`ProfileDetail`] mirrors that crate's `Profile` fields locally rather
+/// than importing them). This is informational only, not a candidate to
+/// add anywhere: see [`Message::ImportEvaluated`]'s handler for why a
+/// hand-written monitor rule can't safely become a stored `Profile`.
+struct ImportedMonitor {
+    selector: String,
+    disabled: bool,
+    mode: Option<String>,
+    position: Option<String>,
+    scale: Option<String>,
+}
+
+struct ImportSummary {
+    monitors: Vec<ImportedMonitor>,
+    failures: Vec<(std::path::PathBuf, String)>,
 }
 
 impl DisplaysModule {
     pub fn new() -> (Self, Task<Message>) {
+        let mut config = lua_setup::discover(&hyprforge_core::paths::hypr_config_dir());
+        // No confirm dialog: the require line only ever points at the
+        // daemon's own generated fallback file, never touches the user's
+        // own content, so there's nothing to ask permission for. A real
+        // write failure still surfaces as an error rather than being
+        // silently swallowed.
+        let mut error = None;
+        match &config {
+            HyprConfig::Missing => {
+                let path = hyprforge_core::paths::hyprland_lua_path();
+                match lua_setup::create_lua_config(&path, &monitors_require_line(), MONITORS_PLACEMENT) {
+                    Ok(()) => config = HyprConfig::Lua(path),
+                    Err(e) => error = Some(e.to_string()),
+                }
+            }
+            HyprConfig::Lua(_) => {
+                if let Err(e) = lua_setup::install(
+                    &hyprforge_core::paths::hyprland_lua_path(),
+                    &monitors_require_line(),
+                    MONITORS_PLACEMENT,
+                ) {
+                    error = Some(e.to_string());
+                }
+            }
+            HyprConfig::ConfOnly(_) => {}
+        }
+        let setup_plan = match &config {
+            HyprConfig::Lua(path) => {
+                let contents = std::fs::read_to_string(path).unwrap_or_default();
+                lua_setup::detect(&contents, &monitors_require_line(), MONITORS_PLACEMENT)
+            }
+            _ => SetupPlan::NeedsInsert { insert_before_line: 1 },
+        };
+        // The require line can exist (just installed above, or from a
+        // prior session) before the daemon has ever settled a topology and
+        // written its own fallback file. A require() pointing at a file
+        // that doesn't exist yet errors on the user's next `hyprctl
+        // reload`, so this ensures it's at least present and empty until
+        // the daemon writes real content.
+        if matches!(config, HyprConfig::Lua(_)) {
+            let lua_path = hyprforge_core::paths::monitors_lua_path();
+            if !lua_path.exists() {
+                let _ = hyprforge_core::paths::write_atomic(
+                    &lua_path,
+                    "-- Generated by Hyprforge. Do not edit by hand — changes will be\n\
+                     -- overwritten the next time the display daemon settles a layout.\n",
+                );
+            }
+        }
         (
             DisplaysModule {
                 connected: false,
                 error: None,
+                setup_error: error,
                 profiles: Vec::new(),
                 current_fingerprint: String::new(),
                 current_profile_id: None,
@@ -581,6 +687,9 @@ impl DisplaysModule {
                 last_event: None,
                 show_other_profiles: false,
                 editor: None,
+                config,
+                setup_plan,
+                import_review: None,
             },
             Task::perform(load(), Message::Loaded),
         )
@@ -660,6 +769,126 @@ impl DisplaysModule {
         )
         .padding([spacing::SM, 0.0])
         .into()
+    }
+
+    /// The "Import from config" flow's loading state and summary.
+    ///
+    /// Unlike Window Rules/Shortcuts' import, this is read-only — there's
+    /// nothing to check and add. A hand-written `hl.monitor()` rule only
+    /// ever names an `output` selector, never the make/model/serial
+    /// triple a stored `Profile` is keyed on, so turning one into a real
+    /// profile would mean guessing an identity — a wrong guess is safe
+    /// (it just never matches anything) but still not something to do
+    /// silently. The common case doesn't need this anyway: displayd
+    /// already learns a profile automatically the moment it sees a
+    /// display it doesn't recognise.
+    fn import_review_view(&self, review: Option<&ImportSummary>, scale: FontScale) -> Element<'_, Message> {
+        let Some(review) = review else {
+            return container(scaled_text("Reading your hyprland.lua…", 14.0, scale))
+                .padding(spacing::LG)
+                .into();
+        };
+
+        let mut body = column![scaled_text("Import from config", 22.0, scale)].spacing(spacing::LG);
+
+        if !review.failures.is_empty() {
+            let mut failures = column![meta_text(
+                format!(
+                    "{} file{} couldn't be evaluated:",
+                    review.failures.len(),
+                    if review.failures.len() == 1 { "" } else { "s" }
+                ),
+                13.0,
+                scale,
+            )]
+            .spacing(spacing::XS);
+            for (path, reason) in &review.failures {
+                failures = failures.push(meta_text(format!("{} — {reason}", path.display()), 12.0, scale));
+            }
+            body = body.push(section("Couldn't evaluate", scale, failures.spacing(spacing::XS)));
+        }
+
+        if review.monitors.is_empty() {
+            body = body.push(meta_text(
+                "No hand-written hl.monitor() rules found outside Hyprforge's own \
+                 generated files.",
+                14.0,
+                scale,
+            ));
+        } else {
+            let mut list = column![].spacing(spacing::SM);
+            for m in &review.monitors {
+                let summary = if m.disabled {
+                    format!("{} — disabled", m.selector)
+                } else {
+                    format!(
+                        "{}  mode {}  position {}  scale {}",
+                        m.selector,
+                        m.mode.as_deref().unwrap_or("preferred"),
+                        m.position.as_deref().unwrap_or("auto"),
+                        m.scale.as_deref().unwrap_or("auto"),
+                    )
+                };
+                list = list.push(meta_text(summary, 13.0, scale));
+            }
+            body = body.push(section("Found in your config", scale, list));
+            body = body.push(meta_text(
+                "These can't be turned into a stored profile automatically — a \
+                 profile is keyed on the physical panel's make/model/serial, which a \
+                 hand-written rule's output selector doesn't reliably give. Plug the \
+                 display in once and Hyprforge will learn a correct profile from it \
+                 on its own.",
+                12.0,
+                scale,
+            ));
+        }
+
+        body = body.push(
+            container(secondary_button("Close").on_press(Message::ImportClose)).width(Length::Fill),
+        );
+
+        container(body).padding(spacing::LG).into()
+    }
+
+    /// Unlike Window Rules/Shortcuts, this never blocks anything below it —
+    /// Displays works fully without it, since the daemon applies layouts
+    /// live regardless of whether Hyprland itself can also fall back to a
+    /// static snapshot. `None` once the fallback is already wired up, so
+    /// the banner doesn't linger after there's nothing left to do.
+    /// `Lua`-with-`setup_plan`-not-`AlreadyPresent` and `Missing` normally
+    /// never reach here — `new()` wires up the fallback (or creates a
+    /// minimal `hyprland.lua`) automatically — so seeing either means that
+    /// attempt failed; `setup_error` has why.
+    fn setup_notice(&self, scale: FontScale) -> Option<Element<'_, Message>> {
+        let body: Element<'_, Message> = match &self.config {
+            HyprConfig::Lua(_) if self.setup_plan == SetupPlan::AlreadyPresent => return None,
+            HyprConfig::Lua(_) | HyprConfig::Missing => {
+                let reason = self.setup_error.as_deref().unwrap_or("unknown error");
+                column![scaled_text(
+                    format!(
+                        "Hyprforge couldn't set up the display fallback automatically: {reason}"
+                    ),
+                    13.0,
+                    scale,
+                )]
+                .spacing(spacing::SM)
+                .into()
+            }
+            HyprConfig::ConfOnly(path) => column![
+                scaled_text(
+                    "You're using Hyprland's hyprland.conf format. The fallback \
+                     monitors.lua Hyprforge can keep up to date needs a hyprland.lua to \
+                     source it from, which only the Lua config supports — so this won't \
+                     modify your .conf.",
+                    13.0,
+                    scale,
+                ),
+                meta_text(path.display().to_string(), 12.0, scale),
+            ]
+            .spacing(spacing::SM)
+            .into(),
+        };
+        Some(section("Display fallback", scale, body))
     }
 }
 
@@ -1133,6 +1362,30 @@ impl SettingsModule for DisplaysModule {
                 self.show_warnings = !self.show_warnings;
                 Task::none()
             }
+            Message::ImportFromConfig => {
+                self.import_review = Some(None);
+                Task::perform(import_from_config(), Message::ImportEvaluated)
+            }
+            Message::ImportEvaluated(result) => {
+                let hyprforge_dir = hyprforge_core::paths::hypr_hyprforge_dir();
+                let monitors = result
+                    .calls
+                    .iter()
+                    // Hyprforge's own generated `monitors.lua` is
+                    // `require()`d from hyprland.lua too, so it gets
+                    // evaluated right along with the user's own —
+                    // excluded here, or the daemon's own fallback would
+                    // show up as something to review.
+                    .filter(|call| !call.source_path.starts_with(&hyprforge_dir))
+                    .filter_map(|call| parse_monitor_call(&call.kind, &call.args))
+                    .collect();
+                self.import_review = Some(Some(ImportSummary { monitors, failures: result.failures }));
+                Task::none()
+            }
+            Message::ImportClose => {
+                self.import_review = None;
+                Task::none()
+            }
             Message::LayoutSaved(Ok(())) => {
                 if let Some(editor) = &mut self.editor {
                     editor.status = Some("Saved.".to_string());
@@ -1188,7 +1441,15 @@ impl SettingsModule for DisplaysModule {
             .into();
         }
 
+        if let Some(review) = &self.import_review {
+            return self.import_review_view(review.as_ref(), scale);
+        }
+
         let mut content = column![scaled_text("Monitors", 22.0, scale)].spacing(spacing::LG);
+
+        if let Some(notice) = self.setup_notice(scale) {
+            content = content.push(notice);
+        }
 
         // The countdown lives in its own pinned, always-visible window (see
         // `revert_popup_view` in main.rs) rather than here. A change that
@@ -1316,8 +1577,12 @@ impl SettingsModule for DisplaysModule {
         // stacked on top of each other.
         content = content.push(
             container(
-                row![profiles_button, secondary_button("Refresh").on_press(Message::Refresh)]
-                    .spacing(spacing::SM),
+                row![
+                    secondary_button("Import from config").on_press(Message::ImportFromConfig),
+                    profiles_button,
+                    secondary_button("Refresh").on_press(Message::Refresh),
+                ]
+                .spacing(spacing::SM),
             )
             .width(Length::Fill)
             .align_x(iced::alignment::Horizontal::Right),
@@ -1888,6 +2153,48 @@ async fn fetch_modes(connector_hint: String) -> Vec<(i32, i32, i32, bool)> {
         return Vec::new();
     };
     proxy.get_available_modes(&connector_hint).await.unwrap_or_default()
+}
+
+/// Evaluates the user's own `hyprland.lua` for hand-written `hl.monitor()`
+/// rules. Blocking work (a synchronous Lua VM run), so it goes on the
+/// blocking pool rather than stalling the UI thread.
+async fn import_from_config() -> hyprforge_lua_import::ImportResult {
+    let hypr_dir = hyprforge_core::paths::hypr_config_dir();
+    tokio::task::spawn_blocking(move || hyprforge_lua_import::evaluate(&hypr_dir))
+        .await
+        .unwrap_or_default()
+}
+
+/// `None` if this isn't a `monitor` call, or it has no `output` at all
+/// (Hyprland requires one).
+///
+/// Never attempts to reconstruct an `Identity` (make/model/serial) from
+/// the `output` selector — see [`ImportedMonitor`]'s doc comment for why
+/// that would risk a profile that silently never matches anything. This
+/// only extracts what's safe to show as information.
+fn parse_monitor_call(kind: &str, args: &[serde_json::Value]) -> Option<ImportedMonitor> {
+    if kind != "monitor" {
+        return None;
+    }
+    let table = args.first()?.as_object()?;
+    let selector = table.get("output")?.as_str()?.to_string();
+    if selector.is_empty() {
+        return None;
+    }
+    let field_as_string = |key: &str| -> Option<String> {
+        match table.get(key)? {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        }
+    };
+    Some(ImportedMonitor {
+        selector,
+        disabled: table.get("disabled").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        mode: field_as_string("mode"),
+        position: field_as_string("position"),
+        scale: field_as_string("scale"),
+    })
 }
 
 fn signal_stream() -> impl iced::futures::Stream<Item = Message> {
