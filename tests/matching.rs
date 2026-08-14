@@ -982,3 +982,39 @@ async fn the_connected_set_is_learned_even_when_the_layout_never_matches() {
         profiles.iter().map(|p| (&p.name, p.heads.len())).collect::<Vec<_>>()
     );
 }
+
+/// A user-initiated change that can't be written must say so.
+///
+/// It used to return `Ok(())` regardless: `persist` logged the failure and
+/// swallowed it, so the Settings app reported a successful rename while
+/// nothing reached the disk, and the name reverted at the next daemon
+/// restart with the explanation buried in the daemon's log.
+#[tokio::test(start_paused = true)]
+async fn a_change_that_cannot_be_saved_is_reported_rather_than_swallowed() {
+    let mut h = Harness::new();
+    h.backend.set_topology(vec![identity("BOE", "0x0BC9", "")]);
+    tokio::time::advance(Duration::from_millis(600)).await;
+    settle().await;
+    h.next_signal().await;
+
+    let id = h.daemon.current_fingerprint().unwrap();
+    assert!(h.daemon.rename_profile(&id, "Desk").await.is_ok());
+    assert_eq!(h.daemon.profiles().await[0].name, "Desk");
+
+    // Make the store unwritable the way a real filesystem would: replace the
+    // parent directory with a file, so no temp file can be created beside it.
+    let path = h.storage_path();
+    std::fs::remove_file(&path).ok();
+    std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    std::fs::write(path.parent().unwrap(), b"not a directory").unwrap();
+
+    let err = h
+        .daemon
+        .rename_profile(&id, "Should fail")
+        .await
+        .expect_err("an unwritable store must not report success");
+    assert!(
+        err.to_string().contains("display profiles"),
+        "the error should name what couldn't be saved: {err}"
+    );
+}

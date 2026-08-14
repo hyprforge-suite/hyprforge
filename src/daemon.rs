@@ -317,7 +317,12 @@ impl Daemon {
         {
             let mut profiles = self.profiles.lock().await;
             *profiles = pending.profiles;
-            self.persist(&profiles);
+            // Propagated, not swallowed: a revert that restores the live
+            // layout but not the store is worse than one that fails
+            // outright, because the next hotplug re-applies the layout the
+            // user just rejected. The automatic-timeout caller logs it; the
+            // explicit `RevertLayout` caller returns it to the app.
+            self.persist(&profiles)?;
         }
 
         let plan = plan_from_heads(&pending.heads);
@@ -360,7 +365,7 @@ impl Daemon {
             Some(tokio::time::Instant::now() + AUTO_LEARN_COOLDOWN);
         self.backend.apply_configuration(&plan)?;
         profiles[idx].touch();
-        self.persist(&profiles);
+        self.persist(&profiles)?;
         Ok(())
     }
 
@@ -371,7 +376,7 @@ impl Daemon {
             .find(|p| p.id == profile_id)
             .ok_or_else(|| anyhow::anyhow!("no such profile: {profile_id}"))?;
         profile.name = new_name.to_string();
-        self.persist(&profiles);
+        self.persist(&profiles)?;
         Ok(())
     }
 
@@ -391,7 +396,7 @@ impl Daemon {
             .position(|p| p.id == profile_id)
             .ok_or_else(|| anyhow::anyhow!("no such profile: {profile_id}"))?;
         profiles.remove(idx);
-        self.persist(&profiles);
+        self.persist(&profiles)?;
         Ok(())
     }
 
@@ -426,7 +431,7 @@ impl Daemon {
                 .head_swaps
                 .push((connector_a.to_string(), connector_b.to_string()));
         }
-        self.persist(&profiles);
+        self.persist(&profiles)?;
         Ok(())
     }
 
@@ -465,7 +470,7 @@ impl Daemon {
         head.refresh_mhz = refresh_mhz;
         head.scale = scale;
         head.transform = transform;
-        self.persist(&profiles);
+        self.persist(&profiles)?;
         Ok(())
     }
 
@@ -493,7 +498,7 @@ impl Daemon {
             .find(|p| p.id == profile_id)
             .ok_or_else(|| anyhow::anyhow!("no such profile: {profile_id}"))?;
         profile.extra_output_policy = policy;
-        self.persist(&profiles);
+        self.persist(&profiles)?;
         Ok(())
     }
 
@@ -556,7 +561,10 @@ impl Daemon {
             let name = generate_profile_name(&heads, &existing_names);
             let profile = Profile::from_heads(fp.clone(), name.clone(), &heads);
             profiles.push(profile);
-            self.persist(&profiles);
+            // Background path: nobody is waiting on this call, so a
+            // failure is logged inside `persist` and the daemon carries on
+            // with the layout it has already applied.
+            let _ = self.persist(&profiles);
             let _ = signal_tx.send(DaemonSignal::NewTopologySeen {
                 fingerprint: fp.clone(),
                 summary: format!("{name} (learned)"),
@@ -655,7 +663,10 @@ impl Daemon {
                 "applied layout"
             );
         }
-        self.persist(&profiles);
+        // Background path: nobody is waiting on this call, so a
+        // failure is logged inside `persist` and the daemon carries on
+        // with the layout it has already applied.
+        let _ = self.persist(&profiles);
         let _ = signal_tx.send(DaemonSignal::ProfileApplied {
             id: profile_id.clone(),
             name,
@@ -724,7 +735,10 @@ impl Daemon {
             profile_name = %name,
             "learned a profile for the connected set, which a stored profile only partly covered"
         );
-        self.persist(profiles);
+        // Background path: nobody is waiting on this call, so a
+        // failure is logged inside `persist` and the daemon carries on
+        // with the layout it has already applied.
+        let _ = self.persist(profiles);
         let _ = signal_tx.send(DaemonSignal::NewTopologySeen {
             fingerprint: fingerprint.to_string(),
             summary: format!("{name} (learned)"),
@@ -760,7 +774,10 @@ impl Daemon {
         let id = profiles[profile_idx].id.clone();
         let name = profiles[profile_idx].name.clone();
         tracing::info!(profile_id = %id, "auto-learned updated layout from external change");
-        self.persist(profiles);
+        // Background path: nobody is waiting on this call, so a
+        // failure is logged inside `persist` and the daemon carries on
+        // with the layout it has already applied.
+        let _ = self.persist(profiles);
         let _ = signal_tx.send(DaemonSignal::ProfileAutoLearned { id, name });
     }
 
@@ -777,10 +794,21 @@ impl Daemon {
         Ok(REVERT_WINDOW.as_secs() as u32)
     }
 
-    fn persist(&self, profiles: &[Profile]) {
-        if let Err(e) = crate::storage::save(&self.storage_path, profiles) {
+    /// Writes the profile store, logging and returning any failure.
+    ///
+    /// Returning it matters: every user-initiated change goes out over D-Bus
+    /// as `Ok(())`, and this used to swallow the error, so a rename or a
+    /// geometry edit reported success to the Settings app while nothing
+    /// reached the disk — the change then vanished at the next daemon
+    /// restart with no explanation anywhere but the daemon's own log
+    /// (vision pillar #3: errors surface in the app, never "check the
+    /// logs"). Background callers still only log, because there's nobody
+    /// waiting on them to tell.
+    fn persist(&self, profiles: &[Profile]) -> anyhow::Result<()> {
+        crate::storage::save(&self.storage_path, profiles).map_err(|e| {
             tracing::error!(error = %e, "failed to persist display profiles");
-        }
+            anyhow::anyhow!("couldn't save your display profiles: {e}")
+        })
     }
 }
 
