@@ -4,6 +4,7 @@ members = [
     "crates/hyprforge-core",
     "crates/hyprforge-displayd",
     "crates/hyprforge-windowrules",
+    "crates/hyprforge-input",
     "crates/hyprforge-shortcuts",
     "crates/hyprforge-lua-import",
     "crates/hyprforge-settings",
@@ -19,6 +20,7 @@ license = "MIT"
 # explicitly; only hyprforge-settings actually wants it.
 hyprforge-core = { path = "crates/hyprforge-core", default-features = false }
 hyprforge-windowrules = { path = "crates/hyprforge-windowrules" }
+hyprforge-input = { path = "crates/hyprforge-input" }
 hyprforge-shortcuts = { path = "crates/hyprforge-shortcuts" }
 hyprforge-lua-import = { path = "crates/hyprforge-lua-import" }
 

@@ -44,6 +44,14 @@ pub fn window_rules_lua_path() -> PathBuf {
     hypr_hyprforge_dir().join("window-rules.lua")
 }
 
+pub fn input_toml_path() -> PathBuf {
+    hyprforge_config_dir().join("input.toml")
+}
+
+pub fn input_lua_path() -> PathBuf {
+    hypr_hyprforge_dir().join("input.lua")
+}
+
 pub fn hyprland_lua_path() -> PathBuf {
     hypr_config_dir().join("hyprland.lua")
 }

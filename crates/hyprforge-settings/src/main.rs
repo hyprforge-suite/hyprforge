@@ -7,6 +7,7 @@ use iced::keyboard::{self, key, Key};
 use iced::widget::{column, container, operation, row, text_input, Id};
 use iced::{window, Background, Element, Length, Size, Subscription, Task, Theme};
 use modules::displays::DisplaysModule;
+use modules::input::InputModule;
 use modules::shortcuts::ShortcutsModule;
 use modules::window_rules::WindowRulesModule;
 
@@ -136,6 +137,7 @@ enum Screen {
     Monitors,
     WindowRules,
     Shortcuts,
+    Input,
 }
 
 impl Screen {
@@ -144,6 +146,7 @@ impl Screen {
             Screen::Monitors => "Monitors",
             Screen::WindowRules => "Window Rules",
             Screen::Shortcuts => "Shortcuts",
+            Screen::Input => "Input",
         }
     }
 }
@@ -168,6 +171,10 @@ const NAV: &[NavCategory] = &[
         label: "Shortcuts",
         screens: &[Screen::Shortcuts],
     },
+    NavCategory {
+        label: "Input",
+        screens: &[Screen::Input],
+    },
 ];
 
 #[derive(Debug, Clone)]
@@ -180,6 +187,7 @@ enum Message {
     Displays(modules::displays::Message),
     WindowRules(modules::window_rules::Message),
     Shortcuts(modules::shortcuts::Message),
+    Input(modules::input::Message),
     WindowOpened(window::Id),
     WindowClosed(window::Id),
     RevertPopupOpened(window::Id),
@@ -191,6 +199,7 @@ struct App {
     displays: DisplaysModule,
     window_rules: WindowRulesModule,
     shortcuts: ShortcutsModule,
+    input: InputModule,
     search_query: String,
     search_id: Id,
     font_scale: FontScale,
@@ -204,12 +213,14 @@ impl App {
         let (displays, displays_task) = DisplaysModule::new();
         let (window_rules, window_rules_task) = WindowRulesModule::new();
         let (shortcuts, shortcuts_task) = ShortcutsModule::new();
+        let (input, input_task) = InputModule::new();
         (
             App {
                 screen: Screen::Monitors,
                 displays,
                 window_rules,
                 shortcuts,
+                input,
                 search_query: String::new(),
                 search_id: Id::unique(),
                 font_scale: read_global_font_scale(),
@@ -221,6 +232,7 @@ impl App {
                 displays_task.map(Message::Displays),
                 window_rules_task.map(Message::WindowRules),
                 shortcuts_task.map(Message::Shortcuts),
+                input_task.map(Message::Input),
             ]),
         )
     }
@@ -324,11 +336,13 @@ impl App {
                 // it's always already current.
                 Screen::WindowRules => Task::none(),
                 Screen::Shortcuts => Task::none(),
+                Screen::Input => Task::none(),
             },
             Message::Displays(msg) => {
                 let task = self.displays.update(msg).map(Message::Displays);
                 Task::batch([task, self.sync_revert_popup()])
             }
+            Message::Input(msg) => self.input.update(msg).map(Message::Input),
             Message::WindowOpened(id) => {
                 if self.main_window.is_none() {
                     self.main_window = Some(id);
@@ -426,6 +440,7 @@ impl App {
             Screen::Monitors => self.displays.icon(),
             Screen::WindowRules => self.window_rules.icon(),
             Screen::Shortcuts => self.shortcuts.icon(),
+            Screen::Input => self.input.icon(),
         };
 
         let query = self.search_query.to_lowercase();
@@ -497,6 +512,7 @@ impl App {
             Screen::Monitors => self.displays.view(scale).map(Message::Displays),
             Screen::WindowRules => self.window_rules.view(scale).map(Message::WindowRules),
             Screen::Shortcuts => self.shortcuts.view(scale).map(Message::Shortcuts),
+            Screen::Input => self.input.view(scale).map(Message::Input),
         };
         // The Monitors editor (canvas + full property panel + policy/swap
         // sections) routinely exceeds window height — without scrolling,

@@ -1,0 +1,17 @@
+[package]
+name = "hyprforge-input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# For paths::write_atomic, apply_lua and lua_setup — default-features = false
+# keeps iced out of this pure-logic crate.
+hyprforge-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

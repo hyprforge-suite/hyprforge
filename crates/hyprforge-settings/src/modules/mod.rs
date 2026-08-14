@@ -1,4 +1,5 @@
 pub mod displays;
+pub mod input;
 pub mod keycapture;
 pub mod layout_canvas;
 pub mod shortcuts;

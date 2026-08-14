@@ -1363,6 +1363,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyprforge-input"
+version = "0.1.0"
+dependencies = [
+ "hyprforge-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "toml",
+]
+
+[[package]]
 name = "hyprforge-lua-import"
 version = "0.1.0"
 dependencies = [
@@ -1380,6 +1392,7 @@ dependencies = [
  "anyhow",
  "futures-util",
  "hyprforge-core",
+ "hyprforge-input",
  "hyprforge-lua-import",
  "hyprforge-shortcuts",
  "hyprforge-windowrules",
