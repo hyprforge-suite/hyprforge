@@ -81,6 +81,21 @@ struct RuleDraft {
     suppress_event: String,
     group: String,
     no_close_for: String,
+    /// The effects this draft was opened with.
+    ///
+    /// Consulted only for the boolean effects, and only to answer one
+    /// question: was this stored as an explicit `false`? A checkbox has two
+    /// states and the model has three (`Some(true)`, `Some(false)`, `None`),
+    /// so unchecked would otherwise mean "unset" and quietly destroy a
+    /// `float = false` that came in from a user's own config. `false` is not
+    /// the same as absent to Hyprland — rules are ordered, and an explicit
+    /// `false` is how a later rule cancels an earlier one.
+    ///
+    /// The matchers already model this properly, as tri-states; the effects
+    /// can't without turning thirteen checkboxes into dropdowns for a case
+    /// almost nobody authors by hand. This preserves what's stored without
+    /// making the common path worse.
+    stored_effects: Effects,
 }
 
 impl RuleDraft {
@@ -144,6 +159,7 @@ impl RuleDraft {
             suppress_event: e.suppress_event.clone().unwrap_or_default(),
             group: e.group.clone().unwrap_or_default(),
             no_close_for: e.no_close_for.map(|v| v.to_string()).unwrap_or_default(),
+            stored_effects: e.clone(),
         }
     }
 
@@ -168,8 +184,8 @@ impl RuleDraft {
                 silent: self.workspace_silent,
             },
             tag: non_empty(self.tag),
-            float: self.float.then_some(true),
-            no_blur: self.no_blur.then_some(true),
+            float: keep_false(self.float, self.stored_effects.float),
+            no_blur: keep_false(self.no_blur, self.stored_effects.no_blur),
             rounding: self.rounding.trim().parse().ok(),
             border_color: non_empty(self.border_color),
             // move/size are two-part; a half-filled pair isn't expressible
@@ -184,29 +200,134 @@ impl RuleDraft {
                 fullscreen: parse_opacity(&self.opacity_fullscreen),
                 is_override: self.opacity_override,
             },
-            opaque: self.opaque.then_some(true),
-            no_anim: self.no_anim.then_some(true),
-            no_focus: self.no_focus.then_some(true),
-            stay_focused: self.stay_focused.then_some(true),
-            dim_around: self.dim_around.then_some(true),
-            keep_aspect_ratio: self.keep_aspect_ratio.then_some(true),
+            opaque: keep_false(self.opaque, self.stored_effects.opaque),
+            no_anim: keep_false(self.no_anim, self.stored_effects.no_anim),
+            no_focus: keep_false(self.no_focus, self.stored_effects.no_focus),
+            stay_focused: keep_false(self.stay_focused, self.stored_effects.stay_focused),
+            dim_around: keep_false(self.dim_around, self.stored_effects.dim_around),
+            keep_aspect_ratio: keep_false(self.keep_aspect_ratio, self.stored_effects.keep_aspect_ratio),
             border_size: self.border_size.trim().parse().ok(),
             min_size: int_pair_or_none(&self.min_w, &self.min_h),
             max_size: int_pair_or_none(&self.max_w, &self.max_h),
             animation: non_empty(self.animation),
             idle_inhibit: non_empty(self.idle_inhibit),
-            tile: self.tile.then_some(true),
-            fullscreen: self.fullscreen_effect.then_some(true),
-            maximize: self.maximize.then_some(true),
-            pin: self.pin.then_some(true),
-            center: self.center.then_some(true),
-            no_initial_focus: self.no_initial_focus.then_some(true),
+            tile: keep_false(self.tile, self.stored_effects.tile),
+            fullscreen: keep_false(self.fullscreen_effect, self.stored_effects.fullscreen),
+            maximize: keep_false(self.maximize, self.stored_effects.maximize),
+            pin: keep_false(self.pin, self.stored_effects.pin),
+            center: keep_false(self.center, self.stored_effects.center),
+            no_initial_focus: keep_false(self.no_initial_focus, self.stored_effects.no_initial_focus),
             monitor: non_empty(self.monitor),
             suppress_event: non_empty(self.suppress_event),
             group: non_empty(self.group),
             no_close_for: self.no_close_for.trim().parse().ok(),
         };
         (matcher, effects)
+    }
+
+    /// Whether any match field is set, without consuming the draft.
+    ///
+    /// Hyprland requires a rule to match on something, and
+    /// [`codegen::generate`](hyprforge_windowrules::codegen::generate) skips
+    /// a rule whose matcher is empty — so a rule saved without one is stored,
+    /// listed, and silently never applied.
+    fn matches_nothing(&self) -> bool {
+        [&self.class, &self.title, &self.initial_class, &self.initial_title, &self.match_tag, &self.content]
+            .iter()
+            .all(|f| f.trim().is_empty())
+            && self.fullscreen.is_none()
+            && self.floating.is_none()
+            && self.xwayland.is_none()
+    }
+
+    /// The exact line this draft will write, for the preview.
+    ///
+    /// Rendered by the same codegen the real file gets, so it can't drift
+    /// into being a plausible-looking lie. A rule matching nothing renders
+    /// as a line codegen would skip, so callers should check
+    /// [`matches_nothing`](Self::matches_nothing) first.
+    fn preview(&self, name: &str) -> String {
+        let (matcher, effects) = self.clone().into_matcher_effects();
+        hyprforge_windowrules::codegen::render_one(&Rule {
+            name: name.to_string(),
+            enabled: true,
+            matcher,
+            effects,
+        })
+    }
+
+    /// Everything stopping this draft from being saved, in the order a user
+    /// would fix them. Empty means Save is live.
+    ///
+    /// This exists because every conversion in
+    /// [`into_matcher_effects`](Self::into_matcher_effects) is lossy on bad
+    /// input by design — `parse().ok()` drops what it can't read, and a
+    /// half-filled pair drops both halves. That's the right behaviour for
+    /// *storage* (never write a field Hyprland would reject) and a terrible
+    /// one for a user, who typed something and watched it disappear without
+    /// a word. Naming the problem here is what turns a silent drop into a
+    /// fixable message.
+    fn blockers(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.matches_nothing() {
+            out.push(
+                "Match at least one window property — a rule that matches nothing never applies."
+                    .to_string(),
+            );
+        }
+        for (label, text) in [
+            ("Rounding", &self.rounding),
+            ("Border size", &self.border_size),
+            ("Refuse close for", &self.no_close_for),
+        ] {
+            if !text.trim().is_empty() && text.trim().parse::<i32>().is_err() {
+                out.push(format!("{label} must be a whole number."));
+            }
+        }
+        for (label, text) in [
+            ("Active opacity", &self.opacity_active),
+            ("Inactive opacity", &self.opacity_inactive),
+            ("Fullscreen opacity", &self.opacity_fullscreen),
+        ] {
+            if !text.trim().is_empty() && parse_opacity(text).is_none() {
+                out.push(format!("{label} must be a number, e.g. 0.9."));
+            }
+        }
+        // Hyprland's `{ a, b }` can't express one half without the other, so
+        // a half-filled pair is dropped entirely on save. Say so rather than
+        // letting the typed half vanish.
+        for (label, a, b) in [
+            ("Position", &self.move_x, &self.move_y),
+            ("Size", &self.size_w, &self.size_h),
+        ] {
+            if a.trim().is_empty() != b.trim().is_empty() {
+                out.push(format!("{label} needs both values, or neither."));
+            }
+        }
+        for (label, a, b) in [
+            ("Minimum size", &self.min_w, &self.min_h),
+            ("Maximum size", &self.max_w, &self.max_h),
+        ] {
+            let typed = !a.trim().is_empty() || !b.trim().is_empty();
+            if typed && int_pair_or_none(a, b).is_none() {
+                out.push(format!("{label} needs a whole number for both width and height."));
+            }
+        }
+        out
+    }
+}
+
+/// A checkbox's value as the model's tri-state.
+///
+/// On is always `Some(true)`. Off is `None` — *unless* the value was stored
+/// as an explicit `false`, which a checkbox has no way to show and no way to
+/// re-enter once lost, so leaving it alone preserves it. See
+/// [`RuleDraft::stored_effects`].
+fn keep_false(on: bool, stored: Option<bool>) -> Option<bool> {
+    match (on, stored) {
+        (true, _) => Some(true),
+        (false, Some(false)) => Some(false),
+        (false, _) => None,
     }
 }
 
@@ -331,7 +452,12 @@ impl MonitorChoice {
 pub enum Message {
     Add,
     Edit(usize),
+    /// Arms the confirm on a row; the delete itself is [`Message::DeleteConfirm`].
     Delete(usize),
+    DeleteConfirm(usize),
+    /// Arms the confirm on a workspace pin.
+    DeleteWorkspacePinConfirm(usize),
+    DeleteCancel,
     MoveUp(usize),
     MoveDown(usize),
     ToggleEnabled(usize),
@@ -419,6 +545,15 @@ struct ImportCandidateRule {
     effects: Effects,
     enabled: bool,
     checked: bool,
+    /// A rule with this exact matcher is already stored.
+    ///
+    /// This matters more here than it looks: a `hl.window_rule` is usually
+    /// written across several lines, and a multi-line call can never have
+    /// its source line removed (by design — see `remove_matched_lines`), so
+    /// it comes back in every subsequent import. Pre-checking it would add
+    /// another copy each time, and duplicate rules don't merely clutter the
+    /// list — they re-apply, with later ones overriding earlier ones.
+    already_imported: bool,
     /// Where the original call came from — kept so a checked-and-added
     /// candidate's hand-written source line can be removed after a
     /// successful import (see [`Message::ImportConfirm`]'s handler).
@@ -432,6 +567,9 @@ struct ImportCandidateRule {
 struct ImportCandidateWorkspaceRule {
     rule: WorkspaceRule,
     checked: bool,
+    /// A pin for this workspace is already stored — see
+    /// [`ImportCandidateRule::already_imported`].
+    already_imported: bool,
     source_path: std::path::PathBuf,
     line: Option<usize>,
 }
@@ -479,6 +617,37 @@ pub struct WindowRulesModule {
     /// while the evaluator is running; `Some(Some(_))` once results are
     /// ready for the user to check through.
     import_review: Option<Option<ImportReview>>,
+    /// The row whose Delete is armed, if any.
+    ///
+    /// Deleting rewrites the config immediately and there's nothing to undo
+    /// it with, so it takes two presses (vision pillar #4: destructive
+    /// actions are confirmed or reversible). A window rule is a page of
+    /// fields to reconstruct from memory, which makes an accidental click
+    /// far more expensive here than a mis-click usually is.
+    pending_delete: Option<PendingDelete>,
+}
+
+/// Which row is waiting on a delete confirmation. One field for both lists
+/// so arming a rule disarms a pin and vice versa — two independent armed
+/// rows on screen at once would be its own kind of confusing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingDelete {
+    Rule(usize),
+    WorkspacePin(usize),
+}
+
+/// Shown against an import candidate that duplicates something already
+/// stored. A duplicate window rule isn't just clutter — rules are ordered
+/// and later ones override earlier ones, so a second copy changes what
+/// actually applies.
+fn already_imported_note<'a>(scale: FontScale) -> Element<'a, Message> {
+    scaled_text(
+        "Already in your rules — importing it again would apply it twice.",
+        12.0,
+        scale,
+    )
+    .color(hyprforge_core::theme::WARNING)
+    .into()
 }
 
 /// Where the window picker is in its one-shot load.
@@ -559,6 +728,7 @@ impl WindowRulesModule {
                 error,
                 status: None,
                 import_review: None,
+                pending_delete: None,
             },
             // Read the monitors up front: the workspace-pin dropdown needs
             // them, and a failure here is silent by design — the section
@@ -612,6 +782,9 @@ impl WindowRulesModule {
         let Some(draft) = self.draft.take() else {
             return;
         };
+        // Taken before the draft is consumed, and by the same rule the
+        // preview used, so what the user was shown is what gets written.
+        let name = self.name_for(&draft);
         let editing_index = draft.editing_index;
         let (matcher, effects) = draft.into_matcher_effects();
         match editing_index {
@@ -620,13 +793,6 @@ impl WindowRulesModule {
                 self.rules[i].effects = effects;
             }
             None => {
-                let existing: Vec<String> = self.rules.iter().map(|r| r.name.clone()).collect();
-                let label = matcher
-                    .class
-                    .clone()
-                    .or_else(|| matcher.title.clone())
-                    .unwrap_or_else(|| "rule".to_string());
-                let name = generate_rule_name(&label, &existing);
                 self.rules.push(Rule {
                     name,
                     enabled: true,
@@ -735,10 +901,19 @@ impl SettingsModule for WindowRulesModule {
                 Task::none()
             }
             Message::Delete(i) => {
+                self.pending_delete = Some(PendingDelete::Rule(i));
+                Task::none()
+            }
+            Message::DeleteConfirm(i) => {
+                self.pending_delete = None;
                 if i < self.rules.len() {
                     self.rules.remove(i);
                 }
                 self.save_and_maybe_reload()
+            }
+            Message::DeleteCancel => {
+                self.pending_delete = None;
+                Task::none()
             }
             Message::MoveUp(i) => {
                 if i > 0 && i < self.rules.len() {
@@ -851,6 +1026,11 @@ impl SettingsModule for WindowRulesModule {
                 Task::none()
             }
             Message::DeleteWorkspacePin(i) => {
+                self.pending_delete = Some(PendingDelete::WorkspacePin(i));
+                Task::none()
+            }
+            Message::DeleteWorkspacePinConfirm(i) => {
+                self.pending_delete = None;
                 if i < self.workspace_rules.len() {
                     self.workspace_rules.remove(i);
                     return self.save_and_maybe_reload();
@@ -866,6 +1046,13 @@ impl SettingsModule for WindowRulesModule {
                 Task::none()
             }
             Message::DraftSave => {
+                // A draft that can't produce a working rule must not be
+                // stored: an unmatched rule is skipped by codegen and an
+                // unparseable field is dropped, either way leaving the user
+                // with a rule that silently isn't what they wrote.
+                if self.draft.as_ref().is_some_and(|d| !d.blockers().is_empty()) {
+                    return Task::none();
+                }
                 self.commit_draft();
                 self.save_and_maybe_reload()
             }
@@ -901,20 +1088,32 @@ impl SettingsModule for WindowRulesModule {
                     if let Some((matcher, effects, enabled)) =
                         hyprforge_windowrules::import::rule_from_call(&call.kind, &call.args)
                     {
+                        // Matched on the matcher alone: it's what decides
+                        // which windows a rule claims, so a second rule with
+                        // the same one is a duplicate however its effects
+                        // have since been edited.
+                        let already_imported =
+                            self.rules.iter().any(|r| r.matcher == matcher);
                         rules.push(ImportCandidateRule {
                             matcher,
                             effects,
                             enabled,
-                            checked: true,
+                            checked: !already_imported,
+                            already_imported,
                             source_path: call.source_path.clone(),
                             line: call.line,
                         });
                     } else if let Some(rule) =
                         hyprforge_windowrules::import::workspace_rule_from_call(&call.kind, &call.args)
                     {
+                        let already_imported = self
+                            .workspace_rules
+                            .iter()
+                            .any(|w| w.workspace.trim() == rule.workspace.trim());
                         workspace_rules.push(ImportCandidateWorkspaceRule {
                             rule,
-                            checked: true,
+                            checked: !already_imported,
+                            already_imported,
                             source_path: call.source_path.clone(),
                             line: call.line,
                         });
@@ -1033,16 +1232,30 @@ impl SettingsModule for WindowRulesModule {
             ]
             .spacing(spacing::XS)
             .width(Length::Fill);
+            // An armed row swaps its whole action set for the confirm pair,
+            // so the only two things that can happen next are the two the
+            // user is being asked about.
+            let actions: Vec<Element<'_, Message>> =
+                if self.pending_delete == Some(PendingDelete::Rule(i)) {
+                    vec![
+                        secondary_button("Keep").on_press(Message::DeleteCancel).into(),
+                        danger_button("Delete for good", Message::DeleteConfirm(i)),
+                    ]
+                } else {
+                    vec![
+                        secondary_button("Up").on_press(Message::MoveUp(i)).into(),
+                        secondary_button("Down").on_press(Message::MoveDown(i)).into(),
+                        secondary_button("Edit").on_press(Message::Edit(i)).into(),
+                        danger_button("Delete", Message::Delete(i)),
+                    ]
+                };
             list = list.push(
                 container(
                     row![
                         checkbox(rule.enabled).on_toggle(move |_| Message::ToggleEnabled(i)),
                         info,
-                        secondary_button("Up").on_press(Message::MoveUp(i)),
-                        secondary_button("Down").on_press(Message::MoveDown(i)),
-                        secondary_button("Edit").on_press(Message::Edit(i)),
-                        danger_button("Delete", Message::Delete(i)),
                     ]
+                    .extend(actions)
                     .spacing(spacing::SM)
                     .align_y(iced::Alignment::Center),
                 )
@@ -1126,11 +1339,17 @@ impl WindowRulesModule {
                     .clone()
                     .or_else(|| candidate.matcher.title.clone())
                     .unwrap_or_else(|| "(no match)".to_string());
+                let mut info = column![scaled_text(summary, 14.0, scale)]
+                    .spacing(spacing::XS)
+                    .width(Length::Fill);
+                if candidate.already_imported {
+                    info = info.push(already_imported_note(scale));
+                }
                 list = list.push(
                     row![
                         checkbox(candidate.checked)
                             .on_toggle(move |v| Message::ImportToggleRule(i, v)),
-                        scaled_text(summary, 14.0, scale).width(Length::Fill),
+                        info,
                     ]
                     .spacing(spacing::SM)
                     .align_y(iced::Alignment::Center),
@@ -1142,11 +1361,18 @@ impl WindowRulesModule {
         if !review.workspace_rules.is_empty() {
             let mut list = column![].spacing(spacing::SM);
             for (i, candidate) in review.workspace_rules.iter().enumerate() {
+                let mut info =
+                    column![scaled_text(candidate.rule.workspace.clone(), 14.0, scale)]
+                        .spacing(spacing::XS)
+                        .width(Length::Fill);
+                if candidate.already_imported {
+                    info = info.push(already_imported_note(scale));
+                }
                 list = list.push(
                     row![
                         checkbox(candidate.checked)
                             .on_toggle(move |v| Message::ImportToggleWorkspaceRule(i, v)),
-                        scaled_text(candidate.rule.workspace.clone(), 14.0, scale).width(Length::Fill),
+                        info,
                     ]
                     .spacing(spacing::SM)
                     .align_y(iced::Alignment::Center),
@@ -1187,6 +1413,45 @@ impl WindowRulesModule {
     /// *workspace* lives. Together they're how "Steam on the external
     /// display" gets expressed — the rule sends Steam to a workspace, the pin
     /// puts that workspace on the monitor.
+    /// The exact line this draft writes. Rendered by the same codegen the
+    /// real file gets — a window rule is the most opaque thing this module
+    /// produces, and showing it is what makes the form's effect legible
+    /// (vision pillar #4: instant, visible feedback).
+    fn preview_section(&self, draft: &RuleDraft, scale: FontScale) -> Element<'_, Message> {
+        let text = if draft.matches_nothing() {
+            "Nothing yet — a rule needs something to match on.".to_string()
+        } else {
+            draft.preview(&self.name_for(draft)).trim().to_string()
+        };
+        column![
+            scaled_text(text, 12.0, scale).font(iced::Font::MONOSPACE),
+            meta_text("Written to ~/.config/hypr/hyprforge/window-rules.lua", 11.0, scale),
+        ]
+        .spacing(spacing::XS)
+        .into()
+    }
+
+    /// The name this draft will be stored under — its existing one when
+    /// editing, a freshly generated one when new.
+    ///
+    /// Shared with the preview rather than computed at save time only: the
+    /// name is emitted in the generated line, so a preview showing a
+    /// different one would be wrong.
+    fn name_for(&self, draft: &RuleDraft) -> String {
+        if let Some(i) = draft.editing_index {
+            return self.rules[i].name.clone();
+        }
+        let label = if !draft.class.trim().is_empty() {
+            draft.class.trim()
+        } else if !draft.title.trim().is_empty() {
+            draft.title.trim()
+        } else {
+            "rule"
+        };
+        let existing: Vec<String> = self.rules.iter().map(|r| r.name.clone()).collect();
+        generate_rule_name(label, &existing)
+    }
+
     fn workspace_pins_view(&self, scale: FontScale) -> Element<'_, Message> {
         let mut choices: Vec<MonitorChoice> =
             self.monitors.iter().map(MonitorChoice::from_monitor).collect();
@@ -1218,31 +1483,52 @@ impl WindowRulesModule {
                 }))
             };
 
-            list = list.push(
-                column![
-                    row![
-                        text_input("workspace, e.g. 3 or name:gaming", &pin.workspace)
-                            .on_input(move |v| Message::PinWorkspace(i, v)),
-                        iced::widget::pick_list(choices.clone(), selected, move |c| {
-                            Message::PinMonitor(i, c)
-                        })
-                        .placeholder("on monitor…"),
-                        danger_button("Remove", Message::DeleteWorkspacePin(i)),
+            let pin_actions: Vec<Element<'_, Message>> =
+                if self.pending_delete == Some(PendingDelete::WorkspacePin(i)) {
+                    vec![
+                        secondary_button("Keep").on_press(Message::DeleteCancel).into(),
+                        danger_button("Remove for good", Message::DeleteWorkspacePinConfirm(i)),
                     ]
-                    .spacing(spacing::SM)
-                    .align_y(iced::Alignment::Center),
-                    row![
-                        checkbox(pin.default)
-                            .label("Default workspace for that monitor")
-                            .on_toggle(move |v| Message::PinDefault(i, v)),
-                        checkbox(pin.persistent)
-                            .label("Keep alive when empty")
-                            .on_toggle(move |v| Message::PinPersistent(i, v)),
-                    ]
-                    .spacing(spacing::MD),
+                } else {
+                    vec![danger_button("Remove", Message::DeleteWorkspacePin(i))]
+                };
+            let mut entry = column![
+                row![
+                    text_input("workspace, e.g. 3 or name:gaming", &pin.workspace)
+                        .on_input(move |v| Message::PinWorkspace(i, v)),
+                    iced::widget::pick_list(choices.clone(), selected, move |c| {
+                        Message::PinMonitor(i, c)
+                    })
+                    .placeholder("on monitor…"),
                 ]
-                .spacing(spacing::XS),
-            );
+                .extend(pin_actions)
+                .spacing(spacing::SM)
+                .align_y(iced::Alignment::Center),
+                row![
+                    checkbox(pin.default)
+                        .label("Default workspace for that monitor")
+                        .on_toggle(move |v| Message::PinDefault(i, v)),
+                    checkbox(pin.persistent)
+                        .label("Keep alive when empty")
+                        .on_toggle(move |v| Message::PinPersistent(i, v)),
+                ]
+                .spacing(spacing::MD),
+            ]
+            .spacing(spacing::XS);
+            // A pin with no workspace names nothing, so codegen skips it —
+            // silently, which from the user's side is a row that sits there
+            // looking configured and does nothing at all.
+            if pin.workspace.trim().is_empty() {
+                entry = entry.push(
+                    scaled_text(
+                        "Name a workspace — this pin does nothing until you do.",
+                        12.0,
+                        scale,
+                    )
+                    .color(hyprforge_core::theme::WARNING),
+                );
+            }
+            list = list.push(entry);
         }
 
         let note = if self.monitors.is_empty() {
@@ -1671,13 +1957,22 @@ impl WindowRulesModule {
             ));
         }
 
+        body = body.push(section("Writes", scale, self.preview_section(draft, scale)));
+
+        // Disabled rather than hidden, with the reason shown above it: a
+        // button that vanishes leaves no clue what's missing.
+        let blockers = draft.blockers();
+        if let Some(first) = blockers.first() {
+            body = body.push(
+                scaled_text(first.clone(), 12.0, scale).color(hyprforge_core::theme::WARNING),
+            );
+        }
+        let save = primary_button("Save");
+        let save = if blockers.is_empty() { save.on_press(Message::DraftSave) } else { save };
         body = body.push(
             container(
-                row![
-                    secondary_button("Cancel").on_press(Message::DraftCancel),
-                    primary_button("Save").on_press(Message::DraftSave),
-                ]
-                .spacing(spacing::SM),
+                row![secondary_button("Cancel").on_press(Message::DraftCancel), save]
+                    .spacing(spacing::SM),
             )
             .width(Length::Fill)
             .align_x(iced::alignment::Horizontal::Right),
@@ -1837,6 +2132,45 @@ mod tests {
         assert_eq!(effects, rule.effects);
     }
 
+    /// `false` is not the same as absent: rules are ordered and a later
+    /// `float = false` is how you cancel an earlier `float = true`. A
+    /// checkbox can't show the difference, so opening a rule and saving it
+    /// unchanged must not quietly turn one into the other.
+    #[test]
+    fn draft_preserves_explicitly_false_effects() {
+        let mut rule = fully_populated_rule();
+        rule.effects.float = Some(false);
+        rule.effects.no_focus = Some(false);
+        rule.effects.opaque = None;
+
+        let (_, effects) = RuleDraft::from_rule(0, &rule).into_matcher_effects();
+        assert_eq!(effects.float, Some(false), "an explicit false must survive an untouched edit");
+        assert_eq!(effects.no_focus, Some(false));
+        assert_eq!(effects.opaque, None, "unset stays unset");
+    }
+
+    /// ...but ticking the box still means `true`, and unticking one that was
+    /// `true` still removes it. Preserving `false` must not make the
+    /// checkbox itself stop working.
+    #[test]
+    fn toggling_a_preserved_false_effect_still_works() {
+        let mut rule = fully_populated_rule();
+        rule.effects.float = Some(false);
+
+        let mut draft = RuleDraft::from_rule(0, &rule);
+        draft.float = true;
+        assert_eq!(draft.clone().into_matcher_effects().1.float, Some(true));
+
+        let mut on = RuleDraft::from_rule(0, &fully_populated_rule());
+        assert_eq!(on.stored_effects.float, Some(true));
+        on.float = false;
+        assert_eq!(
+            on.into_matcher_effects().1.float,
+            None,
+            "unticking a stored true removes the effect rather than storing false"
+        );
+    }
+
     #[test]
     fn draft_preserves_explicitly_false_matchers() {
         let mut rule = fully_populated_rule();
@@ -1851,6 +2185,104 @@ mod tests {
              widen the rule to match everything"
         );
         assert_eq!(matcher.fullscreen, None);
+    }
+
+    /// A rule with no match field is stored, listed, and skipped by codegen
+    /// — so without this the user gets a rule that looks configured and
+    /// never once applies, with nothing anywhere saying why.
+    #[test]
+    fn a_rule_that_matches_nothing_cannot_be_saved() {
+        let mut draft = RuleDraft { float: true, ..Default::default() };
+        assert!(
+            draft.blockers().iter().any(|b| b.contains("Match at least one")),
+            "{:?}",
+            draft.blockers()
+        );
+
+        draft.class = "discord".to_string();
+        assert!(draft.blockers().is_empty(), "{:?}", draft.blockers());
+    }
+
+    /// A tri-state matcher counts as matching something, even though it's
+    /// not a text field.
+    #[test]
+    fn a_tri_state_matcher_alone_is_enough_to_match_on() {
+        let draft = RuleDraft { floating: Some(true), ..Default::default() };
+        assert!(draft.blockers().is_empty(), "{:?}", draft.blockers());
+    }
+
+    /// Every numeric field is `parse().ok()` on save, so anything unreadable
+    /// vanishes without a word. Blocking is what turns that into a message.
+    #[test]
+    fn unreadable_numbers_are_reported_rather_than_dropped() {
+        let base = RuleDraft { class: "discord".to_string(), ..Default::default() };
+
+        let rounding = RuleDraft { rounding: "10px".to_string(), ..base.clone() };
+        assert!(rounding.blockers().iter().any(|b| b.contains("Rounding")), "{:?}", rounding.blockers());
+
+        let opacity = RuleDraft { opacity_active: "ninety".to_string(), ..base.clone() };
+        assert!(opacity.blockers().iter().any(|b| b.contains("Active opacity")));
+
+        // A valid one doesn't block.
+        let ok = RuleDraft {
+            rounding: "10".to_string(),
+            opacity_active: "0.9".to_string(),
+            ..base
+        };
+        assert!(ok.blockers().is_empty(), "{:?}", ok.blockers());
+    }
+
+    /// Hyprland's `{ a, b }` can't express one half, so a half-filled pair
+    /// is dropped entirely on save — including the half the user typed.
+    #[test]
+    fn a_half_filled_pair_is_reported_rather_than_dropped() {
+        let base = RuleDraft { class: "discord".to_string(), ..Default::default() };
+
+        let half_move = RuleDraft { move_x: "100".to_string(), ..base.clone() };
+        assert!(half_move.blockers().iter().any(|b| b.contains("Position")), "{:?}", half_move.blockers());
+
+        let half_min = RuleDraft { min_w: "200".to_string(), ..base.clone() };
+        assert!(half_min.blockers().iter().any(|b| b.contains("Minimum size")));
+
+        let both = RuleDraft {
+            move_x: "100".to_string(),
+            move_y: "40".to_string(),
+            ..base
+        };
+        assert!(both.blockers().is_empty(), "{:?}", both.blockers());
+    }
+
+    /// Save must actually refuse, not just look disabled.
+    #[test]
+    fn saving_a_blocked_draft_does_nothing() {
+        with_isolated_module(|m| {
+            m.draft = Some(RuleDraft { float: true, ..Default::default() });
+            let _ = m.update(Message::DraftSave);
+            assert!(m.rules.is_empty(), "a rule matching nothing must not be stored");
+            assert!(m.draft.is_some(), "and the form stays open to be fixed");
+        });
+    }
+
+    /// The preview is the real thing, not an approximation — and it names
+    /// the rule the same way the save does, so the line shown is the line
+    /// written.
+    #[test]
+    fn the_preview_matches_what_is_saved() {
+        with_isolated_module(|m| {
+            m.draft = Some(RuleDraft {
+                class: "discord".to_string(),
+                float: true,
+                ..Default::default()
+            });
+            let draft = m.draft.as_ref().unwrap();
+            let preview = draft.preview(&m.name_for(draft));
+            assert!(preview.contains("class = [[discord]]"), "got: {preview}");
+            assert!(preview.contains("float = true"), "got: {preview}");
+            assert!(preview.contains("name = [[hyprforge-discord-1]]"), "got: {preview}");
+
+            m.commit_draft();
+            assert_eq!(hyprforge_windowrules::codegen::render_one(&m.rules[0]), preview);
+        });
     }
 
     #[test]
@@ -2106,7 +2538,11 @@ mod tests {
             let _ = m.update(Message::AddWorkspacePin);
             assert_eq!(m.workspace_rules.len(), 2);
             let _ = m.update(Message::PinWorkspace(1, "name:gaming".into()));
+
+            // Removing takes two presses, same as a rule.
             let _ = m.update(Message::DeleteWorkspacePin(0));
+            assert_eq!(m.workspace_rules.len(), 2, "one press only arms the row");
+            let _ = m.update(Message::DeleteWorkspacePinConfirm(0));
             assert_eq!(m.workspace_rules.len(), 1);
             assert_eq!(m.workspace_rules[0].workspace, "name:gaming");
         });
@@ -2117,9 +2553,43 @@ mod tests {
     #[test]
     fn editing_a_pin_that_is_gone_does_nothing() {
         with_isolated_module(|m| {
-            let _ = m.update(Message::DeleteWorkspacePin(3));
+            let _ = m.update(Message::DeleteWorkspacePinConfirm(3));
             let _ = m.update(Message::PinWorkspace(3, "x".into()));
             assert!(m.workspace_rules.is_empty());
+        });
+    }
+
+    /// A rule is a page of fields to reconstruct from memory, so an
+    /// accidental click must not be able to destroy one.
+    #[test]
+    fn deleting_a_rule_takes_two_presses() {
+        with_isolated_module(|m| {
+            m.rules = vec![fully_populated_rule()];
+
+            let _ = m.update(Message::Delete(0));
+            assert_eq!(m.rules.len(), 1, "one press must not delete anything");
+            assert_eq!(m.pending_delete, Some(PendingDelete::Rule(0)));
+
+            let _ = m.update(Message::DeleteCancel);
+            assert_eq!(m.rules.len(), 1);
+            assert_eq!(m.pending_delete, None, "cancelling disarms the row");
+
+            let _ = m.update(Message::Delete(0));
+            let _ = m.update(Message::DeleteConfirm(0));
+            assert!(m.rules.is_empty());
+            assert_eq!(m.pending_delete, None);
+        });
+    }
+
+    /// Arming one list must not leave a stale armed row in the other.
+    #[test]
+    fn arming_a_pin_disarms_an_armed_rule() {
+        with_isolated_module(|m| {
+            m.rules = vec![fully_populated_rule()];
+            let _ = m.update(Message::AddWorkspacePin);
+            let _ = m.update(Message::Delete(0));
+            let _ = m.update(Message::DeleteWorkspacePin(0));
+            assert_eq!(m.pending_delete, Some(PendingDelete::WorkspacePin(0)));
         });
     }
 
