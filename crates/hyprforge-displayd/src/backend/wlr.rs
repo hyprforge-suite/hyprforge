@@ -77,6 +77,18 @@ struct PendingMode {
     preferred: bool,
 }
 
+/// Locks past poisoning.
+///
+/// Every mutex in this file guards plain data — a snapshot, a proxy map, a
+/// subscriber list — that is replaced wholesale rather than mutated through
+/// invariants, so a panic elsewhere leaves nothing half-updated to protect
+/// against. `unwrap()` here would turn one unrelated panic into a dead
+/// dispatch thread, and a dead dispatch thread means the daemon stops
+/// hearing about displays entirely without ever saying so.
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 struct WlrState {
     manager: Option<ZwlrOutputManagerV1>,
     heads: HashMap<ZwlrOutputHeadV1, PendingHead>,
@@ -181,10 +193,10 @@ impl Dispatch<ZwlrOutputManagerV1, ()> for WlrState {
                         connector_proxies.insert(h.connector.clone(), proxy.clone());
                     }
                 }
-                *state.snapshot.lock().unwrap() = snapshot.clone();
-                *state.connector_proxies.lock().unwrap() = connector_proxies;
+                *lock(&state.snapshot) = snapshot.clone();
+                *lock(&state.connector_proxies) = connector_proxies;
 
-                let mut subs = state.subscribers.lock().unwrap();
+                let mut subs = lock(&state.subscribers);
                 subs.retain(|tx| tx.send(TopologyEvent::Snapshot(snapshot.clone())).is_ok());
                 drop(subs);
 
@@ -440,7 +452,7 @@ impl WlrBackend {
                 refresh_mhz,
             } => Some((width, height, refresh_mhz)),
             ModeSpec::Preferred => {
-                let snapshot = self.snapshot.lock().unwrap();
+                let snapshot = lock(&self.snapshot);
                 snapshot
                     .iter()
                     .find(|h| h.connector == connector)
@@ -457,7 +469,7 @@ impl WlrBackend {
         tx: SyncSender<ConfigOutcome>,
     ) -> anyhow::Result<ZwlrOutputConfigurationV1> {
         let config = self.manager.create_configuration(serial, &self.qh, tx);
-        let proxies = self.connector_proxies.lock().unwrap();
+        let proxies = lock(&self.connector_proxies);
         for head_plan in &plan.heads {
             let head_proxy = proxies.get(&head_plan.connector).ok_or_else(|| {
                 anyhow::anyhow!("unknown connector in layout plan: {}", head_plan.connector)
@@ -522,7 +534,7 @@ impl WlrBackend {
 
 impl OutputBackend for WlrBackend {
     fn list_outputs(&self) -> anyhow::Result<Vec<Head>> {
-        Ok(self.snapshot.lock().unwrap().clone())
+        Ok(lock(&self.snapshot).clone())
     }
 
     fn apply_configuration(&self, plan: &LayoutPlan) -> anyhow::Result<()> {
@@ -551,8 +563,8 @@ impl OutputBackend for WlrBackend {
 
     fn subscribe(&self) -> UnboundedReceiver<TopologyEvent> {
         let (tx, rx) = mpsc::unbounded_channel();
-        let _ = tx.send(TopologyEvent::Snapshot(self.snapshot.lock().unwrap().clone()));
-        self.subscribers.lock().unwrap().push(tx);
+        let _ = tx.send(TopologyEvent::Snapshot(lock(&self.snapshot).clone()));
+        lock(&self.subscribers).push(tx);
         rx
     }
 }

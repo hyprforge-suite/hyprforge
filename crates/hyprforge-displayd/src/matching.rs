@@ -137,23 +137,28 @@ pub fn assign_heads(profile: &Profile, connected: &[Head]) -> HashMap<String, St
     assignment
 }
 
-/// The layout space a planned head occupies, as `(width, height)`.
-fn plan_logical_size(plan: &HeadPlan, connected: &[Head]) -> (i32, i32) {
-    let dims = match plan.mode {
-        Some(ModeSpec::Exact { width, height, .. }) => Some((width, height)),
+/// The layout space a planned head occupies, as `(width, height)`, or
+/// `None` when the head's resolution isn't known — a `Preferred`/`Auto`
+/// plan for a connector the compositor reports no usable mode for.
+///
+/// Deliberately not a guess. A stand-in resolution would silently move
+/// *other* heads by the difference between the guess and the truth, which
+/// is worse than the overlap it set out to repair.
+fn plan_logical_size(plan: &HeadPlan, connected: &[Head]) -> Option<(i32, i32)> {
+    let (w, h) = match plan.mode {
+        Some(ModeSpec::Exact { width, height, .. }) => (width, height),
         _ => connected
             .iter()
             .find(|c| c.connector == plan.connector)
             .and_then(|c| c.effective_mode())
-            .map(|m| (m.width, m.height)),
+            .map(|m| (m.width, m.height))?,
     };
-    let (w, h) = dims.unwrap_or((1920, 1080));
     let (lw, lh) = (logical_size(w, plan.scale), logical_size(h, plan.scale));
     match plan.transform {
         Transform::Rotate90 | Transform::Rotate270 | Transform::Flipped90 | Transform::Flipped270 => {
-            (lh, lw)
+            Some((lh, lw))
         }
-        _ => (lw, lh),
+        _ => Some((lw, lh)),
     }
 }
 
@@ -166,7 +171,9 @@ fn plan_logical_size(plan: &HeadPlan, connected: &[Head]) -> (i32, i32) {
 /// that was flush silently starts overlapping.
 ///
 /// Heads placed by the mirror policy are exempt: sharing a position is the
-/// entire point there, not a mistake to correct.
+/// entire point there, not a mistake to correct. So is any head whose size
+/// we can't determine — it is neither moved nor treated as an obstacle,
+/// since every conclusion about it would rest on a made-up resolution.
 fn resolve_plan_overlaps(heads_plan: &mut [HeadPlan], connected: &[Head], exempt: &[String]) {
     let mut order: Vec<usize> = (0..heads_plan.len())
         .filter(|&i| heads_plan[i].enabled && !exempt.contains(&heads_plan[i].connector))
@@ -175,7 +182,13 @@ fn resolve_plan_overlaps(heads_plan: &mut [HeadPlan], connected: &[Head], exempt
 
     let mut placed: Vec<(i32, i32, i32, i32)> = Vec::new();
     for &i in &order {
-        let (w, h) = plan_logical_size(&heads_plan[i], connected);
+        let Some((w, h)) = plan_logical_size(&heads_plan[i], connected) else {
+            tracing::warn!(
+                connector = %heads_plan[i].connector,
+                "no known resolution, so it is left out of overlap repair"
+            );
+            continue;
+        };
         let (mut x, y) = heads_plan[i].position;
         // Push right past anything already placed that this would sit on.
         // Repeats because clearing one neighbour can run into the next.
@@ -635,6 +648,50 @@ mod tests {
         plan.validate().unwrap();
         let b = plan.heads.iter().find(|h| h.connector == "DP-3").unwrap();
         assert_eq!(b.position.0, 1536, "a flush neighbour shouldn't be pushed");
+    }
+
+    /// A head with no reported mode has no size we can reason about — an
+    /// extra output under `ExtendRight` whose compositor entry carries no
+    /// modes at all. Overlap repair used to substitute 1920x1080 for it,
+    /// which then shoved a head whose size *was* known by the difference
+    /// between the guess and the truth. Skipping it moves nothing.
+    #[test]
+    fn a_head_of_unknown_size_never_pushes_a_head_of_known_size() {
+        let mut unknown = head("DP-9", identity("GWD", "ARZOPA", "1"), 0, 0);
+        unknown.modes.clear();
+        unknown.current_mode = None;
+        let known = head("eDP-2", identity("BOE", "0x0BC9", ""), 2560, 1600);
+        let connected = vec![unknown, known];
+
+        let mut plan = vec![
+            HeadPlan {
+                connector: "DP-9".to_string(),
+                enabled: true,
+                mode: Some(ModeSpec::Preferred),
+                position: (0, 0),
+                transform: Transform::Normal,
+                scale: 1.0,
+            },
+            HeadPlan {
+                connector: "eDP-2".to_string(),
+                enabled: true,
+                mode: Some(ModeSpec::Exact {
+                    width: 2560,
+                    height: 1600,
+                    refresh_mhz: 60000,
+                }),
+                position: (100, 0),
+                transform: Transform::Normal,
+                scale: 1.0,
+            },
+        ];
+        resolve_plan_overlaps(&mut plan, &connected, &[]);
+
+        assert_eq!(
+            plan[1].position.0, 100,
+            "a made-up 1920 wide neighbour must not move a real head"
+        );
+        assert_eq!(plan[0].position.0, 0, "the unknown head isn't moved either");
     }
 
     #[test]
