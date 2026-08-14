@@ -617,6 +617,10 @@ pub struct WindowRulesModule {
     /// while the evaluator is running; `Some(Some(_))` once results are
     /// ready for the user to check through.
     import_review: Option<Option<ImportReview>>,
+    /// Why the stored rules couldn't be read, if they couldn't. While set,
+    /// the module refuses to write anything — an unreadable store is not an
+    /// empty one, and saving over it would destroy what's really there.
+    store_unreadable: Option<String>,
     /// The row whose Delete is armed, if any.
     ///
     /// Deleting rewrites the config immediately and there's nothing to undo
@@ -663,8 +667,15 @@ enum PickerState {
 
 impl WindowRulesModule {
     pub fn new() -> (Self, Task<Message>) {
-        let stored = hyprforge_windowrules::storage::load(&hyprforge_core::paths::window_rules_toml_path())
-            .unwrap_or_default();
+        // A failure here must never look like "you have no rules": that
+        // reading is what turns one bad parse into a wiped store on the next
+        // save.
+        let (stored, store_unreadable) = match hyprforge_windowrules::storage::load(
+            &hyprforge_core::paths::window_rules_toml_path(),
+        ) {
+            Ok(stored) => (stored, None),
+            Err(e) => (Default::default(), Some(e.to_string())),
+        };
         let (rules, workspace_rules) = (stored.rules, stored.workspace_rules);
         let mut config = hyprforge_windowrules::setup::discover(&hyprforge_core::paths::hypr_config_dir());
         // No confirm dialog: the require line is Hyprforge's own file
@@ -728,6 +739,7 @@ impl WindowRulesModule {
                 error,
                 status: None,
                 import_review: None,
+                store_unreadable,
                 pending_delete: None,
             },
             // Read the monitors up front: the workspace-pin dropdown needs
@@ -803,14 +815,34 @@ impl WindowRulesModule {
         }
     }
 
-    fn save_and_maybe_reload(&mut self) -> Task<Message> {
-        if let Err(e) =
-            hyprforge_windowrules::storage::save(
-                &hyprforge_core::paths::window_rules_toml_path(),
-                &self.stored_rules(),
-            )
-        {
+    /// Writes the canonical TOML, or reports why it couldn't.
+    ///
+    /// Split out so a caller about to do something irreversible can find out
+    /// whether the store is safely on disk *first* — see
+    /// [`Message::ImportConfirm`].
+    fn persist(&mut self) -> Result<(), String> {
+        // If the file couldn't be parsed, the in-memory lists mean "unknown",
+        // not "none", and writing them would replace what's really there.
+        if let Some(reason) = &self.store_unreadable {
+            let message = format!(
+                "Not saving — your window-rules.toml couldn't be read, and \
+                 overwriting it would lose whatever is in it. ({reason})"
+            );
+            self.error = Some(message.clone());
+            return Err(message);
+        }
+        hyprforge_windowrules::storage::save(
+            &hyprforge_core::paths::window_rules_toml_path(),
+            &self.stored_rules(),
+        )
+        .map_err(|e| {
             self.error = Some(e.to_string());
+            e.to_string()
+        })
+    }
+
+    fn save_and_maybe_reload(&mut self) -> Task<Message> {
+        if self.persist().is_err() {
             return Task::none();
         }
         // Without a Lua config there is nothing to source the generated file
@@ -1178,8 +1210,17 @@ impl SettingsModule for WindowRulesModule {
                         self.workspace_rules.push(candidate.rule);
                     }
                 }
-                // Best-effort and silent on failure: the entries are
-                // already safely in the store either way, and
+                // Order matters: the store has to be *on disk* before
+                // anything is deleted from the user's config. Pushing onto
+                // `self.rules` above is not "safely added" — it's an
+                // in-memory Vec, and a failed write or a crash between there
+                // and here would lose the rules with no copy anywhere. This
+                // exact ordering cost a real user 37 hand-written binds in
+                // the Shortcuts module.
+                if self.persist().is_err() {
+                    return Task::none();
+                }
+                // Best-effort from here: the entries are on disk, and
                 // `remove_matched_lines` itself only ever removes a line
                 // that still verifiably looks like the exact call it
                 // recorded — see its doc comment for why that's safe to
@@ -1205,6 +1246,30 @@ impl SettingsModule for WindowRulesModule {
             content = content.push(notice);
         }
 
+        if let Some(reason) = &self.store_unreadable {
+            content = content.push(section(
+                "Your rules couldn't be read",
+                scale,
+                column![
+                    scaled_text(
+                        "Hyprforge won't save anything until this is sorted out — writing \
+                         now would replace whatever is in the file with an empty list.",
+                        13.0,
+                        scale,
+                    )
+                    .color(hyprforge_core::theme::WARNING),
+                    meta_text(
+                        format!(
+                            "{}\n{reason}",
+                            hyprforge_core::paths::window_rules_toml_path().display()
+                        ),
+                        12.0,
+                        scale,
+                    ),
+                ]
+                .spacing(spacing::SM),
+            ));
+        }
         if let Some(err) = &self.error {
             content = content.push(scaled_text(format!("Error: {err}"), 13.0, scale));
         }
@@ -2045,11 +2110,9 @@ mod tests {
     /// these tests run on parallel threads, so only one may own it at a time.
     /// Same reasoning as the `ENV_LOCK` in `hyprforge-core`'s `paths` tests.
     fn with_isolated_module(f: impl FnOnce(&mut WindowRulesModule)) {
-        use std::sync::Mutex;
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
         // A test that panics while holding the lock poisons it; the next
         // test still needs to run, and there's no shared state to corrupt.
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::modules::CONFIG_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let dir = tempfile::tempdir().expect("could not make a temp config dir");
         let previous = std::env::var_os("XDG_CONFIG_HOME");
@@ -2556,6 +2619,63 @@ mod tests {
             let _ = m.update(Message::DeleteWorkspacePinConfirm(3));
             let _ = m.update(Message::PinWorkspace(3, "x".into()));
             assert!(m.workspace_rules.is_empty());
+        });
+    }
+
+    /// The same ordering defect that cost a real user their binds in the
+    /// Shortcuts module: nothing may be deleted from the user's config
+    /// unless the store was actually written first.
+    #[test]
+    fn a_failed_save_leaves_the_users_config_untouched() {
+        with_isolated_module(|m| {
+            let dir = tempfile::tempdir().unwrap();
+            let config = dir.path().join("hyprland.lua");
+            let source = "hl.window_rule({ match = { class = [[discord]] }, float = true })\n";
+            std::fs::write(&config, source).unwrap();
+
+            m.store_unreadable = Some("simulated unreadable store".to_string());
+            m.import_review = Some(Some(ImportReview {
+                rules: vec![ImportCandidateRule {
+                    matcher: Matcher { class: Some("discord".into()), ..Default::default() },
+                    effects: Effects::default(),
+                    enabled: true,
+                    checked: true,
+                    already_imported: false,
+                    source_path: config.clone(),
+                    line: Some(1),
+                }],
+                workspace_rules: Vec::new(),
+                failures: Vec::new(),
+            }));
+            let _ = m.update(Message::ImportConfirm);
+
+            assert_eq!(
+                std::fs::read_to_string(&config).unwrap(),
+                source,
+                "nothing may be removed when the store wasn't written"
+            );
+            assert!(m.error.is_some(), "and the failure has to be visible");
+        });
+    }
+
+    /// An unreadable store is not an empty one.
+    #[test]
+    fn an_unreadable_store_is_never_overwritten() {
+        with_isolated_module(|m| {
+            let path = hyprforge_core::paths::window_rules_toml_path();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let precious = "this file did not parse but must survive\n";
+            std::fs::write(&path, precious).unwrap();
+
+            m.store_unreadable = Some("expected an equals".to_string());
+            m.rules.push(fully_populated_rule());
+
+            assert!(m.persist().is_err());
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                precious,
+                "the unparseable file must be left exactly as it was"
+            );
         });
     }
 
