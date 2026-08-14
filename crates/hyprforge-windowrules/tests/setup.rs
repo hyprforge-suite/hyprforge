@@ -17,15 +17,21 @@ require(\"hyprforge/window-rules\")
 require(\"monitors\")
 ";
 
+/// Window rules are `BeforeUserRequires`, and that has to hold even when
+/// the user has no `require()` of their own — which is the common shape.
+///
+/// Hyprland applies the *last* matching rule (verified against 0.56.1), so
+/// appending here would silently make Hyprforge's generated rules override
+/// the user's own hand-written ones. The line belongs above their content.
 #[test]
-fn detects_no_requires_appends_at_end() {
+fn detects_no_requires_and_still_inserts_above_the_users_content() {
     let plan = detect(NO_REQUIRES);
-    let expected_line = NO_REQUIRES.lines().count() + 1;
-    assert_eq!(
-        plan,
-        SetupPlan::NeedsInsert {
-            insert_before_line: expected_line
-        }
+    assert_eq!(plan, SetupPlan::NeedsInsert { insert_before_line: 1 });
+
+    let out = apply(NO_REQUIRES, &plan);
+    assert!(
+        out.find("hyprforge/window-rules").unwrap() < out.find("hl.config").unwrap(),
+        "the require must precede the user's own config: {out}"
     );
 }
 

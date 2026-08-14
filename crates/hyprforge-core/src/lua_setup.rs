@@ -97,6 +97,20 @@ pub enum Placement {
 /// `BeforeUserRequires` module lands inside the first one's block, not in
 /// an arbitrary position determined by whichever require happened to be
 /// textually first at install time.
+/// The first line that isn't a comment or blank, 1-indexed — where a block
+/// belongs when it has to go "at the top" without displacing a file's header
+/// comment. Falls back to line 1 for a file that is nothing but comments.
+fn first_content_line(lines: &[&str]) -> usize {
+    lines
+        .iter()
+        .position(|l| {
+            let t = l.trim_start();
+            !t.is_empty() && !t.starts_with("--")
+        })
+        .map(|i| i + 1)
+        .unwrap_or(1)
+}
+
 pub fn detect(hyprland_lua: &str, line: &str, placement: Placement) -> SetupPlan {
     if hyprland_lua
         .lines()
@@ -121,8 +135,13 @@ pub fn detect(hyprland_lua: &str, line: &str, placement: Placement) -> SetupPlan
             .enumerate()
             .find(|(_, l)| l.trim_start().starts_with("require("))
             .map(|(i, _)| i + 1)
-            // No requires at all, so "before the first one" is the end.
-            .unwrap_or(end),
+            // No requires at all. "The end" is the tempting fallback and it
+            // is exactly backwards: Hyprland applies the *last* matching
+            // rule, verified against 0.56.1, so this placement only delivers
+            // what it promises — the user's own config winning — by landing
+            // early. Falling back to the end inverted that for every config
+            // without a `require()` of its own, which is most of them.
+            .unwrap_or_else(|| first_content_line(&lines)),
     };
     SetupPlan::NeedsInsert { insert_before_line }
 }
@@ -359,14 +378,54 @@ mod tests {
     /// With no requires at all, both placements mean "the end" — there's
     /// nothing to go before.
     #[test]
-    fn a_config_with_no_requires_appends_either_way() {
+    fn a_config_with_no_requires_still_honours_its_placement() {
         let cfg = "hl.config({})\n";
         let line = require_line("keybinds");
-        for placement in [Placement::BeforeUserRequires, Placement::AtEnd] {
-            let out = apply(cfg, &detect(cfg, &line, placement), &line, placement);
-            assert!(out.contains("hyprforge/keybinds"));
-            assert_eq!(out.lines().last().unwrap(), MARKER_END);
-        }
+
+        // `AtEnd` means what it says.
+        let at_end = apply(cfg, &detect(cfg, &line, Placement::AtEnd), &line, Placement::AtEnd);
+        assert!(at_end.contains("hyprforge/keybinds"));
+        assert_eq!(at_end.lines().last().unwrap(), MARKER_END);
+
+        // `BeforeUserRequires` must *not* also append. Hyprland applies the
+        // last matching rule, so appending would make Hyprforge override the
+        // user's own config — the exact opposite of what this placement
+        // exists to guarantee. A config with no `require()` of its own is
+        // the common case, not an edge case.
+        let before = apply(
+            cfg,
+            &detect(cfg, &line, Placement::BeforeUserRequires),
+            &line,
+            Placement::BeforeUserRequires,
+        );
+        assert!(before.contains("hyprforge/keybinds"));
+        assert_eq!(
+            before.lines().next().unwrap(),
+            marker_start(Placement::BeforeUserRequires),
+            "the block belongs above the user's content, not below it: {before}"
+        );
+        assert_eq!(before.lines().last().unwrap(), "hl.config({})");
+    }
+
+    /// ...but a leading comment block is a header, and the require line
+    /// shouldn't shove itself above it.
+    #[test]
+    fn a_leading_comment_block_keeps_its_place_at_the_top() {
+        let cfg = "-- my hyprland config\n-- second line\n\nhl.config({})\n";
+        let line = require_line("monitors");
+        let out = apply(
+            cfg,
+            &detect(cfg, &line, Placement::BeforeUserRequires),
+            &line,
+            Placement::BeforeUserRequires,
+        );
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "-- my hyprland config");
+        assert_eq!(lines[1], "-- second line");
+        assert!(
+            out.find("hyprforge/monitors").unwrap() < out.find("hl.config").unwrap(),
+            "still has to land before the user's own content: {out}"
+        );
     }
 
     /// A second module sharing a placement must join the first module's
