@@ -20,7 +20,7 @@ use hyprforge_core::widgets::{
 };
 use hyprforge_core::SettingsModule;
 use hyprforge_input::catalog::{self, Kind, Setting};
-use hyprforge_input::import::Discovered;
+use hyprforge_input::import::{Discovered, Live};
 use hyprforge_input::model::{Invalid, Settings, Value};
 use hyprforge_input::setup::{HyprConfig, SetupPlan};
 use iced::widget::{checkbox, column, container, pick_list, row, scrollable, text_input};
@@ -49,6 +49,8 @@ pub enum Message {
     ImportToggle(usize),
     ImportConfirm,
     ImportCancel,
+    /// The compositor's current value for every option, read once on open.
+    LiveLoaded(Vec<Live>),
     Reloaded(Result<(), String>),
 }
 
@@ -88,6 +90,15 @@ pub struct InputModule {
     /// user would see a setting in their TOML quietly doing nothing.
     invalid: Vec<Invalid>,
     import_review: Option<ImportState>,
+    /// What Hyprland currently has for each option, and whether the user's
+    /// own config is what put it there.
+    ///
+    /// Without this a row for an unowned key falls back to the *catalog*
+    /// default, which is a different number from what's running whenever
+    /// the user's config sets it — the screen would show `numlock` off
+    /// while it's on. Empty until the read returns, and if it fails the
+    /// rows fall back to the catalog default and say so.
+    live: BTreeMap<&'static str, Live>,
 }
 
 impl InputModule {
@@ -126,8 +137,13 @@ impl InputModule {
                 store_unreadable,
                 invalid,
                 import_review: None,
+                live: BTreeMap::new(),
             },
-            Task::none(),
+            // Read what's actually running, so unowned rows show the truth
+            // rather than the catalog default. A failure is silent by
+            // design: the rows still render, they just can't claim to know
+            // what's live.
+            Task::perform(read_live(), Message::LiveLoaded),
         )
     }
 
@@ -189,14 +205,30 @@ impl InputModule {
         if let Some(draft) = self.drafts.get(setting.key) {
             return draft.clone();
         }
-        match self.settings.get(setting.key) {
-            Some(v) => render_for_edit(v),
-            None => render_for_edit(&Value::default_for(&setting.kind)),
-        }
+        render_for_edit(&self.effective(setting).0)
     }
 
     fn owns(&self, key: &str) -> bool {
         self.settings.get(key).is_some()
+    }
+
+    /// The value a control should display, and where it came from.
+    ///
+    /// Owned beats live beats the catalog default. The order matters in
+    /// both directions: an owned value that hasn't reached the compositor
+    /// yet must still show what the user chose, and an unowned one must
+    /// show what's running rather than what Hyprland would do by default.
+    fn effective(&self, setting: &Setting) -> (Value, Source) {
+        if let Some(v) = self.settings.get(setting.key) {
+            return (v.clone(), Source::Owned);
+        }
+        if let Some(live) = self.live.get(setting.key) {
+            return (
+                live.value.clone(),
+                if live.set { Source::UserConfig } else { Source::Default },
+            );
+        }
+        (Value::default_for(&setting.kind), Source::Default)
     }
 
     /// Parses every pending draft into the store. All-or-nothing per field:
@@ -344,10 +376,20 @@ impl SettingsModule for InputModule {
                 self.import_review = None;
                 Task::none()
             }
+            Message::LiveLoaded(live) => {
+                self.live = live.into_iter().map(|l| (l.key, l)).collect();
+                Task::none()
+            }
             Message::Reloaded(Ok(())) => {
                 self.error = None;
                 self.status = Some("Saved.".to_string());
-                Task::none()
+                // The reload just changed what's running, so the cached
+                // live values are stale. This matters most right after a
+                // Reset: the row falls back to the live value, and without
+                // re-reading it would show the value Hyprforge had been
+                // setting rather than the one the user's config just took
+                // back over.
+                Task::perform(read_live(), Message::LiveLoaded)
             }
             Message::Reloaded(Err(e)) => {
                 self.status = None;
@@ -478,23 +520,20 @@ impl InputModule {
         let key = setting.key;
         let owned = self.owns(key);
 
+        // Every control reads through `effective`, so an unowned row shows
+        // what is actually running rather than what Hyprland would do if
+        // nobody had configured anything.
+        let (current, source) = self.effective(setting);
+
         let control: Element<'_, Message> = match setting.kind {
             Kind::Bool { default } => {
-                let current = self
-                    .settings
-                    .get(key)
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(default);
+                let current = current.as_bool().unwrap_or(default);
                 checkbox(current)
                     .on_toggle(move |b| Message::Set(key, Value::Bool(b)))
                     .into()
             }
             Kind::IntEnum { default, choices } => {
-                let current = self
-                    .settings
-                    .get(key)
-                    .and_then(|v| v.as_int())
-                    .unwrap_or(default);
+                let current = current.as_int().unwrap_or(default);
                 let options: Vec<Choice> = choices
                     .iter()
                     .map(|(v, label)| Choice {
@@ -509,12 +548,7 @@ impl InputModule {
                 .into()
             }
             Kind::TextEnum { default, choices } => {
-                let current = self
-                    .settings
-                    .get(key)
-                    .and_then(|v| v.as_text())
-                    .unwrap_or(default)
-                    .to_string();
+                let current = current.as_text().unwrap_or(default).to_string();
                 let options: Vec<TextChoice> =
                     choices.iter().map(|c| TextChoice { value: c }).collect();
                 let selected = options
@@ -538,12 +572,19 @@ impl InputModule {
         if let Some(problem) = self.draft_errors.get(key) {
             label_side = label_side.push(scaled_text(problem.clone(), 12.0, scale));
         }
-        // "Set by Hyprforge" is the load-bearing distinction on this screen:
-        // it's the difference between a value this app writes into the
-        // config and one it merely shows.
-        if owned {
-            label_side = label_side.push(meta_text("Set by Hyprforge", 12.0, scale));
-        }
+        // Where the displayed value comes from is the load-bearing
+        // distinction on this screen. "Set by Hyprforge" means this app
+        // writes it and it wins; the other two mean the app is only
+        // reporting, and touching the control takes it over.
+        label_side = label_side.push(meta_text(
+            match source {
+                Source::Owned => "Set by Hyprforge",
+                Source::UserConfig => "From your Hyprland config",
+                Source::Default => "Hyprland default",
+            },
+            12.0,
+            scale,
+        ));
 
         let control_side: Element<'_, Message> = if owned {
             row![
@@ -583,14 +624,30 @@ impl InputModule {
             .spacing(spacing::MD)
             .into(),
             ImportState::Ready(candidates) => {
-                let mut list = column![scaled_text(
-                    "These are the input options your config actually sets — \
-                     Hyprland's own defaults are left out. Importing one hands it \
-                     to Hyprforge, which from then on writes it and wins over your \
-                     config file.",
-                    13.0,
-                    scale,
-                )]
+                let mut list = column![
+                    scaled_text(
+                        "These are the input options the running Hyprland reports as \
+                         set, rather than left at its own default. Importing one hands \
+                         it to Hyprforge, which from then on writes it and wins over \
+                         your config file.",
+                        13.0,
+                        scale,
+                    ),
+                    // Hyprland reports "set", not "set *by your config*", and
+                    // it can't tell the two apart. Anything that wrote an
+                    // option since the last reload — hyprctl, a script, a
+                    // tiling helper — looks identical here. Saying so is the
+                    // difference between the user recognising a stray value
+                    // and adopting it permanently without noticing.
+                    meta_text(
+                        "A value changed at runtime — by hyprctl, a script, or another \
+                         tool — is reported as set too, and Hyprland can't tell it apart \
+                         from one your config file wrote. Run `hyprctl reload` first if \
+                         you want exactly what's in your config.",
+                        12.0,
+                        scale,
+                    ),
+                ]
                 .spacing(spacing::SM);
                 for (i, c) in candidates.iter().enumerate() {
                     let mut label = column![row![
@@ -632,6 +689,19 @@ impl InputModule {
             .height(Length::Fill)
             .into()
     }
+}
+
+/// Where the value a row is showing came from. Not cosmetic: it's the
+/// difference between a number this app writes into the config and one it
+/// is merely reporting back from the compositor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// Hyprforge writes this key, and it wins over the user's config.
+    Owned,
+    /// The user's own config sets it; Hyprforge is only displaying it.
+    UserConfig,
+    /// Nobody set it, so this is what Hyprland does on its own.
+    Default,
 }
 
 /// A dropdown entry for an [`Kind::IntEnum`]. Carries the number so the
@@ -716,6 +786,16 @@ fn parse_for(kind: &Kind, raw: &str) -> Result<Value, String> {
         // be wrong anyway.
         Kind::Text { .. } | Kind::TextEnum { .. } => Ok(Value::Text(raw.to_string())),
     }
+}
+
+/// Reads every option's live value. A failure yields an empty list rather
+/// than an error: the screen is fully usable without it, rows just fall
+/// back to the catalog default, and a banner about a background read the
+/// user never asked for would be noise.
+async fn read_live() -> Vec<Live> {
+    tokio::task::spawn_blocking(|| hyprforge_input::import::live().unwrap_or_default())
+        .await
+        .unwrap_or_default()
 }
 
 async fn discover_settings(current: Settings) -> Result<Vec<Discovered>, String> {
@@ -1032,6 +1112,112 @@ mod tests {
                 selected: false,
             }]));
             let _ = m.view(scale);
+        });
+    }
+
+    fn live_value(key: &'static str, value: Value, set: bool) -> Live {
+        Live { key, value, set }
+    }
+
+    /// The defect this pass found: an unowned row fell back to the
+    /// *catalog* default, so a machine whose config turns numlock on would
+    /// see the checkbox unticked while numlock was actually on. The screen
+    /// has to report what's running.
+    #[test]
+    fn an_unowned_row_shows_the_live_value_not_the_catalog_default() {
+        with_temp_config(|m| {
+            let setting = catalog::get("input:numlock_by_default").unwrap();
+            assert_eq!(
+                m.effective(setting),
+                (Value::Bool(false), Source::Default),
+                "catalog default before anything is known"
+            );
+
+            let _ = m.update(Message::LiveLoaded(vec![live_value(
+                "input:numlock_by_default",
+                Value::Bool(true),
+                true,
+            )]));
+            assert_eq!(
+                m.effective(setting),
+                (Value::Bool(true), Source::UserConfig),
+                "the user's config sets it, so that's what must show"
+            );
+        });
+    }
+
+    /// The three sources have to stay distinguishable, because they mean
+    /// different things: only one of them is a value this app writes.
+    #[test]
+    fn the_value_source_is_reported_precisely() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::LiveLoaded(vec![
+                live_value("input:repeat_rate", Value::Int(25), false),
+                live_value("input:kb_layout", Value::Text("de".into()), true),
+            ]));
+            assert_eq!(
+                m.effective(catalog::get("input:repeat_rate").unwrap()).1,
+                Source::Default
+            );
+            assert_eq!(
+                m.effective(catalog::get("input:kb_layout").unwrap()).1,
+                Source::UserConfig
+            );
+
+            let _ = m.update(Message::Set("input:kb_layout", Value::Text("us".into())));
+            assert_eq!(
+                m.effective(catalog::get("input:kb_layout").unwrap()),
+                (Value::Text("us".into()), Source::Owned),
+                "once owned, what the user chose wins over what's live"
+            );
+        });
+    }
+
+    /// An owned value must keep showing even when the live read disagrees
+    /// — between saving and Hyprland reloading, they legitimately differ,
+    /// and the control must not flicker back to the old value.
+    #[test]
+    fn an_owned_value_outranks_a_stale_live_read() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::Set("input:repeat_rate", Value::Int(45)));
+            let _ = m.update(Message::LiveLoaded(vec![live_value(
+                "input:repeat_rate",
+                Value::Int(25),
+                false,
+            )]));
+            assert_eq!(
+                m.effective(catalog::get("input:repeat_rate").unwrap()).0,
+                Value::Int(45)
+            );
+        });
+    }
+
+    /// A failed live read must not break the screen — every row still
+    /// renders, falling back to the catalog default.
+    #[test]
+    fn a_failed_live_read_leaves_the_screen_usable() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::LiveLoaded(Vec::new()));
+            let _ = m.view(FontScale::default());
+            assert_eq!(
+                m.effective(catalog::get("input:repeat_rate").unwrap()).0,
+                Value::Int(25)
+            );
+        });
+    }
+
+    /// Text fields go through the same resolver, so a layout the user's
+    /// config sets shows up in the box rather than the catalog's "us".
+    #[test]
+    fn a_text_field_shows_the_live_value_too() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::LiveLoaded(vec![live_value(
+                "input:kb_layout",
+                Value::Text("de,fr".into()),
+                true,
+            )]));
+            let setting = catalog::get("input:kb_layout").unwrap();
+            assert_eq!(m.shown_text(setting), "de,fr");
         });
     }
 
