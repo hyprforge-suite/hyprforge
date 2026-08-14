@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// A modifier, as Hyprland names it in a bind string and as it appears in the
 /// bitmask `hyprctl binds` reports.
@@ -125,26 +126,149 @@ impl PartialEq for KeyCombo {
 
 impl Eq for KeyCombo {}
 
-/// What a shortcut does.
+/// One value inside a dispatcher's argument table.
 ///
-/// Hyprland's Lua dispatchers live under `hl.dsp.*` and take a table, so this
-/// stores the call rather than trying to model every dispatcher's arguments —
-/// there are dozens, they take different shapes, and a wrong guess produces a
-/// bind that silently does nothing.
+/// Only the Lua types Hyprland's dispatchers actually accept. Untagged so
+/// TOML stores them as what they are — `direction = "left"`, `workspace = 3`,
+/// `follow = true` — rather than as tagged wrappers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum ParamValue {
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Str(String),
+}
+
+impl ParamValue {
+    /// The value as a user would type it into a text field. The inverse of
+    /// the editor's parse step, so a round-trip through the form doesn't
+    /// change a stored value's type.
+    pub fn as_text(&self) -> String {
+        match self {
+            ParamValue::Bool(b) => b.to_string(),
+            ParamValue::Int(i) => i.to_string(),
+            ParamValue::Float(f) => f.to_string(),
+            ParamValue::Str(s) => s.clone(),
+        }
+    }
+}
+
+/// What a shortcut does: a dispatcher path under `hl.dsp` plus the arguments
+/// it's called with.
+///
+/// `params` is the normal case — a structured table the
+/// [`catalog`](crate::catalog) knows the shape of, which is what lets the
+/// editor render real fields and lets codegen emit a call that Hyprland can
+/// always parse.
+///
+/// `raw` is the escape hatch, and it's load-bearing rather than vestigial:
+/// Hyprland has dispatchers and argument shapes this crate's catalog doesn't
+/// model, and a config full of them still has to import, edit and re-emit
+/// without losing anything. When `raw` is set it wins, and `params` is
+/// ignored.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Action {
     /// A dispatcher path relative to `hl.dsp`, e.g. `window.close` or
     /// `exec_cmd`.
     pub dispatcher: String,
-    /// The Lua argument expression, emitted verbatim inside the call's
-    /// parentheses. Empty means no arguments.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub argument: String,
+    /// The dispatcher's argument table, by key.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, ParamValue>,
+    /// A Lua argument expression emitted verbatim inside the call's
+    /// parentheses.
+    ///
+    /// The `argument` alias is what an older `shortcuts.toml` used for this
+    /// same field back when it was the *only* way to store an argument, so
+    /// a store written before the catalog existed still loads — and still
+    /// generates byte-identical Lua.
+    #[serde(default, alias = "argument", skip_serializing_if = "Option::is_none")]
+    pub raw: Option<String>,
 }
 
 impl Action {
     pub fn is_empty(&self) -> bool {
         self.dispatcher.trim().is_empty()
+    }
+
+    /// A dispatcher called with a single structured table.
+    pub fn with_params(
+        dispatcher: impl Into<String>,
+        params: BTreeMap<String, ParamValue>,
+    ) -> Self {
+        Action { dispatcher: dispatcher.into(), params, raw: None }
+    }
+
+    /// A dispatcher whose argument this crate isn't modelling — see `raw`.
+    pub fn with_raw(dispatcher: impl Into<String>, raw: impl Into<String>) -> Self {
+        let raw = raw.into();
+        Action {
+            dispatcher: dispatcher.into(),
+            params: BTreeMap::new(),
+            // An empty `raw` and no `raw` mean the same thing (a call with
+            // no arguments), so they're stored the same way rather than
+            // leaving `Some("")` around to be special-cased downstream.
+            raw: (!raw.trim().is_empty()).then_some(raw),
+        }
+    }
+}
+
+/// The flags in `hl.bind`'s third argument, beside the description.
+///
+/// All default-false, and skipped entirely when none are set, so a shortcut
+/// that uses none of them stores and reads exactly as it did before these
+/// existed.
+///
+/// Spelling matters here: Hyprland's repeat flag is `repeating`, not
+/// `repeat` — verified against the wiki's Binds page for 0.56.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct BindFlags {
+    /// Required for `mouse:272`-style binds to work at all.
+    pub mouse: bool,
+    /// Fires even while an input inhibitor (e.g. a lockscreen) is active.
+    pub locked: bool,
+    /// Fires repeatedly while the key is held.
+    pub repeating: bool,
+    /// Fires on key release instead of press.
+    pub release: bool,
+    /// Fires only on a long press.
+    pub long_press: bool,
+    /// The key event still reaches the focused window.
+    pub non_consuming: bool,
+}
+
+impl BindFlags {
+    pub fn is_default(&self) -> bool {
+        *self == BindFlags::default()
+    }
+
+    /// Why this combination of flags won't load, if it won't.
+    ///
+    /// Hyprland rejects `repeating` together with `release` or `long_press`
+    /// — "long_press / release is incompatible with repeat" — and a rejected
+    /// bind fails the whole generated file, not just itself. Verified
+    /// against 0.56.1 in `tests/live_lua.rs`, which also pins that the
+    /// compositor still refuses it, so this guard can't outlive the rule.
+    pub fn conflict(&self) -> Option<&'static str> {
+        (self.repeating && (self.release || self.long_press))
+            .then_some("Repeating can't be combined with release or long press.")
+    }
+
+    /// `(lua key, value)` for each flag that's on, in a fixed order so the
+    /// generated file doesn't churn between saves.
+    pub fn set_flags(&self) -> Vec<&'static str> {
+        [
+            ("mouse", self.mouse),
+            ("locked", self.locked),
+            ("repeating", self.repeating),
+            ("release", self.release),
+            ("long_press", self.long_press),
+            ("non_consuming", self.non_consuming),
+        ]
+        .into_iter()
+        .filter_map(|(name, on)| on.then_some(name))
+        .collect()
     }
 }
 
@@ -162,6 +286,8 @@ pub struct Shortcut {
     /// set, and always prefixed — see [`description_for`].
     #[serde(default)]
     pub description: String,
+    #[serde(default, skip_serializing_if = "BindFlags::is_default")]
+    pub flags: BindFlags,
 }
 
 fn default_true() -> bool {
@@ -292,6 +418,58 @@ mod tests {
         assert_eq!(description_for(&s), "hyprforge: Launch terminal");
         s.description = "   ".into();
         assert_eq!(description_for(&s), "hyprforge: hyprforge-launch-1");
+    }
+
+    /// The compatibility promise for a `shortcuts.toml` written before the
+    /// catalog existed: its `argument` string still loads, as `raw`.
+    #[test]
+    fn a_legacy_argument_field_loads_as_raw() {
+        let toml = r#"
+            name = "hyprforge-run-1"
+            enabled = true
+            description = "Run something"
+
+            [combo]
+            mods = ["SUPER"]
+            key = "R"
+
+            [action]
+            dispatcher = "exec_cmd"
+            argument = "[[ghostty]]"
+        "#;
+        let shortcut: Shortcut = toml::from_str(toml).unwrap();
+        assert_eq!(shortcut.action.raw.as_deref(), Some("[[ghostty]]"));
+        assert!(shortcut.action.params.is_empty());
+        assert!(shortcut.flags.is_default());
+    }
+
+    /// An empty argument and no argument both mean "called with nothing", so
+    /// they must not be two different stored states.
+    #[test]
+    fn an_empty_raw_argument_is_stored_as_none() {
+        assert_eq!(Action::with_raw("exit", "   ").raw, None);
+    }
+
+    /// A rejected bind fails the whole generated file, so this combination
+    /// has to be caught in the editor rather than discovered on reload.
+    #[test]
+    fn repeating_conflicts_with_release_and_long_press() {
+        let repeating = BindFlags { repeating: true, ..BindFlags::default() };
+        assert!(repeating.conflict().is_none());
+        assert!(BindFlags { release: true, ..repeating }.conflict().is_some());
+        assert!(BindFlags { long_press: true, ..repeating }.conflict().is_some());
+        // Without `repeating` they're fine together.
+        assert!(BindFlags { release: true, long_press: true, ..BindFlags::default() }
+            .conflict()
+            .is_none());
+    }
+
+    #[test]
+    fn flags_render_in_a_fixed_order() {
+        let flags = BindFlags { locked: true, mouse: true, ..BindFlags::default() };
+        assert_eq!(flags.set_flags(), vec!["mouse", "locked"]);
+        assert!(!flags.is_default());
+        assert!(BindFlags::default().set_flags().is_empty());
     }
 
     #[test]

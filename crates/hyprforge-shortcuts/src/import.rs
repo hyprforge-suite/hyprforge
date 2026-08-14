@@ -15,8 +15,11 @@
 //! `hyprforge-lua-import`'s dispatch proxy), is what makes the action
 //! recoverable too.
 
-use crate::model::{Action, KeyCombo, Modifier};
+use crate::catalog::{self, CallShape};
+use crate::lua::lua_string;
+use crate::model::{Action, BindFlags, KeyCombo, Modifier, ParamValue};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 /// A shortcut's combo/action/description, recovered from a recorded
 /// `hl.bind(combo, dispatch, opts)` call. `None` if the first argument
@@ -29,20 +32,50 @@ use serde_json::Value;
 /// [`generate_shortcut_name`](crate::model::generate_shortcut_name), and a
 /// captured call has no "disabled" concept to recover — if `hl.bind` ran
 /// at all, the bind was active.
-pub fn shortcut_from_call(kind: &str, args: &[Value]) -> Option<(KeyCombo, Action, String)> {
+pub fn shortcut_from_call(kind: &str, args: &[Value]) -> Option<Imported> {
     if kind != "bind" {
         return None;
     }
     let combo = parse_combo(args.first()?.as_str()?)?;
-    let (dispatcher, argument) = args.get(1).and_then(dispatch_from_marker).unwrap_or_default();
-    let description = args
-        .get(2)
-        .and_then(Value::as_object)
+    let action = args.get(1).and_then(action_from_marker).unwrap_or_default();
+    let options = args.get(2).and_then(Value::as_object);
+    let description = options
         .and_then(|t| t.get("description"))
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    Some((combo, Action { dispatcher, argument }, description))
+    let flags = options.map(flags_from_options).unwrap_or_default();
+    Some(Imported { combo, action, description, flags })
+}
+
+/// What one recovered `hl.bind` call amounts to.
+///
+/// A struct rather than a tuple because it grew a fourth member: three
+/// same-typed positional values at a call site is where a caller starts
+/// swapping two of them by accident. See [`shortcut_from_call`] for why
+/// `name` and `enabled` aren't among them.
+#[derive(Debug, Clone, Default)]
+pub struct Imported {
+    pub combo: KeyCombo,
+    pub action: Action,
+    pub description: String,
+    pub flags: BindFlags,
+}
+
+/// `hl.bind`'s third argument, minus the description.
+///
+/// Dropping these was a real fidelity loss, not a cosmetic one: a
+/// `mouse:272` bind without `mouse = true` doesn't work at all.
+fn flags_from_options(options: &serde_json::Map<String, Value>) -> BindFlags {
+    let flag = |name: &str| options.get(name).and_then(Value::as_bool).unwrap_or(false);
+    BindFlags {
+        mouse: flag("mouse"),
+        locked: flag("locked"),
+        repeating: flag("repeating"),
+        release: flag("release"),
+        long_press: flag("long_press"),
+        non_consuming: flag("non_consuming"),
+    }
 }
 
 /// Inverse of [`KeyCombo::to_bind_string`]: splits on `+`, the last token
@@ -63,15 +96,24 @@ fn modifier_from_keyword(kw: &str) -> Option<Modifier> {
     Modifier::ALL.into_iter().find(|m| m.keyword().eq_ignore_ascii_case(kw))
 }
 
-/// Recovers `(dispatcher, argument)` from the marker table
-/// `hyprforge-lua-import`'s `hl.dsp` proxy produces for a call like
-/// `hl.dsp.window.close()` — `{ __hyprforge_dispatch = "window.close",
-/// __hyprforge_args = {...} }`. `None` (via the caller's
-/// `unwrap_or_default`) when the second argument isn't that shape at all
-/// — e.g. a hand-written bind that calls something other than `hl.dsp.*`,
-/// which this project has no way to recover the action for regardless of
-/// approach.
-fn dispatch_from_marker(v: &Value) -> Option<(String, String)> {
+/// Recovers an [`Action`] from the marker table `hyprforge-lua-import`'s
+/// `hl.dsp` proxy produces for a call like `hl.dsp.window.close()` —
+/// `{ __hyprforge_dispatch = "window.close", __hyprforge_args = {...} }`.
+/// `None` (via the caller's `unwrap_or_default`) when the second argument
+/// isn't that shape at all — e.g. a hand-written bind that calls something
+/// other than `hl.dsp.*`, which this project has no way to recover the
+/// action for regardless of approach.
+///
+/// Two outcomes, in order of preference:
+///
+/// 1. **Structured** — one table argument (or one bare value for a
+///    positional dispatcher) whose keys the catalog recognises. The result
+///    is a real [`Action::params`], so the editor shows fields and codegen
+///    re-emits it from the model.
+/// 2. **Raw** — anything else: several arguments, a nested table, a
+///    dispatcher this catalog doesn't model. Preserved verbatim as Lua text
+///    so it survives a round-trip untouched rather than being approximated.
+fn action_from_marker(v: &Value) -> Option<Action> {
     let obj = v.as_object()?;
     let dispatcher = obj.get("__hyprforge_dispatch")?.as_str()?.to_string();
     let args: Vec<Value> = obj
@@ -79,28 +121,89 @@ fn dispatch_from_marker(v: &Value) -> Option<(String, String)> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let argument = args.iter().map(render_lua_literal).collect::<Vec<_>>().join(", ");
-    Some((dispatcher, argument))
+
+    if let Some(action) = structured_action(&dispatcher, &args) {
+        return Some(action);
+    }
+    let raw = args.iter().map(render_lua_literal).collect::<Vec<_>>().join(", ");
+    Some(Action::with_raw(dispatcher, raw))
 }
 
-/// Renders a captured argument back to Lua source text — `Action::argument`
-/// is spliced verbatim inside `hl.dsp.<dispatcher>(...)` by
-/// [`crate::codegen::generate`], so a string has to come back already
-/// quoted, the same long-bracket form this crate's own codegen uses.
+/// The structured reading of a call's arguments, when the catalog has an
+/// entry whose shape and keys match exactly. Returns `None` — meaning "use
+/// raw" — for anything it isn't sure about, because a wrong structured
+/// reading rewrites the user's binding into a different one on the next
+/// save, while a raw one only costs them a form.
+fn structured_action(dispatcher: &str, args: &[Value]) -> Option<Action> {
+    let mut params = BTreeMap::new();
+    match args {
+        // `hl.dsp.exit()`, and `hl.dsp.window.close({})` — no arguments and
+        // an empty table both mean no params, which the loop below already
+        // produces for the empty case.
+        [] => {}
+        [Value::Object(table)] => {
+            for (key, value) in table {
+                params.insert(key.clone(), param_value(value)?);
+            }
+        }
+        // `hl.dsp.exec_cmd("ghostty")` — a lone bare value. Which key it
+        // belongs to is only knowable from the catalog, so this needs the
+        // entry resolved before the param can even be named.
+        [single] => {
+            let entry = catalog::ENTRIES
+                .iter()
+                .find(|e| e.dispatcher == dispatcher && e.shape == CallShape::Positional)?;
+            let param = entry.params.first()?;
+            params.insert(param.key.to_string(), param_value(single)?);
+        }
+        _ => return None,
+    }
+    let action = Action::with_params(dispatcher, params);
+    catalog::resolve(&action).is_some().then_some(action)
+}
+
+/// A captured Lua scalar as a [`ParamValue`]. `None` for anything else —
+/// a nested table or a function — which is what sends the whole call down
+/// the raw path.
+fn param_value(v: &Value) -> Option<ParamValue> {
+    match v {
+        Value::String(s) => Some(ParamValue::Str(s.clone())),
+        Value::Bool(b) => Some(ParamValue::Bool(*b)),
+        Value::Number(n) => match n.as_i64() {
+            Some(i) => Some(ParamValue::Int(i)),
+            None => n.as_f64().map(ParamValue::Float),
+        },
+        _ => None,
+    }
+}
+
+/// Renders a captured argument back to Lua source text, for the raw path.
+///
+/// Uses the same [`crate::lua`] helpers codegen writes with, so a raw
+/// argument that goes out and comes back is byte-identical rather than
+/// merely equivalent.
 fn render_lua_literal(v: &Value) -> String {
     match v {
         Value::String(s) => lua_string(s),
         Value::Number(n) => n.to_string(),
         Value::Bool(b) => b.to_string(),
-        _ => String::new(),
+        Value::Null => "nil".to_string(),
+        Value::Array(items) => {
+            wrap(items.iter().map(render_lua_literal).collect())
+        }
+        Value::Object(map) => wrap(
+            map.iter()
+                .map(|(k, v)| format!("{} = {}", crate::lua::lua_key(k), render_lua_literal(v)))
+                .collect(),
+        ),
     }
 }
 
-fn lua_string(s: &str) -> String {
-    if !s.contains("]]") {
-        format!("[[{s}]]")
+fn wrap(entries: Vec<String>) -> String {
+    if entries.is_empty() {
+        "{}".to_string()
     } else {
-        format!("[=[{s}]=]")
+        format!("{{ {} }}", entries.join(", "))
     }
 }
 
@@ -118,54 +221,117 @@ mod tests {
         result
     }
 
+    fn imported(lua_source: &str) -> Imported {
+        let result = evaluated(lua_source);
+        let call = &result.calls[0];
+        shortcut_from_call(&call.kind, &call.args).expect("should read as a bind")
+    }
+
     /// The case that motivates this whole feature: `hyprctl binds -j`
     /// could give us the resolved chord already, but never the dispatcher
     /// — this proves the Lua-VM approach recovers both.
     #[test]
     fn a_mod_key_variable_bind_recovers_both_chord_and_dispatcher() {
-        let result = evaluated(
+        let out = imported(
             r#"
             local mainMod = "SUPER"
             hl.bind(mainMod .. " + Q", hl.dsp.window.close(), { description = "Close window" })
             "#,
         );
-        let call = &result.calls[0];
-        let (combo, action, description) = shortcut_from_call(&call.kind, &call.args).unwrap();
-        assert_eq!(combo.mods, vec![Modifier::Super]);
-        assert_eq!(combo.key, "Q");
-        assert_eq!(action.dispatcher, "window.close");
-        assert_eq!(action.argument, "");
-        assert_eq!(description, "Close window");
+        assert_eq!(out.combo.mods, vec![Modifier::Super]);
+        assert_eq!(out.combo.key, "Q");
+        assert_eq!(out.action.dispatcher, "window.close");
+        assert!(out.action.params.is_empty());
+        assert_eq!(out.action.raw, None);
+        assert_eq!(out.description, "Close window");
+    }
+
+    /// A positional dispatcher's bare argument becomes a named param, which
+    /// is only possible because the catalog says which param it is.
+    #[test]
+    fn a_positional_argument_becomes_a_named_param() {
+        let out = imported(r#"hl.bind("SUPER + Return", hl.dsp.exec_cmd("ghostty"))"#);
+        assert_eq!(out.action.dispatcher, "exec_cmd");
+        assert_eq!(out.action.params["cmd"], ParamValue::Str("ghostty".into()));
+        assert_eq!(out.action.raw, None);
+        assert_eq!(catalog::resolve(&out.action).unwrap().id, "exec_cmd");
+    }
+
+    /// The shape that broke a whole config: a table argument now comes back
+    /// as structured params, so the editor can show fields for it and
+    /// codegen re-emits the table.
+    #[test]
+    fn a_table_argument_becomes_structured_params() {
+        let out = imported(r#"hl.bind("SUPER + left", hl.dsp.focus({ direction = "left" }))"#);
+        assert_eq!(out.action.dispatcher, "focus");
+        assert_eq!(out.action.params["direction"], ParamValue::Str("left".into()));
+        assert_eq!(out.action.raw, None);
+        assert_eq!(catalog::resolve(&out.action).unwrap().id, "focus.direction");
     }
 
     #[test]
-    fn a_dispatcher_argument_round_trips_as_quoted_lua() {
-        let result = evaluated(r#"hl.bind("SUPER + Return", hl.dsp.exec_cmd("ghostty"))"#);
-        let (_, action, _) = shortcut_from_call(&result.calls[0].kind, &result.calls[0].args).unwrap();
-        assert_eq!(action.dispatcher, "exec_cmd");
-        assert_eq!(action.argument, "[[ghostty]]");
+    fn a_numeric_table_value_stays_a_number() {
+        let out = imported(r#"hl.bind("SUPER + 1", hl.dsp.focus({ workspace = 1 }))"#);
+        assert_eq!(out.action.params["workspace"], ParamValue::Int(1));
+    }
+
+    /// The fidelity gap that silently dropped `{ mouse = true }` — without
+    /// it a `mouse:272` bind doesn't work at all.
+    #[test]
+    fn bind_flags_are_recovered() {
+        let out = imported(
+            r#"hl.bind("SUPER + mouse:272", hl.dsp.window.drag(), { mouse = true })"#,
+        );
+        assert!(out.flags.mouse);
+        assert!(!out.flags.locked);
+
+        let locked = imported(
+            r#"hl.bind("XF86AudioMute", hl.dsp.exec_cmd("wpctl"), { locked = true, repeating = true })"#,
+        );
+        assert!(locked.flags.locked);
+        assert!(locked.flags.repeating);
+    }
+
+    /// A dispatcher the catalog doesn't model has to survive untouched
+    /// rather than being approximated into a neighbouring entry.
+    #[test]
+    fn an_unmodelled_dispatcher_falls_back_to_raw() {
+        let out = imported(
+            r#"hl.bind("SUPER + X", hl.dsp.some_future_thing({ mode = "wild" }))"#,
+        );
+        assert_eq!(out.action.dispatcher, "some_future_thing");
+        assert_eq!(out.action.raw.as_deref(), Some("{ mode = [[wild]] }"));
+        assert!(out.action.params.is_empty());
+    }
+
+    /// A nested table isn't representable as flat params, so it takes the
+    /// raw path too — losslessly.
+    #[test]
+    fn a_nested_table_argument_falls_back_to_raw() {
+        let out = imported(
+            r#"hl.bind("SUPER + X", hl.dsp.exec_cmd("kitty", { float = true }))"#,
+        );
+        assert!(out.action.raw.is_some(), "expected raw, got {:?}", out.action);
     }
 
     #[test]
     fn multiple_modifiers_all_parse_regardless_of_order() {
-        let result = evaluated(r#"hl.bind("SUPER + SHIFT + Q", hl.dsp.window.close())"#);
-        let (combo, _, _) = shortcut_from_call(&result.calls[0].kind, &result.calls[0].args).unwrap();
-        assert_eq!(combo.mods, vec![Modifier::Super, Modifier::Shift]);
+        let out = imported(r#"hl.bind("SUPER + SHIFT + Q", hl.dsp.window.close())"#);
+        assert_eq!(out.combo.mods, vec![Modifier::Super, Modifier::Shift]);
     }
 
     #[test]
     fn a_combo_with_no_modifiers_still_parses() {
-        let result = evaluated(r#"hl.bind("XF86AudioPlay", hl.dsp.exec_cmd("playerctl"))"#);
-        let (combo, _, _) = shortcut_from_call(&result.calls[0].kind, &result.calls[0].args).unwrap();
-        assert!(combo.mods.is_empty());
-        assert_eq!(combo.key, "XF86AudioPlay");
+        let out = imported(r#"hl.bind("XF86AudioPlay", hl.dsp.exec_cmd("playerctl"))"#);
+        assert!(out.combo.mods.is_empty());
+        assert_eq!(out.combo.key, "XF86AudioPlay");
     }
 
     #[test]
     fn a_missing_description_is_empty_not_a_failure() {
-        let result = evaluated(r#"hl.bind("SUPER + Q", hl.dsp.window.close())"#);
-        let (_, _, description) = shortcut_from_call(&result.calls[0].kind, &result.calls[0].args).unwrap();
-        assert_eq!(description, "");
+        let out = imported(r#"hl.bind("SUPER + Q", hl.dsp.window.close())"#);
+        assert_eq!(out.description, "");
+        assert!(out.flags.is_default());
     }
 
     #[test]

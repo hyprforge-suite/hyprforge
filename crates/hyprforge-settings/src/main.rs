@@ -537,6 +537,18 @@ impl App {
     /// - `Escape` — clear the search box if it has text, else cancel
     ///   whatever draft/dialog is open in the active module
     fn subscription(&self) -> Subscription<Message> {
+        // While the Shortcuts module is recording a chord, every key on the
+        // keyboard belongs to it — including Ctrl+F and Escape. Binding
+        // Ctrl+F would otherwise navigate to the search box instead of being
+        // recorded, and there'd be no way to bind it at all.
+        if self.shortcuts.is_capturing() {
+            return Subscription::batch([
+                self.displays.subscription().map(Message::Displays),
+                self.shortcuts.subscription().map(Message::Shortcuts),
+                window::close_events().map(Message::WindowClosed),
+            ]);
+        }
+
         let shortcuts = keyboard::listen().filter_map(|event| {
             let keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
                 return None;
@@ -559,6 +571,7 @@ impl App {
 
         Subscription::batch([
             self.displays.subscription().map(Message::Displays),
+            self.shortcuts.subscription().map(Message::Shortcuts),
             shortcuts,
             window::close_events().map(Message::WindowClosed),
         ])

@@ -71,6 +71,26 @@ impl LiveBind {
             .strip_prefix(DESCRIPTION_PREFIX)
             .unwrap_or(&self.description)
     }
+
+    /// The label to show a user, including for the very common bind that
+    /// carries no description at all. That fallback is a fact about
+    /// `LiveBind`, not about any one screen, so it lives here rather than
+    /// being restated at each call site.
+    pub fn display_label(&self) -> &str {
+        let label = self.label();
+        if label.trim().is_empty() { "an existing bind" } else { label }
+    }
+
+    /// Whether this bind claims `combo`, without building a [`KeyCombo`] to
+    /// find out.
+    ///
+    /// [`combo`](Self::combo) allocates a `Vec` and a `String` per call,
+    /// which matters because conflict checking runs this against every live
+    /// bind (typically 80–150) for every shortcut on screen, on every
+    /// redraw. The modmask is already the comparison `KeyCombo` would make.
+    pub fn claims(&self, combo: &KeyCombo) -> bool {
+        self.modmask == combo.mask() && self.key.trim().eq_ignore_ascii_case(combo.key.trim())
+    }
 }
 
 pub fn list_binds() -> Result<Vec<LiveBind>, BindsError> {
@@ -91,26 +111,50 @@ pub fn parse_binds(json: &str) -> Result<Vec<LiveBind>, BindsError> {
     serde_json::from_str(json).map_err(BindsError::Parse)
 }
 
-/// What already claims `combo`, ignoring any bind Hyprforge itself defined
-/// under `own_name`.
+/// What already claims `combo`, ignoring the one bind Hyprforge itself
+/// defined under `own_description`.
 ///
 /// Submap binds are skipped: they only fire inside that mode, so they aren't
 /// a conflict for a global shortcut. Excluding the shortcut's own live bind
 /// is what stops editing a saved shortcut from reporting a conflict with
 /// itself.
+///
+/// Exactly *one* match is excluded, not every bind sharing the description.
+/// Descriptions aren't unique — nothing stops two shortcuts both being
+/// called "Close window", and a user's own bind may carry the same text —
+/// so dropping all of them would hide a real collision behind a coincidence
+/// of naming.
 pub fn conflicts_for<'a>(
     binds: &'a [LiveBind],
     combo: &KeyCombo,
     own_description: Option<&str>,
 ) -> Vec<&'a LiveBind> {
+    let mut own_seen = own_description.is_none();
     binds
         .iter()
         .filter(|b| b.submap.is_empty())
-        .filter(|b| b.combo().conflicts_with(combo))
-        .filter(|b| match own_description {
-            Some(own) => b.description != own,
-            None => true,
+        .filter(|b| b.claims(combo))
+        .filter(|b| {
+            if !own_seen && Some(b.description.as_str()) == own_description {
+                own_seen = true;
+                return false;
+            }
+            true
         })
+        .collect()
+}
+
+/// [`conflicts_for`], as the labels a user reads. The display form of a
+/// conflict is the same wherever it's shown — the list's badge and the
+/// editor's warning had a copy each — so it's produced once, here.
+pub fn conflict_labels(
+    binds: &[LiveBind],
+    combo: &KeyCombo,
+    own_description: Option<&str>,
+) -> Vec<String> {
+    conflicts_for(binds, combo, own_description)
+        .into_iter()
+        .map(|b| b.display_label().to_string())
         .collect()
 }
 
@@ -170,6 +214,20 @@ mod tests {
         assert_eq!(conflicts_for(&binds, &combo(65, "Q"), None).len(), 1);
     }
 
+    /// Descriptions aren't unique. Excluding every bind that shares one
+    /// would report "no conflict" for a chord two shortcuts are genuinely
+    /// fighting over.
+    #[test]
+    fn only_one_bind_is_excluded_as_the_shortcuts_own() {
+        let json = r#"[
+            {"modmask":65,"key":"Q","description":"hyprforge: Close window","submap":""},
+            {"modmask":65,"key":"Q","description":"hyprforge: Close window","submap":""}
+        ]"#;
+        let binds = parse_binds(json).unwrap();
+        let hits = conflicts_for(&binds, &combo(65, "Q"), Some("hyprforge: Close window"));
+        assert_eq!(hits.len(), 1, "the duplicate is a real conflict, not the shortcut itself");
+    }
+
     /// The prefix is the only runtime signal for "this one is ours".
     #[test]
     fn hyprforge_binds_are_distinguishable_from_the_users() {
@@ -186,6 +244,32 @@ mod tests {
     fn a_bind_without_a_description_keeps_its_empty_label() {
         let binds = parse_binds(SAMPLE).unwrap();
         assert_eq!(binds[0].label(), "");
+        // ...but it still needs something readable on screen.
+        assert_eq!(binds[0].display_label(), "an existing bind");
+    }
+
+    #[test]
+    fn conflicts_are_reported_as_readable_labels() {
+        let binds = parse_binds(SAMPLE).unwrap();
+        assert_eq!(conflict_labels(&binds, &combo(64, "C"), None), vec!["an existing bind"]);
+        assert_eq!(conflict_labels(&binds, &combo(65, "Q"), None), vec!["Close window"]);
+        assert!(conflict_labels(&binds, &combo(64, "Z"), None).is_empty());
+    }
+
+    /// `claims` skips building a `KeyCombo`, so it has to agree with the one
+    /// that does — including on case, which Hyprland ignores for letters.
+    #[test]
+    fn claims_agrees_with_building_the_combo() {
+        let binds = parse_binds(SAMPLE).unwrap();
+        for bind in &binds {
+            for probe in [combo(64, "C"), combo(65, "Q"), combo(12, "t"), combo(0, "C")] {
+                assert_eq!(
+                    bind.claims(&probe),
+                    bind.combo().conflicts_with(&probe),
+                    "{bind:?} vs {probe:?}"
+                );
+            }
+        }
     }
 
     #[test]
