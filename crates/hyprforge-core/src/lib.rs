@@ -1,4 +1,6 @@
+pub mod apply_lua;
 pub mod geometry;
+pub mod lua;
 pub mod lua_setup;
 pub mod paths;
 

@@ -59,6 +59,10 @@ pub mod surface {
 pub const TEXT: Color = Color::from_rgb(0.914, 0.918, 0.937); // #e9eaef
 /// Secondary/meta text — timestamps, hints, IDs.
 pub const TEXT_DIM: Color = Color::from_rgb(0.573, 0.588, 0.643); // #9296a4
+/// Something the user should look at before saving — a chord already bound,
+/// a combination the compositor will refuse. Not an error: nothing has gone
+/// wrong yet. Kept in step with [`palette`]'s `warning`.
+pub const WARNING: Color = color!(0xf5b942);
 
 fn palette() -> iced::theme::Palette {
     iced::theme::Palette {

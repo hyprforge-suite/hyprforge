@@ -43,12 +43,12 @@ fn card_style(_theme: &Theme) -> container::Style {
 /// `content` they pass in rather than have the card stretch to fill
 /// whatever space happens to be available.
 pub fn section<'a, Message: 'a>(
-    title: &'a str,
+    title: impl AsRef<str>,
     scale: FontScale,
     content: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     column![
-        meta_text(title.to_uppercase(), 12.0, scale),
+        meta_text(title.as_ref().to_uppercase(), 12.0, scale),
         container(content.into())
             .padding(spacing::MD)
             .width(Length::Fill)
@@ -82,7 +82,7 @@ const CONTROL_MAX_WIDTH: f32 = 340.0;
 
 /// A label paired with its control, aligned into a settings-style row.
 pub fn row_field<'a, Message: 'a>(
-    label: &'a str,
+    label: impl IntoFragment<'a>,
     control: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     row![
