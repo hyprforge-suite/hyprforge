@@ -45,7 +45,9 @@ pub enum Message {
     Reset(&'static str),
     FilterChanged(String),
     ImportOpen,
-    ImportLoaded(Result<Vec<Discovered>, String>),
+    /// The user's own config, evaluated. Import reads the config file, not
+    /// the running compositor — see `hyprforge_input::import` for why.
+    ImportEvaluated(hyprforge_lua_import::ImportResult),
     ImportToggle(usize),
     ImportConfirm,
     ImportCancel,
@@ -56,7 +58,7 @@ pub enum Message {
 
 /// An import run, from click to review.
 enum ImportState {
-    /// The compositor is being asked what's set.
+    /// The user's config is being evaluated.
     Running,
     Ready(Vec<Candidate>),
 }
@@ -323,12 +325,42 @@ impl SettingsModule for InputModule {
             }
             Message::ImportOpen => {
                 self.import_review = Some(ImportState::Running);
-                let current = self.settings.clone();
-                Task::perform(discover_settings(current), Message::ImportLoaded)
+                Task::perform(super::evaluate_user_config(), Message::ImportEvaluated)
             }
-            Message::ImportLoaded(Ok(found)) => {
+            Message::ImportEvaluated(result) => {
+                let hyprforge_dir = hyprforge_core::paths::hypr_hyprforge_dir();
+                let mut found = Vec::new();
+                for call in &result.calls {
+                    // Hyprforge's own generated file is `require()`d from
+                    // hyprland.lua too, so it evaluates right alongside the
+                    // user's own. Excluded here — including it would offer
+                    // Hyprforge's own values back as if the user had
+                    // written them, which is exactly how a stray
+                    // `touchdevice:enabled = false` from a test run got
+                    // imported and persisted on a real machine.
+                    if call.source_path.starts_with(&hyprforge_dir) {
+                        continue;
+                    }
+                    found.extend(hyprforge_input::import::settings_from_call(
+                        &call.kind, &call.args,
+                    ));
+                }
+                // Reported rather than swallowed: a file that didn't
+                // evaluate may be exactly the one holding the settings the
+                // user came here to import (vision pillar #3).
+                if !result.failures.is_empty() {
+                    self.error = Some(format!(
+                        "Some config files couldn't be read, so anything they set isn't listed: {}",
+                        result
+                            .failures
+                            .iter()
+                            .map(|(p, why)| format!("{} ({why})", p.display()))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ));
+                }
                 self.import_review = Some(ImportState::Ready(
-                    found
+                    hyprforge_input::import::candidates_from_config(&found, &self.settings)
                         .into_iter()
                         // Anything already owned starts unticked: the user
                         // came here to adopt what they haven't got, and
@@ -340,11 +372,6 @@ impl SettingsModule for InputModule {
                         })
                         .collect(),
                 ));
-                Task::none()
-            }
-            Message::ImportLoaded(Err(e)) => {
-                self.import_review = None;
-                self.error = Some(e);
                 Task::none()
             }
             Message::ImportToggle(i) => {
@@ -611,7 +638,7 @@ impl InputModule {
 
     fn import_view(&self, review: &ImportState, scale: FontScale) -> Element<'_, Message> {
         let body: Element<'_, Message> = match review {
-            ImportState::Running => scaled_text("Reading your current settings…", 13.0, scale).into(),
+            ImportState::Running => scaled_text("Reading your Hyprland config…", 13.0, scale).into(),
             ImportState::Ready(candidates) if candidates.is_empty() => column![
                 scaled_text(
                     "Hyprland reports no input options set beyond its own defaults, \
@@ -624,30 +651,14 @@ impl InputModule {
             .spacing(spacing::MD)
             .into(),
             ImportState::Ready(candidates) => {
-                let mut list = column![
-                    scaled_text(
-                        "These are the input options the running Hyprland reports as \
-                         set, rather than left at its own default. Importing one hands \
-                         it to Hyprforge, which from then on writes it and wins over \
-                         your config file.",
-                        13.0,
-                        scale,
-                    ),
-                    // Hyprland reports "set", not "set *by your config*", and
-                    // it can't tell the two apart. Anything that wrote an
-                    // option since the last reload — hyprctl, a script, a
-                    // tiling helper — looks identical here. Saying so is the
-                    // difference between the user recognising a stray value
-                    // and adopting it permanently without noticing.
-                    meta_text(
-                        "A value changed at runtime — by hyprctl, a script, or another \
-                         tool — is reported as set too, and Hyprland can't tell it apart \
-                         from one your config file wrote. Run `hyprctl reload` first if \
-                         you want exactly what's in your config.",
-                        12.0,
-                        scale,
-                    ),
-                ]
+                let mut list = column![scaled_text(
+                    "These are the input options your own Hyprland config sets. \
+                     Importing one hands it to Hyprforge, which from then on writes \
+                     it and wins over your config file — the line in your config \
+                     stays where it is, it just stops being the one that decides.",
+                    13.0,
+                    scale,
+                )]
                 .spacing(spacing::SM);
                 for (i, c) in candidates.iter().enumerate() {
                     let mut label = column![row![
@@ -796,14 +807,6 @@ async fn read_live() -> Vec<Live> {
     tokio::task::spawn_blocking(|| hyprforge_input::import::live().unwrap_or_default())
         .await
         .unwrap_or_default()
-}
-
-async fn discover_settings(current: Settings) -> Result<Vec<Discovered>, String> {
-    tokio::task::spawn_blocking(move || {
-        hyprforge_input::import::discover(&current).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
 }
 
 async fn regenerate_and_reload(settings: Settings) -> Result<(), String> {
@@ -961,57 +964,52 @@ mod tests {
         });
     }
 
+    /// Builds an evaluator result holding one `hl.config` call from
+    /// `file`, the shape the real import path consumes.
+    fn config_result(
+        file: &str,
+        body: serde_json::Value,
+    ) -> hyprforge_lua_import::ImportResult {
+        hyprforge_lua_import::ImportResult {
+            calls: vec![hyprforge_lua_import::RecordedCall {
+                kind: "config".to_string(),
+                source_path: hyprforge_core::paths::hypr_config_dir().join(file),
+                line: Some(1),
+                args: vec![body],
+            }],
+            failures: Vec::new(),
+        }
+    }
+
     /// Values already owned start unticked, so a re-import can't silently
     /// replace a value the user set in the app with one from their file.
     #[test]
     fn an_already_owned_import_candidate_starts_unselected() {
         with_temp_config(|m| {
             let _ = m.update(Message::Set("input:kb_layout", Value::Text("de".into())));
-            let found = vec![
-                Discovered {
-                    key: "input:kb_layout",
-                    label: "Keyboard layout",
-                    value: Value::Text("us".into()),
-                    already_owned: true,
-                    differs: true,
-                },
-                Discovered {
-                    key: "input:repeat_rate",
-                    label: "Key repeat rate",
-                    value: Value::Int(25),
-                    already_owned: false,
-                    differs: false,
-                },
-            ];
-            let _ = m.update(Message::ImportLoaded(Ok(found)));
+            let _ = m.update(Message::ImportEvaluated(config_result(
+                "hyprland.lua",
+                serde_json::json!({ "input": { "kb_layout": "us", "repeat_rate": 25 } }),
+            )));
             let Some(ImportState::Ready(candidates)) = &m.import_review else {
                 panic!("expected a review");
             };
-            assert!(!candidates[0].selected, "already owned, so not re-imported by default");
-            assert!(candidates[1].selected);
+            let layout = candidates.iter().find(|c| c.found.key == "input:kb_layout").unwrap();
+            let rate = candidates.iter().find(|c| c.found.key == "input:repeat_rate").unwrap();
+            assert!(!layout.selected, "already owned, so not re-imported by default");
+            assert!(rate.selected);
         });
     }
 
     #[test]
     fn importing_writes_only_the_selected_candidates() {
         with_temp_config(|m| {
-            let found = vec![
-                Discovered {
-                    key: "input:kb_layout",
-                    label: "Keyboard layout",
-                    value: Value::Text("us".into()),
-                    already_owned: false,
-                    differs: false,
-                },
-                Discovered {
-                    key: "input:repeat_rate",
-                    label: "Key repeat rate",
-                    value: Value::Int(25),
-                    already_owned: false,
-                    differs: false,
-                },
-            ];
-            let _ = m.update(Message::ImportLoaded(Ok(found)));
+            let _ = m.update(Message::ImportEvaluated(config_result(
+                "hyprland.lua",
+                serde_json::json!({ "input": { "kb_layout": "us", "repeat_rate": 25 } }),
+            )));
+            // Candidates come back in catalog-key order, so kb_layout is
+            // first and repeat_rate second.
             let _ = m.update(Message::ImportToggle(1));
             let _ = m.update(Message::ImportConfirm);
             assert!(m.owns("input:kb_layout"));
@@ -1022,17 +1020,71 @@ mod tests {
     #[test]
     fn cancelling_an_import_changes_nothing() {
         with_temp_config(|m| {
-            let found = vec![Discovered {
-                key: "input:kb_layout",
-                label: "Keyboard layout",
-                value: Value::Text("us".into()),
-                already_owned: false,
-                differs: false,
-            }];
-            let _ = m.update(Message::ImportLoaded(Ok(found)));
+            let _ = m.update(Message::ImportEvaluated(config_result(
+                "hyprland.lua",
+                serde_json::json!({ "input": { "kb_layout": "us" } }),
+            )));
             let _ = m.update(Message::ImportCancel);
             assert!(m.settings.is_empty());
             assert!(m.import_review.is_none());
+        });
+    }
+
+    /// The defect that made import read the config instead of the live
+    /// compositor. Hyprforge's own generated file is `require()`d from
+    /// hyprland.lua, so it evaluates alongside the user's own — and it
+    /// holds whatever Hyprforge last wrote. Offering that back as
+    /// importable is how a stray `touchdevice:enabled = false` from a test
+    /// run got adopted and persisted on a real machine.
+    #[test]
+    fn hyprforges_own_generated_file_is_never_offered_for_import() {
+        with_temp_config(|m| {
+            let mut result = config_result(
+                "hyprland.lua",
+                serde_json::json!({ "input": { "kb_layout": "us" } }),
+            );
+            result.calls.push(hyprforge_lua_import::RecordedCall {
+                kind: "config".to_string(),
+                source_path: hyprforge_core::paths::input_lua_path(),
+                line: Some(5),
+                args: vec![serde_json::json!({
+                    "input": {
+                        "kb_layout": "us",
+                        "touchdevice": { "enabled": false }
+                    }
+                })],
+            });
+            let _ = m.update(Message::ImportEvaluated(result));
+
+            let Some(ImportState::Ready(candidates)) = &m.import_review else {
+                panic!("expected a review");
+            };
+            assert!(
+                candidates
+                    .iter()
+                    .all(|c| c.found.key != "input:touchdevice:enabled"),
+                "a value only Hyprforge's own file sets must not look importable"
+            );
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].found.key, "input:kb_layout");
+        });
+    }
+
+    /// A config file that didn't evaluate may be the one holding the
+    /// settings the user came to import, so it can't be swallowed.
+    #[test]
+    fn an_unreadable_config_file_is_reported_rather_than_ignored() {
+        with_temp_config(|m| {
+            let mut result = config_result(
+                "hyprland.lua",
+                serde_json::json!({ "input": { "kb_layout": "us" } }),
+            );
+            result
+                .failures
+                .push((std::path::PathBuf::from("/tmp/theirs.lua"), "boom".into()));
+            let _ = m.update(Message::ImportEvaluated(result));
+            let e = m.error.as_ref().expect("the failure must surface");
+            assert!(e.contains("theirs.lua"), "{e}");
         });
     }
 

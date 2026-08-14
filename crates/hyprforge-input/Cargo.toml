@@ -15,3 +15,4 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+hyprforge-lua-import.workspace = true

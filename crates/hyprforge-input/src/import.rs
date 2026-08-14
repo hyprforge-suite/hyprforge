@@ -1,25 +1,32 @@
-//! Adopting the input settings a user already has.
+//! Adopting the input settings a user already has, and reading what's
+//! currently running.
 //!
-//! Unlike shortcuts and window rules, this module doesn't evaluate the
-//! user's `hyprland.lua` to find out what they configured. It asks the
-//! running compositor, because `hyprctl getoption -j` reports something no
-//! amount of config parsing can: a `set` flag distinguishing "the user
-//! chose this" from "this is Hyprland's default".
+//! **Import comes from the user's config file**, evaluated by
+//! `hyprforge-lua-import` the same way shortcuts and window rules import —
+//! [`settings_from_call`] and [`candidates_from_config`].
 //!
-//! That distinction is the whole feature. Importing every option would put
-//! 51 keys under Hyprforge's ownership, most of which the user never had an
-//! opinion about, and every one of those would then override anything they
-//! later wrote by hand. Importing only what `set` reports gives exactly the
-//! keys they actually configured — verified against this machine's config,
-//! where the nine `set` options are precisely the nine lines in its
-//! `hl.config` block.
+//! It used to come from the live compositor instead, keying off the `set`
+//! flag in `hyprctl getoption -j`. That reads well and is wrong in a way
+//! that bit a real user within a day: Hyprland reports *set*, not *set by
+//! your config*, and it cannot tell the two apart. Anything that wrote an
+//! option since the last reload — `hyprctl`, a script, a test suite —
+//! is indistinguishable from a line in `hyprland.lua`. A stray
+//! `input:touchdevice:enabled = false` from a test run got imported and
+//! persisted that way, disabling touch input on a machine whose config had
+//! never mentioned it.
 //!
-//! The tradeoff is that this reads the *live* compositor, so it reflects a
-//! reload rather than the file on disk. For adoption that is the better
-//! answer: what's running is what the user is actually experiencing.
+//! Evaluating the config has neither problem. The value is the one written
+//! down, and `RecordedCall::source_path` lets the caller exclude
+//! Hyprforge's own generated file, so importing can't echo Hyprforge's
+//! values back as if the user had chosen them.
+//!
+//! [`live`] still reads the compositor, because "what is running right
+//! now" is a genuinely different question and the editor needs it to show
+//! unowned rows truthfully. It just isn't what import is built on.
 
 use crate::catalog::{self, Kind};
 use crate::model::{Settings, Value};
+use std::collections::BTreeMap;
 use std::process::Command;
 
 #[derive(Debug, thiserror::Error)]
@@ -164,6 +171,96 @@ fn read_value(obj: &serde_json::Value, kind: &Kind) -> Option<Value> {
     }
 }
 
+/// Flattens one recorded `hl.config({...})` call into catalog keys.
+///
+/// Takes plain `(kind, args)` rather than a
+/// `hyprforge_lua_import::RecordedCall`, so this crate never depends on the
+/// evaluator — and therefore never on `mlua`. `serde_json::Value` is the
+/// shared currency, the same arrangement window rules and shortcuts use.
+///
+/// This is [`crate::codegen`] in reverse: nested tables under `input`
+/// become the colon keys the catalog is written in.
+pub fn settings_from_call(kind: &str, args: &[serde_json::Value]) -> Vec<(&'static str, Value)> {
+    if kind != "config" {
+        return Vec::new();
+    }
+    let Some(input) = args.first().and_then(|a| a.get("input")) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    flatten(input, "input", &mut out);
+    out
+}
+
+fn flatten(node: &serde_json::Value, prefix: &str, out: &mut Vec<(&'static str, Value)>) {
+    let Some(table) = node.as_object() else {
+        return;
+    };
+    for (name, value) in table {
+        let key = format!("{prefix}:{name}");
+        if value.is_object() {
+            flatten(value, &key, out);
+            continue;
+        }
+        // Looked up rather than trusted: a config can set input options
+        // this module doesn't cover (`input:tablet:*`) or that Hyprland
+        // added since, and neither belongs in the store.
+        let Some(setting) = catalog::get(&key) else {
+            continue;
+        };
+        if let Some(v) = coerce(value, &setting.kind) {
+            out.push((setting.key, v));
+        }
+    }
+}
+
+/// Reads a JSON value as the type the catalog declares.
+///
+/// The coercion that matters is integer-to-float: a config writing
+/// `sensitivity = 0` produces a JSON integer, while the same setting is a
+/// float to Hyprland. Storing it as an integer would render `sensitivity =
+/// 0` into the generated Lua and hand an int to a float option.
+fn coerce(value: &serde_json::Value, kind: &Kind) -> Option<Value> {
+    match kind {
+        Kind::Bool { .. } => value.as_bool().map(Value::Bool),
+        Kind::Int { .. } | Kind::IntEnum { .. } => value.as_i64().map(Value::Int),
+        Kind::Float { .. } => value.as_f64().map(Value::Float),
+        Kind::Text { .. } | Kind::TextEnum { .. } => {
+            value.as_str().map(|s| Value::Text(s.to_string()))
+        }
+    }
+}
+
+/// Turns flattened config settings into review candidates.
+///
+/// `found` must be in evaluation order, with Hyprforge's own generated file
+/// already excluded by the caller — it has the `source_path` to do it, and
+/// including it would echo Hyprforge's own values back as if the user had
+/// written them. Later calls override earlier ones for the same key, which
+/// is what Hyprland does.
+pub fn candidates_from_config(
+    found: &[(&'static str, Value)],
+    current: &Settings,
+) -> Vec<Discovered> {
+    let mut resolved: BTreeMap<&'static str, Value> = BTreeMap::new();
+    for (key, value) in found {
+        resolved.insert(key, value.clone());
+    }
+    resolved
+        .into_iter()
+        .map(|(key, value)| {
+            let stored = current.get(key);
+            Discovered {
+                key,
+                label: catalog::get(key).map(|s| s.label).unwrap_or(key),
+                already_owned: stored.is_some(),
+                differs: stored.is_some_and(|s| *s != value),
+                value,
+            }
+        })
+        .collect()
+}
+
 /// Folds the chosen options into `settings`. Only the keys passed are
 /// touched — importing is additive, so a user can adopt their keyboard
 /// settings without the app also claiming their touchpad.
@@ -279,6 +376,132 @@ mod tests {
     #[test]
     fn live_drops_sentinel_placeholders() {
         assert!(parse_live(SAMPLE).iter().all(|l| l.key != "input:kb_file"));
+    }
+
+    fn call(json: serde_json::Value) -> Vec<(&'static str, Value)> {
+        settings_from_call("config", &[json])
+    }
+
+    /// The real shape, taken from this machine's `hyprland.lua`.
+    #[test]
+    fn a_config_call_flattens_into_catalog_keys() {
+        let found = call(serde_json::json!({
+            "input": {
+                "kb_layout": "us",
+                "numlock_by_default": true,
+                "follow_mouse": 1,
+                "sensitivity": 0,
+                "touchpad": { "natural_scroll": false }
+            }
+        }));
+        let map: BTreeMap<_, _> = found.into_iter().collect();
+        assert_eq!(map["input:kb_layout"], Value::Text("us".into()));
+        assert_eq!(map["input:numlock_by_default"], Value::Bool(true));
+        assert_eq!(map["input:follow_mouse"], Value::Int(1));
+        assert_eq!(map["input:touchpad:natural_scroll"], Value::Bool(false));
+    }
+
+    /// `sensitivity = 0` in a config is a JSON integer, but the setting is
+    /// a float. Stored as an integer it would render `sensitivity = 0` and
+    /// hand an int to a float option.
+    #[test]
+    fn an_integer_written_for_a_float_setting_becomes_a_float() {
+        let map: BTreeMap<_, _> = call(serde_json::json!({ "input": { "sensitivity": 0 } }))
+            .into_iter()
+            .collect();
+        assert_eq!(map["input:sensitivity"], Value::Float(0.0));
+    }
+
+    /// A config sets far more than input; nothing else may leak in.
+    #[test]
+    fn other_categories_are_ignored() {
+        assert_eq!(
+            call(serde_json::json!({
+                "decoration": { "rounding": 10 },
+                "general": { "border_size": 2 }
+            })),
+            vec![]
+        );
+    }
+
+    /// Options outside the catalog — `input:tablet:*`, or anything
+    /// Hyprland adds later — must not enter the store.
+    #[test]
+    fn uncatalogued_input_options_are_skipped() {
+        let found = call(serde_json::json!({
+            "input": {
+                "tablet": { "left_handed": true },
+                "some_new_option": 3,
+                "kb_layout": "de"
+            }
+        }));
+        assert_eq!(found, vec![("input:kb_layout", Value::Text("de".into()))]);
+    }
+
+    #[test]
+    fn a_non_config_call_yields_nothing() {
+        assert_eq!(settings_from_call("bind", &[serde_json::json!({})]), vec![]);
+        assert_eq!(settings_from_call("config", &[]), vec![]);
+    }
+
+    /// Hyprland applies the last call for a key, so import must resolve the
+    /// same way.
+    #[test]
+    fn a_later_call_wins_for_the_same_key() {
+        let mut found = call(serde_json::json!({ "input": { "repeat_rate": 20 } }));
+        found.extend(call(serde_json::json!({ "input": { "repeat_rate": 40 } })));
+        let candidates = candidates_from_config(&found, &Settings::default());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].value, Value::Int(40));
+    }
+
+    /// The defect this replaced the live import to fix: a value only
+    /// Hyprforge's own generated file sets must never come back as
+    /// something the user configured. The caller drops that file by
+    /// `source_path`; this pins that dropping it is sufficient.
+    #[test]
+    fn excluding_the_generated_file_removes_values_only_it_set() {
+        let user = call(serde_json::json!({ "input": { "kb_layout": "us" } }));
+        let generated = call(serde_json::json!({
+            "input": { "kb_layout": "us", "touchdevice": { "enabled": false } }
+        }));
+
+        let with_generated: Vec<_> = user.iter().chain(generated.iter()).cloned().collect();
+        assert!(
+            candidates_from_config(&with_generated, &Settings::default())
+                .iter()
+                .any(|c| c.key == "input:touchdevice:enabled"),
+            "including the generated file is what let the phantom value in"
+        );
+
+        let candidates = candidates_from_config(&user, &Settings::default());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].key, "input:kb_layout");
+    }
+
+    #[test]
+    fn config_candidates_mark_what_is_already_owned() {
+        let mut current = Settings::default();
+        current.set("input:kb_layout", Value::Text("de".into()));
+        let found = call(serde_json::json!({ "input": { "kb_layout": "us" } }));
+        let candidates = candidates_from_config(&found, &current);
+        assert!(candidates[0].already_owned && candidates[0].differs);
+    }
+
+    /// Everything imported from a config has to be storable, or import
+    /// hands the user a file its own validator rejects.
+    #[test]
+    fn config_imported_values_pass_validation() {
+        let found = call(serde_json::json!({
+            "input": {
+                "kb_layout": "us", "sensitivity": 0, "repeat_rate": 25,
+                "touchpad": { "natural_scroll": true }
+            }
+        }));
+        let mut settings = Settings::default();
+        let candidates = candidates_from_config(&found, &settings);
+        merge(&mut settings, &candidates);
+        assert_eq!(settings.validate(), vec![]);
     }
 
     #[test]

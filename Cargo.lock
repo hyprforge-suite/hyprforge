@@ -1367,6 +1367,7 @@ name = "hyprforge-input"
 version = "0.1.0"
 dependencies = [
  "hyprforge-core",
+ "hyprforge-lua-import",
  "serde",
  "serde_json",
  "tempfile",
