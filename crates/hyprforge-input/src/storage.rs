@@ -110,6 +110,27 @@ mod tests {
         assert_eq!(load(&path).unwrap(), sample());
     }
 
+    /// [`Value`] is an untagged enum whose `Int` arm is tried before its
+    /// `Float` arm, so a whole float is exactly where a silent type change
+    /// would hide. `1.0` coming back as `Int(1)` would render as `1` in the
+    /// generated Lua — an integer reaching a setting Hyprland types as a
+    /// float.
+    #[test]
+    fn a_whole_float_does_not_come_back_as_an_integer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input.toml");
+        let mut s = Settings::default();
+        s.set("input:touchpad:scroll_factor", Value::Float(1.0));
+        save(&path, &s).unwrap();
+
+        assert_eq!(
+            load(&path).unwrap().get("input:touchpad:scroll_factor"),
+            Some(&Value::Float(1.0))
+        );
+        let lua = crate::codegen::generate(&load(&path).unwrap());
+        assert!(lua.contains("scroll_factor = 1.0,"), "{lua}");
+    }
+
     /// The file is meant to be hand-editable, so a hand-written spelling
     /// has to load.
     #[test]

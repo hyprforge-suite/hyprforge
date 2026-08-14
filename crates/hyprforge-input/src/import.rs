@@ -30,6 +30,22 @@ pub enum ImportError {
     NoCompositor,
 }
 
+/// What the compositor currently has for one option, whether or not
+/// anyone set it.
+///
+/// The editor needs this for every option, not just the set ones: a row
+/// showing the catalog default for a key the user's own config sets to
+/// something else is a screen that lies about what's running. `set` is what
+/// lets a row say *where* the value it's showing came from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Live {
+    pub key: &'static str,
+    pub value: Value,
+    /// The user's config writes this key, as opposed to it being
+    /// Hyprland's own default.
+    pub set: bool,
+}
+
 /// One option the compositor reports as explicitly set.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Discovered {
@@ -55,6 +71,13 @@ pub fn discover(current: &Settings) -> Result<Vec<Discovered>, ImportError> {
     Ok(parse(&out, current))
 }
 
+/// What the compositor currently has for every catalogued option, set or
+/// not — one `hyprctl` call, the same one [`discover`] makes.
+pub fn live() -> Result<Vec<Live>, ImportError> {
+    let out = run_hyprctl()?;
+    Ok(parse_live(&out))
+}
+
 fn run_hyprctl() -> Result<String, ImportError> {
     let batch = catalog::SETTINGS
         .iter()
@@ -77,6 +100,24 @@ fn run_hyprctl() -> Result<String, ImportError> {
 /// Split out from [`discover`] so the parsing is testable without a
 /// compositor — the part that can actually be wrong.
 pub fn parse(hyprctl_json: &str, current: &Settings) -> Vec<Discovered> {
+    parse_live(hyprctl_json)
+        .into_iter()
+        .filter(|l| l.set)
+        .map(|l| {
+            let stored = current.get(l.key);
+            Discovered {
+                key: l.key,
+                label: catalog::get(l.key).map(|s| s.label).unwrap_or(l.key),
+                already_owned: stored.is_some(),
+                differs: stored.is_some_and(|s| *s != l.value),
+                value: l.value,
+            }
+        })
+        .collect()
+}
+
+/// Every catalogued option in `hyprctl_json`, set or not.
+pub fn parse_live(hyprctl_json: &str) -> Vec<Live> {
     let mut found = Vec::new();
     for line in hyprctl_json.lines() {
         let line = line.trim();
@@ -89,22 +130,16 @@ pub fn parse(hyprctl_json: &str, current: &Settings) -> Vec<Discovered> {
         let Some(key) = obj.get("option").and_then(|v| v.as_str()) else {
             continue;
         };
-        if obj.get("set").and_then(|v| v.as_bool()) != Some(true) {
-            continue;
-        }
         let Some(setting) = catalog::get(key) else {
             continue;
         };
         let Some(value) = read_value(&obj, &setting.kind) else {
             continue;
         };
-        let stored = current.get(setting.key);
-        found.push(Discovered {
+        found.push(Live {
             key: setting.key,
-            label: setting.label,
-            already_owned: stored.is_some(),
-            differs: stored.is_some_and(|s| *s != value),
             value,
+            set: obj.get("set").and_then(|v| v.as_bool()) == Some(true),
         });
     }
     found
@@ -225,6 +260,25 @@ mod tests {
         merge(&mut settings, &found[..1]);
         assert_eq!(settings.values.len(), 1);
         assert!(settings.get("input:kb_layout").is_some());
+    }
+
+    /// The editor needs every option's live value, not just the set ones —
+    /// a row falling back to the catalog default would show `false` for a
+    /// setting the user's own config turned on.
+    #[test]
+    fn live_reports_unset_options_too_with_their_source_marked() {
+        let live = parse_live(SAMPLE);
+        let repeat = live.iter().find(|l| l.key == "input:repeat_rate").unwrap();
+        assert_eq!(repeat.value, Value::Int(25));
+        assert!(!repeat.set, "Hyprland's own default");
+        let layout = live.iter().find(|l| l.key == "input:kb_layout").unwrap();
+        assert!(layout.set, "the user's config writes this one");
+    }
+
+    /// A sentinel is still not a value, whichever way it's read.
+    #[test]
+    fn live_drops_sentinel_placeholders() {
+        assert!(parse_live(SAMPLE).iter().all(|l| l.key != "input:kb_file"));
     }
 
     #[test]

@@ -210,6 +210,18 @@ fn check(setting: &Setting, value: &Value) -> Option<String> {
 }
 
 fn in_range(v: f64, min: Option<f64>, max: Option<f64>) -> Result<(), String> {
+    // Checked before the bounds, because NaN passes them: every comparison
+    // against NaN is false, so `v < lo` and `v > hi` are both false and it
+    // would sail through as in-range.
+    //
+    // `nan` and `inf` are both valid TOML floats, so a hand-edited file
+    // reaches here. Neither survives codegen: NaN renders as `NaN.0`, a Lua
+    // syntax error that takes the whole generated file — and therefore the
+    // user's whole config — down, and `inf` renders as an undefined Lua
+    // global that silently evaluates to nil.
+    if !v.is_finite() {
+        return Err("must be an ordinary number".to_string());
+    }
     match (min, max) {
         (Some(lo), _) if v < lo => Err(format!("must be at least {lo}")),
         (_, Some(hi)) if v > hi => Err(format!("must be at most {hi}")),
@@ -290,6 +302,38 @@ mod tests {
         let bad = s.validate();
         assert_eq!(bad.len(), 1);
         assert!(bad[0].problem.contains("know"), "{}", bad[0].problem);
+    }
+
+    /// `nan` and `inf` are valid TOML floats, so this is reachable by
+    /// hand-editing. NaN slips past a naive range check — every comparison
+    /// against it is false — and then renders as `NaN.0`, a syntax error
+    /// that takes down the entire generated file.
+    #[test]
+    fn a_non_finite_float_is_refused_rather_than_passing_the_range_check() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut s = Settings::default();
+            s.set("input:touchpad:scroll_factor", Value::Float(bad));
+            let problems = s.validate();
+            assert_eq!(problems.len(), 1, "{bad} was accepted");
+            assert!(
+                problems[0].problem.contains("ordinary number"),
+                "{}",
+                problems[0].problem
+            );
+        }
+    }
+
+    /// The whole point of catching it: nothing non-finite may reach the
+    /// generated Lua.
+    #[test]
+    fn a_non_finite_float_never_reaches_the_generated_file() {
+        let mut s = Settings::default();
+        s.set("input:touchpad:scroll_factor", Value::Float(f64::NAN));
+        s.set("input:repeat_rate", Value::Int(30));
+        let lua = crate::codegen::generate(&s);
+        assert!(!lua.contains("NaN"), "{lua}");
+        assert!(!lua.contains("scroll_factor"), "{lua}");
+        assert!(lua.contains("repeat_rate = 30"), "{lua}");
     }
 
     #[test]

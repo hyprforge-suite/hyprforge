@@ -105,9 +105,16 @@ fn render_value(value: &Value) -> String {
         Value::Int(i) => i.to_string(),
         // Always with a decimal point, so a float setting never reaches
         // Hyprland looking like an integer.
+        //
+        // Only finite floats get here — `generate` skips anything
+        // `validate` rejects, and non-finite is one of the things it
+        // rejects precisely because `NaN` renders as `NaN.0`, which is a
+        // syntax error that would take the whole file down. Debug
+        // formatting of a finite f64 always carries a `.` or an `e`, so
+        // the fallback is belt and braces.
         Value::Float(f) => {
             let s = format!("{f:?}");
-            if s.contains(['.', 'e', 'n', 'i']) {
+            if s.contains(['.', 'e']) {
                 s
             } else {
                 format!("{s}.0")
