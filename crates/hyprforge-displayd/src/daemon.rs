@@ -79,6 +79,10 @@ struct PendingRevert {
 pub struct Daemon {
     backend: Arc<dyn OutputBackend>,
     storage_path: PathBuf,
+    /// Where the Hyprland-native fallback is written. Held rather than
+    /// looked up at write time so a mock run can be pointed somewhere
+    /// harmless — see [`DaemonPaths`].
+    monitors_lua_path: PathBuf,
     profiles: Mutex<Vec<Profile>>,
     competing_monitor_rules: Mutex<Vec<String>>,
     suppress_learn_until: Mutex<Option<tokio::time::Instant>>,
@@ -95,11 +99,22 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    pub fn new(backend: Arc<dyn OutputBackend>, storage_path: PathBuf) -> anyhow::Result<Self> {
+    /// Every path the daemon will write is named by the caller.
+    ///
+    /// There is deliberately no convenience constructor that fills in the
+    /// real locations for you. The previous one took only `storage_path` and
+    /// quietly defaulted `monitors.lua` to the real config — so the
+    /// integration tests, which carefully used a temp dir for profiles,
+    /// wrote mock outputs straight into the developer's own Hyprland config
+    /// every time they settled a topology. Making the caller say where
+    /// everything goes is what stops that being possible.
+    pub fn with_paths(backend: Arc<dyn OutputBackend>, paths: DaemonPaths) -> anyhow::Result<Self> {
+        let DaemonPaths { storage_path, monitors_lua_path } = paths;
         let profiles = crate::storage::load(&storage_path)?;
         Ok(Daemon {
             backend,
             storage_path,
+            monitors_lua_path,
             profiles: Mutex::new(profiles),
             competing_monitor_rules: Mutex::new(Vec::new()),
             suppress_learn_until: Mutex::new(None),
@@ -578,7 +593,7 @@ impl Daemon {
             // Spawned rather than awaited: it shells out to `hyprctl`, and
             // this settle's own signal emission below must never wait on
             // that round-trip.
-            tokio::spawn(write_monitors_fallback(heads.clone()));
+            tokio::spawn(write_monitors_fallback(heads.clone(), self.monitors_lua_path.clone()));
         } else {
             // A commit that doesn't take is the other way to loop forever.
             // `apply_configuration` reports success once the request is sent,
@@ -780,14 +795,45 @@ impl Daemon {
 /// spawned as a detached background task (it shells out to `hyprctl`, and
 /// the settle path that triggers it must never wait on that round-trip),
 /// so its future has to be `'static` and touches no daemon state.
-async fn write_monitors_fallback(heads: Vec<Head>) {
+async fn write_monitors_fallback(heads: Vec<Head>, path: PathBuf) {
     let descriptions = crate::hyprctl_monitors::connector_descriptions().await;
     let entries = crate::monitors_codegen::entries_from_heads(&heads, &descriptions);
     let lua = crate::monitors_codegen::generate(&entries);
-    if let Err(e) =
-        hyprforge_core::paths::write_atomic(&hyprforge_core::paths::monitors_lua_path(), &lua)
-    {
+    if let Err(e) = hyprforge_core::paths::write_atomic(&path, &lua) {
         tracing::warn!(error = %e, "failed to write the monitors.lua fallback");
+    }
+}
+
+/// Every file the daemon owns.
+///
+/// Held together so there is exactly one place that decides where the
+/// daemon writes — and so a mock run can move *all* of it at once. Getting
+/// that wrong is not theoretical: a `--mock` run once wrote a `MOCK-1`
+/// output into a real user's `monitors.lua`, leaving their actual display
+/// absent from the very file that exists to keep its layout when the daemon
+/// isn't running.
+#[derive(Debug, Clone)]
+pub struct DaemonPaths {
+    pub storage_path: PathBuf,
+    pub monitors_lua_path: PathBuf,
+}
+
+impl DaemonPaths {
+    /// The real locations, for a real run.
+    pub fn real() -> Self {
+        DaemonPaths {
+            storage_path: hyprforge_core::paths::display_profiles_path(),
+            monitors_lua_path: hyprforge_core::paths::monitors_lua_path(),
+        }
+    }
+
+    /// Throwaway locations under `dir`, for a mock run. Nothing here may
+    /// point at anything Hyprland reads.
+    pub fn mock_under(dir: &std::path::Path) -> Self {
+        DaemonPaths {
+            storage_path: dir.join("display-profiles.toml"),
+            monitors_lua_path: dir.join("monitors.lua"),
+        }
     }
 }
 

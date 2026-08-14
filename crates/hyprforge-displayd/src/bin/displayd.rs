@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
-use hyprforge_core::paths::display_profiles_path;
 use hyprforge_displayd::backend::mock::MockBackend;
+use hyprforge_displayd::daemon::DaemonPaths;
 use hyprforge_displayd::backend::wlr::WlrBackend;
 use hyprforge_displayd::backend::OutputBackend;
 use hyprforge_displayd::daemon::Daemon;
@@ -47,19 +47,26 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run(mock: bool) -> anyhow::Result<()> {
-    let storage_path = display_profiles_path();
-
-    let (backend, mock_backend): (Arc<dyn OutputBackend>, Option<Arc<MockBackend>>) = if mock {
-        tracing::info!("starting with mock backend");
+    // A mock run gets its own state directory, because it is not a
+    // simulation of the daemon if it writes where the real one does. This
+    // was a real incident: `--mock` wrote a `MOCK-1` output into a user's
+    // `monitors.lua`, so the file Hyprland reads to keep their layout named
+    // an output that doesn't exist and omitted the one that does.
+    let (paths, backend, mock_backend): (
+        DaemonPaths,
+        Arc<dyn OutputBackend>,
+        Option<Arc<MockBackend>>,
+    ) = if mock {
+        let dir = mock_state_dir()?;
+        tracing::info!(dir = %dir.display(), "starting with mock backend; state kept here");
         let backend = Arc::new(MockBackend::new());
-        (backend.clone(), Some(backend))
+        (DaemonPaths::mock_under(&dir), backend.clone(), Some(backend))
     } else {
         tracing::info!("connecting to compositor via wlr-output-management-v1");
-        let backend = Arc::new(WlrBackend::connect()?);
-        (backend, None)
+        (DaemonPaths::real(), Arc::new(WlrBackend::connect()?), None)
     };
 
-    let daemon = Arc::new(Daemon::new(backend.clone(), storage_path)?);
+    let daemon = Arc::new(Daemon::with_paths(backend.clone(), paths)?);
     warn_about_competing_monitor_rules(&daemon).await;
 
     let events = backend.subscribe();
@@ -125,6 +132,18 @@ async fn warn_about_competing_monitor_rules(daemon: &Daemon) {
         );
     }
     daemon.set_competing_monitor_rules(competing).await;
+}
+
+/// A scratch directory for a mock run's state, under `$XDG_RUNTIME_DIR`
+/// (falling back to the temp dir) so it never collides with the real config
+/// and doesn't survive a reboot.
+fn mock_state_dir() -> anyhow::Result<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = base.join("hyprforge-displayd-mock");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
 }
 
 /// Registers a second, mock-only D-Bus method for driving fake topology

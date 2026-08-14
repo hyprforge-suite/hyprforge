@@ -1,6 +1,6 @@
 use hyprforge_displayd::backend::mock::MockBackend;
 use hyprforge_displayd::backend::OutputBackend;
-use hyprforge_displayd::daemon::{Daemon, DaemonSignal, REVERT_WINDOW};
+use hyprforge_displayd::daemon::{Daemon, DaemonPaths, DaemonSignal, REVERT_WINDOW};
 use hyprforge_displayd::types::Identity;
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,12 +38,18 @@ struct Harness {
 impl Harness {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let storage_path = dir.path().join("display-profiles.toml");
         let backend = Arc::new(MockBackend::new());
+        // Every path under the temp dir, `monitors.lua` included. Settling a
+        // topology regenerates that file, and pointing it at the real config
+        // meant a test run rewrote the developer's own display setup with
+        // mock outputs.
         let daemon = Arc::new(
-            Daemon::new(backend.clone() as Arc<dyn OutputBackend>, storage_path)
-                .unwrap()
-                .with_debounce(Duration::from_millis(10)),
+            Daemon::with_paths(
+                backend.clone() as Arc<dyn OutputBackend>,
+                DaemonPaths::mock_under(dir.path()),
+            )
+            .unwrap()
+            .with_debounce(Duration::from_millis(10)),
         );
         let (signal_tx, signal_rx) = tokio::sync::mpsc::unbounded_channel();
         let events = backend.subscribe();
