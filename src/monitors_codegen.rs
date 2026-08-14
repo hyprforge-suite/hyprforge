@@ -119,17 +119,14 @@ fn transform_index(t: Transform) -> u8 {
     }
 }
 
-/// Quotes with a Lua long bracket, which needs no escaping — same approach
-/// `hyprforge-shortcuts::codegen` and `hyprforge-windowrules::codegen` use,
-/// so a `desc:` string containing regex-like or quote characters can never
-/// break the generated call's own parse.
-fn lua_string(s: &str) -> String {
-    if !s.contains("]]") {
-        format!("[[{s}]]")
-    } else {
-        format!("[=[{s}]=]")
-    }
-}
+/// Quotes with a Lua long bracket, which needs no escaping, so a `desc:`
+/// string containing regex-like or quote characters can never break the
+/// generated call's own parse.
+///
+/// The one implementation all three generating crates share — this crate's
+/// former copy got the fallback condition wrong in the same way the other
+/// two did. See [`hyprforge_core::lua`].
+use hyprforge_core::lua::lua_string;
 
 #[cfg(test)]
 mod tests {
