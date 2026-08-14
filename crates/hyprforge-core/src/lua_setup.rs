@@ -622,3 +622,137 @@ mod tests {
         assert_eq!(removed, 0);
     }
 }
+
+/// Everything a module needs to own a `require()`d Lua file.
+///
+/// The three Settings modules each ran the same four-step opening move —
+/// discover the config, create or install, detect the resulting plan, write
+/// an empty generated file if it doesn't exist yet — in about forty
+/// near-identical lines apiece, comments included. Only three values ever
+/// differed, and they're the three fields here.
+pub struct ModuleSetup<'a> {
+    /// The `require("…")` line this module owns.
+    pub require_line: &'a str,
+    pub placement: Placement,
+    /// The generated file the require line points at, and the contents to
+    /// give it if it doesn't exist yet.
+    ///
+    /// Writing it eagerly is not optional: the require line can be installed
+    /// before the module has ever saved anything, and `require()` of a
+    /// missing file is an error on the user's very next `hyprctl reload`.
+    pub generated: (PathBuf, String),
+}
+
+/// What [`bootstrap`] worked out about the user's config.
+pub struct SetupState {
+    pub config: HyprConfig,
+    pub plan: SetupPlan,
+    /// Why automatic setup failed, if it did. Never fatal — a module stays
+    /// usable and saves to its own TOML regardless (vision pillar #3).
+    pub error: Option<String>,
+}
+
+/// Runs a module's opening move against the user's Hyprland config.
+///
+/// No confirmation is asked for anywhere in here: the require line only ever
+/// points at Hyprforge's own generated file and never touches the user's own
+/// content, so there is nothing to ask permission for beyond what installing
+/// the module already implies. A real write failure still surfaces, in
+/// [`SetupState::error`].
+pub fn bootstrap(hypr_dir: &Path, hyprland_lua: &Path, setup: ModuleSetup<'_>) -> SetupState {
+    let mut config = discover(hypr_dir);
+    let mut error = None;
+    match &config {
+        HyprConfig::Missing => {
+            match create_lua_config(hyprland_lua, setup.require_line, setup.placement) {
+                Ok(()) => config = HyprConfig::Lua(hyprland_lua.to_path_buf()),
+                Err(e) => error = Some(e.to_string()),
+            }
+        }
+        HyprConfig::Lua(_) => {
+            if let Err(e) = install(hyprland_lua, setup.require_line, setup.placement) {
+                error = Some(e.to_string());
+            }
+        }
+        // Nothing to automate: require() doesn't exist in that format.
+        HyprConfig::ConfOnly(_) => {}
+    }
+
+    let plan = match &config {
+        HyprConfig::Lua(path) => {
+            let contents = std::fs::read_to_string(path).unwrap_or_default();
+            detect(&contents, setup.require_line, setup.placement)
+        }
+        _ => SetupPlan::NeedsInsert { insert_before_line: 1 },
+    };
+
+    if matches!(config, HyprConfig::Lua(_)) {
+        let (path, contents) = &setup.generated;
+        if !path.exists() {
+            let _ = crate::paths::write_atomic(path, contents);
+        }
+    }
+
+    SetupState { config, plan, error }
+}
+
+#[cfg(test)]
+mod bootstrap_tests {
+    use super::*;
+
+    fn setup(dir: &Path) -> ModuleSetup<'static> {
+        ModuleSetup {
+            require_line: "require(\"hyprforge/keybinds\")",
+            placement: Placement::AtEnd,
+            generated: (dir.join("keybinds.lua"), "-- empty\n".to_string()),
+        }
+    }
+
+    /// The gap that bit a real user: the require line exists before the
+    /// module has ever saved, and `require()` of a missing file fails the
+    /// next reload.
+    #[test]
+    fn the_generated_file_exists_before_anything_is_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let lua = dir.path().join("hyprland.lua");
+        std::fs::write(&lua, "hl.config({})\n").unwrap();
+
+        let state = bootstrap(dir.path(), &lua, setup(dir.path()));
+        assert!(state.error.is_none(), "{:?}", state.error);
+        assert!(matches!(state.config, HyprConfig::Lua(_)));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("keybinds.lua")).unwrap(),
+            "-- empty\n"
+        );
+        assert!(std::fs::read_to_string(&lua).unwrap().contains("hyprforge/keybinds"));
+    }
+
+    /// A second run must not clobber real content with the empty version.
+    #[test]
+    fn an_existing_generated_file_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let lua = dir.path().join("hyprland.lua");
+        std::fs::write(&lua, "hl.config({})\n").unwrap();
+        std::fs::write(dir.path().join("keybinds.lua"), "-- real content\n").unwrap();
+
+        bootstrap(dir.path(), &lua, setup(dir.path()));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("keybinds.lua")).unwrap(),
+            "-- real content\n"
+        );
+    }
+
+    /// A `.conf`-only user can't be served by a require line, and that has
+    /// to be reported rather than attempted.
+    #[test]
+    fn a_conf_only_config_is_left_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf = dir.path().join("hyprland.conf");
+        std::fs::write(&conf, "monitor=,preferred,auto,1\n").unwrap();
+
+        let state = bootstrap(dir.path(), &dir.path().join("hyprland.lua"), setup(dir.path()));
+        assert!(matches!(state.config, HyprConfig::ConfOnly(_)));
+        assert_eq!(std::fs::read_to_string(&conf).unwrap(), "monitor=,preferred,auto,1\n");
+        assert!(!dir.path().join("hyprland.lua").exists());
+    }
+}

@@ -4,6 +4,19 @@ pub mod layout_canvas;
 pub mod shortcuts;
 pub mod window_rules;
 
+/// Evaluates the user's own `hyprland.lua` for importable entries.
+///
+/// Blocking work (a synchronous Lua VM run over their whole config), so it
+/// goes on the blocking pool rather than stalling the UI thread. Shared
+/// because all three modules import from the same file in the same way —
+/// they differ only in which recorded calls they then care about.
+pub async fn evaluate_user_config() -> hyprforge_lua_import::ImportResult {
+    let hypr_dir = hyprforge_core::paths::hypr_config_dir();
+    tokio::task::spawn_blocking(move || hyprforge_lua_import::evaluate(&hypr_dir))
+        .await
+        .unwrap_or_default()
+}
+
 /// One lock for every test that repoints `$XDG_CONFIG_HOME`.
 ///
 /// It has to be shared across modules, not one per module: the variable is

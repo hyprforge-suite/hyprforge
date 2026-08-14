@@ -536,52 +536,19 @@ impl ShortcutsModule {
                 Ok(shortcuts) => (shortcuts, None),
                 Err(e) => (Vec::new(), Some(e.to_string())),
             };
-        let mut config = hyprforge_shortcuts::setup::discover(&hyprforge_core::paths::hypr_config_dir());
-        // No confirm dialog: the require line only ever points at
-        // Hyprforge's own generated file, never touches the user's own
-        // content, so there's nothing to ask permission for beyond what
-        // installing this module already implies. A real write failure
-        // still surfaces as an error rather than being silently swallowed.
-        let mut error = None;
-        match &config {
-            HyprConfig::Missing => {
-                let path = hyprforge_core::paths::hyprland_lua_path();
-                match hyprforge_shortcuts::setup::create_lua_config(&path) {
-                    Ok(()) => config = HyprConfig::Lua(path),
-                    Err(e) => error = Some(e.to_string()),
-                }
-            }
-            HyprConfig::Lua(_) => {
-                if let Err(e) =
-                    hyprforge_shortcuts::setup::install(&hyprforge_core::paths::hyprland_lua_path())
-                {
-                    error = Some(e.to_string());
-                }
-            }
-            HyprConfig::ConfOnly(_) => {}
-        }
-        let setup_plan = match &config {
-            HyprConfig::Lua(path) => {
-                let contents = std::fs::read_to_string(path).unwrap_or_default();
-                hyprforge_shortcuts::setup::detect(&contents)
-            }
-            _ => SetupPlan::NeedsInsert { insert_before_line: 1 },
-        };
-        // The require line can exist (just installed above, or from a
-        // prior session) before this module has ever written its own
-        // generated file — e.g. before the first shortcut is ever saved.
-        // A require() pointing at a file that doesn't exist yet errors on
-        // the user's next `hyprctl reload`, so this ensures it's at least
-        // present and empty until a real save writes real content.
-        if matches!(config, HyprConfig::Lua(_)) {
-            let lua_path = hyprforge_core::paths::keybinds_lua_path();
-            if !lua_path.exists() {
-                let _ = hyprforge_core::paths::write_atomic(
-                    &lua_path,
-                    &hyprforge_shortcuts::codegen::generate(&[]),
-                );
-            }
-        }
+        let setup = lua_setup::bootstrap(
+            &hyprforge_core::paths::hypr_config_dir(),
+            &hyprforge_core::paths::hyprland_lua_path(),
+            lua_setup::ModuleSetup {
+                require_line: hyprforge_shortcuts::setup::REQUIRE_LINE,
+                placement: hyprforge_shortcuts::setup::PLACEMENT,
+                generated: (
+                    hyprforge_core::paths::keybinds_lua_path(),
+                    hyprforge_shortcuts::codegen::generate(&[]),
+                ),
+            },
+        );
+        let (config, setup_plan, error) = (setup.config, setup.plan, setup.error);
         (
             ShortcutsModule {
                 shortcuts,
@@ -818,34 +785,7 @@ impl ShortcutsModule {
     /// failed; the reason is already in `self.error`, shown generically
     /// above this.
     fn setup_notice(&self, scale: FontScale) -> Option<Element<'_, Message>> {
-        let body = match &self.config {
-            HyprConfig::Lua(_) => return None,
-            HyprConfig::Missing => column![scaled_text(
-                "No Hyprland config found, and Hyprforge couldn't create one \
-                 automatically — see the error above.",
-                13.0,
-                scale,
-            )],
-            HyprConfig::ConfOnly(path) => column![
-                scaled_text(
-                    "You're using Hyprland's hyprland.conf format. Hyprforge \
-                     generates Lua binds and sources them with require(), which \
-                     only the Lua config supports — so it won't modify your .conf.",
-                    13.0,
-                    scale,
-                ),
-                meta_text(path.display().to_string(), 12.0, scale),
-                scaled_text(
-                    "Hyprland switched its config language from hyprlang to Lua \
-                     in 0.55. To use this module, port your settings into a \
-                     hyprland.lua; Hyprforge will pick it up automatically on \
-                     next launch. Your .conf is left untouched either way.",
-                    13.0,
-                    scale,
-                ),
-            ],
-        };
-        Some(section("Setup required", scale, body.spacing(spacing::SM)))
+        hyprforge_core::widgets::setup_notice(&self.config, "binds", scale)
     }
 }
 
@@ -1059,7 +999,7 @@ impl SettingsModule for ShortcutsModule {
             }
             Message::ImportFromConfig => {
                 self.import_review = Some(ImportState::Running);
-                Task::perform(import_from_config(), Message::ImportEvaluated)
+                Task::perform(super::evaluate_user_config(), Message::ImportEvaluated)
             }
             Message::ImportEvaluated(result) => {
                 let hyprforge_dir = hyprforge_core::paths::hypr_hyprforge_dir();
@@ -1736,16 +1676,6 @@ async fn regenerate_and_reload(shortcuts: Vec<Shortcut>) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
-/// Evaluates the user's own `hyprland.lua` for importable shortcuts.
-/// Blocking work (a synchronous Lua VM run), so it goes on the blocking
-/// pool rather than stalling the UI thread — same treatment the conflict
-/// check gets.
-async fn import_from_config() -> hyprforge_lua_import::ImportResult {
-    let hypr_dir = hyprforge_core::paths::hypr_config_dir();
-    tokio::task::spawn_blocking(move || hyprforge_lua_import::evaluate(&hypr_dir))
-        .await
-        .unwrap_or_default()
-}
 
 #[cfg(test)]
 mod tests {

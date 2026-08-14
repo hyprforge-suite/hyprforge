@@ -20,7 +20,7 @@ use std::path::Path;
 pub use hyprforge_core::lua_setup::{HyprConfig, SetupError, SetupPlan};
 
 /// Window rules go first, so the user's own rules win. See the module docs.
-const PLACEMENT: Placement = Placement::BeforeUserRequires;
+pub const PLACEMENT: Placement = Placement::BeforeUserRequires;
 
 /// Only the drift test needs this separately from [`REQUIRE_LINE`] — in
 /// production the const below is what's used.

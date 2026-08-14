@@ -16,7 +16,7 @@ use std::path::Path;
 
 pub use hyprforge_core::lua_setup::{HyprConfig, SetupError, SetupPlan};
 
-const PLACEMENT: Placement = Placement::AtEnd;
+pub const PLACEMENT: Placement = Placement::AtEnd;
 
 #[cfg(test)]
 const MODULE: &str = "keybinds";
