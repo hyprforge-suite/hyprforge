@@ -20,7 +20,7 @@ const MONITORS_PLACEMENT: Placement = Placement::BeforeUserRequires;
 fn monitors_require_line() -> String {
     lua_setup::require_line("monitors")
 }
-use iced::widget::{column, container, row, scrollable, text_input};
+use iced::widget::{checkbox, column, container, row, scrollable, text_input};
 use iced::{Element, Length, Subscription, Task};
 use serde::Deserialize;
 
@@ -522,7 +522,12 @@ pub enum Message {
     RefreshSelected(RefreshOption),
     ToggleWarnings,
     ImportFromConfig,
-    ImportEvaluated(hyprforge_lua_import::ImportResult),
+    ImportEvaluated((hyprforge_lua_import::ImportResult, Vec<LiveHead>)),
+    /// Tick an entry that resolves to a connected display.
+    ImportToggle(usize, bool),
+    /// Write the checked entries' geometry into the current profile.
+    ImportApply,
+    ImportApplied(Result<(), String>),
     ImportClose,
 }
 
@@ -611,11 +616,115 @@ struct ImportedMonitor {
     mode: Option<String>,
     position: Option<String>,
     scale: Option<String>,
+    /// The live connector this entry's `output` selector resolves to, if
+    /// that display is plugged in right now.
+    ///
+    /// This is the whole difference between an entry that can be imported
+    /// and one that can only be described. A stored profile is keyed on the
+    /// make/model/serial of really-observed hardware, and a `desc:` string
+    /// encodes no serial — so a rule for a display that isn't connected
+    /// cannot become a profile without inventing an identity. A rule for one
+    /// that *is* connected needs no invention at all: the daemon already
+    /// learned a profile for it, and the geometry can simply be written into
+    /// that profile's head.
+    target: Option<String>,
+    /// Only meaningful when `target` is set.
+    checked: bool,
+}
+
+/// One currently-connected output, from `GetCurrentLayout`.
+///
+/// Only the two fields needed to resolve an `output` selector. Mirrors
+/// displayd's `Head` locally rather than depending on that crate, the same
+/// as [`ProfileDetail`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct LiveHead {
+    connector: String,
+    description: String,
+}
+
+impl ImportedMonitor {
+    /// Which live connector this entry names, if any.
+    ///
+    /// Hyprland accepts either a bare connector (`DP-3`) or a
+    /// `desc:<description>` selector; both are resolved here against what
+    /// the compositor actually reports, so a rule naming a display that
+    /// isn't plugged in resolves to nothing rather than to a guess.
+    fn resolve(&self, live: &[LiveHead]) -> Option<String> {
+        let selector = self.selector.trim();
+        match selector.strip_prefix("desc:") {
+            Some(desc) => live
+                .iter()
+                .find(|h| h.description.trim() == desc.trim())
+                .map(|h| h.connector.clone()),
+            None => live
+                .iter()
+                .find(|h| h.connector == selector)
+                .map(|h| h.connector.clone()),
+        }
+    }
+
+    /// The geometry this entry would write, as `SetHeadGeometry` wants it.
+    ///
+    /// `None` for anything that doesn't carry a full mode and position —
+    /// those are the two the RPC can't default, and a partial import that
+    /// silently filled in zeros would move a display somewhere the user
+    /// never asked for.
+    fn geometry(&self) -> Option<ImportGeometry> {
+        let (width, height, refresh_mhz) = parse_mode(self.mode.as_deref()?)?;
+        let (x, y) = parse_position(self.position.as_deref()?)?;
+        Some(ImportGeometry {
+            x,
+            y,
+            width,
+            height,
+            refresh_mhz,
+            // Hyprland's own default when a monitor rule omits it.
+            scale: self.scale.as_deref().and_then(|s| s.trim().parse().ok()).unwrap_or(1.0),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ImportGeometry {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    refresh_mhz: i32,
+    scale: f64,
+}
+
+/// `"2560x1600@165.00"` → `(2560, 1600, 165000)`. `preferred` and anything
+/// else unparseable yields `None` — the caller then treats the entry as
+/// describable but not importable rather than inventing a mode.
+fn parse_mode(s: &str) -> Option<(i32, i32, i32)> {
+    let (dims, refresh) = s.trim().split_once('@')?;
+    let (w, h) = dims.split_once('x')?;
+    let hz: f64 = refresh.trim().parse().ok()?;
+    Some((w.trim().parse().ok()?, h.trim().parse().ok()?, (hz * 1000.0).round() as i32))
+}
+
+/// `"1920x0"` → `(1920, 0)`. `auto` and anything else yields `None`.
+fn parse_position(s: &str) -> Option<(i32, i32)> {
+    let (x, y) = s.trim().split_once('x')?;
+    Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
 }
 
 struct ImportSummary {
     monitors: Vec<ImportedMonitor>,
     failures: Vec<(std::path::PathBuf, String)>,
+}
+
+impl ImportSummary {
+    /// The entries that can actually be applied: connected, and carrying
+    /// enough geometry to write.
+    fn importable(&self) -> impl Iterator<Item = (usize, &ImportedMonitor)> {
+        self.monitors
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.target.is_some() && m.geometry().is_some())
+    }
 }
 
 impl DisplaysModule {
@@ -817,7 +926,7 @@ impl DisplaysModule {
             ));
         } else {
             let mut list = column![].spacing(spacing::SM);
-            for m in &review.monitors {
+            for (i, m) in review.monitors.iter().enumerate() {
                 let summary = if m.disabled {
                     format!("{} — disabled", m.selector)
                 } else {
@@ -829,18 +938,78 @@ impl DisplaysModule {
                         m.scale.as_deref().unwrap_or("auto"),
                     )
                 };
-                list = list.push(meta_text(summary, 13.0, scale));
+                let applicable = m.target.is_some() && m.geometry().is_some();
+                let mut info = column![scaled_text(summary, 13.0, scale)]
+                    .spacing(spacing::XS)
+                    .width(Length::Fill);
+                // Say which of the three states this entry is in, because
+                // "you can't import this" and "you can" look identical
+                // otherwise.
+                info = info.push(match (&m.target, applicable) {
+                    (Some(connector), true) => meta_text(
+                        format!("Connected as {connector} — can be imported"),
+                        12.0,
+                        scale,
+                    ),
+                    (Some(connector), false) => meta_text(
+                        format!(
+                            "Connected as {connector}, but this rule leaves the mode or \
+                             position up to Hyprland, so there are no numbers to import."
+                        ),
+                        12.0,
+                        scale,
+                    ),
+                    (None, _) => meta_text(
+                        "That display isn't connected right now, so there's nothing to \
+                         import it into.",
+                        12.0,
+                        scale,
+                    ),
+                });
+
+                let row_content: Element<'_, Message> = if applicable {
+                    row![
+                        checkbox(m.checked).on_toggle(move |v| Message::ImportToggle(i, v)),
+                        info,
+                    ]
+                    .spacing(spacing::SM)
+                    .align_y(iced::Alignment::Center)
+                    .into()
+                } else {
+                    info.into()
+                };
+                list = list.push(row_content);
             }
             body = body.push(section("Found in your config", scale, list));
+
+            let can_apply = review.importable().any(|(_, m)| m.checked);
             body = body.push(meta_text(
-                "These can't be turned into a stored profile automatically — a \
-                 profile is keyed on the physical panel's make/model/serial, which a \
-                 hand-written rule's output selector doesn't reliably give. Plug the \
-                 display in once and Hyprforge will learn a correct profile from it \
-                 on its own.",
+                "Checked entries write their position, size, refresh and scale into \
+                 the profile for the displays you're using now. Transform is left \
+                 alone — Hyprland numbers it its own way, and getting that wrong \
+                 rotates a screen.\n\nAnything not connected can't be imported: a \
+                 profile is keyed on the panel's make/model/serial, and an output \
+                 selector doesn't carry that. Plug the display in once and Hyprforge \
+                 learns a correct profile from it on its own.",
                 12.0,
                 scale,
             ));
+
+            body = body.push(
+                container(
+                    row![
+                        secondary_button("Close").on_press(Message::ImportClose),
+                        {
+                            let b = primary_button("Import checked");
+                            if can_apply { b.on_press(Message::ImportApply) } else { b }
+                        },
+                    ]
+                    .spacing(spacing::SM),
+                )
+                .width(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Right),
+            );
+            return container(body).padding(spacing::LG).into();
         }
 
         body = body.push(
@@ -1364,11 +1533,11 @@ impl SettingsModule for DisplaysModule {
             }
             Message::ImportFromConfig => {
                 self.import_review = Some(None);
-                Task::perform(import_from_config(), Message::ImportEvaluated)
+                Task::perform(import_with_layout(), Message::ImportEvaluated)
             }
-            Message::ImportEvaluated(result) => {
+            Message::ImportEvaluated((result, live)) => {
                 let hyprforge_dir = hyprforge_core::paths::hypr_hyprforge_dir();
-                let monitors = result
+                let monitors: Vec<ImportedMonitor> = result
                     .calls
                     .iter()
                     // Hyprforge's own generated `monitors.lua` is
@@ -1378,9 +1547,66 @@ impl SettingsModule for DisplaysModule {
                     // show up as something to review.
                     .filter(|call| !call.source_path.starts_with(&hyprforge_dir))
                     .filter_map(|call| parse_monitor_call(&call.kind, &call.args))
+                    .map(|mut m| {
+                        m.target = m.resolve(&live);
+                        // Pre-checked only when it can really be applied.
+                        m.checked = m.target.is_some() && m.geometry().is_some();
+                        m
+                    })
                     .collect();
                 self.import_review = Some(Some(ImportSummary { monitors, failures: result.failures }));
                 Task::none()
+            }
+            Message::ImportToggle(i, checked) => {
+                if let Some(Some(review)) = &mut self.import_review {
+                    if let Some(m) = review.monitors.get_mut(i) {
+                        // Only an applicable entry can be ticked; the view
+                        // doesn't offer a checkbox for the others, and this
+                        // guards the message arriving anyway.
+                        if m.target.is_some() && m.geometry().is_some() {
+                            m.checked = checked;
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::ImportApply => {
+                let Some(Some(review)) = &self.import_review else {
+                    return Task::none();
+                };
+                // The profile for what's connected right now. Auto-learn
+                // guarantees one exists — "nothing matches" is precisely the
+                // condition that creates it — so there is nothing to invent.
+                let Some(profile_id) = self
+                    .current_profile_id
+                    .clone()
+                    .or_else(|| (!self.current_fingerprint.is_empty()).then(|| self.current_fingerprint.clone()))
+                else {
+                    self.error = Some(
+                        "No profile for the current displays yet — Hyprforge learns one \
+                         automatically a moment after it sees them."
+                            .to_string(),
+                    );
+                    return Task::none();
+                };
+                let edits: Vec<(String, ImportGeometry)> = review
+                    .importable()
+                    .filter(|(_, m)| m.checked)
+                    .filter_map(|(_, m)| Some((m.target.clone()?, m.geometry()?)))
+                    .collect();
+                if edits.is_empty() {
+                    return Task::none();
+                }
+                self.import_review = None;
+                Task::perform(apply_imported_geometry(profile_id, edits), Message::ImportApplied)
+            }
+            Message::ImportApplied(Ok(())) => {
+                self.error = None;
+                Task::perform(load(), Message::Loaded)
+            }
+            Message::ImportApplied(Err(e)) => {
+                self.error = Some(e);
+                Task::perform(load(), Message::Loaded)
             }
             Message::ImportClose => {
                 self.import_review = None;
@@ -2071,6 +2297,58 @@ async fn rename(id: String, new_name: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Writes imported geometry into the profile for the currently-connected
+/// displays, one head at a time.
+///
+/// Deliberately reuses `SetHeadGeometry` rather than adding a
+/// "create profile from a config file" RPC. Every profile in this system is
+/// born from really-observed hardware, and that invariant is what makes
+/// matching trustworthy — a profile conjured from a `desc:` string carries
+/// no serial and could never match anything. For a display that *is*
+/// plugged in, the profile already exists and only its numbers need
+/// changing, which is exactly what this RPC is for.
+///
+/// Transform is left alone: `hl.monitor`'s transform is an integer with
+/// Hyprland's own numbering, and mapping it wrong would rotate someone's
+/// screen. Position, size, refresh and scale are the fields worth importing.
+async fn apply_imported_geometry(
+    profile_id: String,
+    edits: Vec<(String, ImportGeometry)>,
+) -> Result<(), String> {
+    let conn = connect().await?;
+    let proxy = DisplaydProxy::new(&conn).await.map_err(|e| e.to_string())?;
+    let detail: ProfileDetail = serde_json::from_str(
+        &proxy.get_profile(&profile_id).await.map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+
+    for (connector, geometry) in edits {
+        // The stored head to write into. `connector_hint` is the connector
+        // the profile was learned on, so for the connected case it is the
+        // live connector — but an unmatched name is skipped rather than
+        // guessed at, since writing to the wrong head moves the wrong
+        // display.
+        let Some(head) = detail.heads.iter().find(|h| h.connector_hint == connector) else {
+            continue;
+        };
+        proxy
+            .set_head_geometry(
+                &profile_id,
+                &head.connector_hint,
+                geometry.x,
+                geometry.y,
+                geometry.width,
+                geometry.height,
+                geometry.refresh_mhz,
+                geometry.scale,
+                &head.transform,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 async fn delete(id: String) -> Result<(), String> {
     let conn = connect().await?;
     let proxy = DisplaydProxy::new(&conn).await.map_err(|e| e.to_string())?;
@@ -2194,7 +2472,35 @@ fn parse_monitor_call(kind: &str, args: &[serde_json::Value]) -> Option<Imported
         mode: field_as_string("mode"),
         position: field_as_string("position"),
         scale: field_as_string("scale"),
+        // Filled in once the live layout is known — see
+        // `Message::ImportEvaluated`.
+        target: None,
+        checked: false,
     })
+}
+
+/// The currently-connected outputs, for resolving imported `output`
+/// selectors. An unreachable daemon yields an empty list, which makes every
+/// entry unresolvable and therefore read-only — the honest outcome, since
+/// without knowing what's plugged in nothing can be safely applied.
+async fn current_layout() -> Vec<LiveHead> {
+    let Ok(conn) = connect().await else {
+        return Vec::new();
+    };
+    let Ok(proxy) = DisplaydProxy::new(&conn).await else {
+        return Vec::new();
+    };
+    let Ok(json) = proxy.get_current_layout().await else {
+        return Vec::new();
+    };
+    serde_json::from_str(&json).unwrap_or_default()
+}
+
+/// Evaluates the user's config and reads the live layout together, since an
+/// imported entry is only meaningful next to what's actually connected.
+async fn import_with_layout() -> (hyprforge_lua_import::ImportResult, Vec<LiveHead>) {
+    let (result, live) = tokio::join!(import_from_config(), current_layout());
+    (result, live)
 }
 
 fn signal_stream() -> impl iced::futures::Stream<Item = Message> {
@@ -2563,5 +2869,81 @@ mod tests {
         assert_eq!(head.x, -1920, "negative positions are valid — monitor to the left");
         assert_eq!(head.refresh_mhz, 144000);
         assert_eq!(head.scale, 1.5);
+    }
+
+    fn live(connector: &str, description: &str) -> LiveHead {
+        LiveHead { connector: connector.to_string(), description: description.to_string() }
+    }
+
+    fn imported(selector: &str, mode: Option<&str>, position: Option<&str>) -> ImportedMonitor {
+        ImportedMonitor {
+            selector: selector.to_string(),
+            disabled: false,
+            mode: mode.map(str::to_string),
+            position: position.map(str::to_string),
+            scale: Some("1.6".to_string()),
+            target: None,
+            checked: false,
+        }
+    }
+
+    /// Hyprland accepts either form, so both have to resolve — against what
+    /// is really connected, never against a guess.
+    #[test]
+    fn a_selector_resolves_by_description_or_connector() {
+        let heads = vec![live("eDP-2", "BOE 0x0BC9"), live("DP-3", "GWD ARZOPA")];
+
+        let by_desc = imported("desc:BOE 0x0BC9", None, None);
+        assert_eq!(by_desc.resolve(&heads).as_deref(), Some("eDP-2"));
+
+        let by_connector = imported("DP-3", None, None);
+        assert_eq!(by_connector.resolve(&heads).as_deref(), Some("DP-3"));
+    }
+
+    /// A rule for a display that isn't plugged in must resolve to nothing.
+    /// This is the whole reason import is limited: without the panel
+    /// present there is no make/model/serial to key a profile on.
+    #[test]
+    fn a_selector_for_a_disconnected_display_resolves_to_nothing() {
+        let heads = vec![live("eDP-2", "BOE 0x0BC9")];
+        assert_eq!(imported("desc:DELL U2720Q", None, None).resolve(&heads), None);
+        assert_eq!(imported("HDMI-A-1", None, None).resolve(&heads), None);
+        // ...and with nothing connected at all, nothing is importable.
+        assert_eq!(imported("desc:BOE 0x0BC9", None, None).resolve(&[]), None);
+    }
+
+    #[test]
+    fn a_full_rule_yields_geometry() {
+        let m = imported("desc:BOE 0x0BC9", Some("2560x1600@165.00"), Some("0x0"));
+        let g = m.geometry().expect("a complete rule is importable");
+        assert_eq!((g.width, g.height), (2560, 1600));
+        assert_eq!(g.refresh_mhz, 165000, "Hz are stored as millihertz");
+        assert_eq!((g.x, g.y), (0, 0));
+        assert_eq!(g.scale, 1.6);
+    }
+
+    /// `preferred`/`auto` are Hyprland deciding for itself. There are no
+    /// numbers to import, and inventing them would move someone's display.
+    #[test]
+    fn a_rule_that_defers_to_hyprland_has_nothing_to_import() {
+        assert!(imported("eDP-2", Some("preferred"), Some("0x0")).geometry().is_none());
+        assert!(imported("eDP-2", Some("2560x1600@165.00"), Some("auto")).geometry().is_none());
+        assert!(imported("eDP-2", None, Some("0x0")).geometry().is_none());
+    }
+
+    /// A negative position is ordinary — a monitor to the left of the origin.
+    #[test]
+    fn negative_positions_parse() {
+        let m = imported("eDP-2", Some("1920x1080@60.00"), Some("-1920x0"));
+        let g = m.geometry().unwrap();
+        assert_eq!((g.x, g.y), (-1920, 0));
+    }
+
+    /// Scale is the one field with a safe default: Hyprland's own is 1.
+    #[test]
+    fn a_missing_scale_defaults_to_one() {
+        let mut m = imported("eDP-2", Some("1920x1080@60.00"), Some("0x0"));
+        m.scale = None;
+        assert_eq!(m.geometry().unwrap().scale, 1.0);
     }
 }
