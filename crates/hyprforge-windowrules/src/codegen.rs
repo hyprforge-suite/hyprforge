@@ -26,7 +26,7 @@ pub fn generate(rules: &[Rule], workspace_rules: &[WorkspaceRule]) -> String {
         if rule.matcher.is_empty() {
             continue;
         }
-        out.push_str(&render_rule(rule));
+        out.push_str(&render_one(rule));
         out.push('\n');
     }
     out
@@ -48,7 +48,12 @@ fn render_workspace_rule(wr: &WorkspaceRule) -> String {
     format!("hl.workspace_rule({{ {} }})\n", fields.join(", "))
 }
 
-fn render_rule(rule: &Rule) -> String {
+/// One rule's `hl.window_rule` line, exactly as [`generate`] writes it.
+///
+/// Public so the editor can show the user the line their form is about to
+/// produce — the same function, so a preview can't drift into being a
+/// plausible-looking lie.
+pub fn render_one(rule: &Rule) -> String {
     let mut fields = Vec::new();
     fields.push(format!("name = {}", lua_string(&rule.name)));
     fields.push(format!("enabled = {}", rule.enabled));
@@ -191,13 +196,11 @@ fn lua_expr(s: &str) -> String {
     }
 }
 
-/// Quotes `s` using a Lua long-bracket string (`[[...]]`), which needs no
-/// escaping and so passes RE2 regex strings through verbatim. Falls back to
-/// a `[=[...]=]` level if the content itself contains `]]`.
-fn lua_string(s: &str) -> String {
-    if !s.contains("]]") {
-        format!("[[{s}]]")
-    } else {
-        format!("[=[{s}]=]")
-    }
-}
+/// Quotes using a Lua long-bracket string, which needs no escaping and so
+/// passes RE2 regex strings through verbatim.
+///
+/// Shared rather than reimplemented: this crate's own copy tested only for
+/// `]]` in the content, which let a perfectly ordinary class pattern like
+/// `^firefox[0-9]` close its string a character early and take the whole
+/// generated file down. See [`hyprforge_core::lua`].
+use hyprforge_core::lua::lua_string;
