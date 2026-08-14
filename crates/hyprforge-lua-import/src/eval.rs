@@ -122,8 +122,52 @@ fn install_hl(lua: &Lua, state: &SharedState) -> mlua::Result<()> {
         )?;
     }
     hl.set("dsp", make_dispatch_proxy(lua, String::new())?)?;
+
+    // Everything else a real config calls — `hl.config`, `hl.env`,
+    // `hl.animation`, `hl.on`, ... — has to exist too, even though nothing
+    // imports it. Lua aborts the whole chunk on the first call to a nil
+    // field, so a single unstubbed `hl.config({...})` on line 8 would sink
+    // the binds and window rules further down the same file. Unknown names
+    // are recorded like any other call (harmless: every adapter filters by
+    // `kind`) and return an inert proxy, so a config that keeps using the
+    // result — `hl.curve(...)` stored and indexed later — still evaluates.
+    let meta = lua.create_table()?;
+    let state = state.clone();
+    meta.set(
+        MetaMethod::Index.name(),
+        lua.create_function(move |lua, (_t, key): (Table, String)| {
+            let state = state.clone();
+            lua.create_function(move |lua, args: Variadic<Value>| {
+                record_call(lua, &state, &key, args)?;
+                make_inert_proxy(lua)
+            })
+        })?,
+    )?;
+    hl.set_metatable(Some(meta))?;
+
     lua.globals().set("hl", hl)?;
     Ok(())
+}
+
+/// A value that tolerates whatever a config does with it next — indexing
+/// it or calling it both yield the proxy again. Returned from stubs for
+/// `hl.*` names nothing imports, where the point is only that evaluation
+/// survives long enough to reach the calls that *are* importable.
+fn make_inert_proxy(lua: &Lua) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    let meta = lua.create_table()?;
+    let for_index = t.clone();
+    meta.set(
+        MetaMethod::Index.name(),
+        lua.create_function(move |_, (_t, _key): (Table, Value)| Ok(for_index.clone()))?,
+    )?;
+    let for_call = t.clone();
+    meta.set(
+        MetaMethod::Call.name(),
+        lua.create_function(move |_, (_t, _args): (Table, Variadic<Value>)| Ok(for_call.clone()))?,
+    )?;
+    t.set_metatable(Some(meta))?;
+    Ok(t)
 }
 
 fn record_call(
@@ -426,6 +470,33 @@ mod tests {
             "got: {:?}",
             result.failures[0].1
         );
+    }
+
+    /// The shape of a real hand-written config: importable calls sit below
+    /// a pile of `hl.*` calls nothing imports. Those must not abort the
+    /// chunk — before they were stubbed, an `hl.config` on line 8 meant
+    /// zero shortcuts imported from an otherwise fine file.
+    #[test]
+    fn an_hl_function_nothing_imports_does_not_sink_the_rest_of_the_file() {
+        let dir = dir_with(&[(
+            "hyprland.lua",
+            r#"
+            hl.config({ debug = { disable_logs = false } })
+            hl.env("XCURSOR_SIZE", "24")
+            hl.on("hyprland.start", function() hl.exec_cmd("waybar") end)
+            local curve = hl.curve("quick", { type = "bezier" })
+            hl.animation({ leaf = "global", bezier = curve.name })
+            hl.bind("SUPER + Q", hl.dsp.window.close())
+            "#,
+        )]);
+        let result = evaluate(dir.path());
+        assert!(result.failures.is_empty(), "unexpected failures: {:?}", result.failures);
+        let bind = result
+            .calls
+            .iter()
+            .find(|c| c.kind == "bind")
+            .expect("the bind below the unimported calls should still be recorded");
+        assert_eq!(bind.args[0], serde_json::json!("SUPER + Q"));
     }
 
     #[test]
