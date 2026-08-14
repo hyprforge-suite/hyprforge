@@ -504,6 +504,14 @@ pub struct ShortcutsModule {
     /// per row. Empty when Hyprland isn't reachable — in which case no badge
     /// is shown at all, rather than a wrong one.
     live_binds: Vec<LiveBind>,
+    /// Why the stored shortcuts couldn't be read, if they couldn't.
+    ///
+    /// An unreadable store is not an empty one. Loading used to be
+    /// `unwrap_or_default()`, so a read or parse failure silently produced
+    /// an empty list — the UI said "No shortcuts yet" and the very next save
+    /// wrote that emptiness over the file. When this is set, the module
+    /// refuses to write at all and says why.
+    store_unreadable: Option<String>,
     /// Bumped on every chord change. A conflict check's result is dropped
     /// unless it still matches — without it, a slow check for an old chord
     /// lands after a newer one and reports a conflict the user already
@@ -519,9 +527,15 @@ pub struct ShortcutsModule {
 
 impl ShortcutsModule {
     pub fn new() -> (Self, Task<Message>) {
-        let shortcuts =
-            hyprforge_shortcuts::storage::load(&hyprforge_core::paths::shortcuts_toml_path())
-                .unwrap_or_default();
+        // A failure here must never look like "you have no shortcuts": that
+        // reading is what turns one bad parse into a wiped store on the next
+        // save.
+        let (shortcuts, store_unreadable) =
+            match hyprforge_shortcuts::storage::load(&hyprforge_core::paths::shortcuts_toml_path())
+            {
+                Ok(shortcuts) => (shortcuts, None),
+                Err(e) => (Vec::new(), Some(e.to_string())),
+            };
         let mut config = hyprforge_shortcuts::setup::discover(&hyprforge_core::paths::hypr_config_dir());
         // No confirm dialog: the require line only ever points at
         // Hyprforge's own generated file, never touches the user's own
@@ -579,6 +593,7 @@ impl ShortcutsModule {
                 import_review: None,
                 filter: String::new(),
                 live_binds: Vec::new(),
+                store_unreadable,
                 conflict_generation: 0,
                 pending_delete: None,
             },
@@ -737,12 +752,37 @@ impl ShortcutsModule {
         generate_shortcut_name(label, &existing)
     }
 
-    fn save_and_maybe_reload(&mut self) -> Task<Message> {
-        if let Err(e) = hyprforge_shortcuts::storage::save(
+    /// Writes the canonical TOML, or reports why it couldn't.
+    ///
+    /// Split out from [`save_and_maybe_reload`](Self::save_and_maybe_reload)
+    /// so a caller that is about to do something irreversible can find out
+    /// whether the store is safely on disk *first*. See
+    /// [`Message::ImportConfirm`].
+    fn persist(&mut self) -> Result<(), String> {
+        // Refusing to write is the whole point of `store_unreadable`: if the
+        // file couldn't be parsed, `self.shortcuts` is an empty list that
+        // means "unknown", not "none", and saving it would replace whatever
+        // is really in there with nothing.
+        if let Some(reason) = &self.store_unreadable {
+            let message = format!(
+                "Not saving — your shortcuts.toml couldn't be read, and \
+                 overwriting it would lose whatever is in it. ({reason})"
+            );
+            self.error = Some(message.clone());
+            return Err(message);
+        }
+        hyprforge_shortcuts::storage::save(
             &hyprforge_core::paths::shortcuts_toml_path(),
             &self.shortcuts,
-        ) {
+        )
+        .map_err(|e| {
             self.error = Some(e.to_string());
+            e.to_string()
+        })
+    }
+
+    fn save_and_maybe_reload(&mut self) -> Task<Message> {
+        if self.persist().is_err() {
             return Task::none();
         }
         // Without a Lua config there is nothing to source the generated file
@@ -1102,10 +1142,23 @@ impl SettingsModule for ShortcutsModule {
                         });
                     }
                 }
-                // Best-effort and silent on failure: the entries are
-                // already safely in the store either way, and
-                // `remove_matched_lines` only ever removes a line that
-                // still verifiably looks like the exact call it recorded.
+                // Order matters, and getting it wrong cost a real user 37
+                // hand-written binds: the store has to be *on disk* before
+                // anything is deleted from their config. Adding to
+                // `self.shortcuts` above is not "safely added" — it's an
+                // in-memory Vec, and a failed write, a crash, or a closed
+                // window between there and here loses the binds with no copy
+                // anywhere.
+                //
+                // So: persist first, and only remove source lines if that
+                // actually succeeded. A failure now leaves the user's config
+                // untouched, which is recoverable; the other order isn't.
+                if self.persist().is_err() {
+                    return Task::none();
+                }
+                // Best-effort from here: the entries are on disk, and
+                // `remove_matched_lines` only ever removes a line that still
+                // verifiably looks like the exact call it recorded.
                 let _ = lua_setup::remove_matched_lines(&to_remove);
                 self.save_and_maybe_reload()
             }
@@ -1127,6 +1180,30 @@ impl SettingsModule for ShortcutsModule {
             content = content.push(notice);
         }
 
+        if let Some(reason) = &self.store_unreadable {
+            content = content.push(section(
+                "Your shortcuts couldn't be read",
+                scale,
+                column![
+                    scaled_text(
+                        "Hyprforge won't save anything until this is sorted out — writing \
+                         now would replace whatever is in the file with an empty list.",
+                        13.0,
+                        scale,
+                    )
+                    .color(hyprforge_core::theme::WARNING),
+                    meta_text(
+                        format!(
+                            "{}\n{reason}",
+                            hyprforge_core::paths::shortcuts_toml_path().display()
+                        ),
+                        12.0,
+                        scale,
+                    ),
+                ]
+                .spacing(spacing::SM),
+            ));
+        }
         if let Some(err) = &self.error {
             content = content.push(scaled_text(format!("Error: {err}"), 13.0, scale));
         }
@@ -1691,6 +1768,7 @@ mod tests {
             import_review: None,
             filter: String::new(),
             live_binds: Vec::new(),
+            store_unreadable: None,
             conflict_generation: 0,
             pending_delete: None,
         }
@@ -2014,14 +2092,13 @@ mod tests {
         previous: Option<std::ffi::OsString>,
     }
 
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     impl TempConfig {
         fn new() -> Self {
-            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let lock = crate::modules::CONFIG_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let dir = tempfile::tempdir().unwrap();
             let previous = std::env::var_os("XDG_CONFIG_HOME");
-            // SAFETY: ENV_LOCK serialises every env mutation in this module.
+            // SAFETY: `CONFIG_ENV_LOCK` serialises every env mutation in
+            // this crate's tests.
             unsafe { std::env::set_var("XDG_CONFIG_HOME", dir.path()) };
             TempConfig { _dir: dir, _lock: lock, previous }
         }
@@ -2171,6 +2248,83 @@ mod tests {
             source,
             "the hand-written bind must survive an import that can't replace it"
         );
+    }
+
+    /// The defect that cost a real user 37 hand-written binds: the import
+    /// deleted their source lines before the store was ever written, so a
+    /// failure in between left the binds in neither place.
+    #[test]
+    fn a_failed_save_leaves_the_users_config_untouched() {
+        let _env = TempConfig::new();
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("hyprland.lua");
+        let source = "hl.bind([[SUPER + Q]], hl.dsp.window.close())\n";
+        std::fs::write(&config, source).unwrap();
+
+        let mut module = test_module();
+        // Make the write fail the way a real one would: the store's parent
+        // is a *file*, so no shortcuts.toml can be created under it.
+        module.store_unreadable = Some("simulated unreadable store".to_string());
+
+        let call = recorded_bind(
+            r#"hl.bind("SUPER + Q", hl.dsp.window.close())"#,
+            &config,
+            1,
+        );
+        let _ = module.update(Message::ImportEvaluated(hyprforge_lua_import::ImportResult {
+            calls: vec![call],
+            failures: Vec::new(),
+        }));
+        let _ = module.update(Message::ImportToggle(0, true));
+        let _ = module.update(Message::ImportConfirm);
+
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            source,
+            "nothing may be removed from the user's config when the store wasn't written"
+        );
+        assert!(module.error.is_some(), "and the failure has to be visible");
+    }
+
+    /// An unreadable store is not an empty one. Treating it as empty is what
+    /// turns a single bad parse into a wiped file on the next save.
+    #[test]
+    fn an_unreadable_store_is_never_overwritten() {
+        let _env = TempConfig::new();
+        let path = hyprforge_core::paths::shortcuts_toml_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let precious = "this file did not parse but must survive\n";
+        std::fs::write(&path, precious).unwrap();
+
+        let mut module = test_module();
+        module.store_unreadable = Some("expected an equals".to_string());
+        module.shortcuts.push(shortcut_with(
+            "new",
+            Action::with_params("window.close", BTreeMap::new()),
+        ));
+
+        assert!(module.persist().is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            precious,
+            "the unparseable file must be left exactly as it was"
+        );
+        assert!(module.error.as_deref().unwrap().contains("couldn't be read"));
+    }
+
+    /// ...and a readable store still saves normally.
+    #[test]
+    fn a_readable_store_still_saves() {
+        let _env = TempConfig::new();
+        let mut module = test_module();
+        module.shortcuts.push(shortcut_with(
+            "new",
+            Action::with_params("window.close", BTreeMap::new()),
+        ));
+        assert!(module.persist().is_ok());
+        let written =
+            std::fs::read_to_string(hyprforge_core::paths::shortcuts_toml_path()).unwrap();
+        assert!(written.contains("window.close"), "got: {written}");
     }
 
     /// A multi-line `hl.bind` can never have its source line removed, so it

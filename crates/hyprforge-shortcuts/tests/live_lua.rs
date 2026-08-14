@@ -12,12 +12,29 @@
 //! Every probe binds a chord nothing sane uses (SUPER+ALT+CTRL+SHIFT+F13/F14),
 //! so evaluating them can't shadow a real shortcut, and they're gone at the
 //! next reload either way.
+//!
+//! The tests take [`COMPOSITOR`] because they share one: each probe loads
+//! binds into the running Hyprland and then reloads to drop them, so two
+//! running at once means one test's reload deletes another's bind before it
+//! can be observed. That failed exactly the way a real bug would — a
+//! description "not reaching `hyprctl binds`" — so the lock is what keeps a
+//! genuine failure here believable.
 
 use hyprforge_shortcuts::catalog::{self, CallShape, Entry, ParamKind};
 use hyprforge_shortcuts::codegen::generate;
 use hyprforge_shortcuts::model::{Action, BindFlags, KeyCombo, Modifier, ParamValue, Shortcut};
 use std::collections::BTreeMap;
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
+
+/// The running compositor, which every probe here mutates. A poisoned lock
+/// is still usable: the only shared state is Hyprland's own bind list, and
+/// each test reloads before it starts.
+static COMPOSITOR: Mutex<()> = Mutex::new(());
+
+fn compositor() -> MutexGuard<'static, ()> {
+    COMPOSITOR.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// The four-modifier chord no real config binds, plus an F-key per probe so
 /// they don't overwrite each other.
@@ -96,6 +113,7 @@ fn probe_shortcuts(fill: Fill) -> Vec<Shortcut> {
 #[test]
 #[ignore]
 fn hyprland_accepts_every_catalog_entry() {
+    let _live = compositor();
     reload();
     let errors_before = config_errors();
     assert!(
@@ -116,6 +134,7 @@ fn hyprland_accepts_every_catalog_entry() {
 #[test]
 #[ignore]
 fn hyprland_accepts_raw_actions_and_flags() {
+    let _live = compositor();
     reload();
     assert!(config_errors().is_empty(), "config already has errors");
 
@@ -173,6 +192,7 @@ fn hyprland_accepts_raw_actions_and_flags() {
 #[test]
 #[ignore]
 fn hyprland_rejects_repeating_with_release() {
+    let _live = compositor();
     reload();
     assert!(config_errors().is_empty(), "config already has errors");
 
@@ -207,6 +227,7 @@ fn hyprland_rejects_repeating_with_release() {
 #[test]
 #[ignore]
 fn a_generated_description_reaches_hyprctl_binds() {
+    let _live = compositor();
     let shortcuts = vec![Shortcut {
         name: "hyprforge-probe-desc".to_string(),
         enabled: true,
