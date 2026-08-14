@@ -595,10 +595,8 @@ pub struct DisplaysModule {
     /// which would otherwise wipe out a setup failure noticed once at
     /// startup before the user ever saw it.
     setup_error: Option<String>,
-    /// `None` when no import is in progress or under review. `Some(None)`
-    /// while the evaluator is running; `Some(Some(_))` once results are
-    /// ready to show.
-    import_review: Option<Option<ImportSummary>>,
+    /// `None` when no import is in progress or under review.
+    import_review: Option<ImportState>,
 }
 
 /// A hand-written `hl.monitor({...})` call, summarised for display.
@@ -709,6 +707,13 @@ fn parse_mode(s: &str) -> Option<(i32, i32, i32)> {
 fn parse_position(s: &str) -> Option<(i32, i32)> {
     let (x, y) = s.trim().split_once('x')?;
     Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+}
+
+/// Where an "Import from config" run has got to. A two-state enum rather
+/// than a nested `Option`, matching the other two modules.
+enum ImportState {
+    Running,
+    Ready(ImportSummary),
 }
 
 struct ImportSummary {
@@ -891,8 +896,8 @@ impl DisplaysModule {
     /// silently. The common case doesn't need this anyway: displayd
     /// already learns a profile automatically the moment it sees a
     /// display it doesn't recognise.
-    fn import_review_view(&self, review: Option<&ImportSummary>, scale: FontScale) -> Element<'_, Message> {
-        let Some(review) = review else {
+    fn import_review_view(&self, state: &ImportState, scale: FontScale) -> Element<'_, Message> {
+        let ImportState::Ready(review) = state else {
             return container(scaled_text("Reading your hyprland.lua…", 14.0, scale))
                 .padding(spacing::LG)
                 .into();
@@ -1532,7 +1537,7 @@ impl SettingsModule for DisplaysModule {
                 Task::none()
             }
             Message::ImportFromConfig => {
-                self.import_review = Some(None);
+                self.import_review = Some(ImportState::Running);
                 Task::perform(import_with_layout(), Message::ImportEvaluated)
             }
             Message::ImportEvaluated((result, live)) => {
@@ -1554,11 +1559,12 @@ impl SettingsModule for DisplaysModule {
                         m
                     })
                     .collect();
-                self.import_review = Some(Some(ImportSummary { monitors, failures: result.failures }));
+                self.import_review =
+                    Some(ImportState::Ready(ImportSummary { monitors, failures: result.failures }));
                 Task::none()
             }
             Message::ImportToggle(i, checked) => {
-                if let Some(Some(review)) = &mut self.import_review {
+                if let Some(ImportState::Ready(review)) = &mut self.import_review {
                     if let Some(m) = review.monitors.get_mut(i) {
                         // Only an applicable entry can be ticked; the view
                         // doesn't offer a checkbox for the others, and this
@@ -1571,7 +1577,7 @@ impl SettingsModule for DisplaysModule {
                 Task::none()
             }
             Message::ImportApply => {
-                let Some(Some(review)) = &self.import_review else {
+                let Some(ImportState::Ready(review)) = &self.import_review else {
                     return Task::none();
                 };
                 // The profile for what's connected right now. Auto-learn
@@ -1667,8 +1673,8 @@ impl SettingsModule for DisplaysModule {
             .into();
         }
 
-        if let Some(review) = &self.import_review {
-            return self.import_review_view(review.as_ref(), scale);
+        if let Some(state) = &self.import_review {
+            return self.import_review_view(state, scale);
         }
 
         let mut content = column![scaled_text("Monitors", 22.0, scale)].spacing(spacing::LG);
@@ -2433,15 +2439,6 @@ async fn fetch_modes(connector_hint: String) -> Vec<(i32, i32, i32, bool)> {
     proxy.get_available_modes(&connector_hint).await.unwrap_or_default()
 }
 
-/// Evaluates the user's own `hyprland.lua` for hand-written `hl.monitor()`
-/// rules. Blocking work (a synchronous Lua VM run), so it goes on the
-/// blocking pool rather than stalling the UI thread.
-async fn import_from_config() -> hyprforge_lua_import::ImportResult {
-    let hypr_dir = hyprforge_core::paths::hypr_config_dir();
-    tokio::task::spawn_blocking(move || hyprforge_lua_import::evaluate(&hypr_dir))
-        .await
-        .unwrap_or_default()
-}
 
 /// `None` if this isn't a `monitor` call, or it has no `output` at all
 /// (Hyprland requires one).
@@ -2499,7 +2496,7 @@ async fn current_layout() -> Vec<LiveHead> {
 /// Evaluates the user's config and reads the live layout together, since an
 /// imported entry is only meaningful next to what's actually connected.
 async fn import_with_layout() -> (hyprforge_lua_import::ImportResult, Vec<LiveHead>) {
-    let (result, live) = tokio::join!(import_from_config(), current_layout());
+    let (result, live) = tokio::join!(super::evaluate_user_config(), current_layout());
     (result, live)
 }
 
