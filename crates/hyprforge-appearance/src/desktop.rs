@@ -47,11 +47,41 @@ pub enum DesktopError {
 /// What a desktop key holds, and how an editor should offer it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DesktopKind {
-    /// Free text — a theme or font name.
+    /// Free text — a name nothing on disk can be enumerated for.
     Text,
     /// A closed set the schema itself declares.
     Enum(&'static [&'static str]),
     Int { min: i64, max: i64 },
+    /// A name that can be discovered by scanning the system, so it can be
+    /// picked from a list instead of typed.
+    ///
+    /// Typing these by hand means knowing an exact directory name, and a
+    /// typo produces no error anywhere — GTK just falls back to its
+    /// default, which looks exactly like the setting failing to save.
+    Installed(Catalogue),
+    /// A font name: a family and a point size in one string, e.g.
+    /// `"Noto Sans 10"`. Offered as a family list plus a size, because
+    /// they are two decisions and only one of them is enumerable.
+    Font,
+}
+
+/// Which set of installed things a [`DesktopKind::Installed`] draws from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Catalogue {
+    GtkThemes,
+    IconThemes,
+    CursorThemes,
+}
+
+impl Catalogue {
+    /// The names currently installed, sorted and de-duplicated.
+    pub fn installed(self) -> Vec<String> {
+        match self {
+            Catalogue::GtkThemes => crate::themes::gtk_themes(),
+            Catalogue::IconThemes => crate::themes::icon_themes(),
+            Catalogue::CursorThemes => crate::themes::cursor_themes(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -104,22 +134,22 @@ pub const SETTINGS: &[DesktopSetting] = &[
     DesktopSetting {
         key: "gtk-theme",
         label: "GTK theme",
-        help: "Widget theme for GTK apps, by name — one of the folders in ~/.themes or /usr/share/themes.",
-        kind: DesktopKind::Text,
+        help: "Widget theme for GTK apps.",
+        kind: DesktopKind::Installed(Catalogue::GtkThemes),
     contested_by: None,
     },
     DesktopSetting {
         key: "icon-theme",
         label: "Icon theme",
-        help: "Icon set for GTK apps, by name.",
-        kind: DesktopKind::Text,
+        help: "Icon set for GTK apps.",
+        kind: DesktopKind::Installed(Catalogue::IconThemes),
     contested_by: None,
     },
     DesktopSetting {
         key: "cursor-theme",
         label: "Cursor theme",
-        help: "Pointer theme by name.",
-        kind: DesktopKind::Text,
+        help: "Pointer theme.",
+        kind: DesktopKind::Installed(Catalogue::CursorThemes),
         contested_by: Some(CURSOR_SYNC),
     },
     DesktopSetting {
@@ -132,22 +162,22 @@ pub const SETTINGS: &[DesktopSetting] = &[
     DesktopSetting {
         key: "font-name",
         label: "Interface font",
-        help: "Font and size for app interfaces, e.g. \"Noto Sans 10\".",
-        kind: DesktopKind::Text,
+        help: "Font and size for app interfaces.",
+        kind: DesktopKind::Font,
     contested_by: None,
     },
     DesktopSetting {
         key: "document-font-name",
         label: "Document font",
         help: "Font and size for document text.",
-        kind: DesktopKind::Text,
+        kind: DesktopKind::Font,
     contested_by: None,
     },
     DesktopSetting {
         key: "monospace-font-name",
         label: "Monospace font",
         help: "Font and size for terminals and code.",
-        kind: DesktopKind::Text,
+        kind: DesktopKind::Font,
     contested_by: None,
     },
 ];
@@ -217,12 +247,49 @@ fn unquote(raw: &str) -> String {
     }
 }
 
+/// Splits a font string into its family and point size.
+///
+/// gsettings stores `"Noto Sans 10"` — and on this machine
+/// `"Noto Sans  10"`, with two spaces — so the size is the trailing
+/// numeric token and the family is everything before it. A string with no
+/// trailing number has no size, which is valid: the family alone is a
+/// legal font description.
+///
+/// The family keeps any style words (`"Noto Sans Bold"`), because
+/// dropping them would silently change the font when the user was only
+/// editing the size.
+pub fn split_font(value: &str) -> (String, Option<u32>) {
+    let trimmed = value.trim();
+    match trimmed.rsplit_once(char::is_whitespace) {
+        Some((family, last)) => match last.parse::<u32>() {
+            Ok(size) if !family.trim().is_empty() => (family.trim().to_string(), Some(size)),
+            _ => (trimmed.to_string(), None),
+        },
+        None => (trimmed.to_string(), None),
+    }
+}
+
+/// Rebuilds a font string from a family and a size.
+///
+/// One space, whatever the original had — gsettings accepts it and it is
+/// what every other tool writes.
+pub fn join_font(family: &str, size: Option<u32>) -> String {
+    let family = family.trim();
+    match size {
+        Some(size) => format!("{family} {size}"),
+        None => family.to_string(),
+    }
+}
+
 /// Whether `value` is something this key will accept, checked before
 /// writing so a bad value is a message rather than a desktop-wide change
 /// that half-applies.
 pub fn check(setting: &DesktopSetting, value: &str) -> Result<(), String> {
     match setting.kind {
-        DesktopKind::Text => {
+        // An installed name is checked for emptiness only, not against
+        // the installed list: a theme can live outside the search paths,
+        // and refusing a value the system accepts would be a dead end.
+        DesktopKind::Text | DesktopKind::Installed(_) | DesktopKind::Font => {
             if value.trim().is_empty() {
                 Err("can't be empty".to_string())
             } else {
@@ -288,6 +355,48 @@ mod tests {
         let theme = get_setting("gtk-theme").unwrap();
         assert!(check(theme, "Dracula").is_ok());
         assert!(check(theme, "   ").is_err());
+    }
+
+    /// The real value from this machine, two spaces and all.
+    #[test]
+    fn a_font_splits_into_family_and_size() {
+        assert_eq!(split_font("Noto Sans  10"), ("Noto Sans".into(), Some(10)));
+        assert_eq!(split_font("Cantarell 11"), ("Cantarell".into(), Some(11)));
+    }
+
+    /// Style words belong to the family. Dropping them would silently
+    /// change the font when the user was only editing the size.
+    #[test]
+    fn a_style_stays_with_the_family() {
+        assert_eq!(
+            split_font("Noto Sans Bold 12"),
+            ("Noto Sans Bold".into(), Some(12))
+        );
+    }
+
+    /// A family alone is a legal font description, and a family that ends
+    /// in a number must not have it eaten.
+    #[test]
+    fn a_font_without_a_size_keeps_its_whole_name() {
+        assert_eq!(split_font("Cantarell"), ("Cantarell".into(), None));
+        assert_eq!(split_font(""), (String::new(), None));
+        assert_eq!(split_font("12"), ("12".into(), None), "no family to split off");
+    }
+
+    #[test]
+    fn a_font_round_trips_through_split_and_join() {
+        for original in ["Noto Sans 10", "Noto Sans Bold 12", "Cantarell"] {
+            let (family, size) = split_font(original);
+            assert_eq!(join_font(&family, size), original);
+        }
+    }
+
+    /// The odd double space this machine actually stores normalises to
+    /// one, which gsettings accepts and every other tool writes.
+    #[test]
+    fn joining_normalises_spacing() {
+        let (family, size) = split_font("Noto Sans  10");
+        assert_eq!(join_font(&family, size), "Noto Sans 10");
     }
 
     #[test]

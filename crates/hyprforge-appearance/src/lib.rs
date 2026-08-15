@@ -20,6 +20,7 @@ pub mod catalog;
 pub mod desktop;
 pub mod setup;
 pub mod storage;
+pub mod themes;
 
 pub use catalog::CATALOG;
 pub use storage::Appearance;
