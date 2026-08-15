@@ -1343,6 +1343,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyprforge-authui"
+version = "0.1.0"
+dependencies = [
+ "hyprforge-core",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.19",
+ "toml",
+]
+
+[[package]]
 name = "hyprforge-core"
 version = "0.1.0"
 dependencies = [
