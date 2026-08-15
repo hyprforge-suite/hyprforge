@@ -8,6 +8,7 @@ use iced::widget::{column, container, operation, row, text_input, Id};
 use iced::{window, Background, Element, Length, Size, Subscription, Task, Theme};
 use modules::appearance::AppearanceModule;
 use modules::desktop::DesktopModule;
+use modules::session::SessionModule;
 use modules::displays::DisplaysModule;
 use modules::input::InputModule;
 use modules::shortcuts::ShortcutsModule;
@@ -142,6 +143,7 @@ enum Screen {
     Input,
     Appearance,
     Desktop,
+    Session,
 }
 
 impl Screen {
@@ -153,6 +155,7 @@ impl Screen {
             Screen::Input => "Input",
             Screen::Appearance => "Appearance",
             Screen::Desktop => "Desktop",
+            Screen::Session => "Session",
         }
     }
 }
@@ -185,6 +188,10 @@ const NAV: &[NavCategory] = &[
         label: "Appearance",
         screens: &[Screen::Appearance, Screen::Desktop],
     },
+    NavCategory {
+        label: "Session",
+        screens: &[Screen::Session],
+    },
 ];
 
 #[derive(Debug, Clone)]
@@ -200,6 +207,7 @@ enum Message {
     Input(modules::input::Message),
     Appearance(modules::appearance::Message),
     Desktop(modules::desktop::Message),
+    Session(modules::session::Message),
     WindowOpened(window::Id),
     WindowClosed(window::Id),
     RevertPopupOpened(window::Id),
@@ -214,6 +222,7 @@ struct App {
     input: InputModule,
     appearance: AppearanceModule,
     desktop: DesktopModule,
+    session: SessionModule,
     search_query: String,
     search_id: Id,
     font_scale: FontScale,
@@ -230,6 +239,7 @@ impl App {
         let (input, input_task) = InputModule::new();
         let (appearance, appearance_task) = AppearanceModule::new();
         let (desktop, desktop_task) = DesktopModule::new();
+        let (session, session_task) = SessionModule::new();
         (
             App {
                 screen: Screen::Monitors,
@@ -239,6 +249,7 @@ impl App {
                 input,
                 appearance,
                 desktop,
+                session,
                 search_query: String::new(),
                 search_id: Id::unique(),
                 font_scale: read_global_font_scale(),
@@ -253,6 +264,7 @@ impl App {
                 input_task.map(Message::Input),
                 appearance_task.map(Message::Appearance),
                 desktop_task.map(Message::Desktop),
+                session_task.map(Message::Session),
             ]),
         )
     }
@@ -359,6 +371,7 @@ impl App {
                 Screen::Input => Task::none(),
                 Screen::Appearance => Task::none(),
                 Screen::Desktop => Task::none(),
+                Screen::Session => Task::none(),
             },
             Message::Displays(msg) => {
                 let task = self.displays.update(msg).map(Message::Displays);
@@ -367,6 +380,7 @@ impl App {
             Message::Input(msg) => self.input.update(msg).map(Message::Input),
             Message::Appearance(msg) => self.appearance.update(msg).map(Message::Appearance),
             Message::Desktop(msg) => self.desktop.update(msg).map(Message::Desktop),
+            Message::Session(msg) => self.session.update(msg).map(Message::Session),
             Message::WindowOpened(id) => {
                 if self.main_window.is_none() {
                     self.main_window = Some(id);
@@ -467,6 +481,7 @@ impl App {
             Screen::Input => self.input.icon(),
             Screen::Appearance => self.appearance.icon(),
             Screen::Desktop => self.desktop.icon(),
+            Screen::Session => self.session.icon(),
         };
 
         let query = self.search_query.to_lowercase();
@@ -541,6 +556,7 @@ impl App {
             Screen::Input => self.input.view(scale).map(Message::Input),
             Screen::Appearance => self.appearance.view(scale).map(Message::Appearance),
             Screen::Desktop => self.desktop.view(scale).map(Message::Desktop),
+            Screen::Session => self.session.view(scale).map(Message::Session),
         };
         // The Monitors editor (canvas + full property panel + policy/swap
         // sections) routinely exceeds window height — without scrolling,
