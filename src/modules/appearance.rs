@@ -39,8 +39,8 @@ use std::collections::BTreeMap;
 
 use super::setting_rows::{self, RowContext};
 
-/// Which half of the screen is showing. The two are long enough that one
-/// scrolling page would bury whichever the user didn't come for.
+/// Which part of the screen is showing. All three are long enough that
+/// one scrolling page would bury whichever the user didn't come for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Theme,
@@ -132,7 +132,7 @@ pub struct AppearanceModule {
     desktop_errors: BTreeMap<&'static str, String>,
     /// The last desktop write, so it can be offered back. gsettings has
     /// no generated file to delete, so this is the only undo available.
-    desktop_undo: Option<(&'static str, String, String)>,
+    desktop_undo: Option<(&'static str, String)>,
     filter: String,
     config: HyprConfig,
     setup_plan: SetupPlan,
@@ -165,7 +165,7 @@ impl AppearanceModule {
                 placement: hyprforge_appearance::setup::PLACEMENT,
                 generated: (
                     appearance_lua_path(),
-                    hyprforge_appearance::apply::generate(&Appearance::default()),
+                    hyprforge_appearance::apply::generate(&Appearance::default(), None),
                 ),
             },
         );
@@ -202,6 +202,17 @@ impl AppearanceModule {
                 Task::perform(read_desktop(), Message::DesktopLoaded),
             ]),
         )
+    }
+
+    /// The curve names currently defined, or `None` if the compositor
+    /// couldn't be read. `None` means "can't check" rather than "none
+    /// exist" — the difference between skipping a validation and failing
+    /// every animation.
+    fn known_curves(&self) -> Option<Vec<String>> {
+        if self.curves.is_empty() {
+            return None;
+        }
+        Some(self.curves.iter().map(|c| c.name.clone()).collect())
     }
 
     fn rows(&self) -> RowContext<'_, Message> {
@@ -258,7 +269,10 @@ impl AppearanceModule {
                 }
             }
         }
-        Task::perform(regenerate_and_reload(self.stored.clone()), Message::Reloaded)
+        Task::perform(
+            regenerate_and_reload(self.stored.clone(), self.known_curves()),
+            Message::Reloaded,
+        )
     }
 
     fn apply_drafts(&mut self) -> Task<Message> {
@@ -300,24 +314,41 @@ impl AppearanceModule {
         if let Some(a) = self.stored.animations.get(leaf) {
             return (a.clone(), true);
         }
-        let live = self
+        let mut live = self
             .live_animations
             .iter()
             .find(|l| l.leaf == leaf)
             .map(|l| l.animation.clone())
             .unwrap_or(Animation {
                 enabled: true,
-                speed: 1.0,
+                speed: 0.0,
                 bezier: String::new(),
                 style: String::new(),
             });
+        // Shown rather than a bare 0, which would read as "this animation
+        // takes no time" when it means "inherits from its parent".
+        if live.speed <= 0.0 {
+            live.speed =
+                hyprforge_appearance::animations::inherited_speed(leaf, &self.live_animations);
+        }
         (live, false)
     }
 
     /// Takes ownership of a leaf, seeding it from whatever is running so
     /// touching one control doesn't silently reset the others.
+    ///
+    /// A leaf nothing has overridden reports speed 0, because Hyprland
+    /// has it inherit rather than hold a value — and `hl.animation`
+    /// refuses 0. Seeding what was reported would write a line the
+    /// compositor rejects, which is a toggle that silently does nothing.
+    /// The inherited speed is resolved instead, and the row shows the
+    /// number rather than hiding it.
     fn own_animation(&mut self, leaf: &str) -> Animation {
-        let (current, _) = self.effective_animation(leaf);
+        let (mut current, _) = self.effective_animation(leaf);
+        if current.speed <= 0.0 || !current.speed.is_finite() {
+            current.speed =
+                hyprforge_appearance::animations::inherited_speed(leaf, &self.live_animations);
+        }
         self.stored.animations.set(leaf, current.clone());
         current
     }
@@ -452,13 +483,14 @@ impl SettingsModule for AppearanceModule {
             Message::DesktopUndo(key, previous) => write_desktop(self, key, previous),
             Message::DesktopWritten(key, Ok(previous)) => {
                 self.desktop_drafts.remove(key);
-                if let Some(new_value) = self.desktop_drafts.get(key).cloned() {
-                    self.desktop.insert(key, new_value);
-                }
+                // Offered back only when it actually changed — a "put it
+                // back" for a value that is already what it was is noise.
+                self.desktop_undo = previous
+                    .filter(|p| self.desktop.get(key) != Some(p))
+                    .map(|p| (key, p));
                 // Re-read rather than assume: gsettings normalises some
                 // values, and showing what we sent instead of what it
-                // stored would be the same lie the settings rows had.
-                self.desktop_undo = previous.map(|p| (key, p, String::new()));
+                // stored would be the same lie the settings rows told.
                 Task::perform(read_desktop(), Message::DesktopLoaded)
             }
             Message::DesktopWritten(key, Err(e)) => {
@@ -563,7 +595,11 @@ impl SettingsModule for AppearanceModule {
                 .spacing(spacing::SM),
             ));
         }
-        if !self.invalid.is_empty() {
+        // Animations are checked alongside settings, not separately: both
+        // are skipped by codegen when invalid, and a skipped animation
+        // with no banner is a toggle that silently did nothing.
+        let bad_animations = self.stored.animations.invalid(self.known_curves().as_deref());
+        if !self.invalid.is_empty() || !bad_animations.is_empty() {
             let mut list = column![scaled_text(
                 "These are in your appearance.toml but aren't being applied. Fix \
                  or remove them:",
@@ -574,6 +610,13 @@ impl SettingsModule for AppearanceModule {
             for bad in &self.invalid {
                 list = list.push(meta_text(
                     format!("{} — {}", bad.key, bad.problem),
+                    12.0,
+                    scale,
+                ));
+            }
+            for (leaf, problem) in &bad_animations {
+                list = list.push(meta_text(
+                    format!("animation {leaf} — {problem}"),
                     12.0,
                     scale,
                 ));
@@ -609,6 +652,17 @@ impl SettingsModule for AppearanceModule {
             .align_y(iced::Alignment::Center),
         );
 
+        // Shown on every tab whose rows the filter actually hides.
+        // Without it on Animations, a filter typed under Windows silently
+        // hid animation rows with no visible box explaining why.
+        if self.tab != Tab::Theme {
+            content = content.push(
+                text_input("Filter settings…", &self.filter)
+                    .on_input(Message::FilterChanged)
+                    .padding(spacing::SM),
+            );
+        }
+
         content = match self.tab {
             Tab::Theme => content.push(self.theme_view(scale)),
             Tab::Windows => self.windows_view(content, scale),
@@ -637,7 +691,7 @@ impl AppearanceModule {
         )]
         .spacing(spacing::SM);
 
-        if let Some((key, previous, _)) = &self.desktop_undo {
+        if let Some((key, previous)) = &self.desktop_undo {
             body = body.push(
                 row![
                     scaled_text(
@@ -694,6 +748,19 @@ impl AppearanceModule {
         if current.is_none() {
             label_side = label_side.push(meta_text("Not available on this desktop", 12.0, scale));
         }
+        // Only while the contesting option is actually on. Warning
+        // unconditionally would cry wolf at users who already turned it
+        // off, and this screen is where they'd have turned it off.
+        if let Some(contested) = setting.contested_by {
+            let on = self
+                .live
+                .get(contested.option)
+                .and_then(|l| l.value.as_bool())
+                .unwrap_or(true);
+            if on {
+                label_side = label_side.push(scaled_text(contested.warning, 12.0, scale));
+            }
+        }
 
         let control_side: Element<'_, Message> =
             if self.desktop_drafts.contains_key(key) {
@@ -723,12 +790,6 @@ impl AppearanceModule {
         mut content: iced::widget::Column<'a, Message>,
         scale: FontScale,
     ) -> iced::widget::Column<'a, Message> {
-        content = content.push(
-            text_input("Filter settings…", &self.filter)
-                .on_input(Message::FilterChanged)
-                .padding(spacing::SM),
-        );
-
         if !self.drafts.is_empty() {
             content = content.push(
                 row![
@@ -801,6 +862,7 @@ impl AppearanceModule {
         )]
         .spacing(spacing::SM);
 
+        let mut any = false;
         for live in &self.live_animations {
             let leaf = live.leaf.clone();
             if !self.filter.trim().is_empty()
@@ -808,6 +870,7 @@ impl AppearanceModule {
             {
                 continue;
             }
+            any = true;
             let (current, owned) = self.effective_animation(&leaf);
             let shown_speed = self
                 .animation_drafts
@@ -866,6 +929,13 @@ impl AppearanceModule {
                 .spacing(spacing::MD)
                 .align_y(iced::Alignment::Center),
             );
+        }
+        if !any {
+            body = body.push(scaled_text(
+                format!("No animation matches “{}”.", self.filter.trim()),
+                13.0,
+                scale,
+            ));
         }
         section("Animations", scale, body)
     }
@@ -1041,10 +1111,17 @@ async fn read_animations() -> (Vec<LiveAnimation>, Vec<Curve>) {
     .unwrap_or_default()
 }
 
-async fn regenerate_and_reload(appearance: Appearance) -> Result<(), String> {
+async fn regenerate_and_reload(
+    appearance: Appearance,
+    known_curves: Option<Vec<String>>,
+) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        hyprforge_appearance::apply::apply(&appearance_lua_path(), &appearance)
-            .map_err(|e| e.to_string())
+        hyprforge_appearance::apply::apply(
+            &appearance_lua_path(),
+            &appearance,
+            known_curves.as_deref(),
+        )
+        .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1122,7 +1199,7 @@ mod tests {
             let _ = m.update(Message::Set("decoration:rounding", Value::Int(12)));
             let _ = m.update(Message::Reset("decoration:rounding"));
             assert!(!m.rows().owns("decoration:rounding"));
-            let lua = hyprforge_appearance::apply::generate(&m.stored);
+            let lua = hyprforge_appearance::apply::generate(&m.stored, None);
             assert!(!lua.contains("rounding"), "{lua}");
         });
     }
@@ -1205,6 +1282,127 @@ mod tests {
                 assert!(m.stored.animations.get("fade").is_none(), "{bad} was accepted");
                 assert!(m.animation_errors.contains_key("fade"), "{bad}");
             }
+        });
+    }
+
+    /// The defect a review pass found: `hyprctl` reports speed 0 for
+    /// every un-overridden leaf, Hyprland refuses `speed = 0`, and codegen
+    /// skips what it can't write — so toggling any of the 18 unconfigured
+    /// animations on a typical config silently did nothing.
+    #[test]
+    fn toggling_an_unconfigured_animation_writes_a_usable_speed() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::AnimationsLoaded(
+                vec![
+                    live_animation("global", 10.0, true),
+                    live_animation("windows", 4.79, true),
+                    // What the compositor really reports for a leaf
+                    // nothing has overridden.
+                    live_animation("windowsMove", 0.0, false),
+                ],
+                Vec::new(),
+            ));
+            let _ = m.update(Message::AnimationToggled("windowsMove".into(), false));
+
+            let stored = m.stored.animations.get("windowsMove").unwrap();
+            assert!(stored.speed > 0.0, "speed {} is unwritable", stored.speed);
+            assert_eq!(stored.speed, 4.79, "should inherit from `windows`");
+            assert_eq!(
+                m.stored.animations.invalid(None),
+                vec![],
+                "nothing may be stored that codegen would skip"
+            );
+            let lua = hyprforge_appearance::apply::generate(&m.stored, None);
+            assert!(lua.contains("windowsMove"), "the toggle must reach the file: {lua}");
+        });
+    }
+
+    /// A row for an inheriting leaf shows the speed it would inherit, not
+    /// a bare 0 — which would read as "this animation takes no time".
+    #[test]
+    fn an_inheriting_row_shows_the_speed_it_would_inherit() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::AnimationsLoaded(
+                vec![
+                    live_animation("global", 10.0, true),
+                    live_animation("fadeDpms", 0.0, false),
+                ],
+                Vec::new(),
+            ));
+            let (shown, owned) = m.effective_animation("fadeDpms");
+            assert!(!owned);
+            assert_eq!(shown.speed, 10.0);
+        });
+    }
+
+    /// A curve can vanish without the user touching Hyprforge — delete
+    /// an `hl.curve` line from your own config and a stored animation
+    /// still names it. Hyprland refuses with "no such bezier", which
+    /// aborts the whole file, so every other appearance setting would
+    /// stop applying too.
+    #[test]
+    fn an_animation_naming_a_deleted_curve_is_surfaced_and_skipped() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::AnimationsLoaded(
+                vec![live_animation("windows", 4.79, true)],
+                vec![Curve { name: "linear".into(), points: (0.0, 0.0, 1.0, 1.0) }],
+            ));
+            m.stored.animations.set(
+                "windows",
+                Animation {
+                    enabled: true,
+                    speed: 4.0,
+                    bezier: "easeOutQuint".into(),
+                    style: String::new(),
+                },
+            );
+            let problems = m.stored.animations.invalid(m.known_curves().as_deref());
+            assert_eq!(problems.len(), 1);
+            assert!(problems[0].1.contains("easeOutQuint"), "{}", problems[0].1);
+            // Driven off exactly this, so building the view proves the
+            // banner is reachable.
+            let _ = m.view(FontScale::default());
+        });
+    }
+
+    /// With no curve list read, the check is skipped rather than failing
+    /// every animation — otherwise an unreachable compositor would blank
+    /// the whole section.
+    #[test]
+    fn an_unread_curve_list_does_not_invalidate_animations() {
+        with_temp_config(|m| {
+            assert!(m.known_curves().is_none(), "no curves read yet");
+            m.stored.animations.set(
+                "windows",
+                Animation {
+                    enabled: true,
+                    speed: 4.0,
+                    bezier: "whatever".into(),
+                    style: String::new(),
+                },
+            );
+            assert_eq!(m.stored.animations.invalid(m.known_curves().as_deref()), vec![]);
+        });
+    }
+
+    /// A stored animation codegen would skip has to be visible, or the
+    /// user sees a control that does nothing with no explanation.
+    #[test]
+    fn an_unwritable_animation_is_surfaced_on_screen() {
+        with_temp_config(|m| {
+            m.stored.animations.set(
+                "windows",
+                Animation {
+                    enabled: true,
+                    speed: 0.0,
+                    bezier: String::new(),
+                    style: String::new(),
+                },
+            );
+            assert_eq!(m.stored.animations.invalid(None).len(), 1);
+            // The banner is driven off exactly this, so building the view
+            // is what proves it's reachable.
+            let _ = m.view(FontScale::default());
         });
     }
 
@@ -1334,12 +1532,49 @@ mod tests {
         });
     }
 
+    /// With `cursor:sync_gsettings_theme` on — Hyprland's default —
+    /// Hyprland pushes its own cursor theme into gsettings on every theme
+    /// load, so a value set here is overwritten on the next reload. The
+    /// row has to say so, or the screen looks broken rather than
+    /// contested.
+    #[test]
+    fn a_contested_desktop_key_warns_only_while_it_is_contested() {
+        let cursor = desktop::get_setting("cursor-theme").unwrap();
+        let sync = cursor.contested_by.expect("cursor theme is contested");
+        assert_eq!(sync.option, "cursor:sync_gsettings_theme");
+        assert!(sync.warning.contains("overwritten"), "{}", sync.warning);
+
+        // Uncontested keys must not carry a warning — crying wolf on
+        // every row would make the real one invisible.
+        assert!(desktop::get_setting("gtk-theme").unwrap().contested_by.is_none());
+    }
+
     /// A row for a key this desktop's schema lacks has to say so rather
     /// than showing an empty box that silently does nothing.
     #[test]
     fn a_missing_desktop_key_still_renders() {
         with_temp_config(|m| {
             m.desktop.clear();
+            let _ = m.view(FontScale::default());
+        });
+    }
+
+    /// The filter hides animation rows too, so a filter typed under
+    /// Windows was silently hiding them with no visible box to explain
+    /// why. Both tabs that filter must show the control.
+    #[test]
+    fn a_filter_typed_on_one_tab_stays_visible_on_the_other() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::AnimationsLoaded(
+                vec![live_animation("windows", 4.79, true)],
+                Vec::new(),
+            ));
+            let _ = m.update(Message::TabSelected(Tab::Windows));
+            let _ = m.update(Message::FilterChanged("nothing matches this".into()));
+            // Switching tabs keeps the filter, so the box has to come
+            // with it — and the empty result has to say so.
+            let _ = m.update(Message::TabSelected(Tab::Animations));
+            assert_eq!(m.filter, "nothing matches this");
             let _ = m.view(FontScale::default());
         });
     }
