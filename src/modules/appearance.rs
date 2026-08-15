@@ -21,7 +21,7 @@
 
 use hyprforge_appearance::animations::{Animation, Curve, LiveAnimation};
 use hyprforge_appearance::catalog::{self, CATALOG};
-use hyprforge_appearance::desktop::{self, DesktopKind, DesktopSetting};
+use hyprforge_appearance::desktop::{self, Catalogue, DesktopKind, DesktopSetting};
 use hyprforge_appearance::setup::{HyprConfig, SetupPlan};
 use hyprforge_appearance::storage::Appearance;
 use hyprforge_core::hlconfig::import::{Discovered, Live};
@@ -80,6 +80,11 @@ pub enum Message {
     AnimationReset(String),
     // -- Desktop (gsettings) --
     DesktopLoaded(Vec<(&'static str, String)>),
+    /// The themes and fonts installed on this machine, scanned once.
+    InstalledLoaded(Installed),
+    FontFamilyChosen(&'static str, String),
+    FontSizeChanged(&'static str, String),
+    FontSizeSubmitted(&'static str),
     DesktopDraftChanged(&'static str, String),
     DesktopCommit(&'static str),
     DesktopChosen(&'static str, String),
@@ -116,6 +121,25 @@ enum Payload {
     Animation(String, Animation),
 }
 
+/// Everything pickable that had to be found on disk.
+#[derive(Debug, Clone, Default)]
+pub struct Installed {
+    pub gtk: Vec<String>,
+    pub icons: Vec<String>,
+    pub cursors: Vec<String>,
+    pub fonts: Vec<String>,
+}
+
+impl Installed {
+    fn for_catalogue(&self, catalogue: Catalogue) -> &[String] {
+        match catalogue {
+            Catalogue::GtkThemes => &self.gtk,
+            Catalogue::IconThemes => &self.icons,
+            Catalogue::CursorThemes => &self.cursors,
+        }
+    }
+}
+
 pub struct AppearanceModule {
     tab: Tab,
     stored: Appearance,
@@ -133,6 +157,12 @@ pub struct AppearanceModule {
     /// The last desktop write, so it can be offered back. gsettings has
     /// no generated file to delete, so this is the only undo available.
     desktop_undo: Option<(&'static str, String)>,
+    /// Themes and fonts found on disk, for the pickers. Empty until the
+    /// scan returns; a row falls back to a text field so a slow or
+    /// failed scan never leaves a setting uneditable.
+    installed: Installed,
+    /// Font sizes mid-edit, keyed by gsettings key.
+    font_sizes: BTreeMap<&'static str, String>,
     filter: String,
     config: HyprConfig,
     setup_plan: SetupPlan,
@@ -181,6 +211,8 @@ impl AppearanceModule {
                 desktop_drafts: BTreeMap::new(),
                 desktop_errors: BTreeMap::new(),
                 desktop_undo: None,
+                installed: Installed::default(),
+                font_sizes: BTreeMap::new(),
                 filter: String::new(),
                 config: setup.config,
                 setup_plan: setup.plan,
@@ -200,6 +232,7 @@ impl AppearanceModule {
                 Task::perform(read_live(), Message::LiveLoaded),
                 Task::perform(read_animations(), |(a, c)| Message::AnimationsLoaded(a, c)),
                 Task::perform(read_desktop(), Message::DesktopLoaded),
+                Task::perform(read_installed(), Message::InstalledLoaded),
             ]),
         )
     }
@@ -473,7 +506,40 @@ impl SettingsModule for AppearanceModule {
                 self.desktop_drafts.insert(key, raw);
                 Task::none()
             }
+            Message::InstalledLoaded(installed) => {
+                self.installed = installed;
+                Task::none()
+            }
             Message::DesktopChosen(key, value) => write_desktop(self, key, value),
+            Message::FontFamilyChosen(key, family) => {
+                // Only the family changes; the size is whatever is
+                // currently stored, so picking a font can't silently
+                // resize the interface.
+                let (_, size) = desktop::split_font(self.desktop.get(key).map_or("", |v| v));
+                write_desktop(self, key, desktop::join_font(&family, size))
+            }
+            Message::FontSizeChanged(key, raw) => {
+                self.desktop_errors.remove(key);
+                self.font_sizes.insert(key, raw);
+                Task::none()
+            }
+            Message::FontSizeSubmitted(key) => {
+                let Some(raw) = self.font_sizes.get(key).cloned() else {
+                    return Task::none();
+                };
+                let (family, _) = desktop::split_font(self.desktop.get(key).map_or("", |v| v));
+                match raw.trim().parse::<u32>() {
+                    Ok(size) if size > 0 => {
+                        self.font_sizes.remove(key);
+                        write_desktop(self, key, desktop::join_font(&family, Some(size)))
+                    }
+                    _ => {
+                        self.desktop_errors
+                            .insert(key, "expected a whole number of points".to_string());
+                        Task::none()
+                    }
+                }
+            }
             Message::DesktopCommit(key) => {
                 let Some(raw) = self.desktop_drafts.get(key).cloned() else {
                     return Task::none();
@@ -731,6 +797,49 @@ impl AppearanceModule {
                 pick_list(options, selected, move |choice: String| {
                     Message::DesktopChosen(key, choice)
                 })
+                .into()
+            }
+            // A scan that hasn't returned, or found nothing, falls back
+            // to a text field rather than an empty dropdown — a setting
+            // that can't be edited because a scan failed is worse than
+            // one that has to be typed.
+            DesktopKind::Installed(catalogue)
+                if !self.installed.for_catalogue(catalogue).is_empty() =>
+            {
+                let options = hyprforge_appearance::themes::options_including(
+                    self.installed.for_catalogue(catalogue),
+                    current.as_deref(),
+                );
+                let selected = current.clone().filter(|c| options.contains(c));
+                pick_list(options, selected, move |choice: String| {
+                    Message::DesktopChosen(key, choice)
+                })
+                .into()
+            }
+            DesktopKind::Font if !self.installed.fonts.is_empty() => {
+                let (family, size) = desktop::split_font(current.as_deref().unwrap_or(""));
+                let options = hyprforge_appearance::themes::options_including(
+                    &self.installed.fonts,
+                    Some(&family),
+                );
+                let selected = Some(family.clone()).filter(|f| options.contains(f));
+                let shown_size = self
+                    .font_sizes
+                    .get(key)
+                    .cloned()
+                    .unwrap_or_else(|| size.map(|s| s.to_string()).unwrap_or_default());
+                row![
+                    pick_list(options, selected, move |choice: String| {
+                        Message::FontFamilyChosen(key, choice)
+                    }),
+                    text_input("size", &shown_size)
+                        .on_input(move |raw| Message::FontSizeChanged(key, raw))
+                        .on_submit(Message::FontSizeSubmitted(key))
+                        .padding(spacing::SM)
+                        .width(Length::Fixed(70.0)),
+                ]
+                .spacing(spacing::SM)
+                .align_y(iced::Alignment::Center)
                 .into()
             }
             _ => text_input("", &shown)
@@ -1087,6 +1196,20 @@ async fn write_desktop_value(
     tokio::task::spawn_blocking(move || desktop::set(key, &value).map_err(|e| e.to_string()))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// Scans for installed themes and fonts. Blocking filesystem work plus
+/// an `fc-list`, so it goes on the blocking pool rather than stalling the
+/// first frame.
+async fn read_installed() -> Installed {
+    tokio::task::spawn_blocking(|| Installed {
+        gtk: Catalogue::GtkThemes.installed(),
+        icons: Catalogue::IconThemes.installed(),
+        cursors: Catalogue::CursorThemes.installed(),
+        fonts: hyprforge_appearance::themes::font_families(),
+    })
+    .await
+    .unwrap_or_default()
 }
 
 async fn read_desktop() -> Vec<(&'static str, String)> {
@@ -1529,6 +1652,83 @@ mod tests {
             let _ = m.update(Message::DesktopDraftChanged("gtk-theme", "  ".into()));
             let _ = m.update(Message::DesktopCommit("gtk-theme"));
             assert!(m.desktop_errors.contains_key("gtk-theme"));
+        });
+    }
+
+    fn installed() -> Installed {
+        Installed {
+            gtk: vec!["Adwaita".into(), "Dracula".into()],
+            icons: vec!["Adwaita".into(), "Dracula".into()],
+            cursors: vec!["Dracula-cursors".into()],
+            fonts: vec!["Cantarell".into(), "Noto Sans".into()],
+        }
+    }
+
+    /// Picking a theme writes it straight through — there is no draft
+    /// step, because choosing from a list is already a complete decision.
+    #[test]
+    fn choosing_an_installed_theme_writes_it() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::InstalledLoaded(installed()));
+            let _ = m.update(Message::DesktopLoaded(vec![("gtk-theme", "Adwaita".into())]));
+            // The write itself goes through gsettings, which the test
+            // can't do; what's checked is that it was accepted rather
+            // than refused by validation.
+            let _ = m.update(Message::DesktopChosen("gtk-theme", "Dracula".into()));
+            assert!(!m.desktop_errors.contains_key("gtk-theme"));
+        });
+    }
+
+    /// Changing the family must not resize the interface, and changing
+    /// the size must not change the font. They're one gsettings string,
+    /// so each has to preserve the other half.
+    #[test]
+    fn a_font_family_and_size_are_edited_independently() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::InstalledLoaded(installed()));
+            let _ = m.update(Message::DesktopLoaded(vec![("font-name", "Noto Sans  10".into())]));
+
+            let (family, size) = desktop::split_font("Noto Sans  10");
+            assert_eq!((family.as_str(), size), ("Noto Sans", Some(10)));
+            assert_eq!(desktop::join_font("Cantarell", size), "Cantarell 10");
+            assert_eq!(desktop::join_font(&family, Some(12)), "Noto Sans 12");
+        });
+    }
+
+    #[test]
+    fn a_bad_font_size_is_refused_rather_than_written() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::InstalledLoaded(installed()));
+            let _ = m.update(Message::DesktopLoaded(vec![("font-name", "Noto Sans 10".into())]));
+            for bad in ["0", "huge", "-3"] {
+                let _ = m.update(Message::FontSizeChanged("font-name", bad.into()));
+                let _ = m.update(Message::FontSizeSubmitted("font-name"));
+                assert!(m.desktop_errors.contains_key("font-name"), "{bad} was accepted");
+            }
+        });
+    }
+
+    /// A theme installed somewhere the scan doesn't look would otherwise
+    /// vanish from its own picker, leaving nothing selected — and the
+    /// next click would replace a working setting.
+    #[test]
+    fn a_theme_outside_the_scan_is_still_offered() {
+        let options = hyprforge_appearance::themes::options_including(
+            &installed().gtk,
+            Some("Custom-Theme"),
+        );
+        assert!(options.contains(&"Custom-Theme".to_string()));
+    }
+
+    /// A scan that hasn't returned must not leave a setting uneditable —
+    /// the row falls back to a text field.
+    #[test]
+    fn rows_still_render_before_the_scan_returns() {
+        with_temp_config(|m| {
+            assert!(m.installed.gtk.is_empty());
+            let _ = m.view(FontScale::default());
+            let _ = m.update(Message::InstalledLoaded(installed()));
+            let _ = m.view(FontScale::default());
         });
     }
 
