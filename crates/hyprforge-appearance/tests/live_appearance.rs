@@ -117,7 +117,7 @@ fn hyprland_accepts_a_file_setting_every_option() {
     eval_and_assert_clean(&generate(&Appearance {
         settings,
         animations: Animations::default(),
-    }));
+    }, None));
     reload();
 }
 
@@ -136,7 +136,7 @@ fn hyprland_accepts_the_colour_form_this_crate_writes() {
     eval_and_assert_clean(&generate(&Appearance {
         settings,
         animations: Animations::default(),
-    }));
+    }, None));
 
     // And it round-trips: what comes back converts to what went in.
     let live = getoption("general:col:active_border")["gradient"]
@@ -165,7 +165,7 @@ fn a_gap_written_as_an_integer_takes_effect_and_reads_back() {
     eval_and_assert_clean(&generate(&Appearance {
         settings,
         animations: Animations::default(),
-    }));
+    }, None));
 
     let live = getoption("general:gaps_in")["css"].as_str().unwrap().to_string();
     assert_eq!(
@@ -196,10 +196,10 @@ fn a_later_animation_call_overrides_the_same_leaf() {
                 style: String::new(),
             },
         );
-        eval_and_assert_clean(&generate(&Appearance {
-            settings: Settings::default(),
-            animations,
-        }));
+        eval_and_assert_clean(&generate(
+            &Appearance { settings: Settings::default(), animations },
+            None,
+        ));
     };
 
     write(4.79, "easeOutQuint");
@@ -254,7 +254,7 @@ fn hyprland_accepts_the_extremes_of_every_declared_range() {
         eval_and_assert_clean(&generate(&Appearance {
             settings,
             animations: Animations::default(),
-        }));
+        }, None));
     }
     reload();
 }

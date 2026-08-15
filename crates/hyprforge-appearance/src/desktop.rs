@@ -60,7 +60,32 @@ pub struct DesktopSetting {
     pub label: &'static str,
     pub help: &'static str,
     pub kind: DesktopKind,
+    /// A Hyprland option that also writes this key, and the warning to
+    /// show while it's on.
+    ///
+    /// Only the cursor keys have one, and it is a real conflict rather
+    /// than a theoretical one: with `cursor:sync_gsettings_theme` on —
+    /// which is the default — Hyprland pushes its own xcursor theme and
+    /// size into gsettings on every theme load. A value set here is
+    /// overwritten on the next reload, and without saying so the screen
+    /// would look broken rather than contested.
+    pub contested_by: Option<Contested>,
 }
+
+/// A Hyprland option that writes a gsettings key behind the screen's back.
+#[derive(Debug, Clone, Copy)]
+pub struct Contested {
+    /// The Hyprland option key, so the caller can read whether it's on.
+    pub option: &'static str,
+    pub warning: &'static str,
+}
+
+const CURSOR_SYNC: Contested = Contested {
+    option: "cursor:sync_gsettings_theme",
+    warning: "Hyprland is set to push its own cursor theme and size here, so this \
+              will be overwritten on the next reload. Turn off \"Share cursor theme \
+              with GTK apps\" under Windows to control it from here.",
+};
 
 /// The keys this screen offers.
 ///
@@ -74,48 +99,56 @@ pub const SETTINGS: &[DesktopSetting] = &[
         label: "Light or dark",
         help: "What apps should prefer. Most GTK4 and modern Qt apps follow this.",
         kind: DesktopKind::Enum(&["default", "prefer-dark", "prefer-light"]),
+    contested_by: None,
     },
     DesktopSetting {
         key: "gtk-theme",
         label: "GTK theme",
         help: "Widget theme for GTK apps, by name — one of the folders in ~/.themes or /usr/share/themes.",
         kind: DesktopKind::Text,
+    contested_by: None,
     },
     DesktopSetting {
         key: "icon-theme",
         label: "Icon theme",
         help: "Icon set for GTK apps, by name.",
         kind: DesktopKind::Text,
+    contested_by: None,
     },
     DesktopSetting {
         key: "cursor-theme",
         label: "Cursor theme",
-        help: "Pointer theme by name. Hyprland pushes this to GTK apps when \"Share cursor theme\" is on.",
+        help: "Pointer theme by name.",
         kind: DesktopKind::Text,
+        contested_by: Some(CURSOR_SYNC),
     },
     DesktopSetting {
         key: "cursor-size",
         label: "Cursor size",
         help: "Pointer size in pixels. 24 is the usual default.",
         kind: DesktopKind::Int { min: 8, max: 128 },
+        contested_by: Some(CURSOR_SYNC),
     },
     DesktopSetting {
         key: "font-name",
         label: "Interface font",
         help: "Font and size for app interfaces, e.g. \"Noto Sans 10\".",
         kind: DesktopKind::Text,
+    contested_by: None,
     },
     DesktopSetting {
         key: "document-font-name",
         label: "Document font",
         help: "Font and size for document text.",
         kind: DesktopKind::Text,
+    contested_by: None,
     },
     DesktopSetting {
         key: "monospace-font-name",
         label: "Monospace font",
         help: "Font and size for terminals and code.",
         kind: DesktopKind::Text,
+    contested_by: None,
     },
 ];
 

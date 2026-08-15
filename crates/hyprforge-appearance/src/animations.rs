@@ -74,19 +74,39 @@ impl Animations {
 
     /// Leaves whose stored values can't be written, with the reason.
     ///
-    /// A negative or non-finite speed is the one that matters: it reaches
-    /// the generated file as `speed = -1` or `speed = NaN.0`, and the
-    /// second is a syntax error that takes every other line in the file
-    /// with it.
-    pub fn invalid(&self) -> Vec<(String, String)> {
+    /// Three ways a stored animation becomes unwritable, and all three
+    /// take the *whole* generated file down rather than just their own
+    /// line — a rejected `hl.animation` aborts the chunk, and `NaN`
+    /// doesn't even parse:
+    ///
+    /// - a speed of zero or less, which Hyprland refuses outright
+    ///   ("speed must be greater than 0")
+    /// - a non-finite speed, which renders as `NaN.0`
+    /// - a curve that no longer exists, which Hyprland refuses with
+    ///   "no such bezier" — reachable without touching Hyprforge at all,
+    ///   by deleting an `hl.curve` line from your own config
+    ///
+    /// `known_curves` is `None` when the curve list couldn't be read. The
+    /// check is then skipped rather than failing everything: refusing
+    /// every animation because the compositor is unreachable would be a
+    /// worse answer than writing one that might be stale.
+    pub fn invalid(&self, known_curves: Option<&[String]>) -> Vec<(String, String)> {
         let mut out = Vec::new();
         for (leaf, a) in &self.items {
-            if !a.speed.is_finite() {
+            if leaf.trim().is_empty() {
+                out.push((leaf.clone(), "an animation needs a name".to_string()));
+            } else if !a.speed.is_finite() {
                 out.push((leaf.clone(), "speed must be an ordinary number".to_string()));
             } else if a.speed <= 0.0 {
                 out.push((leaf.clone(), "speed must be greater than 0".to_string()));
-            } else if leaf.trim().is_empty() {
-                out.push((leaf.clone(), "an animation needs a name".to_string()));
+            } else if let Some(curves) = known_curves {
+                let named = a.bezier.trim();
+                if !named.is_empty() && !curves.iter().any(|c| c == named) {
+                    out.push((
+                        leaf.clone(),
+                        format!("no curve named \"{named}\" exists any more"),
+                    ));
+                }
             }
         }
         out
@@ -99,8 +119,12 @@ impl Animations {
 /// written: one bad value would otherwise take down the whole generated
 /// file, and the editor surfaces the same problems separately so nothing
 /// is dropped silently.
-pub fn generate(animations: &Animations) -> String {
-    let bad: Vec<String> = animations.invalid().into_iter().map(|(l, _)| l).collect();
+pub fn generate(animations: &Animations, known_curves: Option<&[String]>) -> String {
+    let bad: Vec<String> = animations
+        .invalid(known_curves)
+        .into_iter()
+        .map(|(l, _)| l)
+        .collect();
     let mut out = String::new();
     for (leaf, a) in &animations.items {
         if bad.contains(leaf) {
@@ -140,6 +164,38 @@ fn render_speed(speed: f64) -> String {
     } else {
         format!("{speed}")
     }
+}
+
+/// A speed to write for a leaf the compositor reports as `0`.
+///
+/// `hyprctl animations` reports speed `0` for every leaf nothing has
+/// overridden — 18 of 35 on a typical config — because Hyprland's
+/// animation tree has it *inherit* from its parent rather than hold a
+/// value. But `hl.animation` refuses `speed = 0` outright ("speed must be
+/// greater than 0"), so seeding a newly-owned leaf with what was reported
+/// produces a line Hyprland rejects. Left unhandled that is a silent
+/// no-op: the user toggles an animation and nothing happens.
+///
+/// There is no "leave it alone" option once a leaf is owned, since every
+/// `hl.animation` call must carry a speed. So this resolves the
+/// inheritance the same way Hyprland does — the nearest ancestor by name
+/// (`windowsMove` → `windows`, `fadeDim` → `fade`), then `global`, then a
+/// last-resort 1.0 — and the caller shows the user the number it picked
+/// rather than writing it behind their back.
+pub fn inherited_speed(leaf: &str, live: &[LiveAnimation]) -> f64 {
+    let usable = |name: &str| {
+        live.iter()
+            .find(|l| l.leaf == name && l.animation.speed > 0.0)
+            .map(|l| l.animation.speed)
+    };
+    let ancestor = live
+        .iter()
+        .filter(|l| l.leaf != leaf && leaf.starts_with(&l.leaf) && l.animation.speed > 0.0)
+        // Longest match wins: `windowsIn` should take `windows`, not a
+        // shorter coincidental prefix.
+        .max_by_key(|l| l.leaf.len())
+        .map(|l| l.animation.speed);
+    ancestor.or_else(|| usable("global")).unwrap_or(1.0)
 }
 
 /// One animation as the running compositor currently has it.
@@ -338,16 +394,84 @@ mod tests {
             let mut a = Animations::default();
             a.set("windows", animation(bad));
             a.set("fade", animation(2.0));
-            assert_eq!(a.invalid().len(), 1, "{bad} was accepted");
-            let lua = generate(&a);
+            assert_eq!(a.invalid(None).len(), 1, "{bad} was accepted");
+            let lua = generate(&a, None);
             assert!(!lua.contains("windows"), "{bad}: {lua}");
             assert!(lua.contains("fade"), "{bad}: {lua}");
         }
     }
 
+    /// Reachable without touching Hyprforge at all: delete an `hl.curve`
+    /// line from your own config and a stored animation still names it.
+    /// Hyprland refuses with "no such bezier", which aborts the whole
+    /// generated file — so every other appearance setting would stop
+    /// applying too.
+    #[test]
+    fn an_animation_naming_a_deleted_curve_is_reported_and_skipped() {
+        let curves = vec!["linear".to_string(), "quick".to_string()];
+        let mut a = Animations::default();
+        a.set(
+            "windows",
+            Animation {
+                enabled: true,
+                speed: 4.0,
+                bezier: "easeOutQuint".to_string(),
+                style: String::new(),
+            },
+        );
+        a.set(
+            "fade",
+            Animation {
+                enabled: true,
+                speed: 2.0,
+                bezier: "linear".to_string(),
+                style: String::new(),
+            },
+        );
+
+        let problems = a.invalid(Some(&curves));
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].0, "windows");
+        assert!(problems[0].1.contains("easeOutQuint"), "{}", problems[0].1);
+
+        let lua = generate(&a, Some(&curves));
+        assert!(!lua.contains("windows"), "{lua}");
+        assert!(lua.contains("fade"), "the good one still writes: {lua}");
+    }
+
+    /// An animation with no curve names nothing, so there is nothing to
+    /// go stale.
+    #[test]
+    fn an_animation_without_a_curve_is_unaffected_by_the_curve_check() {
+        let mut a = Animations::default();
+        a.set(
+            "fade",
+            Animation { enabled: true, speed: 2.0, bezier: String::new(), style: String::new() },
+        );
+        assert_eq!(a.invalid(Some(&[])), vec![]);
+    }
+
+    /// Refusing every animation because the compositor is unreachable
+    /// would be a worse answer than writing one that might be stale.
+    #[test]
+    fn an_unknown_curve_list_skips_the_check_rather_than_failing_everything() {
+        let mut a = Animations::default();
+        a.set(
+            "windows",
+            Animation {
+                enabled: true,
+                speed: 4.0,
+                bezier: "whatever".to_string(),
+                style: String::new(),
+            },
+        );
+        assert_eq!(a.invalid(None), vec![]);
+        assert!(generate(&a, None).contains("windows"));
+    }
+
     #[test]
     fn an_empty_set_generates_nothing() {
-        assert_eq!(generate(&Animations::default()), "");
+        assert_eq!(generate(&Animations::default(), None), "");
     }
 
     #[test]
@@ -355,7 +479,7 @@ mod tests {
         let mut a = Animations::default();
         a.set("windows", animation(4.79));
         a.set("fade", animation(3.03));
-        assert_eq!(generate(&a), generate(&a));
+        assert_eq!(generate(&a, None), generate(&a, None));
     }
 
     /// Real `hyprctl animations -j` output, trimmed to three entries.
@@ -389,6 +513,68 @@ mod tests {
         let (animations, _) = parse_live(SAMPLE);
         let special = animations.iter().find(|a| a.leaf == "specialWorkspaceOut").unwrap();
         assert!(!special.overridden);
+    }
+
+    /// The defect this exists for: every un-overridden leaf reports speed
+    /// 0, and Hyprland refuses `speed = 0`, so seeding a newly-owned leaf
+    /// with what was reported writes a line the compositor rejects — a
+    /// toggle that silently does nothing.
+    #[test]
+    fn an_inherited_speed_resolves_to_the_nearest_ancestor() {
+        let live = vec![
+            LiveAnimation {
+                leaf: "global".into(),
+                animation: animation(10.0),
+                overridden: true,
+            },
+            LiveAnimation {
+                leaf: "windows".into(),
+                animation: animation(4.79),
+                overridden: true,
+            },
+            LiveAnimation {
+                leaf: "windowsMove".into(),
+                animation: animation(0.0),
+                overridden: false,
+            },
+            LiveAnimation {
+                leaf: "fadeDpms".into(),
+                animation: animation(0.0),
+                overridden: false,
+            },
+        ];
+        assert_eq!(inherited_speed("windowsMove", &live), 4.79, "nearest ancestor");
+        assert_eq!(inherited_speed("fadeDpms", &live), 10.0, "no ancestor, so global");
+    }
+
+    /// Longest match, so `windowsIn` takes `windows` rather than a
+    /// shorter coincidental prefix.
+    #[test]
+    fn the_longest_matching_ancestor_wins() {
+        let live = vec![
+            LiveAnimation { leaf: "w".into(), animation: animation(1.0), overridden: true },
+            LiveAnimation { leaf: "windows".into(), animation: animation(4.79), overridden: true },
+        ];
+        assert_eq!(inherited_speed("windowsIn", &live), 4.79);
+    }
+
+    /// Whatever it resolves to must be writable, or the fix would just
+    /// move the silent no-op somewhere else.
+    #[test]
+    fn an_inherited_speed_is_always_usable() {
+        for live in [
+            Vec::new(),
+            vec![LiveAnimation {
+                leaf: "global".into(),
+                animation: animation(0.0),
+                overridden: false,
+            }],
+        ] {
+            let speed = inherited_speed("windows", &live);
+            let mut a = Animations::default();
+            a.set("windows", animation(speed));
+            assert_eq!(a.invalid(None), vec![], "speed {speed} is not writable");
+        }
     }
 
     #[test]
