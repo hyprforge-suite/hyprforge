@@ -1,7 +1,9 @@
+pub mod appearance;
 pub mod displays;
 pub mod input;
 pub mod keycapture;
 pub mod layout_canvas;
+pub mod setting_rows;
 pub mod shortcuts;
 pub mod window_rules;
 

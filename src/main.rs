@@ -6,6 +6,7 @@ use hyprforge_core::SettingsModule;
 use iced::keyboard::{self, key, Key};
 use iced::widget::{column, container, operation, row, text_input, Id};
 use iced::{window, Background, Element, Length, Size, Subscription, Task, Theme};
+use modules::appearance::AppearanceModule;
 use modules::displays::DisplaysModule;
 use modules::input::InputModule;
 use modules::shortcuts::ShortcutsModule;
@@ -138,6 +139,7 @@ enum Screen {
     WindowRules,
     Shortcuts,
     Input,
+    Appearance,
 }
 
 impl Screen {
@@ -147,6 +149,7 @@ impl Screen {
             Screen::WindowRules => "Window Rules",
             Screen::Shortcuts => "Shortcuts",
             Screen::Input => "Input",
+            Screen::Appearance => "Appearance",
         }
     }
 }
@@ -175,6 +178,10 @@ const NAV: &[NavCategory] = &[
         label: "Input",
         screens: &[Screen::Input],
     },
+    NavCategory {
+        label: "Appearance",
+        screens: &[Screen::Appearance],
+    },
 ];
 
 #[derive(Debug, Clone)]
@@ -188,6 +195,7 @@ enum Message {
     WindowRules(modules::window_rules::Message),
     Shortcuts(modules::shortcuts::Message),
     Input(modules::input::Message),
+    Appearance(modules::appearance::Message),
     WindowOpened(window::Id),
     WindowClosed(window::Id),
     RevertPopupOpened(window::Id),
@@ -200,6 +208,7 @@ struct App {
     window_rules: WindowRulesModule,
     shortcuts: ShortcutsModule,
     input: InputModule,
+    appearance: AppearanceModule,
     search_query: String,
     search_id: Id,
     font_scale: FontScale,
@@ -214,6 +223,7 @@ impl App {
         let (window_rules, window_rules_task) = WindowRulesModule::new();
         let (shortcuts, shortcuts_task) = ShortcutsModule::new();
         let (input, input_task) = InputModule::new();
+        let (appearance, appearance_task) = AppearanceModule::new();
         (
             App {
                 screen: Screen::Monitors,
@@ -221,6 +231,7 @@ impl App {
                 window_rules,
                 shortcuts,
                 input,
+                appearance,
                 search_query: String::new(),
                 search_id: Id::unique(),
                 font_scale: read_global_font_scale(),
@@ -233,6 +244,7 @@ impl App {
                 window_rules_task.map(Message::WindowRules),
                 shortcuts_task.map(Message::Shortcuts),
                 input_task.map(Message::Input),
+                appearance_task.map(Message::Appearance),
             ]),
         )
     }
@@ -337,12 +349,14 @@ impl App {
                 Screen::WindowRules => Task::none(),
                 Screen::Shortcuts => Task::none(),
                 Screen::Input => Task::none(),
+                Screen::Appearance => Task::none(),
             },
             Message::Displays(msg) => {
                 let task = self.displays.update(msg).map(Message::Displays);
                 Task::batch([task, self.sync_revert_popup()])
             }
             Message::Input(msg) => self.input.update(msg).map(Message::Input),
+            Message::Appearance(msg) => self.appearance.update(msg).map(Message::Appearance),
             Message::WindowOpened(id) => {
                 if self.main_window.is_none() {
                     self.main_window = Some(id);
@@ -441,6 +455,7 @@ impl App {
             Screen::WindowRules => self.window_rules.icon(),
             Screen::Shortcuts => self.shortcuts.icon(),
             Screen::Input => self.input.icon(),
+            Screen::Appearance => self.appearance.icon(),
         };
 
         let query = self.search_query.to_lowercase();
@@ -513,6 +528,7 @@ impl App {
             Screen::WindowRules => self.window_rules.view(scale).map(Message::WindowRules),
             Screen::Shortcuts => self.shortcuts.view(scale).map(Message::Shortcuts),
             Screen::Input => self.input.view(scale).map(Message::Input),
+            Screen::Appearance => self.appearance.view(scale).map(Message::Appearance),
         };
         // The Monitors editor (canvas + full property panel + policy/swap
         // sections) routinely exceeds window height — without scrolling,

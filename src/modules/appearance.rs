@@ -1,0 +1,1396 @@
+//! One screen for how the desktop looks.
+//!
+//! Three things a user thinks of as one decision, which the system keeps
+//! in three places: Hyprland's own appearance settings, its per-animation
+//! speeds and curves, and the GTK/icon/cursor/font settings in gsettings
+//! that no file here generates. On this machine the window borders and the
+//! GTK theme are both Dracula, matched by hand in two files with nothing
+//! keeping them in step. Putting them on one screen is the point.
+//!
+//! The three don't share an ownership story, and the screen doesn't
+//! pretend they do:
+//!
+//! - **Hyprland settings and animations** are an overlay — Hyprforge
+//!   writes a file, that file wins because it's sourced last, and Reset
+//!   stops writing the key so the user's config decides again. Each row
+//!   says which of those it's showing.
+//! - **Desktop settings** are shared state with one value and no layering.
+//!   Writing one *is* the change; there is no generated file to delete to
+//!   undo it. So they're written only when the user changes that control,
+//!   and the previous value is offered back as the only undo there is.
+
+use hyprforge_appearance::animations::{Animation, Curve, LiveAnimation};
+use hyprforge_appearance::catalog::{self, CATALOG};
+use hyprforge_appearance::desktop::{self, DesktopKind, DesktopSetting};
+use hyprforge_appearance::setup::{HyprConfig, SetupPlan};
+use hyprforge_appearance::storage::Appearance;
+use hyprforge_core::hlconfig::import::{Discovered, Live};
+use hyprforge_core::hlconfig::{Invalid, Setting, Settings, Value};
+use hyprforge_core::lua_setup;
+use hyprforge_core::theme::{spacing, FontScale};
+use hyprforge_core::widgets::{
+    danger_button, divider, meta_text, primary_button, scaled_text, secondary_button, section,
+    setup_notice,
+};
+use hyprforge_core::SettingsModule;
+use iced::widget::{checkbox, column, container, pick_list, row, scrollable, text_input};
+use iced::{Element, Length, Task};
+use std::collections::BTreeMap;
+
+use super::setting_rows::{self, RowContext};
+
+/// Which half of the screen is showing. The two are long enough that one
+/// scrolling page would bury whichever the user didn't come for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    Theme,
+    Windows,
+    Animations,
+}
+
+impl Tab {
+    const ALL: [Tab; 3] = [Tab::Theme, Tab::Windows, Tab::Animations];
+
+    fn label(self) -> &'static str {
+        match self {
+            Tab::Theme => "Theme",
+            Tab::Windows => "Windows",
+            Tab::Animations => "Animations",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum Message {
+    TabSelected(Tab),
+    // -- Hyprland settings --
+    Set(&'static str, Value),
+    DraftChanged(&'static str, String),
+    ApplyDrafts,
+    DiscardDrafts,
+    Reset(&'static str),
+    FilterChanged(String),
+    LiveLoaded(Vec<Live>),
+    // -- Animations --
+    AnimationsLoaded(Vec<LiveAnimation>, Vec<Curve>),
+    AnimationToggled(String, bool),
+    AnimationSpeedChanged(String, String),
+    AnimationSpeedSubmitted(String),
+    AnimationCurveChosen(String, String),
+    AnimationReset(String),
+    // -- Desktop (gsettings) --
+    DesktopLoaded(Vec<(&'static str, String)>),
+    DesktopDraftChanged(&'static str, String),
+    DesktopCommit(&'static str),
+    DesktopChosen(&'static str, String),
+    DesktopUndo(&'static str, String),
+    DesktopWritten(&'static str, Result<Option<String>, String>),
+    // -- Import --
+    ImportOpen,
+    ImportEvaluated(hyprforge_lua_import::ImportResult),
+    ImportToggle(usize),
+    ImportConfirm,
+    ImportCancel,
+    Reloaded(Result<(), String>),
+}
+
+enum ImportState {
+    Running,
+    Ready(Vec<Candidate>),
+}
+
+/// An importable value, either a setting or an animation. Both come from
+/// the same evaluation of the user's config and are reviewed together,
+/// because "adopt what I already have" is one decision.
+struct Candidate {
+    label: String,
+    detail: String,
+    selected: bool,
+    already_owned: bool,
+    differs: bool,
+    payload: Payload,
+}
+
+enum Payload {
+    Setting(Discovered),
+    Animation(String, Animation),
+}
+
+pub struct AppearanceModule {
+    tab: Tab,
+    stored: Appearance,
+    drafts: BTreeMap<&'static str, String>,
+    draft_errors: BTreeMap<&'static str, String>,
+    /// Speed fields mid-edit, keyed by leaf. Same reason as `drafts`:
+    /// committing per keystroke would reload Hyprland once per character.
+    animation_drafts: BTreeMap<String, String>,
+    animation_errors: BTreeMap<String, String>,
+    /// Desktop values as gsettings currently has them, and any field
+    /// being typed into.
+    desktop: BTreeMap<&'static str, String>,
+    desktop_drafts: BTreeMap<&'static str, String>,
+    desktop_errors: BTreeMap<&'static str, String>,
+    /// The last desktop write, so it can be offered back. gsettings has
+    /// no generated file to delete, so this is the only undo available.
+    desktop_undo: Option<(&'static str, String, String)>,
+    filter: String,
+    config: HyprConfig,
+    setup_plan: SetupPlan,
+    error: Option<String>,
+    status: Option<String>,
+    store_unreadable: Option<String>,
+    invalid: Vec<Invalid>,
+    live: BTreeMap<&'static str, Live>,
+    live_animations: Vec<LiveAnimation>,
+    curves: Vec<Curve>,
+    import_review: Option<ImportState>,
+}
+
+impl AppearanceModule {
+    pub fn new() -> (Self, Task<Message>) {
+        // A failure here must never look like "you've configured
+        // nothing": that reading is what turns one bad parse into a wiped
+        // store on the next save.
+        let (stored, store_unreadable) =
+            match hyprforge_appearance::storage::load(&appearance_toml_path()) {
+                Ok(stored) => (stored, None),
+                Err(e) => (Appearance::default(), Some(e.to_string())),
+            };
+        let invalid = stored.settings.validate(&CATALOG);
+        let setup = lua_setup::bootstrap(
+            &hyprforge_core::paths::hypr_config_dir(),
+            &hyprforge_core::paths::hyprland_lua_path(),
+            lua_setup::ModuleSetup {
+                require_line: hyprforge_appearance::setup::REQUIRE_LINE,
+                placement: hyprforge_appearance::setup::PLACEMENT,
+                generated: (
+                    appearance_lua_path(),
+                    hyprforge_appearance::apply::generate(&Appearance::default()),
+                ),
+            },
+        );
+        (
+            AppearanceModule {
+                tab: Tab::Theme,
+                stored,
+                drafts: BTreeMap::new(),
+                draft_errors: BTreeMap::new(),
+                animation_drafts: BTreeMap::new(),
+                animation_errors: BTreeMap::new(),
+                desktop: BTreeMap::new(),
+                desktop_drafts: BTreeMap::new(),
+                desktop_errors: BTreeMap::new(),
+                desktop_undo: None,
+                filter: String::new(),
+                config: setup.config,
+                setup_plan: setup.plan,
+                error: setup.error,
+                status: None,
+                store_unreadable,
+                invalid,
+                live: BTreeMap::new(),
+                live_animations: Vec::new(),
+                curves: Vec::new(),
+                import_review: None,
+            },
+            // All three reads are silent on failure by design: every
+            // section still renders, it just can't claim to know what's
+            // live.
+            Task::batch([
+                Task::perform(read_live(), Message::LiveLoaded),
+                Task::perform(read_animations(), |(a, c)| Message::AnimationsLoaded(a, c)),
+                Task::perform(read_desktop(), Message::DesktopLoaded),
+            ]),
+        )
+    }
+
+    fn rows(&self) -> RowContext<'_, Message> {
+        RowContext {
+            settings: &self.stored.settings,
+            live: &self.live,
+            drafts: &self.drafts,
+            draft_errors: &self.draft_errors,
+            on_set: Message::Set,
+            on_draft: Message::DraftChanged,
+            on_reset: Message::Reset,
+            on_submit: Message::ApplyDrafts,
+        }
+    }
+
+    /// Writes the canonical TOML. Nothing irreversible runs unless this
+    /// returned `Ok` — the ordering rule that exists because doing it the
+    /// other way round cost a real user 37 hand-written binds.
+    fn persist(&mut self) -> Result<(), String> {
+        if let Some(reason) = &self.store_unreadable {
+            let message = format!(
+                "Not saving — your appearance.toml couldn't be read, and \
+                 overwriting it would lose whatever is in it. ({reason})"
+            );
+            self.error = Some(message.clone());
+            return Err(message);
+        }
+        hyprforge_appearance::storage::save(&appearance_toml_path(), &self.stored).map_err(|e| {
+            self.error = Some(e.to_string());
+            e.to_string()
+        })
+    }
+
+    fn save_and_maybe_reload(&mut self) -> Task<Message> {
+        if self.persist().is_err() {
+            return Task::none();
+        }
+        self.invalid = self.stored.settings.validate(&CATALOG);
+        if !matches!(self.config, HyprConfig::Lua(_)) {
+            self.error = None;
+            self.status = Some(
+                "Saved. Settings take effect once Hyprland setup is finished — see above."
+                    .to_string(),
+            );
+            return Task::none();
+        }
+        if self.setup_plan != SetupPlan::AlreadyPresent {
+            match hyprforge_appearance::setup::install(&hyprforge_core::paths::hyprland_lua_path())
+            {
+                Ok(plan) => self.setup_plan = plan,
+                Err(e) => {
+                    self.error = Some(e.to_string());
+                    return Task::none();
+                }
+            }
+        }
+        Task::perform(regenerate_and_reload(self.stored.clone()), Message::Reloaded)
+    }
+
+    fn apply_drafts(&mut self) -> Task<Message> {
+        self.draft_errors.clear();
+        let pending: Vec<(&'static str, String)> =
+            self.drafts.iter().map(|(k, v)| (*k, v.clone())).collect();
+        let mut applied = false;
+        for (key, raw) in pending {
+            let Some(setting) = catalog::get(key) else {
+                continue;
+            };
+            match setting_rows::parse_for(&setting.kind, &raw) {
+                Ok(value) => {
+                    let problems = Settings::from_one(key, value.clone()).validate(&CATALOG);
+                    if let Some(problem) = problems.first() {
+                        self.draft_errors.insert(key, problem.problem.clone());
+                    } else {
+                        self.stored.settings.set(key, value);
+                        self.drafts.remove(key);
+                        applied = true;
+                    }
+                }
+                Err(problem) => {
+                    self.draft_errors.insert(key, problem);
+                }
+            }
+        }
+        if !applied {
+            return Task::none();
+        }
+        self.save_and_maybe_reload()
+    }
+
+    /// The animation a row should show: owned first, then whatever the
+    /// compositor currently has. Same precedence as a setting row, and for
+    /// the same reason — showing a default while something else is running
+    /// is a screen that lies.
+    fn effective_animation(&self, leaf: &str) -> (Animation, bool) {
+        if let Some(a) = self.stored.animations.get(leaf) {
+            return (a.clone(), true);
+        }
+        let live = self
+            .live_animations
+            .iter()
+            .find(|l| l.leaf == leaf)
+            .map(|l| l.animation.clone())
+            .unwrap_or(Animation {
+                enabled: true,
+                speed: 1.0,
+                bezier: String::new(),
+                style: String::new(),
+            });
+        (live, false)
+    }
+
+    /// Takes ownership of a leaf, seeding it from whatever is running so
+    /// touching one control doesn't silently reset the others.
+    fn own_animation(&mut self, leaf: &str) -> Animation {
+        let (current, _) = self.effective_animation(leaf);
+        self.stored.animations.set(leaf, current.clone());
+        current
+    }
+
+    fn matches_filter(&self, setting: &Setting) -> bool {
+        let q = self.filter.trim().to_lowercase();
+        q.is_empty()
+            || setting.label.to_lowercase().contains(&q)
+            || setting.key.to_lowercase().contains(&q)
+            || setting.help.to_lowercase().contains(&q)
+    }
+}
+
+impl SettingsModule for AppearanceModule {
+    type Message = Message;
+
+    fn title(&self) -> &str {
+        "Appearance"
+    }
+
+    fn icon(&self) -> &'static str {
+        "🎨"
+    }
+
+    fn update(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::TabSelected(tab) => {
+                self.tab = tab;
+                Task::none()
+            }
+            Message::Set(key, value) => {
+                self.stored.settings.set(key, value);
+                self.status = None;
+                self.save_and_maybe_reload()
+            }
+            Message::DraftChanged(key, raw) => {
+                self.drafts.insert(key, raw);
+                self.draft_errors.remove(key);
+                Task::none()
+            }
+            Message::ApplyDrafts => self.apply_drafts(),
+            Message::DiscardDrafts => {
+                self.drafts.clear();
+                self.draft_errors.clear();
+                self.animation_drafts.clear();
+                self.animation_errors.clear();
+                Task::none()
+            }
+            Message::Reset(key) => {
+                self.stored.settings.clear(key);
+                self.drafts.remove(key);
+                self.draft_errors.remove(key);
+                self.status = None;
+                self.save_and_maybe_reload()
+            }
+            Message::FilterChanged(q) => {
+                self.filter = q;
+                Task::none()
+            }
+            Message::LiveLoaded(live) => {
+                self.live = live.into_iter().map(|l| (l.key, l)).collect();
+                Task::none()
+            }
+            Message::AnimationsLoaded(animations, curves) => {
+                self.live_animations = animations;
+                self.curves = curves;
+                Task::none()
+            }
+            Message::AnimationToggled(leaf, enabled) => {
+                let mut a = self.own_animation(&leaf);
+                a.enabled = enabled;
+                self.stored.animations.set(&leaf, a);
+                self.save_and_maybe_reload()
+            }
+            Message::AnimationCurveChosen(leaf, bezier) => {
+                let mut a = self.own_animation(&leaf);
+                a.bezier = bezier;
+                self.stored.animations.set(&leaf, a);
+                self.save_and_maybe_reload()
+            }
+            Message::AnimationSpeedChanged(leaf, raw) => {
+                self.animation_errors.remove(&leaf);
+                self.animation_drafts.insert(leaf, raw);
+                Task::none()
+            }
+            Message::AnimationSpeedSubmitted(leaf) => {
+                let Some(raw) = self.animation_drafts.get(&leaf).cloned() else {
+                    return Task::none();
+                };
+                match raw.trim().parse::<f64>() {
+                    Ok(speed) if speed.is_finite() && speed > 0.0 => {
+                        let mut a = self.own_animation(&leaf);
+                        a.speed = speed;
+                        self.stored.animations.set(&leaf, a);
+                        self.animation_drafts.remove(&leaf);
+                        self.save_and_maybe_reload()
+                    }
+                    Ok(_) => {
+                        self.animation_errors
+                            .insert(leaf, "speed must be greater than 0".to_string());
+                        Task::none()
+                    }
+                    Err(_) => {
+                        self.animation_errors
+                            .insert(leaf, "expected a number".to_string());
+                        Task::none()
+                    }
+                }
+            }
+            Message::AnimationReset(leaf) => {
+                self.stored.animations.clear(&leaf);
+                self.animation_drafts.remove(&leaf);
+                self.animation_errors.remove(&leaf);
+                self.save_and_maybe_reload()
+            }
+            Message::DesktopLoaded(values) => {
+                self.desktop = values.into_iter().collect();
+                Task::none()
+            }
+            Message::DesktopDraftChanged(key, raw) => {
+                self.desktop_errors.remove(key);
+                self.desktop_drafts.insert(key, raw);
+                Task::none()
+            }
+            Message::DesktopChosen(key, value) => write_desktop(self, key, value),
+            Message::DesktopCommit(key) => {
+                let Some(raw) = self.desktop_drafts.get(key).cloned() else {
+                    return Task::none();
+                };
+                write_desktop(self, key, raw)
+            }
+            Message::DesktopUndo(key, previous) => write_desktop(self, key, previous),
+            Message::DesktopWritten(key, Ok(previous)) => {
+                self.desktop_drafts.remove(key);
+                if let Some(new_value) = self.desktop_drafts.get(key).cloned() {
+                    self.desktop.insert(key, new_value);
+                }
+                // Re-read rather than assume: gsettings normalises some
+                // values, and showing what we sent instead of what it
+                // stored would be the same lie the settings rows had.
+                self.desktop_undo = previous.map(|p| (key, p, String::new()));
+                Task::perform(read_desktop(), Message::DesktopLoaded)
+            }
+            Message::DesktopWritten(key, Err(e)) => {
+                self.desktop_errors.insert(key, e);
+                Task::none()
+            }
+            Message::ImportOpen => {
+                self.import_review = Some(ImportState::Running);
+                Task::perform(super::evaluate_user_config(), Message::ImportEvaluated)
+            }
+            Message::ImportEvaluated(result) => {
+                self.import_review = Some(ImportState::Ready(self.candidates(&result)));
+                if !result.failures.is_empty() {
+                    self.error = Some(format!(
+                        "Some config files couldn't be read, so anything they set isn't listed: {}",
+                        result
+                            .failures
+                            .iter()
+                            .map(|(p, why)| format!("{} ({why})", p.display()))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ));
+                }
+                Task::none()
+            }
+            Message::ImportToggle(i) => {
+                if let Some(ImportState::Ready(candidates)) = &mut self.import_review {
+                    if let Some(c) = candidates.get_mut(i) {
+                        c.selected = !c.selected;
+                    }
+                }
+                Task::none()
+            }
+            Message::ImportConfirm => {
+                let chosen: Vec<Payload> = match self.import_review.take() {
+                    Some(ImportState::Ready(candidates)) => candidates
+                        .into_iter()
+                        .filter(|c| c.selected)
+                        .map(|c| c.payload)
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                if chosen.is_empty() {
+                    return Task::none();
+                }
+                let count = chosen.len();
+                for payload in chosen {
+                    match payload {
+                        Payload::Setting(d) => self.stored.settings.set(d.key, d.value),
+                        Payload::Animation(leaf, a) => self.stored.animations.set(&leaf, a),
+                    }
+                }
+                self.status = Some(format!("Imported {count} item(s)."));
+                self.save_and_maybe_reload()
+            }
+            Message::ImportCancel => {
+                self.import_review = None;
+                Task::none()
+            }
+            Message::Reloaded(Ok(())) => {
+                self.error = None;
+                self.status = Some("Saved.".to_string());
+                // What's running just changed, so the cached live values
+                // are stale — most visibly right after a Reset, where a
+                // row falls back to them.
+                Task::batch([
+                    Task::perform(read_live(), Message::LiveLoaded),
+                    Task::perform(read_animations(), |(a, c)| Message::AnimationsLoaded(a, c)),
+                ])
+            }
+            Message::Reloaded(Err(e)) => {
+                self.status = None;
+                self.error = Some(e);
+                Task::none()
+            }
+        }
+    }
+
+    fn view(&self, scale: FontScale) -> Element<'_, Message> {
+        if let Some(review) = &self.import_review {
+            return self.import_view(review, scale);
+        }
+
+        let mut content = column![].spacing(spacing::LG).width(Length::Fill);
+
+        if let Some(notice) = setup_notice(&self.config, "appearance settings", scale) {
+            content = content.push(notice);
+        }
+        if let Some(reason) = &self.store_unreadable {
+            content = content.push(section(
+                "Your settings file couldn't be read",
+                scale,
+                column![
+                    scaled_text(
+                        "Nothing will be saved until this is fixed — writing over it \
+                         would lose whatever it contains.",
+                        13.0,
+                        scale,
+                    ),
+                    meta_text(reason.clone(), 12.0, scale),
+                ]
+                .spacing(spacing::SM),
+            ));
+        }
+        if !self.invalid.is_empty() {
+            let mut list = column![scaled_text(
+                "These are in your appearance.toml but aren't being applied. Fix \
+                 or remove them:",
+                13.0,
+                scale,
+            )]
+            .spacing(spacing::XS);
+            for bad in &self.invalid {
+                list = list.push(meta_text(
+                    format!("{} — {}", bad.key, bad.problem),
+                    12.0,
+                    scale,
+                ));
+            }
+            content = content.push(section("Settings being skipped", scale, list));
+        }
+        if let Some(e) = &self.error {
+            content = content.push(section(
+                "Something went wrong",
+                scale,
+                scaled_text(e.clone(), 13.0, scale),
+            ));
+        }
+        if let Some(s) = &self.status {
+            content = content.push(meta_text(s.clone(), 12.0, scale));
+        }
+
+        let mut tabs = row![].spacing(spacing::SM);
+        for tab in Tab::ALL {
+            let button = if tab == self.tab {
+                primary_button(tab.label())
+            } else {
+                secondary_button(tab.label())
+            };
+            tabs = tabs.push(button.on_press(Message::TabSelected(tab)));
+        }
+        content = content.push(
+            row![
+                tabs,
+                secondary_button("Import from Hyprland").on_press(Message::ImportOpen),
+            ]
+            .spacing(spacing::MD)
+            .align_y(iced::Alignment::Center),
+        );
+
+        content = match self.tab {
+            Tab::Theme => content.push(self.theme_view(scale)),
+            Tab::Windows => self.windows_view(content, scale),
+            Tab::Animations => content.push(self.animations_view(scale)),
+        };
+
+        scrollable(container(content).padding(spacing::LG))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+}
+
+impl AppearanceModule {
+    /// The gsettings half. Kept visually first because it's the part a
+    /// user is most likely to be looking for, and because it's the part
+    /// that makes the Hyprland colours below make sense.
+    fn theme_view(&self, scale: FontScale) -> Element<'_, Message> {
+        let mut body = column![meta_text(
+            "These apply to GTK and Qt apps, not to Hyprland itself. Unlike \
+             everything else on this screen they're shared with the rest of your \
+             desktop — changing one takes effect immediately and there's no \
+             generated file to undo it with.",
+            12.0,
+            scale,
+        )]
+        .spacing(spacing::SM);
+
+        if let Some((key, previous, _)) = &self.desktop_undo {
+            body = body.push(
+                row![
+                    scaled_text(
+                        format!("{} was \u{201c}{previous}\u{201d}", label_for(key)),
+                        13.0,
+                        scale,
+                    ),
+                    secondary_button("Put it back")
+                        .on_press(Message::DesktopUndo(key, previous.clone())),
+                ]
+                .spacing(spacing::MD)
+                .align_y(iced::Alignment::Center),
+            );
+        }
+
+        for setting in desktop::SETTINGS {
+            body = body.push(divider());
+            body = body.push(self.desktop_row(setting, scale));
+        }
+        section("Desktop theme", scale, body)
+    }
+
+    fn desktop_row(&self, setting: &'static DesktopSetting, scale: FontScale) -> Element<'_, Message> {
+        let key = setting.key;
+        let current = self.desktop.get(key).cloned();
+        let shown = self
+            .desktop_drafts
+            .get(key)
+            .cloned()
+            .or_else(|| current.clone())
+            .unwrap_or_default();
+
+        let control: Element<'_, Message> = match setting.kind {
+            DesktopKind::Enum(choices) => {
+                let options: Vec<String> = choices.iter().map(|c| c.to_string()).collect();
+                let selected = current.clone().filter(|c| options.contains(c));
+                pick_list(options, selected, move |choice: String| {
+                    Message::DesktopChosen(key, choice)
+                })
+                .into()
+            }
+            _ => text_input("", &shown)
+                .on_input(move |raw| Message::DesktopDraftChanged(key, raw))
+                .on_submit(Message::DesktopCommit(key))
+                .padding(spacing::SM)
+                .into(),
+        };
+
+        let mut label_side = column![scaled_text(setting.label, 14.0, scale)].spacing(2);
+        label_side = label_side.push(meta_text(setting.help, 12.0, scale));
+        if let Some(problem) = self.desktop_errors.get(key) {
+            label_side = label_side.push(scaled_text(problem.clone(), 12.0, scale));
+        }
+        if current.is_none() {
+            label_side = label_side.push(meta_text("Not available on this desktop", 12.0, scale));
+        }
+
+        let control_side: Element<'_, Message> =
+            if self.desktop_drafts.contains_key(key) {
+                row![
+                    container(control).width(Length::Fill),
+                    primary_button("Set").on_press(Message::DesktopCommit(key)),
+                ]
+                .spacing(spacing::SM)
+                .align_y(iced::Alignment::Center)
+                .into()
+            } else {
+                control
+            };
+
+        row![
+            container(label_side).width(Length::FillPortion(2)),
+            container(control_side).width(Length::FillPortion(3)),
+        ]
+        .spacing(spacing::MD)
+        .align_y(iced::Alignment::Center)
+        .into()
+    }
+
+    /// The Hyprland settings half, one section per catalog category.
+    fn windows_view<'a>(
+        &'a self,
+        mut content: iced::widget::Column<'a, Message>,
+        scale: FontScale,
+    ) -> iced::widget::Column<'a, Message> {
+        content = content.push(
+            text_input("Filter settings…", &self.filter)
+                .on_input(Message::FilterChanged)
+                .padding(spacing::SM),
+        );
+
+        if !self.drafts.is_empty() {
+            content = content.push(
+                row![
+                    scaled_text(
+                        format!("{} field(s) typed but not applied", self.drafts.len()),
+                        13.0,
+                        scale,
+                    ),
+                    primary_button("Apply").on_press(Message::ApplyDrafts),
+                    secondary_button("Discard").on_press(Message::DiscardDrafts),
+                ]
+                .spacing(spacing::MD)
+                .align_y(iced::Alignment::Center),
+            );
+        }
+
+        let rows = self.rows();
+        let mut any = false;
+        for category in CATALOG.categories {
+            let settings: Vec<&'static Setting> = CATALOG
+                .in_category(category.key)
+                .filter(|s| self.matches_filter(s))
+                .collect();
+            if settings.is_empty() {
+                continue;
+            }
+            any = true;
+            let mut body = column![meta_text(category.help, 12.0, scale)].spacing(spacing::SM);
+            for setting in settings {
+                body = body.push(divider());
+                body = body.push(rows.row(setting, scale));
+            }
+            content = content.push(section(category.label, scale, body));
+        }
+
+        if !any {
+            content = content.push(scaled_text(
+                format!("Nothing matches “{}”.", self.filter.trim()),
+                13.0,
+                scale,
+            ));
+        }
+        for (_, why) in CATALOG.unsupported {
+            content = content.push(meta_text(*why, 12.0, scale));
+        }
+        content
+    }
+
+    fn animations_view(&self, scale: FontScale) -> Element<'_, Message> {
+        if self.live_animations.is_empty() {
+            return section(
+                "Animations",
+                scale,
+                scaled_text(
+                    "Couldn't read the animation list from Hyprland, so there's \
+                     nothing to show. Anything already saved still applies.",
+                    13.0,
+                    scale,
+                ),
+            );
+        }
+
+        let curve_names: Vec<String> = self.curves.iter().map(|c| c.name.clone()).collect();
+        let mut body = column![meta_text(
+            "Speed is Hyprland's own unit — higher is faster. Curves are the ones \
+             your config defines; Hyprforge doesn't write curves, only picks from \
+             them.",
+            12.0,
+            scale,
+        )]
+        .spacing(spacing::SM);
+
+        for live in &self.live_animations {
+            let leaf = live.leaf.clone();
+            if !self.filter.trim().is_empty()
+                && !leaf.to_lowercase().contains(&self.filter.trim().to_lowercase())
+            {
+                continue;
+            }
+            let (current, owned) = self.effective_animation(&leaf);
+            let shown_speed = self
+                .animation_drafts
+                .get(&leaf)
+                .cloned()
+                .unwrap_or_else(|| format!("{}", current.speed));
+
+            let mut label_side = column![scaled_text(leaf.clone(), 14.0, scale)].spacing(2);
+            if let Some(problem) = self.animation_errors.get(&leaf) {
+                label_side = label_side.push(scaled_text(problem.clone(), 12.0, scale));
+            }
+            label_side = label_side.push(meta_text(
+                if owned {
+                    "Set by Hyprforge"
+                } else if live.overridden {
+                    "From your Hyprland config"
+                } else {
+                    "Hyprland default"
+                },
+                12.0,
+                scale,
+            ));
+
+            let for_toggle = leaf.clone();
+            let for_speed = leaf.clone();
+            let for_submit = leaf.clone();
+            let for_curve = leaf.clone();
+            let mut controls = row![
+                checkbox(current.enabled)
+                    .on_toggle(move |b| Message::AnimationToggled(for_toggle.clone(), b)),
+                text_input("speed", &shown_speed)
+                    .on_input(move |raw| Message::AnimationSpeedChanged(for_speed.clone(), raw))
+                    .on_submit(Message::AnimationSpeedSubmitted(for_submit.clone()))
+                    .padding(spacing::SM)
+                    .width(Length::Fixed(90.0)),
+                pick_list(
+                    curve_names.clone(),
+                    Some(current.bezier.clone()).filter(|b| curve_names.contains(b)),
+                    move |name: String| Message::AnimationCurveChosen(for_curve.clone(), name),
+                ),
+            ]
+            .spacing(spacing::SM)
+            .align_y(iced::Alignment::Center);
+
+            if owned {
+                controls = controls
+                    .push(danger_button("Reset", Message::AnimationReset(leaf.clone())));
+            }
+
+            body = body.push(divider());
+            body = body.push(
+                row![
+                    container(label_side).width(Length::FillPortion(2)),
+                    container(controls).width(Length::FillPortion(3)),
+                ]
+                .spacing(spacing::MD)
+                .align_y(iced::Alignment::Center),
+            );
+        }
+        section("Animations", scale, body)
+    }
+
+    /// Both halves of an import, reviewed together — "adopt what I already
+    /// have" is one decision, not two.
+    fn candidates(&self, result: &hyprforge_lua_import::ImportResult) -> Vec<Candidate> {
+        let hyprforge_dir = hyprforge_core::paths::hypr_hyprforge_dir();
+        let mut found = Vec::new();
+        let mut animations = Vec::new();
+        for call in &result.calls {
+            // Hyprforge's own generated file is `require()`d from
+            // hyprland.lua too, so it evaluates alongside the user's own.
+            // Including it would offer Hyprforge's values back as if the
+            // user had written them.
+            if call.source_path.starts_with(&hyprforge_dir) {
+                continue;
+            }
+            found.extend(hyprforge_core::hlconfig::import::settings_from_call(
+                &call.kind, &call.args, &CATALOG,
+            ));
+            if let Some(pair) =
+                hyprforge_appearance::animations::animation_from_call(&call.kind, &call.args)
+            {
+                animations.push(pair);
+            }
+        }
+
+        let mut out: Vec<Candidate> = hyprforge_core::hlconfig::import::candidates_from_config(
+            &found,
+            &CATALOG,
+            &self.stored.settings,
+        )
+        .into_iter()
+        .map(|d| Candidate {
+            label: d.label.to_string(),
+            detail: setting_rows::render_for_edit(&d.value),
+            selected: !d.already_owned,
+            already_owned: d.already_owned,
+            differs: d.differs,
+            payload: Payload::Setting(d),
+        })
+        .collect();
+
+        // Later calls win, same as Hyprland applies them.
+        let resolved: BTreeMap<String, Animation> = animations.into_iter().collect();
+        for (leaf, animation) in resolved {
+            let stored = self.stored.animations.get(&leaf);
+            out.push(Candidate {
+                label: format!("Animation: {leaf}"),
+                detail: format!("speed {}", animation.speed),
+                selected: stored.is_none(),
+                already_owned: stored.is_some(),
+                differs: stored.is_some_and(|s| *s != animation),
+                payload: Payload::Animation(leaf, animation),
+            });
+        }
+        out
+    }
+
+    fn import_view(&self, review: &ImportState, scale: FontScale) -> Element<'_, Message> {
+        let body: Element<'_, Message> = match review {
+            ImportState::Running => {
+                scaled_text("Reading your Hyprland config…", 13.0, scale).into()
+            }
+            ImportState::Ready(candidates) if candidates.is_empty() => column![
+                scaled_text(
+                    "Your config doesn't set any appearance options Hyprforge can \
+                     take over, so there's nothing to import.",
+                    13.0,
+                    scale,
+                ),
+                secondary_button("Close").on_press(Message::ImportCancel),
+            ]
+            .spacing(spacing::MD)
+            .into(),
+            ImportState::Ready(candidates) => {
+                let mut list = column![scaled_text(
+                    "These are the appearance options your own Hyprland config sets. \
+                     Importing one hands it to Hyprforge, which from then on writes \
+                     it and wins over your config file — the line in your config \
+                     stays where it is, it just stops being the one that decides.",
+                    13.0,
+                    scale,
+                )]
+                .spacing(spacing::SM);
+                for (i, c) in candidates.iter().enumerate() {
+                    let mut entry = column![row![
+                        checkbox(c.selected).on_toggle(move |_| Message::ImportToggle(i)),
+                        scaled_text(format!("{} — {}", c.label, c.detail), 13.0, scale),
+                    ]
+                    .spacing(spacing::SM)
+                    .align_y(iced::Alignment::Center)]
+                    .spacing(2);
+                    if c.differs {
+                        entry = entry.push(meta_text(
+                            "Different from what Hyprforge has — importing replaces it.",
+                            12.0,
+                            scale,
+                        ));
+                    } else if c.already_owned {
+                        entry = entry.push(meta_text("Already imported.", 12.0, scale));
+                    }
+                    list = list.push(entry);
+                }
+                column![
+                    list,
+                    row![
+                        primary_button("Import selected").on_press(Message::ImportConfirm),
+                        secondary_button("Cancel").on_press(Message::ImportCancel),
+                    ]
+                    .spacing(spacing::MD),
+                ]
+                .spacing(spacing::LG)
+                .into()
+            }
+        };
+        scrollable(container(section("Import from Hyprland", scale, body)).padding(spacing::LG))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+}
+
+fn label_for(key: &str) -> &'static str {
+    desktop::get_setting(key).map(|s| s.label).unwrap_or("Setting")
+}
+
+/// Validates before writing, because a gsettings write is immediate and
+/// desktop-wide — there is no generated file to roll back.
+fn write_desktop(module: &mut AppearanceModule, key: &'static str, value: String) -> Task<Message> {
+    let Some(setting) = desktop::get_setting(key) else {
+        return Task::none();
+    };
+    if let Err(problem) = desktop::check(setting, &value) {
+        module.desktop_errors.insert(key, problem);
+        return Task::none();
+    }
+    module.desktop_errors.remove(key);
+    Task::perform(write_desktop_value(key, value), move |r| {
+        Message::DesktopWritten(key, r)
+    })
+}
+
+async fn write_desktop_value(
+    key: &'static str,
+    value: String,
+) -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(move || desktop::set(key, &value).map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+async fn read_desktop() -> Vec<(&'static str, String)> {
+    tokio::task::spawn_blocking(|| desktop::read_all().unwrap_or_default())
+        .await
+        .unwrap_or_default()
+}
+
+async fn read_live() -> Vec<Live> {
+    tokio::task::spawn_blocking(|| {
+        hyprforge_core::hlconfig::import::live(&CATALOG).unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+async fn read_animations() -> (Vec<LiveAnimation>, Vec<Curve>) {
+    tokio::task::spawn_blocking(|| {
+        hyprforge_appearance::animations::live().unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+async fn regenerate_and_reload(appearance: Appearance) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        hyprforge_appearance::apply::apply(&appearance_lua_path(), &appearance)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn appearance_toml_path() -> std::path::PathBuf {
+    hyprforge_core::paths::hyprforge_config_dir().join("appearance.toml")
+}
+
+fn appearance_lua_path() -> std::path::PathBuf {
+    hyprforge_core::paths::hypr_hyprforge_dir().join("appearance.lua")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs `f` against a module whose config lives in a throwaway
+    /// directory. Without this, `AppearanceModule::new()` reads — and
+    /// several update arms then *save over* — the developer's real
+    /// `~/.config/hyprforge/appearance.toml`.
+    fn with_temp_config<T>(f: impl FnOnce(&mut AppearanceModule) -> T) -> T {
+        let _lock = crate::modules::CONFIG_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let previous = std::env::var("XDG_CONFIG_HOME").ok();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", dir.path()) };
+        let (mut module, _) = AppearanceModule::new();
+        let out = f(&mut module);
+        match previous {
+            Some(p) => unsafe { std::env::set_var("XDG_CONFIG_HOME", p) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+        out
+    }
+
+    fn live_animation(leaf: &str, speed: f64, overridden: bool) -> LiveAnimation {
+        LiveAnimation {
+            leaf: leaf.to_string(),
+            animation: Animation {
+                enabled: true,
+                speed,
+                bezier: "easeOutQuint".to_string(),
+                style: String::new(),
+            },
+            overridden,
+        }
+    }
+
+    #[test]
+    fn a_new_module_owns_nothing() {
+        with_temp_config(|m| {
+            assert!(m.stored.is_empty());
+            assert!(!m.rows().owns("decoration:rounding"));
+        });
+    }
+
+    #[test]
+    fn setting_a_value_takes_ownership() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::Set("decoration:rounding", Value::Int(12)));
+            assert_eq!(
+                m.stored.settings.get("decoration:rounding"),
+                Some(&Value::Int(12))
+            );
+        });
+    }
+
+    /// Reset stops writing the key rather than writing the default, so
+    /// the user's own config decides again.
+    #[test]
+    fn reset_gives_the_key_back_rather_than_writing_the_default() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::Set("decoration:rounding", Value::Int(12)));
+            let _ = m.update(Message::Reset("decoration:rounding"));
+            assert!(!m.rows().owns("decoration:rounding"));
+            let lua = hyprforge_appearance::apply::generate(&m.stored);
+            assert!(!lua.contains("rounding"), "{lua}");
+        });
+    }
+
+    /// A colour is typed, so it goes through the draft path — and an
+    /// invalid one must be refused, since Hyprland rejects it and a
+    /// rejected value takes the whole generated file down.
+    #[test]
+    fn a_malformed_colour_is_refused_with_the_expected_form() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::DraftChanged(
+                "general:col:active_border",
+                "rgba(bd93f9)".into(),
+            ));
+            let _ = m.update(Message::ApplyDrafts);
+            assert!(!m.rows().owns("general:col:active_border"));
+            let problem = &m.draft_errors["general:col:active_border"];
+            assert!(problem.contains("rgba"), "{problem}");
+        });
+    }
+
+    #[test]
+    fn a_valid_colour_is_accepted() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::DraftChanged(
+                "general:col:active_border",
+                "rgba(bd93f9ff)".into(),
+            ));
+            let _ = m.update(Message::ApplyDrafts);
+            assert_eq!(
+                m.stored.settings.get("general:col:active_border"),
+                Some(&Value::Text("rgba(bd93f9ff)".into()))
+            );
+        });
+    }
+
+    /// Touching one animation control must not silently reset the
+    /// others — taking ownership seeds the leaf from what's running.
+    #[test]
+    fn owning_an_animation_keeps_its_other_values() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::AnimationsLoaded(
+                vec![live_animation("windows", 4.79, true)],
+                Vec::new(),
+            ));
+            let _ = m.update(Message::AnimationToggled("windows".into(), false));
+            let stored = m.stored.animations.get("windows").unwrap();
+            assert!(!stored.enabled);
+            assert_eq!(stored.speed, 4.79, "speed must survive a toggle");
+            assert_eq!(stored.bezier, "easeOutQuint", "curve must survive a toggle");
+        });
+    }
+
+    #[test]
+    fn an_animation_speed_commits_on_submit_not_per_keystroke() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::AnimationsLoaded(
+                vec![live_animation("fade", 3.0, false)],
+                Vec::new(),
+            ));
+            let _ = m.update(Message::AnimationSpeedChanged("fade".into(), "5.5".into()));
+            assert!(m.stored.animations.get("fade").is_none(), "still a draft");
+            let _ = m.update(Message::AnimationSpeedSubmitted("fade".into()));
+            assert_eq!(m.stored.animations.get("fade").unwrap().speed, 5.5);
+        });
+    }
+
+    /// Hyprland refuses a speed of zero or less, and NaN would render as
+    /// a syntax error taking the whole file with it.
+    #[test]
+    fn an_unusable_animation_speed_is_refused() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::AnimationsLoaded(
+                vec![live_animation("fade", 3.0, false)],
+                Vec::new(),
+            ));
+            for bad in ["0", "-2", "nonsense"] {
+                let _ = m.update(Message::AnimationSpeedChanged("fade".into(), bad.into()));
+                let _ = m.update(Message::AnimationSpeedSubmitted("fade".into()));
+                assert!(m.stored.animations.get("fade").is_none(), "{bad} was accepted");
+                assert!(m.animation_errors.contains_key("fade"), "{bad}");
+            }
+        });
+    }
+
+    #[test]
+    fn an_animation_reset_hands_the_leaf_back() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::AnimationsLoaded(
+                vec![live_animation("fade", 3.0, false)],
+                Vec::new(),
+            ));
+            let _ = m.update(Message::AnimationToggled("fade".into(), false));
+            assert!(m.stored.animations.get("fade").is_some());
+            let _ = m.update(Message::AnimationReset("fade".into()));
+            assert!(m.stored.animations.get("fade").is_none());
+        });
+    }
+
+    /// The rule that keeps the data-loss bug from returning.
+    #[test]
+    fn an_unreadable_store_blocks_saving() {
+        with_temp_config(|m| {
+            m.store_unreadable = Some("bad toml".to_string());
+            let _ = m.update(Message::Set("decoration:rounding", Value::Int(12)));
+            let saved = hyprforge_appearance::storage::load(&appearance_toml_path()).unwrap();
+            assert!(saved.is_empty(), "nothing may be written over an unreadable store");
+            assert!(m.error.is_some(), "and the user has to be told why");
+        });
+    }
+
+    #[test]
+    fn a_readable_store_still_saves() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::Set("decoration:rounding", Value::Int(12)));
+            let saved = hyprforge_appearance::storage::load(&appearance_toml_path()).unwrap();
+            assert_eq!(saved.settings.get("decoration:rounding"), Some(&Value::Int(12)));
+        });
+    }
+
+    fn config_result(file: &str, calls: Vec<serde_json::Value>) -> hyprforge_lua_import::ImportResult {
+        hyprforge_lua_import::ImportResult {
+            calls: calls
+                .into_iter()
+                .map(|body| hyprforge_lua_import::RecordedCall {
+                    kind: if body.get("leaf").is_some() { "animation" } else { "config" }
+                        .to_string(),
+                    source_path: hyprforge_core::paths::hypr_config_dir().join(file),
+                    line: Some(1),
+                    args: vec![body],
+                })
+                .collect(),
+            failures: Vec::new(),
+        }
+    }
+
+    /// Settings and animations are reviewed in one list, because "adopt
+    /// what I already have" is one decision.
+    #[test]
+    fn import_offers_settings_and_animations_together() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::ImportEvaluated(config_result(
+                "hyprland.lua",
+                vec![
+                    serde_json::json!({ "decoration": { "rounding": 10 } }),
+                    serde_json::json!({ "leaf": "windows", "speed": 4.79, "bezier": "easeOutQuint" }),
+                ],
+            )));
+            let Some(ImportState::Ready(candidates)) = &m.import_review else {
+                panic!("expected a review");
+            };
+            assert_eq!(candidates.len(), 2);
+            assert!(candidates.iter().any(|c| c.label.contains("Animation: windows")));
+            let _ = m.update(Message::ImportConfirm);
+            assert_eq!(m.stored.settings.get("decoration:rounding"), Some(&Value::Int(10)));
+            assert_eq!(m.stored.animations.get("windows").unwrap().speed, 4.79);
+        });
+    }
+
+    /// Hyprforge's own generated file evaluates alongside the user's, so
+    /// its values must never come back as importable.
+    #[test]
+    fn hyprforges_own_generated_file_is_never_offered_for_import() {
+        with_temp_config(|m| {
+            let mut result = config_result(
+                "hyprland.lua",
+                vec![serde_json::json!({ "decoration": { "rounding": 10 } })],
+            );
+            result.calls.push(hyprforge_lua_import::RecordedCall {
+                kind: "config".to_string(),
+                source_path: appearance_lua_path(),
+                line: Some(5),
+                args: vec![serde_json::json!({ "decoration": { "blur": { "passes": 9 } } })],
+            });
+            let _ = m.update(Message::ImportEvaluated(result));
+            let Some(ImportState::Ready(candidates)) = &m.import_review else {
+                panic!("expected a review");
+            };
+            assert_eq!(candidates.len(), 1);
+            assert!(!candidates[0].label.contains("passes"));
+        });
+    }
+
+    #[test]
+    fn cancelling_an_import_changes_nothing() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::ImportEvaluated(config_result(
+                "hyprland.lua",
+                vec![serde_json::json!({ "decoration": { "rounding": 10 } })],
+            )));
+            let _ = m.update(Message::ImportCancel);
+            assert!(m.stored.is_empty());
+            assert!(m.import_review.is_none());
+        });
+    }
+
+    /// gsettings is written immediately and desktop-wide, so a bad value
+    /// must be caught before the write rather than after.
+    #[test]
+    fn an_invalid_desktop_value_is_refused_before_writing() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::DesktopDraftChanged("cursor-size", "enormous".into()));
+            let _ = m.update(Message::DesktopCommit("cursor-size"));
+            assert!(m.desktop_errors.contains_key("cursor-size"));
+
+            let _ = m.update(Message::DesktopDraftChanged("gtk-theme", "  ".into()));
+            let _ = m.update(Message::DesktopCommit("gtk-theme"));
+            assert!(m.desktop_errors.contains_key("gtk-theme"));
+        });
+    }
+
+    /// A row for a key this desktop's schema lacks has to say so rather
+    /// than showing an empty box that silently does nothing.
+    #[test]
+    fn a_missing_desktop_key_still_renders() {
+        with_temp_config(|m| {
+            m.desktop.clear();
+            let _ = m.view(FontScale::default());
+        });
+    }
+
+    /// Builds the whole screen in each state it can be in.
+    #[test]
+    fn the_screen_builds_in_every_state() {
+        with_temp_config(|m| {
+            let scale = FontScale::default();
+            for tab in Tab::ALL {
+                let _ = m.update(Message::TabSelected(tab));
+                let _ = m.view(scale);
+            }
+
+            let _ = m.update(Message::AnimationsLoaded(
+                vec![live_animation("windows", 4.79, true)],
+                vec![Curve { name: "linear".into(), points: (0.0, 0.0, 1.0, 1.0) }],
+            ));
+            let _ = m.update(Message::DesktopLoaded(vec![("gtk-theme", "Dracula".into())]));
+            let _ = m.update(Message::TabSelected(Tab::Animations));
+            let _ = m.view(scale);
+
+            m.store_unreadable = Some("bad toml".into());
+            m.error = Some("something failed".into());
+            m.status = Some("saved".into());
+            m.stored.settings.set("decoration:rounding", Value::Text("huge".into()));
+            m.invalid = m.stored.settings.validate(&CATALOG);
+            let _ = m.view(scale);
+
+            m.store_unreadable = None;
+            m.filter = "nothing matches this".into();
+            let _ = m.update(Message::TabSelected(Tab::Windows));
+            let _ = m.view(scale);
+            m.filter = String::new();
+
+            m.import_review = Some(ImportState::Running);
+            let _ = m.view(scale);
+            m.import_review = Some(ImportState::Ready(Vec::new()));
+            let _ = m.view(scale);
+        });
+    }
+
+    /// Every catalogued setting has to render — a kind the row builder
+    /// doesn't handle would show as a blank row in front of a user.
+    #[test]
+    fn every_catalogued_setting_produces_a_row() {
+        with_temp_config(|m| {
+            let rows = m.rows();
+            for setting in CATALOG.settings {
+                let _ = rows.row(setting, FontScale::default());
+            }
+        });
+    }
+}

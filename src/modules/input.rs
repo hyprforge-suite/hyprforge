@@ -15,15 +15,15 @@
 use hyprforge_core::lua_setup;
 use hyprforge_core::theme::{spacing, FontScale};
 use hyprforge_core::widgets::{
-    danger_button, divider, meta_text, primary_button, scaled_text, secondary_button,
-    section, setup_notice,
+    divider, meta_text, primary_button, scaled_text, secondary_button, section, setup_notice,
 };
+use super::setting_rows::{self, RowContext};
 use hyprforge_core::SettingsModule;
-use hyprforge_input::catalog::{self, Kind, Setting, CATALOG};
+use hyprforge_input::catalog::{self, Setting, CATALOG};
 use hyprforge_core::hlconfig::import::{Discovered, Live};
 use hyprforge_core::hlconfig::{Invalid, Settings, Value};
 use hyprforge_input::setup::{HyprConfig, SetupPlan};
-use iced::widget::{checkbox, column, container, pick_list, row, scrollable, text_input};
+use iced::widget::{checkbox, column, container, row, scrollable, text_input};
 use iced::{Element, Length, Task};
 use std::collections::BTreeMap;
 
@@ -201,38 +201,6 @@ impl InputModule {
         Task::perform(regenerate_and_reload(self.settings.clone()), Message::Reloaded)
     }
 
-    /// The value a row should display: the draft if one is being typed,
-    /// otherwise what's stored, otherwise the catalog default.
-    fn shown_text(&self, setting: &Setting) -> String {
-        if let Some(draft) = self.drafts.get(setting.key) {
-            return draft.clone();
-        }
-        render_for_edit(&self.effective(setting).0)
-    }
-
-    fn owns(&self, key: &str) -> bool {
-        self.settings.get(key).is_some()
-    }
-
-    /// The value a control should display, and where it came from.
-    ///
-    /// Owned beats live beats the catalog default. The order matters in
-    /// both directions: an owned value that hasn't reached the compositor
-    /// yet must still show what the user chose, and an unowned one must
-    /// show what's running rather than what Hyprland would do by default.
-    fn effective(&self, setting: &Setting) -> (Value, Source) {
-        if let Some(v) = self.settings.get(setting.key) {
-            return (v.clone(), Source::Owned);
-        }
-        if let Some(live) = self.live.get(setting.key) {
-            return (
-                live.value.clone(),
-                if live.set { Source::UserConfig } else { Source::Default },
-            );
-        }
-        (Value::default_for(&setting.kind), Source::Default)
-    }
-
     /// Parses every pending draft into the store. All-or-nothing per field:
     /// a field that doesn't parse keeps its draft and its error, and the
     /// ones that do parse are still applied, so one typo doesn't discard
@@ -246,7 +214,7 @@ impl InputModule {
             let Some(setting) = catalog::get(key) else {
                 continue;
             };
-            match parse_for(&setting.kind, &raw) {
+            match setting_rows::parse_for(&setting.kind, &raw) {
                 Ok(value) => {
                     let problems = Settings::from_one(key, value.clone()).validate(&CATALOG);
                     if let Some(problem) = problems.first() {
@@ -545,97 +513,22 @@ impl SettingsModule for InputModule {
 }
 
 impl InputModule {
-    fn setting_row(&self, setting: &'static Setting, scale: FontScale) -> Element<'_, Message> {
-        let key = setting.key;
-        let owned = self.owns(key);
-
-        // Every control reads through `effective`, so an unowned row shows
-        // what is actually running rather than what Hyprland would do if
-        // nobody had configured anything.
-        let (current, source) = self.effective(setting);
-
-        let control: Element<'_, Message> = match setting.kind {
-            Kind::Bool { default } => {
-                let current = current.as_bool().unwrap_or(default);
-                checkbox(current)
-                    .on_toggle(move |b| Message::Set(key, Value::Bool(b)))
-                    .into()
-            }
-            Kind::IntEnum { default, choices } => {
-                let current = current.as_int().unwrap_or(default);
-                let options: Vec<Choice> = choices
-                    .iter()
-                    .map(|(v, label)| Choice {
-                        value: *v,
-                        label,
-                    })
-                    .collect();
-                let selected = options.iter().find(|c| c.value == current).copied();
-                pick_list(options, selected, move |c: Choice| {
-                    Message::Set(key, Value::Int(c.value))
-                })
-                .into()
-            }
-            Kind::TextEnum { default, choices } => {
-                let current = current.as_text().unwrap_or(default).to_string();
-                let options: Vec<TextChoice> =
-                    choices.iter().map(|c| TextChoice { value: c }).collect();
-                let selected = options
-                    .iter()
-                    .find(|c| c.value == current.as_str())
-                    .copied();
-                pick_list(options, selected, move |c: TextChoice| {
-                    Message::Set(key, Value::Text(c.value.to_string()))
-                })
-                .into()
-            }
-            _ => text_input(&placeholder_for(&setting.kind), &self.shown_text(setting))
-                .on_input(move |raw| Message::DraftChanged(key, raw))
-                .on_submit(Message::ApplyDrafts)
-                .padding(spacing::SM)
-                .into(),
-        };
-
-        let mut label_side = column![scaled_text(setting.label, 14.0, scale)].spacing(2);
-        label_side = label_side.push(meta_text(setting.help, 12.0, scale));
-        if let Some(problem) = self.draft_errors.get(key) {
-            label_side = label_side.push(scaled_text(problem.clone(), 12.0, scale));
+    /// The shared row renderer, wired to this module's messages.
+    fn rows(&self) -> RowContext<'_, Message> {
+        RowContext {
+            settings: &self.settings,
+            live: &self.live,
+            drafts: &self.drafts,
+            draft_errors: &self.draft_errors,
+            on_set: Message::Set,
+            on_draft: Message::DraftChanged,
+            on_reset: Message::Reset,
+            on_submit: Message::ApplyDrafts,
         }
-        // Where the displayed value comes from is the load-bearing
-        // distinction on this screen. "Set by Hyprforge" means this app
-        // writes it and it wins; the other two mean the app is only
-        // reporting, and touching the control takes it over.
-        label_side = label_side.push(meta_text(
-            match source {
-                Source::Owned => "Set by Hyprforge",
-                Source::UserConfig => "From your Hyprland config",
-                Source::Default => "Hyprland default",
-            },
-            12.0,
-            scale,
-        ));
+    }
 
-        let control_side: Element<'_, Message> = if owned {
-            row![
-                container(control).width(Length::Fill),
-                danger_button("Reset", Message::Reset(key)),
-            ]
-            .spacing(spacing::SM)
-            .align_y(iced::Alignment::Center)
-            .into()
-        } else {
-            control
-        };
-
-        // Laid out like `widgets::row_field`, but built here because the
-        // label is a stack (name, help, ownership) rather than one string.
-        row![
-            container(label_side).width(Length::FillPortion(2)),
-            container(control_side).width(Length::FillPortion(3)),
-        ]
-        .spacing(spacing::MD)
-        .align_y(iced::Alignment::Center)
-        .into()
+    fn setting_row(&self, setting: &'static Setting, scale: FontScale) -> Element<'_, Message> {
+        self.rows().row(setting, scale)
     }
 
     fn import_view(&self, review: &ImportState, scale: FontScale) -> Element<'_, Message> {
@@ -666,7 +559,7 @@ impl InputModule {
                     let mut label = column![row![
                         checkbox(c.selected).on_toggle(move |_| Message::ImportToggle(i)),
                         scaled_text(
-                            format!("{} — {}", c.found.label, render_for_edit(&c.found.value)),
+                            format!("{} — {}", c.found.label, setting_rows::render_for_edit(&c.found.value)),
                             13.0,
                             scale,
                         ),
@@ -704,107 +597,6 @@ impl InputModule {
     }
 }
 
-/// Where the value a row is showing came from. Not cosmetic: it's the
-/// difference between a number this app writes into the config and one it
-/// is merely reporting back from the compositor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Source {
-    /// Hyprforge writes this key, and it wins over the user's config.
-    Owned,
-    /// The user's own config sets it; Hyprforge is only displaying it.
-    UserConfig,
-    /// Nobody set it, so this is what Hyprland does on its own.
-    Default,
-}
-
-/// A dropdown entry for an [`Kind::IntEnum`]. Carries the number so the
-/// message doesn't have to map a label back to a value — a mapping that
-/// silently breaks the moment two choices share a label.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Choice {
-    value: i64,
-    label: &'static str,
-}
-
-impl std::fmt::Display for Choice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.label)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TextChoice {
-    value: &'static str,
-}
-
-impl std::fmt::Display for TextChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.value.is_empty() {
-            f.write_str("Device default")
-        } else {
-            f.write_str(self.value)
-        }
-    }
-}
-
-/// How a value is written into a text field. Floats keep their decimal
-/// point so a field showing `1` for a float setting can't be mistaken for
-/// an integer one.
-fn render_for_edit(value: &Value) -> String {
-    match value {
-        Value::Bool(b) => b.to_string(),
-        Value::Int(i) => i.to_string(),
-        Value::Float(f) => {
-            let s = format!("{f:?}");
-            if s.contains('.') {
-                s
-            } else {
-                format!("{s}.0")
-            }
-        }
-        Value::Text(s) => s.clone(),
-    }
-}
-
-fn placeholder_for(kind: &Kind) -> String {
-    match kind {
-        Kind::Int { default, .. } | Kind::Gaps { default, .. } => default.to_string(),
-        Kind::Float { default, .. } => render_for_edit(&Value::Float(*default)),
-        Kind::Text { default: "" } => "not set".to_string(),
-        Kind::Text { default } => (*default).to_string(),
-        _ => String::new(),
-    }
-}
-
-/// Turns what was typed into the type the catalog expects. The error text
-/// is what the user sees under the field, so it names the expectation
-/// rather than echoing a parser's wording.
-fn parse_for(kind: &Kind, raw: &str) -> Result<Value, String> {
-    let trimmed = raw.trim();
-    match kind {
-        Kind::Int { .. } | Kind::IntEnum { .. } | Kind::Gaps { .. } => trimmed
-            .parse::<i64>()
-            .map(Value::Int)
-            .map_err(|_| "expected a whole number".to_string()),
-        Kind::Float { .. } => trimmed
-            .parse::<f64>()
-            .map(Value::Float)
-            .map_err(|_| "expected a number".to_string()),
-        Kind::Bool { .. } => trimmed
-            .parse::<bool>()
-            .map(Value::Bool)
-            .map_err(|_| "expected true or false".to_string()),
-        // A colour is typed as text; `validate` is what checks the form,
-        // so the same rule applies whether it was typed here or written
-        // into the TOML by hand.
-        Kind::Color { .. } => Ok(Value::Text(trimmed.to_string())),
-        // Text keeps its surrounding whitespace: a layout list like
-        // "us, cz" is the user's to format, and trimming the interior would
-        // be wrong anyway.
-        Kind::Text { .. } | Kind::TextEnum { .. } => Ok(Value::Text(raw.to_string())),
-    }
-}
-
 /// Reads every option's live value. A failure yields an empty list rather
 /// than an error: the screen is fully usable without it, rows just fall
 /// back to the catalog default, and a banner about a background read the
@@ -826,6 +618,7 @@ async fn regenerate_and_reload(settings: Settings) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::setting_rows::Source;
     use super::*;
 
     /// Runs `f` against a module whose config lives in a throwaway
@@ -852,7 +645,7 @@ mod tests {
     fn a_new_module_owns_nothing() {
         with_temp_config(|m| {
             assert!(m.settings.is_empty());
-            assert!(!m.owns("input:kb_layout"));
+            assert!(!m.rows().owns("input:kb_layout"));
         });
     }
 
@@ -860,7 +653,7 @@ mod tests {
     fn toggling_a_checkbox_takes_ownership_of_the_key() {
         with_temp_config(|m| {
             let _ = m.update(Message::Set("input:numlock_by_default", Value::Bool(true)));
-            assert!(m.owns("input:numlock_by_default"));
+            assert!(m.rows().owns("input:numlock_by_default"));
             assert_eq!(
                 m.settings.get("input:numlock_by_default"),
                 Some(&Value::Bool(true))
@@ -874,9 +667,9 @@ mod tests {
     fn reset_gives_the_key_back_rather_than_writing_the_default() {
         with_temp_config(|m| {
             let _ = m.update(Message::Set("input:repeat_rate", Value::Int(30)));
-            assert!(m.owns("input:repeat_rate"));
+            assert!(m.rows().owns("input:repeat_rate"));
             let _ = m.update(Message::Reset("input:repeat_rate"));
-            assert!(!m.owns("input:repeat_rate"));
+            assert!(!m.rows().owns("input:repeat_rate"));
             let lua = hyprforge_input::apply::generate(&m.settings);
             assert!(!lua.contains("repeat_rate"), "{lua}");
         });
@@ -888,7 +681,7 @@ mod tests {
     fn typing_does_not_commit_until_applied() {
         with_temp_config(|m| {
             let _ = m.update(Message::DraftChanged("input:repeat_rate", "45".into()));
-            assert!(!m.owns("input:repeat_rate"), "still just a draft");
+            assert!(!m.rows().owns("input:repeat_rate"), "still just a draft");
             let _ = m.update(Message::ApplyDrafts);
             assert_eq!(m.settings.get("input:repeat_rate"), Some(&Value::Int(45)));
             assert!(m.drafts.is_empty());
@@ -900,7 +693,7 @@ mod tests {
         with_temp_config(|m| {
             let _ = m.update(Message::DraftChanged("input:repeat_rate", "fast".into()));
             let _ = m.update(Message::ApplyDrafts);
-            assert!(!m.owns("input:repeat_rate"));
+            assert!(!m.rows().owns("input:repeat_rate"));
             assert!(m.draft_errors.contains_key("input:repeat_rate"));
             assert_eq!(
                 m.drafts.get("input:repeat_rate").map(String::as_str),
@@ -918,7 +711,7 @@ mod tests {
             let _ = m.update(Message::DraftChanged("input:repeat_delay", "450".into()));
             let _ = m.update(Message::ApplyDrafts);
             assert_eq!(m.settings.get("input:repeat_delay"), Some(&Value::Int(450)));
-            assert!(!m.owns("input:repeat_rate"));
+            assert!(!m.rows().owns("input:repeat_rate"));
         });
     }
 
@@ -929,7 +722,7 @@ mod tests {
         with_temp_config(|m| {
             let _ = m.update(Message::DraftChanged("input:sensitivity", "5".into()));
             let _ = m.update(Message::ApplyDrafts);
-            assert!(!m.owns("input:sensitivity"));
+            assert!(!m.rows().owns("input:sensitivity"));
             let problem = &m.draft_errors["input:sensitivity"];
             assert!(problem.contains("at most 1"), "{problem}");
         });
@@ -1018,8 +811,8 @@ mod tests {
             // first and repeat_rate second.
             let _ = m.update(Message::ImportToggle(1));
             let _ = m.update(Message::ImportConfirm);
-            assert!(m.owns("input:kb_layout"));
-            assert!(!m.owns("input:repeat_rate"), "it was unticked");
+            assert!(m.rows().owns("input:kb_layout"));
+            assert!(!m.rows().owns("input:repeat_rate"), "it was unticked");
         });
     }
 
@@ -1186,7 +979,7 @@ mod tests {
         with_temp_config(|m| {
             let setting = catalog::get("input:numlock_by_default").unwrap();
             assert_eq!(
-                m.effective(setting),
+                m.rows().effective(setting),
                 (Value::Bool(false), Source::Default),
                 "catalog default before anything is known"
             );
@@ -1197,7 +990,7 @@ mod tests {
                 true,
             )]));
             assert_eq!(
-                m.effective(setting),
+                m.rows().effective(setting),
                 (Value::Bool(true), Source::UserConfig),
                 "the user's config sets it, so that's what must show"
             );
@@ -1214,17 +1007,17 @@ mod tests {
                 live_value("input:kb_layout", Value::Text("de".into()), true),
             ]));
             assert_eq!(
-                m.effective(catalog::get("input:repeat_rate").unwrap()).1,
+                m.rows().effective(catalog::get("input:repeat_rate").unwrap()).1,
                 Source::Default
             );
             assert_eq!(
-                m.effective(catalog::get("input:kb_layout").unwrap()).1,
+                m.rows().effective(catalog::get("input:kb_layout").unwrap()).1,
                 Source::UserConfig
             );
 
             let _ = m.update(Message::Set("input:kb_layout", Value::Text("us".into())));
             assert_eq!(
-                m.effective(catalog::get("input:kb_layout").unwrap()),
+                m.rows().effective(catalog::get("input:kb_layout").unwrap()),
                 (Value::Text("us".into()), Source::Owned),
                 "once owned, what the user chose wins over what's live"
             );
@@ -1244,7 +1037,7 @@ mod tests {
                 false,
             )]));
             assert_eq!(
-                m.effective(catalog::get("input:repeat_rate").unwrap()).0,
+                m.rows().effective(catalog::get("input:repeat_rate").unwrap()).0,
                 Value::Int(45)
             );
         });
@@ -1258,7 +1051,7 @@ mod tests {
             let _ = m.update(Message::LiveLoaded(Vec::new()));
             let _ = m.view(FontScale::default());
             assert_eq!(
-                m.effective(catalog::get("input:repeat_rate").unwrap()).0,
+                m.rows().effective(catalog::get("input:repeat_rate").unwrap()).0,
                 Value::Int(25)
             );
         });
@@ -1275,7 +1068,7 @@ mod tests {
                 true,
             )]));
             let setting = catalog::get("input:kb_layout").unwrap();
-            assert_eq!(m.shown_text(setting), "de,fr");
+            assert_eq!(m.rows().shown_text(setting), "de,fr");
         });
     }
 
