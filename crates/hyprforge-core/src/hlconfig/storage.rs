@@ -1,7 +1,7 @@
 //! The canonical `input.toml`, and the only source of truth for what this
 //! module owns.
 
-use crate::model::Settings;
+use super::Settings;
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -53,7 +53,7 @@ pub fn load(path: &Path) -> Result<Settings, StorageError> {
 /// leaves a half-written canonical file.
 pub fn save(path: &Path, settings: &Settings) -> Result<(), StorageError> {
     let contents = toml::to_string_pretty(settings)?;
-    hyprforge_core::paths::write_atomic(path, &contents).map_err(|source| StorageError::Write {
+    crate::paths::write_atomic(path, &contents).map_err(|source| StorageError::Write {
         path: path.display().to_string(),
         source,
     })
@@ -62,14 +62,15 @@ pub fn save(path: &Path, settings: &Settings) -> Result<(), StorageError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Value;
+    use crate::hlconfig::model::test_catalog::CATALOG;
+    use crate::hlconfig::Value;
 
     fn sample() -> Settings {
         let mut s = Settings::default();
-        s.set("input:kb_layout", Value::Text("us,cz".into()));
-        s.set("input:repeat_rate", Value::Int(30));
-        s.set("input:sensitivity", Value::Float(-0.25));
-        s.set("input:touchpad:tap_to_click", Value::Bool(true));
+        s.set("demo:name", Value::Text("us,cz".into()));
+        s.set("demo:count", Value::Int(3));
+        s.set("demo:ratio", Value::Float(-0.25));
+        s.set("demo:nested:deep", Value::Bool(true));
         s
     }
 
@@ -106,7 +107,7 @@ mod tests {
         let path = dir.path().join("input.toml");
         save(&path, &sample()).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("\"input:touchpad:tap_to_click\""), "{raw}");
+        assert!(raw.contains("\"demo:nested:deep\""), "{raw}");
         assert_eq!(load(&path).unwrap(), sample());
     }
 
@@ -120,15 +121,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("input.toml");
         let mut s = Settings::default();
-        s.set("input:touchpad:scroll_factor", Value::Float(1.0));
+        s.set("demo:ratio", Value::Float(1.0));
         save(&path, &s).unwrap();
 
         assert_eq!(
-            load(&path).unwrap().get("input:touchpad:scroll_factor"),
+            load(&path).unwrap().get("demo:ratio"),
             Some(&Value::Float(1.0))
         );
-        let lua = crate::codegen::generate(&load(&path).unwrap());
-        assert!(lua.contains("scroll_factor = 1.0,"), "{lua}");
+        let lua = crate::hlconfig::codegen::generate(&load(&path).unwrap(), &CATALOG, "demo");
+        assert!(lua.contains("ratio = 1.0,"), "{lua}");
     }
 
     /// The file is meant to be hand-editable, so a hand-written spelling
@@ -139,11 +140,11 @@ mod tests {
         let path = dir.path().join("input.toml");
         std::fs::write(
             &path,
-            "\"input:kb_layout\" = \"de\"\n\"input:repeat_rate\" = 40\n",
+            "\"demo:name\" = \"de\"\n\"demo:count\" = 40\n",
         )
         .unwrap();
         let s = load(&path).unwrap();
-        assert_eq!(s.get("input:kb_layout"), Some(&Value::Text("de".into())));
-        assert_eq!(s.get("input:repeat_rate"), Some(&Value::Int(40)));
+        assert_eq!(s.get("demo:name"), Some(&Value::Text("de".into())));
+        assert_eq!(s.get("demo:count"), Some(&Value::Int(40)));
     }
 }

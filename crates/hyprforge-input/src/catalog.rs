@@ -16,97 +16,9 @@
 //! `vec2`, a type nothing else here uses and which needs its own editor,
 //! and there is no drawing tablet on hand to verify any of it against. An
 //! unverified guess about hardware nobody here can test is worth less than
-//! an honest gap — see [`crate::model::UNSUPPORTED_CATEGORIES`].
+//! an honest gap — see [`CATALOG`]'s `unsupported` list.
 
-/// What a setting accepts, and what Hyprland does with it when nothing sets
-/// it. The default matters for more than display: [`crate::model`] uses it
-/// to tell "the user chose the default" from "the user chose nothing",
-/// which is the difference between writing the key and staying out of the
-/// way.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Kind {
-    Bool {
-        default: bool,
-    },
-    Int {
-        default: i64,
-        min: Option<i64>,
-        max: Option<i64>,
-    },
-    /// An integer whose values are named states rather than a quantity —
-    /// a dropdown, not a spinner.
-    IntEnum {
-        default: i64,
-        choices: &'static [(i64, &'static str)],
-    },
-    Float {
-        default: f64,
-        min: Option<f64>,
-        max: Option<f64>,
-    },
-    Text {
-        default: &'static str,
-    },
-    /// Text with a closed set of accepted values. Only used where the set
-    /// really is closed: `accel_profile` looks like one but also takes
-    /// `custom <step> <points...>`, so it stays [`Kind::Text`].
-    TextEnum {
-        default: &'static str,
-        choices: &'static [&'static str],
-    },
-}
-
-impl Kind {
-    /// The name `hyprctl getoption -j` uses for this type's value field.
-    /// The live test compares against this, which is what stops the catalog
-    /// claiming an int where Hyprland has a float.
-    pub fn hyprctl_field(&self) -> &'static str {
-        match self {
-            Kind::Bool { .. } => "bool",
-            Kind::Int { .. } | Kind::IntEnum { .. } => "int",
-            Kind::Float { .. } => "float",
-            Kind::Text { .. } | Kind::TextEnum { .. } => "str",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct Setting {
-    /// Hyprland's own colon-separated key, e.g. `input:touchpad:flip_x`.
-    pub key: &'static str,
-    /// Short human label for the editor.
-    pub label: &'static str,
-    /// One sentence on what it does, shown next to the control. Kept to
-    /// what a user needs to decide, not a restatement of the label.
-    pub help: &'static str,
-    pub kind: Kind,
-}
-
-impl Setting {
-    /// The `input:touchpad`-style prefix this setting groups under.
-    pub fn category(&self) -> &'static str {
-        match self.key.rfind(':') {
-            Some(i) => &self.key[..i],
-            None => self.key,
-        }
-    }
-
-    /// The last path segment — the name as written inside the Lua table.
-    pub fn leaf(&self) -> &'static str {
-        match self.key.rfind(':') {
-            Some(i) => &self.key[i + 1..],
-            None => self.key,
-        }
-    }
-}
-
-/// A group of settings, in the order the editor shows them.
-#[derive(Debug, Clone, Copy)]
-pub struct Category {
-    pub key: &'static str,
-    pub label: &'static str,
-    pub help: &'static str,
-}
+pub use hyprforge_core::hlconfig::{Catalog, Category, Kind, Setting};
 
 pub const CATEGORIES: &[Category] = &[
     Category {
@@ -136,17 +48,23 @@ pub const CATEGORIES: &[Category] = &[
     },
 ];
 
-pub fn category(key: &str) -> Option<&'static Category> {
-    CATEGORIES.iter().find(|c| c.key == key)
-}
+/// Everything this module claims about Hyprland's input surface.
+///
+/// `input:tablet` is listed as unsupported rather than omitted, so a
+/// tablet key in a hand-edited file is reported as "not editable here"
+/// instead of as a typo — otherwise a user hunts for a misspelling that
+/// isn't there.
+pub const CATALOG: Catalog = Catalog {
+    settings: SETTINGS,
+    categories: CATEGORIES,
+    unsupported: &[(
+        "input:tablet",
+        "Drawing tablet mapping isn't editable here yet — keep it in your own config.",
+    )],
+};
 
 pub fn get(key: &str) -> Option<&'static Setting> {
-    SETTINGS.iter().find(|s| s.key == key)
-}
-
-/// Settings in `category`, in catalog order.
-pub fn in_category(category: &str) -> impl Iterator<Item = &'static Setting> + use<'_> {
-    SETTINGS.iter().filter(move |s| s.category() == category)
+    CATALOG.get(key)
 }
 
 const FOLLOW_MOUSE: &[(i64, &str)] = &[
@@ -549,7 +467,7 @@ mod tests {
     fn every_setting_belongs_to_a_declared_category() {
         for s in SETTINGS {
             assert!(
-                category(s.category()).is_some(),
+                CATALOG.category(s.category()).is_some(),
                 "{} is in undeclared category {}",
                 s.key,
                 s.category()
@@ -562,7 +480,7 @@ mod tests {
     fn every_category_has_settings() {
         for c in CATEGORIES {
             assert!(
-                in_category(c.key).next().is_some(),
+                CATALOG.in_category(c.key).next().is_some(),
                 "category {} has no settings",
                 c.key
             );

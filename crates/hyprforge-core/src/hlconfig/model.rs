@@ -7,21 +7,9 @@
 //! default or the user's own config. That is what makes this module safe to
 //! adopt gradually rather than all at once.
 
-use crate::catalog::{self, Kind, Setting};
+use super::{Catalog, Kind, Setting};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-
-/// Categories Hyprland has but this module doesn't edit, so the UI can say
-/// so instead of implying input config is fully covered.
-///
-/// `input:tablet` needs a `vec2` editor for its mapped-region and
-/// active-area fields, and hardware to verify against. Listing it is
-/// cheaper than pretending it doesn't exist and leaving a user hunting for
-/// where their tablet settings went.
-pub const UNSUPPORTED_CATEGORIES: &[(&str, &str)] = &[(
-    "input:tablet",
-    "Drawing tablet mapping isn't editable here yet — keep it in your own config.",
-)];
 
 /// One setting's value. The variant must match its catalog [`Kind`];
 /// [`Settings::validate`] is what enforces that.
@@ -41,9 +29,9 @@ impl Value {
             Kind::Bool { default } => Value::Bool(default),
             Kind::Int { default, .. } | Kind::IntEnum { default, .. } => Value::Int(default),
             Kind::Float { default, .. } => Value::Float(default),
-            Kind::Text { default } | Kind::TextEnum { default, .. } => {
-                Value::Text(default.to_string())
-            }
+            Kind::Text { default }
+            | Kind::TextEnum { default, .. }
+            | Kind::Color { default } => Value::Text(default.to_string()),
         }
     }
 
@@ -133,13 +121,13 @@ impl Settings {
     /// Nothing here is a crash, because every one of these is reachable by
     /// hand-editing the TOML, and a settings app that dies on a typo in its
     /// own config file is worse than one that points at the line.
-    pub fn validate(&self) -> Vec<Invalid> {
+    pub fn validate(&self, catalog: &Catalog) -> Vec<Invalid> {
         let mut out = Vec::new();
         for (key, value) in &self.values {
-            let Some(setting) = catalog::get(key) else {
+            let Some(setting) = catalog.get(key) else {
                 out.push(Invalid {
                     key: key.clone(),
-                    problem: unknown_key_problem(key),
+                    problem: catalog.unknown_key_reason(key),
                 });
                 continue;
             };
@@ -152,19 +140,6 @@ impl Settings {
         }
         out
     }
-}
-
-/// Why a key isn't in the catalog — separated because "this belongs to a
-/// category we don't edit" is a completely different situation from "this
-/// is a typo", and telling a user their tablet setting is a typo would send
-/// them looking in the wrong place.
-fn unknown_key_problem(key: &str) -> String {
-    for (category, why) in UNSUPPORTED_CATEGORIES {
-        if key.starts_with(&format!("{category}:")) {
-            return (*why).to_string();
-        }
-    }
-    "not an input option Hyprforge knows about".to_string()
 }
 
 fn check(setting: &Setting, value: &Value) -> Option<String> {
@@ -191,6 +166,10 @@ fn check(setting: &Setting, value: &Value) -> Option<String> {
             .ok_or("expected a number".to_string())
             .and_then(|f| in_range(f, min, max)),
         Kind::Text { .. } => value.as_text().map(|_| ()).ok_or("expected text".to_string()),
+        Kind::Color { .. } => value
+            .as_text()
+            .ok_or("expected a colour".to_string())
+            .and_then(check_color),
         Kind::TextEnum { choices, .. } => value
             .as_text()
             .ok_or("expected text".to_string())
@@ -207,6 +186,36 @@ fn check(setting: &Setting, value: &Value) -> Option<String> {
             }),
     }
     .err()
+}
+
+/// Hyprland's colour literals: `rgba(rrggbbaa)` and `rgb(rrggbb)`.
+///
+/// Checked rather than passed through, because a malformed colour is
+/// refused by Hyprland — and a refused value in a generated file takes
+/// every other setting in that file down with it, not just this one.
+///
+/// Deliberately not exhaustive: Hyprland also accepts `0xAARRGGBB` and
+/// named-gradient forms. Those are accepted as written rather than
+/// rejected, since refusing a form Hyprland takes would be worse than
+/// letting it through — a wrong "invalid" is a dead end, an unchecked
+/// valid value is merely unchecked.
+fn check_color(s: &str) -> Result<(), String> {
+    let digits = |body: &str, want: usize| {
+        body.len() == want && body.chars().all(|c| c.is_ascii_hexdigit())
+    };
+    let ok = match s.strip_prefix("rgba(").and_then(|r| r.strip_suffix(')')) {
+        Some(body) => digits(body, 8),
+        None => match s.strip_prefix("rgb(").and_then(|r| r.strip_suffix(')')) {
+            Some(body) => digits(body, 6),
+            // Anything that isn't an rgb()/rgba() call is left alone.
+            None => true,
+        },
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err("expected rgba(rrggbbaa) or rgb(rrggbb) in hex".to_string())
+    }
 }
 
 fn in_range(v: f64, min: Option<f64>, max: Option<f64>) -> Result<(), String> {
@@ -229,91 +238,157 @@ fn in_range(v: f64, min: Option<f64>, max: Option<f64>) -> Result<(), String> {
     }
 }
 
+/// A small catalog for the tests in this module and its siblings —
+/// enough shapes to exercise every branch without pinning the generic
+/// machinery to any real module's option list.
+#[cfg(test)]
+pub(super) mod test_catalog {
+    use super::super::{Catalog, Category, Kind, Setting};
+
+    pub const SETTINGS: &[Setting] = &[
+        Setting {
+            key: "demo:count",
+            label: "Count",
+            help: "a whole number",
+            kind: Kind::Int { default: 5, min: Some(1), max: Some(10) },
+        },
+        Setting {
+            key: "demo:ratio",
+            label: "Ratio",
+            help: "a number",
+            kind: Kind::Float { default: 1.0, min: Some(-1.0), max: Some(2.0) },
+        },
+        Setting {
+            key: "demo:enabled",
+            label: "Enabled",
+            help: "on or off",
+            kind: Kind::Bool { default: false },
+        },
+        Setting {
+            key: "demo:name",
+            label: "Name",
+            help: "free text",
+            kind: Kind::Text { default: "" },
+        },
+        Setting {
+            key: "demo:mode",
+            label: "Mode",
+            help: "a closed set",
+            kind: Kind::TextEnum { default: "", choices: &["", "fast", "slow"] },
+        },
+        Setting {
+            key: "demo:level",
+            label: "Level",
+            help: "named numbers",
+            kind: Kind::IntEnum { default: 0, choices: &[(0, "Off"), (1, "On")] },
+        },
+        Setting {
+            key: "demo:tint",
+            label: "Tint",
+            help: "a colour",
+            kind: Kind::Color { default: "rgba(000000ff)" },
+        },
+        Setting {
+            key: "demo:nested:deep",
+            label: "Deep",
+            help: "a subcategory",
+            kind: Kind::Bool { default: true },
+        },
+    ];
+
+    pub const CATEGORIES: &[Category] = &[
+        Category { key: "demo", label: "Demo", help: "" },
+        Category { key: "demo:nested", label: "Nested", help: "" },
+    ];
+
+    pub const CATALOG: Catalog = Catalog {
+        settings: SETTINGS,
+        categories: CATEGORIES,
+        unsupported: &[("demo:untouched", "Not editable here yet.")],
+    };
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_catalog::CATALOG;
     use super::*;
 
     #[test]
     fn a_valid_set_has_nothing_to_report() {
         let mut s = Settings::default();
-        s.set("input:kb_layout", Value::Text("us,cz".into()));
-        s.set("input:repeat_rate", Value::Int(30));
-        s.set("input:touchpad:tap_to_click", Value::Bool(true));
-        s.set("input:sensitivity", Value::Float(-0.3));
-        assert_eq!(s.validate(), vec![]);
+        s.set("demo:name", Value::Text("hello".into()));
+        s.set("demo:count", Value::Int(3));
+        s.set("demo:enabled", Value::Bool(true));
+        s.set("demo:ratio", Value::Float(-0.3));
+        s.set("demo:tint", Value::Text("rgba(bd93f9ff)".into()));
+        assert_eq!(s.validate(&CATALOG), vec![]);
     }
 
     #[test]
     fn an_out_of_range_number_is_named_with_its_limit() {
-        let mut s = Settings::default();
-        s.set("input:sensitivity", Value::Float(2.5));
-        let bad = s.validate();
+        let s = Settings::from_one("demo:ratio", Value::Float(9.0));
+        let bad = s.validate(&CATALOG);
         assert_eq!(bad.len(), 1);
-        assert_eq!(bad[0].key, "input:sensitivity");
-        assert!(bad[0].problem.contains("at most 1"), "{}", bad[0].problem);
+        assert!(bad[0].problem.contains("at most 2"), "{}", bad[0].problem);
     }
 
     #[test]
     fn a_wrong_type_is_rejected_rather_than_coerced() {
-        let mut s = Settings::default();
-        s.set("input:touchpad:tap_to_click", Value::Text("yes".into()));
-        assert_eq!(s.validate().len(), 1);
+        let s = Settings::from_one("demo:enabled", Value::Text("yes".into()));
+        assert_eq!(s.validate(&CATALOG).len(), 1);
     }
 
-    /// Writing `scroll_factor = 1` in the TOML is unambiguous, so it's
-    /// accepted where a float is wanted. The reverse is not: a fractional
-    /// repeat rate is a real mistake.
+    /// Writing `ratio = 1` in the TOML is unambiguous, so it's accepted
+    /// where a float is wanted. The reverse is not: a fractional count is
+    /// a real mistake.
     #[test]
     fn an_integer_is_accepted_for_a_float_but_not_the_reverse() {
-        let mut s = Settings::default();
-        s.set("input:touchpad:scroll_factor", Value::Int(1));
-        assert_eq!(s.validate(), vec![]);
-
-        let mut s = Settings::default();
-        s.set("input:repeat_rate", Value::Float(25.5));
-        assert_eq!(s.validate().len(), 1);
+        assert_eq!(
+            Settings::from_one("demo:ratio", Value::Int(1)).validate(&CATALOG),
+            vec![]
+        );
+        assert_eq!(
+            Settings::from_one("demo:count", Value::Float(2.5))
+                .validate(&CATALOG)
+                .len(),
+            1
+        );
     }
 
     #[test]
     fn a_value_outside_a_closed_set_lists_what_is_allowed() {
-        let mut s = Settings::default();
-        s.set("input:touchpad:tap_button_map", Value::Text("rlm".into()));
-        let bad = s.validate();
-        assert!(bad[0].problem.contains("\"lrm\""), "{}", bad[0].problem);
+        let s = Settings::from_one("demo:mode", Value::Text("sideways".into()));
+        let bad = s.validate(&CATALOG);
+        assert!(bad[0].problem.contains("\"fast\""), "{}", bad[0].problem);
     }
 
-    /// A tablet key in a hand-edited file is a real setting this module
-    /// doesn't cover, not a typo, and saying so is what stops someone
-    /// hunting for a misspelling that isn't there.
+    /// A key from a part the module knowingly doesn't edit is a real
+    /// setting, not a typo, and saying so is what stops someone hunting
+    /// for a misspelling that isn't there.
     #[test]
     fn an_unsupported_category_says_so_instead_of_calling_it_a_typo() {
-        let mut s = Settings::default();
-        s.set("input:tablet:left_handed", Value::Bool(true));
-        let bad = s.validate();
+        let s = Settings::from_one("demo:untouched:thing", Value::Bool(true));
+        let bad = s.validate(&CATALOG);
         assert_eq!(bad.len(), 1);
-        assert!(bad[0].problem.contains("tablet"), "{}", bad[0].problem);
-        assert!(!bad[0].problem.contains("know"), "{}", bad[0].problem);
+        assert!(bad[0].problem.contains("Not editable"), "{}", bad[0].problem);
     }
 
     #[test]
     fn an_unknown_key_is_reported_as_unknown() {
-        let mut s = Settings::default();
-        s.set("input:kb_layuot", Value::Text("us".into()));
-        let bad = s.validate();
+        let s = Settings::from_one("demo:cuont", Value::Int(1));
+        let bad = s.validate(&CATALOG);
         assert_eq!(bad.len(), 1);
         assert!(bad[0].problem.contains("know"), "{}", bad[0].problem);
     }
 
     /// `nan` and `inf` are valid TOML floats, so this is reachable by
-    /// hand-editing. NaN slips past a naive range check — every comparison
-    /// against it is false — and then renders as `NaN.0`, a syntax error
-    /// that takes down the entire generated file.
+    /// hand-editing. NaN slips past a naive range check — every
+    /// comparison against it is false — and then renders as `NaN.0`, a
+    /// syntax error that takes down the entire generated file.
     #[test]
     fn a_non_finite_float_is_refused_rather_than_passing_the_range_check() {
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            let mut s = Settings::default();
-            s.set("input:touchpad:scroll_factor", Value::Float(bad));
-            let problems = s.validate();
+            let problems = Settings::from_one("demo:ratio", Value::Float(bad)).validate(&CATALOG);
             assert_eq!(problems.len(), 1, "{bad} was accepted");
             assert!(
                 problems[0].problem.contains("ordinary number"),
@@ -328,29 +403,49 @@ mod tests {
     #[test]
     fn a_non_finite_float_never_reaches_the_generated_file() {
         let mut s = Settings::default();
-        s.set("input:touchpad:scroll_factor", Value::Float(f64::NAN));
-        s.set("input:repeat_rate", Value::Int(30));
-        let lua = crate::codegen::generate(&s);
+        s.set("demo:ratio", Value::Float(f64::NAN));
+        s.set("demo:count", Value::Int(3));
+        let lua = crate::hlconfig::codegen::generate(&s, &CATALOG, "");
         assert!(!lua.contains("NaN"), "{lua}");
-        assert!(!lua.contains("scroll_factor"), "{lua}");
-        assert!(lua.contains("repeat_rate = 30"), "{lua}");
+        assert!(!lua.contains("ratio"), "{lua}");
+        assert!(lua.contains("count = 3"), "{lua}");
+    }
+
+    /// A malformed colour is refused by Hyprland, and a refused value in
+    /// a generated file takes every other setting in it down too.
+    #[test]
+    fn a_malformed_colour_is_refused() {
+        for bad in ["rgba(bd93f9)", "rgb(bd93f9ff)", "rgba(zzzzzzzz)"] {
+            let problems =
+                Settings::from_one("demo:tint", Value::Text(bad.into())).validate(&CATALOG);
+            assert_eq!(problems.len(), 1, "{bad} was accepted");
+        }
+        for good in ["rgba(bd93f9ff)", "rgb(282a36)", "0xffbd93f9"] {
+            assert_eq!(
+                Settings::from_one("demo:tint", Value::Text(good.into())).validate(&CATALOG),
+                vec![],
+                "{good} was refused"
+            );
+        }
     }
 
     #[test]
     fn clearing_a_key_removes_it_entirely() {
-        let mut s = Settings::default();
-        s.set("input:repeat_rate", Value::Int(30));
-        s.clear("input:repeat_rate");
+        let mut s = Settings::from_one("demo:count", Value::Int(3));
+        s.clear("demo:count");
         assert!(s.is_empty());
     }
 
     #[test]
     fn defaults_come_back_with_the_catalog_type() {
-        for setting in catalog::SETTINGS {
-            let v = Value::default_for(&setting.kind);
-            let mut s = Settings::default();
-            s.set(setting.key, v);
-            assert_eq!(s.validate(), vec![], "{} rejected its own default", setting.key);
+        for setting in CATALOG.settings {
+            let s = Settings::from_one(setting.key, Value::default_for(&setting.kind));
+            assert_eq!(
+                s.validate(&CATALOG),
+                vec![],
+                "{} rejected its own default",
+                setting.key
+            );
         }
     }
 }

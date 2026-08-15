@@ -1335,8 +1335,10 @@ version = "0.1.0"
 dependencies = [
  "iced",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.19",
+ "toml",
  "zbus",
 ]
 

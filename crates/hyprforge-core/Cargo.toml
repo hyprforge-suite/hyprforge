@@ -17,6 +17,8 @@ dbus = ["dep:zbus"]
 iced = { workspace = true, optional = true }
 zbus = { workspace = true, optional = true }
 serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

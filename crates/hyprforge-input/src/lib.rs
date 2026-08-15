@@ -1,16 +1,16 @@
-//! Keyboard, pointer and touchpad settings, written as a `hl.config`
-//! overlay the user's own config can still coexist with.
+//! Keyboard, pointer and touchpad settings.
 //!
-//! See [`codegen`] for the two measured facts about `hl.config` the design
-//! rests on, and [`setup`] for why this is the one module sourced *last*.
+//! Almost everything here lives in [`hyprforge_core::hlconfig`], the
+//! generic `hl.config` overlay machinery every settings category shares.
+//! This crate is the part that is actually about input: the [`catalog`] of
+//! options, and the [`setup`] require line that decides where the
+//! generated file is sourced.
 
 pub mod apply;
 pub mod catalog;
-pub mod codegen;
-pub mod import;
-pub mod model;
 pub mod setup;
-pub mod storage;
 
-pub use catalog::{Kind, Setting};
-pub use model::{Settings, Value};
+pub use catalog::CATALOG;
+pub use hyprforge_core::hlconfig::{
+    codegen, import, model, storage, Invalid, Kind, Setting, Settings, Value,
+};

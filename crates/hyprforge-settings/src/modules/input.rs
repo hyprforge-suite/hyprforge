@@ -19,9 +19,9 @@ use hyprforge_core::widgets::{
     section, setup_notice,
 };
 use hyprforge_core::SettingsModule;
-use hyprforge_input::catalog::{self, Kind, Setting};
-use hyprforge_input::import::{Discovered, Live};
-use hyprforge_input::model::{Invalid, Settings, Value};
+use hyprforge_input::catalog::{self, Kind, Setting, CATALOG};
+use hyprforge_core::hlconfig::import::{Discovered, Live};
+use hyprforge_core::hlconfig::{Invalid, Settings, Value};
 use hyprforge_input::setup::{HyprConfig, SetupPlan};
 use iced::widget::{checkbox, column, container, pick_list, row, scrollable, text_input};
 use iced::{Element, Length, Task};
@@ -109,11 +109,11 @@ impl InputModule {
         // that reading is what turns one bad parse into a wiped store on
         // the next save.
         let (settings, store_unreadable) =
-            match hyprforge_input::storage::load(&hyprforge_core::paths::input_toml_path()) {
+            match hyprforge_core::hlconfig::storage::load(&hyprforge_core::paths::input_toml_path()) {
                 Ok(settings) => (settings, None),
                 Err(e) => (Settings::default(), Some(e.to_string())),
             };
-        let invalid = settings.validate();
+        let invalid = settings.validate(&CATALOG);
         let setup = lua_setup::bootstrap(
             &hyprforge_core::paths::hypr_config_dir(),
             &hyprforge_core::paths::hyprland_lua_path(),
@@ -122,7 +122,7 @@ impl InputModule {
                 placement: hyprforge_input::setup::PLACEMENT,
                 generated: (
                     hyprforge_core::paths::input_lua_path(),
-                    hyprforge_input::codegen::generate(&Settings::default()),
+                    hyprforge_input::apply::generate(&Settings::default()),
                 ),
             },
         );
@@ -161,7 +161,7 @@ impl InputModule {
             self.error = Some(message.clone());
             return Err(message);
         }
-        hyprforge_input::storage::save(
+        hyprforge_core::hlconfig::storage::save(
             &hyprforge_core::paths::input_toml_path(),
             &self.settings,
         )
@@ -175,7 +175,7 @@ impl InputModule {
         if self.persist().is_err() {
             return Task::none();
         }
-        self.invalid = self.settings.validate();
+        self.invalid = self.settings.validate(&CATALOG);
         // Without a Lua config there's nothing to source the generated file
         // from, so reloading would be a no-op dressed up as success. The
         // TOML is still saved, and takes effect once setup is resolved.
@@ -248,7 +248,7 @@ impl InputModule {
             };
             match parse_for(&setting.kind, &raw) {
                 Ok(value) => {
-                    let problems = Settings::from_one(key, value.clone()).validate();
+                    let problems = Settings::from_one(key, value.clone()).validate(&CATALOG);
                     if let Some(problem) = problems.first() {
                         self.draft_errors.insert(key, problem.problem.clone());
                     } else {
@@ -341,8 +341,10 @@ impl SettingsModule for InputModule {
                     if call.source_path.starts_with(&hyprforge_dir) {
                         continue;
                     }
-                    found.extend(hyprforge_input::import::settings_from_call(
-                        &call.kind, &call.args,
+                    found.extend(hyprforge_core::hlconfig::import::settings_from_call(
+                        &call.kind,
+                        &call.args,
+                        &CATALOG,
                     ));
                 }
                 // Reported rather than swallowed: a file that didn't
@@ -360,7 +362,7 @@ impl SettingsModule for InputModule {
                     ));
                 }
                 self.import_review = Some(ImportState::Ready(
-                    hyprforge_input::import::candidates_from_config(&found, &self.settings)
+                    hyprforge_core::hlconfig::import::candidates_from_config(&found, &CATALOG, &self.settings)
                         .into_iter()
                         // Anything already owned starts unticked: the user
                         // came here to adopt what they haven't got, and
@@ -395,7 +397,7 @@ impl SettingsModule for InputModule {
                 if chosen.is_empty() {
                     return Task::none();
                 }
-                hyprforge_input::import::merge(&mut self.settings, &chosen);
+                hyprforge_core::hlconfig::import::merge(&mut self.settings, &chosen);
                 self.status = Some(format!("Imported {} setting(s).", chosen.len()));
                 self.save_and_maybe_reload()
             }
@@ -504,8 +506,8 @@ impl SettingsModule for InputModule {
         }
 
         let mut any_row = false;
-        for category in catalog::CATEGORIES {
-            let rows: Vec<&'static Setting> = catalog::in_category(category.key)
+        for category in CATALOG.categories {
+            let rows: Vec<&'static Setting> = CATALOG.in_category(category.key)
                 .filter(|s| self.matches_filter(s))
                 .collect();
             if rows.is_empty() {
@@ -528,7 +530,7 @@ impl SettingsModule for InputModule {
             ));
         }
 
-        for (category, why) in hyprforge_input::model::UNSUPPORTED_CATEGORIES {
+        for (category, why) in CATALOG.unsupported {
             if !self.filter.trim().is_empty() && !category.contains(&self.filter.trim().to_lowercase()) {
                 continue;
             }
@@ -792,6 +794,10 @@ fn parse_for(kind: &Kind, raw: &str) -> Result<Value, String> {
             .parse::<bool>()
             .map(Value::Bool)
             .map_err(|_| "expected true or false".to_string()),
+        // A colour is typed as text; `validate` is what checks the form,
+        // so the same rule applies whether it was typed here or written
+        // into the TOML by hand.
+        Kind::Color { .. } => Ok(Value::Text(trimmed.to_string())),
         // Text keeps its surrounding whitespace: a layout list like
         // "us, cz" is the user's to format, and trimming the interior would
         // be wrong anyway.
@@ -804,7 +810,7 @@ fn parse_for(kind: &Kind, raw: &str) -> Result<Value, String> {
 /// back to the catalog default, and a banner about a background read the
 /// user never asked for would be noise.
 async fn read_live() -> Vec<Live> {
-    tokio::task::spawn_blocking(|| hyprforge_input::import::live().unwrap_or_default())
+    tokio::task::spawn_blocking(|| hyprforge_core::hlconfig::import::live(&CATALOG).unwrap_or_default())
         .await
         .unwrap_or_default()
 }
@@ -871,7 +877,7 @@ mod tests {
             assert!(m.owns("input:repeat_rate"));
             let _ = m.update(Message::Reset("input:repeat_rate"));
             assert!(!m.owns("input:repeat_rate"));
-            let lua = hyprforge_input::codegen::generate(&m.settings);
+            let lua = hyprforge_input::apply::generate(&m.settings);
             assert!(!lua.contains("repeat_rate"), "{lua}");
         });
     }
@@ -948,7 +954,7 @@ mod tests {
             m.store_unreadable = Some("bad toml".to_string());
             let _ = m.update(Message::Set("input:repeat_rate", Value::Int(30)));
             let saved =
-                hyprforge_input::storage::load(&hyprforge_core::paths::input_toml_path()).unwrap();
+                hyprforge_core::hlconfig::storage::load(&hyprforge_core::paths::input_toml_path()).unwrap();
             assert!(saved.is_empty(), "nothing may be written over a store we can't read");
             assert!(m.error.is_some(), "and the user has to be told why");
         });
@@ -959,7 +965,7 @@ mod tests {
         with_temp_config(|m| {
             let _ = m.update(Message::Set("input:repeat_rate", Value::Int(30)));
             let saved =
-                hyprforge_input::storage::load(&hyprforge_core::paths::input_toml_path()).unwrap();
+                hyprforge_core::hlconfig::storage::load(&hyprforge_core::paths::input_toml_path()).unwrap();
             assert_eq!(saved.get("input:repeat_rate"), Some(&Value::Int(30)));
         });
     }
@@ -1095,7 +1101,7 @@ mod tests {
     fn an_invalid_stored_value_is_surfaced_rather_than_silently_skipped() {
         with_temp_config(|m| {
             m.settings.set("input:sensitivity", Value::Float(9.0));
-            m.invalid = m.settings.validate();
+            m.invalid = m.settings.validate(&CATALOG);
             assert_eq!(m.invalid.len(), 1);
             assert_eq!(m.invalid[0].key, "input:sensitivity");
         });
@@ -1121,7 +1127,7 @@ mod tests {
     #[test]
     fn every_catalogued_setting_produces_a_row() {
         with_temp_config(|m| {
-            for setting in catalog::SETTINGS {
+            for setting in CATALOG.settings {
                 let _ = m.setting_row(setting, FontScale::default());
             }
         });
@@ -1141,7 +1147,7 @@ mod tests {
             m.error = Some("something failed".to_string());
             m.status = Some("saved".to_string());
             m.settings.set("input:sensitivity", Value::Float(9.0));
-            m.invalid = m.settings.validate();
+            m.invalid = m.settings.validate(&CATALOG);
             let _ = m.view(scale);
 
             m.store_unreadable = None;

@@ -15,9 +15,9 @@
 //! — verified: a `repeat_delay` set to 601 by eval was back to 600 with
 //! `set` false after a reload.
 
-use hyprforge_input::catalog::{self, Kind};
-use hyprforge_input::codegen::generate;
-use hyprforge_input::model::{Settings, Value};
+use hyprforge_input::catalog::{Kind, CATALOG};
+use hyprforge_input::apply::generate;
+use hyprforge_input::{Settings, Value};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 
@@ -56,7 +56,7 @@ fn getoption(key: &str) -> serde_json::Value {
 fn hyprland_has_every_catalogued_option_with_the_declared_type() {
     let _live = compositor();
     let mut wrong = Vec::new();
-    for setting in catalog::SETTINGS {
+    for setting in CATALOG.settings {
         let raw = hyprctl(&["getoption", setting.key, "-j"]);
         if !raw.trim_start().starts_with('{') {
             wrong.push(format!("{}: compositor says {}", setting.key, raw.trim()));
@@ -97,10 +97,10 @@ fn hyprland_accepts_a_file_setting_every_option() {
     );
 
     let mut settings = Settings::default();
-    for setting in catalog::SETTINGS {
+    for setting in CATALOG.settings {
         settings.set(setting.key, probe_value(&setting.kind));
     }
-    assert_eq!(settings.validate(), vec![], "the probe values must be storable");
+    assert_eq!(settings.validate(&CATALOG), vec![], "the probe values must be storable");
 
     eval_and_assert_clean(&generate(&settings));
     reload();
@@ -211,7 +211,7 @@ fn hyprland_accepts_the_extremes_of_every_declared_range() {
 
     for extreme in [Extreme::Min, Extreme::Max] {
         let mut settings = Settings::default();
-        for setting in catalog::SETTINGS {
+        for setting in CATALOG.settings {
             if let Some(v) = range_extreme(&setting.kind, extreme) {
                 settings.set(setting.key, v);
             }
@@ -266,7 +266,7 @@ fn probe_value(kind: &Kind) -> Value {
                 _ => bumped,
             })
         }
-        Kind::Text { default } => Value::Text(default.to_string()),
+        Kind::Text { default } | Kind::Color { default } => Value::Text(default.to_string()),
         Kind::TextEnum { default, choices } => Value::Text(
             choices
                 .iter()
