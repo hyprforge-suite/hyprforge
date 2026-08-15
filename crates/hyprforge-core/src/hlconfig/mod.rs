@@ -205,9 +205,16 @@ impl Catalog {
 
     /// Why a key isn't in this catalog — "belongs to a part we don't
     /// edit" and "is a typo" send a user to completely different places.
+    ///
+    /// Matches an unsupported entry either exactly or as a prefix,
+    /// because both shapes occur: `decoration:wobble` names a whole
+    /// subcategory, while `misc:bell_sound` names one option. Checking
+    /// only the prefix form meant a stored `misc:bell_sound` — exactly
+    /// what a user would have — fell through to "typo".
     pub fn unknown_key_reason(&self, key: &str) -> String {
-        for (category, why) in self.unsupported {
-            if key.starts_with(&format!("{category}:")) {
+        let key = key.trim();
+        for (entry, why) in self.unsupported {
+            if key == *entry || key.starts_with(&format!("{entry}:")) {
                 return (*why).to_string();
             }
         }
@@ -229,6 +236,24 @@ mod tests {
         };
         assert_eq!(s.category(), "decoration:blur");
         assert_eq!(s.leaf(), "passes");
+    }
+
+    /// Both shapes occur in real catalogues: one names a whole
+    /// subcategory, the other names a single option. Only handling the
+    /// prefix form meant a stored key equal to the entry fell through to
+    /// "typo", which sends the user looking for a misspelling that isn't
+    /// there.
+    #[test]
+    fn an_unsupported_entry_is_matched_exactly_as_well_as_by_prefix() {
+        let catalog = Catalog {
+            settings: &[],
+            categories: &[],
+            unsupported: &[("misc:bell_sound", "not in 0.56"), ("decoration:wobble", "not yet")],
+        };
+        assert_eq!(catalog.unknown_key_reason("misc:bell_sound"), "not in 0.56");
+        assert_eq!(catalog.unknown_key_reason("decoration:wobble"), "not yet");
+        assert_eq!(catalog.unknown_key_reason("decoration:wobble:enabled"), "not yet");
+        assert!(catalog.unknown_key_reason("misc:bell_sounds").contains("know"));
     }
 
     #[test]

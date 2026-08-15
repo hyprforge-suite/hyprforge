@@ -1,10 +1,12 @@
 pub mod appearance;
+pub mod catalog_screen;
 pub mod desktop;
 pub mod displays;
 pub mod input;
 pub mod keycapture;
 pub mod layout_canvas;
 pub mod session;
+pub mod system;
 pub mod setting_rows;
 pub mod shortcuts;
 pub mod window_rules;

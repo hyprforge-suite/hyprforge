@@ -66,6 +66,7 @@ with zero GTK/Qt dependency anywhere in the stack.
 | — Appearance module | `hyprforge-appearance` (lib) | GNOME/KDE appearance settings | no (writes gsettings via CLI) | in progress |
 | — Input/keyboard module | `hyprforge-input` (lib) | GNOME/KDE keyboard & touchpad settings | no | in progress |
 | — Session module (autostart, environment, gestures, permissions) | `hyprforge-session` (lib) | hand-edited hyprland.lua | no | in progress |
+| — System module (behaviour, shortcuts behaviour, X11, rendering) | `hyprforge-system` (lib) | hand-edited hyprland.lua | no | in progress |
 | — Users/time module | *(planned)* | — | accountsservice/timedated | not started |
 | **File Manager** | `hyprforge-files-core` (shared logic), `hyprforge-files` (standalone), `hyprforge-files-portal` (xdg-desktop-portal FileChooser backend) | Nautilus/Dolphin/Thunar | portal backend runs as a D-Bus service | not started |
 | **Photo Viewer** | `hyprforge-photos` | eog/gwenview | no | not started |
