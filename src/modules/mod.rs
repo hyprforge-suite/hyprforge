@@ -1,4 +1,5 @@
 pub mod appearance;
+pub mod desktop;
 pub mod displays;
 pub mod input;
 pub mod keycapture;
