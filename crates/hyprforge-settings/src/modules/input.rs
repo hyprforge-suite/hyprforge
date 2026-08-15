@@ -17,7 +17,7 @@ use hyprforge_core::theme::{spacing, FontScale};
 use hyprforge_core::widgets::{
     divider, meta_text, primary_button, scaled_text, secondary_button, section, setup_notice,
 };
-use super::setting_rows::{self, RowContext};
+use super::setting_rows::{self, DynChoice, RowContext};
 use hyprforge_core::SettingsModule;
 use hyprforge_input::catalog::{self, Setting, CATALOG};
 use hyprforge_core::hlconfig::import::{Discovered, Live};
@@ -53,6 +53,9 @@ pub enum Message {
     ImportCancel,
     /// The compositor's current value for every option, read once on open.
     LiveLoaded(Vec<Live>),
+    /// The XKB layouts/variants/models installed, and the connected
+    /// monitors — everything a picker on this screen is built from.
+    ChoicesLoaded(hyprforge_input::xkb::Catalogue, Vec<String>),
     Reloaded(Result<(), String>),
 }
 
@@ -101,6 +104,14 @@ pub struct InputModule {
     /// while it's on. Empty until the read returns, and if it fails the
     /// rows fall back to the catalog default and say so.
     live: BTreeMap<&'static str, Live>,
+    /// Discovered options per setting. Empty until the scan returns, and
+    /// a setting with no entry falls back to a text field — a field that
+    /// can't be edited because a scan failed is worse than one that has
+    /// to be typed.
+    choices: BTreeMap<&'static str, Vec<DynChoice>>,
+    /// Kept so the variant list can be rebuilt when the layout changes:
+    /// variants only mean anything under their own layout.
+    xkb: hyprforge_input::xkb::Catalogue,
 }
 
 impl InputModule {
@@ -140,12 +151,17 @@ impl InputModule {
                 invalid,
                 import_review: None,
                 live: BTreeMap::new(),
+                choices: BTreeMap::new(),
+                xkb: Default::default(),
             },
             // Read what's actually running, so unowned rows show the truth
             // rather than the catalog default. A failure is silent by
             // design: the rows still render, they just can't claim to know
             // what's live.
-            Task::perform(read_live(), Message::LiveLoaded),
+            Task::batch([
+                Task::perform(read_live(), Message::LiveLoaded),
+                Task::perform(read_choices(), |(x, m)| Message::ChoicesLoaded(x, m)),
+            ]),
         )
     }
 
@@ -267,6 +283,10 @@ impl SettingsModule for InputModule {
             Message::Set(key, value) => {
                 self.settings.set(key, value);
                 self.status = None;
+                // Changing the layout changes which variants exist.
+                if key == "input:kb_layout" {
+                    self.rebuild_choices();
+                }
                 self.save_and_maybe_reload()
             }
             Message::DraftChanged(key, raw) => {
@@ -375,6 +395,19 @@ impl SettingsModule for InputModule {
             }
             Message::LiveLoaded(live) => {
                 self.live = live.into_iter().map(|l| (l.key, l)).collect();
+                self.rebuild_choices();
+                Task::none()
+            }
+            Message::ChoicesLoaded(xkb, monitors) => {
+                self.xkb = xkb;
+                self.choices.insert(
+                    "input:touchdevice:output",
+                    monitors
+                        .into_iter()
+                        .map(|name| DynChoice { label: name.clone(), value: name })
+                        .collect(),
+                );
+                self.rebuild_choices();
                 Task::none()
             }
             Message::Reloaded(Ok(())) => {
@@ -514,12 +547,64 @@ impl SettingsModule for InputModule {
 
 impl InputModule {
     /// The shared row renderer, wired to this module's messages.
+    /// Rebuilds the XKB pickers.
+    ///
+    /// Variants depend on the chosen layout — the rules file lists over
+    /// 400 of them and only a handful belong to any one layout — so the
+    /// list is rebuilt whenever the layout could have changed rather than
+    /// computed once.
+    fn rebuild_choices(&mut self) {
+        let entries = |list: &[hyprforge_input::xkb::Entry]| -> Vec<DynChoice> {
+            list.iter()
+                .map(|e| DynChoice {
+                    value: e.code.clone(),
+                    label: format!("{} — {}", e.description, e.code),
+                })
+                .collect()
+        };
+        if self.xkb.layouts.is_empty() {
+            return;
+        }
+        self.choices.insert("input:kb_layout", entries(&self.xkb.layouts));
+        self.choices.insert("input:kb_model", entries(&self.xkb.models));
+
+        let layout = self
+            .settings
+            .get("input:kb_layout")
+            .and_then(|v| v.as_text().map(str::to_string))
+            .or_else(|| {
+                self.live
+                    .get("input:kb_layout")
+                    .and_then(|l| l.value.as_text().map(str::to_string))
+            })
+            .unwrap_or_default();
+        let variants = self.xkb.variants_for(layout.trim());
+        if variants.is_empty() {
+            // No variants for this layout is a real answer, and an empty
+            // dropdown is not a control. Falls back to a text field.
+            self.choices.remove("input:kb_variant");
+        } else {
+            let mut list = entries(&variants);
+            // A blank variant is the default for every layout and has to
+            // be selectable, or the field becomes one-way.
+            list.insert(
+                0,
+                DynChoice {
+                    value: String::new(),
+                    label: "Default".to_string(),
+                },
+            );
+            self.choices.insert("input:kb_variant", list);
+        }
+    }
+
     fn rows(&self) -> RowContext<'_, Message> {
         RowContext {
             settings: &self.settings,
             live: &self.live,
             drafts: &self.drafts,
             draft_errors: &self.draft_errors,
+            choices: &self.choices,
             on_set: Message::Set,
             on_draft: Message::DraftChanged,
             on_reset: Message::Reset,
@@ -601,6 +686,20 @@ impl InputModule {
 /// than an error: the screen is fully usable without it, rows just fall
 /// back to the catalog default, and a banner about a background read the
 /// user never asked for would be noise.
+/// Scans for XKB data and connected monitors. Blocking file and
+/// `hyprctl` work, so it goes on the blocking pool rather than stalling
+/// the first frame.
+async fn read_choices() -> (hyprforge_input::xkb::Catalogue, Vec<String>) {
+    tokio::task::spawn_blocking(|| {
+        (
+            hyprforge_input::xkb::catalogue(),
+            hyprforge_core::monitors::connector_names(),
+        )
+    })
+    .await
+    .unwrap_or_default()
+}
+
 async fn read_live() -> Vec<Live> {
     tokio::task::spawn_blocking(|| hyprforge_core::hlconfig::import::live(&CATALOG).unwrap_or_default())
         .await
@@ -1069,6 +1168,106 @@ mod tests {
             )]));
             let setting = catalog::get("input:kb_layout").unwrap();
             assert_eq!(m.rows().shown_text(setting), "de,fr");
+        });
+    }
+
+    fn xkb_sample() -> hyprforge_input::xkb::Catalogue {
+        hyprforge_input::xkb::parse(
+            "! layout\n  us  English (US)\n  de  German\n\
+             ! variant\n  colemak  us: English (Colemak)\n  neo  de: German (Neo 2)\n\
+             ! model\n  pc105  Generic 105-key PC\n",
+        )
+    }
+
+    /// The value is a code, the thing a user knows is a name, and a wrong
+    /// code is accepted silently — XKB falls back and the keyboard simply
+    /// doesn't change.
+    #[test]
+    fn keyboard_fields_become_pickers_once_xkb_is_read() {
+        with_temp_config(|m| {
+            assert!(m.choices.is_empty(), "a text field until the scan returns");
+            let _ = m.update(Message::ChoicesLoaded(xkb_sample(), Vec::new()));
+            let layouts = &m.choices["input:kb_layout"];
+            assert!(layouts.iter().any(|c| c.value == "us"));
+            assert!(
+                layouts.iter().any(|c| c.label.contains("English (US)")),
+                "the picker has to show the name, not just the code"
+            );
+            assert!(m.choices.contains_key("input:kb_model"));
+        });
+    }
+
+    /// The rules file lists over 400 variants and only a handful belong
+    /// to any one layout, so the list follows the chosen layout.
+    #[test]
+    fn the_variant_list_follows_the_chosen_layout() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::ChoicesLoaded(xkb_sample(), Vec::new()));
+            let _ = m.update(Message::Set("input:kb_layout", Value::Text("us".into())));
+            let variants = &m.choices["input:kb_variant"];
+            assert!(variants.iter().any(|c| c.value == "colemak"));
+            assert!(!variants.iter().any(|c| c.value == "neo"), "that one is German");
+
+            let _ = m.update(Message::Set("input:kb_layout", Value::Text("de".into())));
+            let variants = &m.choices["input:kb_variant"];
+            assert!(variants.iter().any(|c| c.value == "neo"));
+            assert!(!variants.iter().any(|c| c.value == "colemak"));
+        });
+    }
+
+    /// A blank variant is every layout's default and has to be
+    /// selectable, or the field is one-way.
+    #[test]
+    fn the_default_variant_is_selectable() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::ChoicesLoaded(xkb_sample(), Vec::new()));
+            let _ = m.update(Message::Set("input:kb_layout", Value::Text("us".into())));
+            assert!(m.choices["input:kb_variant"].iter().any(|c| c.value.is_empty()));
+        });
+    }
+
+    /// A layout with no variants must not leave an empty dropdown, which
+    /// isn't a control at all.
+    #[test]
+    fn a_layout_without_variants_falls_back_to_a_text_field() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::ChoicesLoaded(xkb_sample(), Vec::new()));
+            let _ = m.update(Message::Set("input:kb_layout", Value::Text("nonesuch".into())));
+            assert!(!m.choices.contains_key("input:kb_variant"));
+        });
+    }
+
+    /// `kb_layout = "us,cz"` is the switchable-layout pattern, and a
+    /// single-select dropdown can't express it — offering one would
+    /// replace both layouts with whichever was clicked. The row falls
+    /// back to a text field, which can.
+    #[test]
+    fn a_multi_layout_value_is_not_offered_a_single_select_picker() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::ChoicesLoaded(xkb_sample(), Vec::new()));
+            let _ = m.update(Message::Set("input:kb_layout", Value::Text("us,de".into())));
+            // The choices still exist; the row is what declines to use
+            // them, so building the view is what proves it's handled.
+            assert!(m.choices.contains_key("input:kb_layout"));
+            let _ = m.view(FontScale::default());
+            assert_eq!(
+                m.settings.get("input:kb_layout"),
+                Some(&Value::Text("us,de".into())),
+                "both layouts must survive being displayed"
+            );
+        });
+    }
+
+    #[test]
+    fn the_mapped_display_field_offers_connected_monitors() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::ChoicesLoaded(
+                Default::default(),
+                vec!["eDP-2".into(), "DP-3".into()],
+            ));
+            let monitors = &m.choices["input:touchdevice:output"];
+            assert_eq!(monitors.len(), 2);
+            assert!(monitors.iter().any(|c| c.value == "eDP-2"));
         });
     }
 

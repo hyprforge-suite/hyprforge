@@ -9,6 +9,7 @@
 pub mod apply;
 pub mod catalog;
 pub mod setup;
+pub mod xkb;
 
 pub use catalog::CATALOG;
 pub use hyprforge_core::hlconfig::{

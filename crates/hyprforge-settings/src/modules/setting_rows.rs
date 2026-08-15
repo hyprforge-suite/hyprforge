@@ -44,6 +44,23 @@ impl Source {
     }
 }
 
+/// One entry in a picker built from something discovered at runtime — an
+/// installed keyboard layout, a connected monitor.
+///
+/// Carries the value and the label separately because the two differ:
+/// `us` is what Hyprland wants, "English (US)" is what a user recognises.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DynChoice {
+    pub value: String,
+    pub label: String,
+}
+
+impl std::fmt::Display for DynChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
 /// Everything a row needs, plus how to turn an interaction into the
 /// caller's own `Message`.
 pub struct RowContext<'a, M> {
@@ -51,6 +68,14 @@ pub struct RowContext<'a, M> {
     pub live: &'a BTreeMap<&'static str, Live>,
     pub drafts: &'a BTreeMap<&'static str, String>,
     pub draft_errors: &'a BTreeMap<&'static str, String>,
+    /// Options discovered at runtime, keyed by setting. A setting with
+    /// entries here is offered as a picker instead of a text field.
+    ///
+    /// Supplied by the module rather than the catalog because the
+    /// catalog is a compile-time description and these depend on the
+    /// machine: which layouts are installed, which monitors are plugged
+    /// in.
+    pub choices: &'a BTreeMap<&'static str, Vec<DynChoice>>,
     pub on_set: fn(&'static str, Value) -> M,
     pub on_draft: fn(&'static str, String) -> M,
     pub on_reset: fn(&'static str) -> M,
@@ -95,7 +120,24 @@ impl<'a, M: Clone + 'static> RowContext<'a, M> {
         let key = setting.key;
         let owned = self.owns(key);
         let (current, source) = self.effective(setting);
-        let (on_set, on_draft, on_reset) = (self.on_set, self.on_draft, self.on_reset);
+        let (on_set, on_draft) = (self.on_set, self.on_draft);
+
+        // A discovered picker wins over the catalog's own idea of the
+        // control, except when the stored value is a comma-separated
+        // list. `kb_layout = "us,cz"` is the switchable-layout pattern,
+        // and a single-select dropdown can't express it — offering one
+        // would replace both layouts with whichever the user clicked.
+        let multi_valued = current.as_text().is_some_and(|t| t.contains(','));
+        if let Some(options) = self.choices.get(key).filter(|_| !multi_valued) {
+            let current_text = current.as_text().unwrap_or_default().to_string();
+            let options = options_including(options, &current_text);
+            let selected = options.iter().find(|c| c.value == current_text).cloned();
+            let control = pick_list(options, selected, move |c: DynChoice| {
+                on_set(key, Value::Text(c.value))
+            })
+            .into();
+            return self.wrap(setting, control, source, owned, scale);
+        }
 
         let control: Element<'a, M> = match setting.kind {
             Kind::Bool { default } => {
@@ -133,13 +175,6 @@ impl<'a, M: Clone + 'static> RowContext<'a, M> {
                 .into(),
         };
 
-        let mut label_side = column![scaled_text(setting.label, 14.0, scale)].spacing(2);
-        label_side = label_side.push(meta_text(setting.help, 12.0, scale));
-        if let Some(problem) = self.draft_errors.get(key) {
-            label_side = label_side.push(scaled_text(problem.clone(), 12.0, scale));
-        }
-        label_side = label_side.push(meta_text(source.label(), 12.0, scale));
-
         // A colour row shows the colour it names. Reading a hex string and
         // picturing it is not something anyone does reliably, and this is
         // the one control where the value *is* the appearance.
@@ -153,6 +188,28 @@ impl<'a, M: Clone + 'static> RowContext<'a, M> {
             .into(),
             _ => control,
         };
+
+        self.wrap(setting, control, source, owned, scale)
+    }
+
+    /// The label stack and Reset button every row shares, whatever
+    /// control sits in it.
+    fn wrap(
+        &self,
+        setting: &'static Setting,
+        control: Element<'a, M>,
+        source: Source,
+        owned: bool,
+        scale: FontScale,
+    ) -> Element<'a, M> {
+        let key = setting.key;
+        let on_reset = self.on_reset;
+        let mut label_side = column![scaled_text(setting.label, 14.0, scale)].spacing(2);
+        label_side = label_side.push(meta_text(setting.help, 12.0, scale));
+        if let Some(problem) = self.draft_errors.get(key) {
+            label_side = label_side.push(scaled_text(problem.clone(), 12.0, scale));
+        }
+        label_side = label_side.push(meta_text(source.label(), 12.0, scale));
 
         let control_side: Element<'a, M> = if owned {
             row![
@@ -176,6 +233,27 @@ impl<'a, M: Clone + 'static> RowContext<'a, M> {
         .align_y(iced::Alignment::Center)
         .into()
     }
+}
+
+/// The options a picker should offer, with `current` kept even when it
+/// isn't among them.
+///
+/// A layout or monitor can be perfectly valid and absent from the list —
+/// a monitor that's unplugged right now, a layout from a custom XKB
+/// tree. A picker that dropped it would show nothing selected, so the
+/// next click would replace a working setting with whatever was hit.
+fn options_including(known: &[DynChoice], current: &str) -> Vec<DynChoice> {
+    let mut options = known.to_vec();
+    if !current.is_empty() && !options.iter().any(|c| c.value == current) {
+        options.insert(
+            0,
+            DynChoice {
+                value: current.to_string(),
+                label: format!("{current} (not installed)"),
+            },
+        );
+    }
+    options
 }
 
 /// A small filled square of the colour a row names.
@@ -363,6 +441,36 @@ mod tests {
         let kind = Kind::Gaps { default: 5, min: Some(0), max: Some(200) };
         assert_eq!(parse_for(&kind, " 12 "), Ok(Value::Int(12)));
         assert!(parse_for(&kind, "12.5").is_err());
+    }
+
+    /// A monitor that's unplugged right now, or a layout from a custom
+    /// XKB tree, is still a valid setting. A picker that dropped it would
+    /// show nothing selected, so the next click would replace a working
+    /// value with whatever was hit.
+    #[test]
+    fn a_picker_keeps_a_value_it_does_not_recognise() {
+        let known = vec![
+            DynChoice { value: "eDP-2".into(), label: "eDP-2".into() },
+            DynChoice { value: "DP-3".into(), label: "DP-3".into() },
+        ];
+        let options = options_including(&known, "HDMI-A-1");
+        assert_eq!(options.len(), 3);
+        assert_eq!(options[0].value, "HDMI-A-1", "kept, and first so it's visible");
+        assert!(options[0].label.contains("not installed"), "and marked as absent");
+    }
+
+    #[test]
+    fn a_recognised_value_is_not_duplicated_or_relabelled() {
+        let known = vec![DynChoice { value: "eDP-2".into(), label: "eDP-2".into() }];
+        let options = options_including(&known, "eDP-2");
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].label, "eDP-2");
+    }
+
+    #[test]
+    fn an_empty_value_adds_no_entry() {
+        let known = vec![DynChoice { value: "eDP-2".into(), label: "eDP-2".into() }];
+        assert_eq!(options_including(&known, "").len(), 1);
     }
 
     #[test]
