@@ -45,6 +45,29 @@ impl Tab {
 /// Which stored list a message is about. The three tabs each hold a list
 /// of blocks and every list needs the same four operations, so they share
 /// the messages rather than repeating them.
+impl Field {
+    /// Which tab's list this field belongs to.
+    ///
+    /// Needed because drafts from all three tabs share one map: without
+    /// it, applying would save only the tab that happened to be open, and
+    /// removing a row would drop the wrong rows' drafts.
+    fn tab(self) -> Tab {
+        match self {
+            Field::Monitor
+            | Field::Path
+            | Field::FitMode
+            | Field::Timeout
+            | Field::RandomOrder
+            | Field::Recursive => Tab::Wallpaper,
+            Field::Time | Field::Temperature | Field::Gamma | Field::Identity => Tab::NightLight,
+            Field::IdleTimeout
+            | Field::OnTimeout
+            | Field::OnResume
+            | Field::IgnoreInhibit => Tab::Idle,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Field {
     Monitor,
@@ -207,16 +230,42 @@ impl DesktopModule {
         let pending: Vec<((usize, Field), String)> =
             self.drafts.iter().map(|(k, v)| (*k, v.clone())).collect();
         let mut bad = Vec::new();
+        let mut touched = Vec::new();
         for ((index, field), raw) in pending {
             if self.apply_draft(index, field, &raw) {
                 self.drafts.remove(&(index, field));
+                if !touched.contains(&field.tab()) {
+                    touched.push(field.tab());
+                }
             } else {
                 bad.push(raw.trim().to_string());
             }
         }
         self.error = (!bad.is_empty())
             .then(|| format!("Couldn't read: {}. Everything else was saved.", bad.join(", ")));
-        self.save(self.tab)
+        // Every tab that changed, not just the one on screen. Typing in
+        // Wallpaper, switching to Idle and pressing Apply would otherwise
+        // leave the wallpaper edit in memory and never written.
+        Task::batch(touched.into_iter().map(|tab| self.save(tab)).collect::<Vec<_>>())
+    }
+
+    /// Drops the drafts belonging to a removed row, and shifts the ones
+    /// after it down.
+    ///
+    /// Removing row 1 makes row 2 become row 1, so a draft keyed to index
+    /// 2 would reappear against a different row's values. Only this tab's
+    /// fields move — the three lists share one map but have separate
+    /// indices.
+    fn reindex_drafts(&mut self, tab: Tab, removed: usize) {
+        let moved: Vec<((usize, Field), String)> = self
+            .drafts
+            .iter()
+            .filter(|((index, field), _)| field.tab() == tab && *index > removed)
+            .map(|((index, field), value)| ((*index - 1, *field), value.clone()))
+            .collect();
+        self.drafts
+            .retain(|(index, field), _| field.tab() != tab || *index < removed);
+        self.drafts.extend(moved);
     }
 
     /// `true` if the value was understood and stored.
@@ -346,7 +395,7 @@ impl SettingsModule for DesktopModule {
             Message::WallpaperRemoved(i) => {
                 if i < self.wallpapers.entries.len() {
                     self.wallpapers.entries.remove(i);
-                    self.drafts.retain(|(index, _), _| *index != i);
+                    self.reindex_drafts(Tab::Wallpaper, i);
                 }
                 self.save(Tab::Wallpaper)
             }
@@ -392,7 +441,7 @@ impl SettingsModule for DesktopModule {
             Message::ProfileRemoved(i) => {
                 if i < self.sunset.profiles.len() {
                     self.sunset.profiles.remove(i);
-                    self.drafts.retain(|(index, _), _| *index != i);
+                    self.reindex_drafts(Tab::NightLight, i);
                 }
                 self.save(Tab::NightLight)
             }
@@ -416,7 +465,7 @@ impl SettingsModule for DesktopModule {
             Message::ListenerRemoved(i) => {
                 if i < self.idle.listeners.len() {
                     self.idle.listeners.remove(i);
-                    self.drafts.retain(|(index, _), _| *index != i);
+                    self.reindex_drafts(Tab::Idle, i);
                 }
                 self.save(Tab::Idle)
             }
@@ -459,18 +508,33 @@ impl SettingsModule for DesktopModule {
                 self.error = None;
                 self.idle_needs_restart =
                     tab == Tab::Idle && applied == Applied::NeedsRestart;
-                self.status = Some(
-                    match applied {
-                        Applied::Live => "Saved and applied.",
-                        Applied::NeedsRestart => {
-                            "Saved. hypridle has no way to be told — restart it below to apply."
-                        }
-                        Applied::DaemonNotRunning => {
-                            "Saved. The daemon isn't running, so nothing changed on screen yet."
-                        }
+                match applied {
+                    // Refusals are an error, not a status: the setting is
+                    // saved but the screen did not change, and calling
+                    // that "applied" is the failure this project keeps
+                    // meeting.
+                    Applied::PartlyRefused(refused) => {
+                        self.status = None;
+                        self.error = Some(format!(
+                            "Saved, but the daemon wouldn't take: {}. \
+                             Check the file still exists and is readable.",
+                            refused.join(", ")
+                        ));
                     }
-                    .to_string(),
-                );
+                    Applied::Live => self.status = Some("Saved and applied.".into()),
+                    Applied::NeedsRestart => {
+                        self.status = Some(
+                            "Saved. hypridle has no way to be told — restart it below to apply."
+                                .into(),
+                        )
+                    }
+                    Applied::DaemonNotRunning => {
+                        self.status = Some(
+                            "Saved. The daemon isn't running, so nothing changed on screen yet."
+                                .into(),
+                        )
+                    }
+                }
                 Task::none()
             }
             Message::Applied(_, Err(e)) => {
@@ -1125,6 +1189,12 @@ mod tests {
 
             let _ = m.update(Message::Applied(Tab::Wallpaper, Ok(Applied::DaemonNotRunning)));
             assert!(m.status.clone().unwrap().contains("isn't running"));
+
+            let _ = m.update(Message::Applied(
+                Tab::Wallpaper,
+                Ok(Applied::PartlyRefused(vec!["/w/gone.png".into()])),
+            ));
+            assert!(m.error.is_some(), "a refusal is an error, not a status");
         });
     }
 
@@ -1150,6 +1220,79 @@ mod tests {
         assert_eq!(options[0], "/elsewhere/b.png", "kept, and first so it's visible");
         assert_eq!(options_including(&known, "/w/a.png").len(), 1, "no duplicate");
         assert_eq!(options_including(&known, "").len(), 1);
+    }
+
+    /// Typing in one tab, switching, and pressing Apply must still save
+    /// the first tab — otherwise the edit sits in memory and is never
+    /// written.
+    #[test]
+    fn applying_saves_every_tab_that_was_edited_not_just_the_open_one() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::WallpaperAdded);
+            let _ = m.update(Message::ProfileAdded);
+            let _ = m.update(Message::TabSelected(Tab::Wallpaper));
+            let _ = m.update(Message::WallpaperChanged(0, Field::Timeout, "45".into()));
+            let _ = m.update(Message::TabSelected(Tab::NightLight));
+            let _ = m.update(Message::ProfileChanged(0, Field::Temperature, "4000".into()));
+
+            let _ = m.update(Message::Commit);
+            assert_eq!(m.wallpapers.entries[0].timeout, Some(45), "the other tab's edit applied");
+            assert_eq!(m.sunset.profiles[0].temperature, 4000);
+            assert!(m.drafts.is_empty());
+        });
+    }
+
+    /// Removing row 1 makes row 2 become row 1, so a draft keyed to index
+    /// 2 would reappear against a different row's values.
+    #[test]
+    fn removing_a_row_shifts_the_later_rows_drafts_down() {
+        with_temp_config(|m| {
+            for _ in 0..3 {
+                let _ = m.update(Message::ProfileAdded);
+            }
+            let _ = m.update(Message::ProfileChanged(2, Field::Temperature, "4000".into()));
+            let _ = m.update(Message::ProfileRemoved(0));
+
+            assert_eq!(m.sunset.profiles.len(), 2);
+            assert_eq!(
+                m.drafts.get(&(1, Field::Temperature)).map(String::as_str),
+                Some("4000"),
+                "the draft must follow its row down"
+            );
+            assert!(!m.drafts.contains_key(&(2, Field::Temperature)));
+        });
+    }
+
+    /// The three lists share one draft map but have separate indices, so
+    /// removing a wallpaper must not disturb a profile's drafts.
+    #[test]
+    fn removing_a_row_leaves_other_tabs_drafts_alone() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::WallpaperAdded);
+            let _ = m.update(Message::ProfileAdded);
+            let _ = m.update(Message::ProfileChanged(0, Field::Temperature, "4000".into()));
+            let _ = m.update(Message::WallpaperRemoved(0));
+            assert_eq!(
+                m.drafts.get(&(0, Field::Temperature)).map(String::as_str),
+                Some("4000")
+            );
+        });
+    }
+
+    /// A refused push means the setting is saved but the screen did not
+    /// change — calling that "applied" is the failure this project keeps
+    /// meeting.
+    #[test]
+    fn a_refused_push_is_reported_as_an_error_not_a_success() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::Applied(
+                Tab::Wallpaper,
+                Ok(Applied::PartlyRefused(vec!["/w/gone.png".into()])),
+            ));
+            assert!(m.status.is_none(), "it did not succeed");
+            let error = m.error.clone().unwrap();
+            assert!(error.contains("/w/gone.png"), "{error}");
+        });
     }
 
     /// Builds every tab in each state it can be in.

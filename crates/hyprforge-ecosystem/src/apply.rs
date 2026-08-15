@@ -40,6 +40,10 @@ pub enum ApplyError {
 pub enum Applied {
     /// Saved and live.
     Live,
+    /// Saved, and the daemon refused some of it. Carries what was
+    /// rejected — a push that failed while the app said "applied" is
+    /// exactly the silent-no-op this project keeps finding.
+    PartlyRefused(Vec<String>),
     /// Saved, but the daemon won't pick it up until it restarts.
     NeedsRestart,
     /// Saved; the daemon isn't running, so there was nothing to tell.
@@ -98,22 +102,33 @@ pub fn wallpapers(
         return Ok(Applied::DaemonNotRunning);
     }
     let skip: Vec<usize> = settings.invalid().into_iter().map(|(i, _)| i).collect();
+    let mut refused = Vec::new();
     for (i, entry) in settings.entries.iter().enumerate() {
         if skip.contains(&i) {
             continue;
         }
-        hyprctl(&[
-            "hyprpaper",
-            "wallpaper",
-            &format!(
-                "{},{},{}",
-                entry.monitor.trim(),
-                wallpaper::expand_tilde(&entry.path),
-                entry.fit_mode
-            ),
-        ]);
+        let request = format!(
+            "{},{},{}",
+            entry.monitor.trim(),
+            wallpaper::expand_tilde(&entry.path),
+            entry.fit_mode
+        );
+        // Checked, not fired and forgotten: hyprpaper refuses an image it
+        // can't read, and reporting "applied" for a wallpaper that never
+        // changed is the failure this project keeps meeting.
+        if !hyprctl(&["hyprpaper", "wallpaper", &request]) {
+            refused.push(if entry.is_fallback() {
+                entry.path.clone()
+            } else {
+                format!("{} on {}", entry.path, entry.monitor.trim())
+            });
+        }
     }
-    Ok(Applied::Live)
+    if refused.is_empty() {
+        Ok(Applied::Live)
+    } else {
+        Ok(Applied::PartlyRefused(refused))
+    }
 }
 
 /// Writes the temperature schedule and pushes the profile that should be
@@ -132,16 +147,26 @@ pub fn temperature(
     if !running("hyprsunset") {
         return Ok(Applied::DaemonNotRunning);
     }
+    let mut refused = Vec::new();
     if let Some(profile) = active_profile(settings, now_minutes) {
-        if profile.identity {
-            hyprctl(&["hyprsunset", "identity"]);
+        let ok = if profile.identity {
+            hyprctl(&["hyprsunset", "identity"])
         } else {
-            hyprctl(&["hyprsunset", "temperature", &profile.temperature.to_string()]);
+            hyprctl(&["hyprsunset", "temperature", &profile.temperature.to_string()])
+        };
+        if !ok {
+            refused.push(format!("{}K at {}", profile.temperature, profile.time));
         }
         // Gamma is a percentage over IPC and a multiplier in the config.
-        hyprctl(&["hyprsunset", "gamma", &format!("{}", (profile.gamma * 100.0).round())]);
+        if !hyprctl(&["hyprsunset", "gamma", &format!("{}", (profile.gamma * 100.0).round())]) {
+            refused.push(format!("brightness {}", profile.gamma));
+        }
     }
-    Ok(Applied::Live)
+    if refused.is_empty() {
+        Ok(Applied::Live)
+    } else {
+        Ok(Applied::PartlyRefused(refused))
+    }
 }
 
 /// The profile hyprsunset would be holding at `now_minutes`.

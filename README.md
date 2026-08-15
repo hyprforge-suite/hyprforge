@@ -32,6 +32,46 @@ crates/
   hyprforge-settings/      the iced GUI, hosting all five modules
 ```
 
+## Checking everything works
+
+```
+./check.sh          # everything available on this machine
+./check.sh --quick  # no compositor or daemons needed
+```
+
+Three tiers, answering different questions:
+
+| Tier | Asks | Needs |
+|---|---|---|
+| clippy + unit tests | does the code do what *this project* thinks? | nothing |
+| live tests | does **Hyprland** agree? | Hyprland running |
+| parse tests | do the **ecosystem daemons** agree? | hyprpaper/hypridle installed |
+
+The first tier catches a mistake in the code. The other two catch the far
+nastier kind: code that is internally consistent and wrong about the system
+it talks to. Every claim the option catalogues make — that an option exists,
+what type it is, what range it accepts — is checked against the running
+compositor, and the generated hyprlang files are handed to the daemons
+themselves.
+
+That matters most where a mistake is *silent*. A misspelled key in a
+generated config isn't an error to hyprpaper or hypridle:
+
+```
+[ERR] Config has errors:
+Config error … config option <listener:this_is_not_a_key> does not exist.
+Proceeding ignoring faulty entries
+```
+
+It exits 0, drops the line, and the setting simply never happens. So the
+parse tests match on the message, not the status — and a negative control
+feeds each daemon a key that definitely doesn't exist and insists it
+complains, because a validation test that cannot fail is worthless.
+
+**The hyprpaper parse check skips while hyprpaper is running.** A second
+instance takes over its IPC socket, and when it exits the socket is gone,
+leaving the original alive but unreachable until it's restarted.
+
 ## Build
 
 ```

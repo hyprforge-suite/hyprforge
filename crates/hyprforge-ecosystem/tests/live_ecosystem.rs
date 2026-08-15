@@ -164,11 +164,21 @@ fn the_generated_wallpaper_file_is_well_formed() {
     });
     settings.splash = Some(false);
 
+    // The path deliberately doesn't exist, so a running hyprpaper refuses
+    // it — and that refusal has to be reported rather than dressed up as
+    // success. This is the assertion that would have caught the app
+    // saying "applied" for a wallpaper that never changed.
     let applied = apply::wallpapers(&generated, &target, &settings).unwrap();
-    assert!(matches!(
-        applied,
-        apply::Applied::Live | apply::Applied::DaemonNotRunning
-    ));
+    match applied {
+        apply::Applied::PartlyRefused(refused) => {
+            assert!(
+                refused.iter().any(|r| r.contains("nonexistent")),
+                "the refusal must name what was rejected: {refused:?}"
+            );
+        }
+        apply::Applied::DaemonNotRunning => {}
+        other => panic!("hyprpaper took a path that doesn't exist: {other:?}"),
+    }
 
     let text = std::fs::read_to_string(&generated).unwrap();
     assert!(text.contains("wallpaper {"), "{text}");
