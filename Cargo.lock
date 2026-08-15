@@ -1414,6 +1414,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyprforge-session"
+version = "0.1.0"
+dependencies = [
+ "hyprforge-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "toml",
+]
+
+[[package]]
 name = "hyprforge-settings"
 version = "0.1.0"
 dependencies = [
@@ -1424,6 +1436,7 @@ dependencies = [
  "hyprforge-ecosystem",
  "hyprforge-input",
  "hyprforge-lua-import",
+ "hyprforge-session",
  "hyprforge-shortcuts",
  "hyprforge-windowrules",
  "iced",

@@ -7,6 +7,7 @@ members = [
     "crates/hyprforge-input",
     "crates/hyprforge-appearance",
     "crates/hyprforge-ecosystem",
+    "crates/hyprforge-session",
     "crates/hyprforge-shortcuts",
     "crates/hyprforge-lua-import",
     "crates/hyprforge-settings",
@@ -25,6 +26,7 @@ hyprforge-windowrules = { path = "crates/hyprforge-windowrules" }
 hyprforge-input = { path = "crates/hyprforge-input" }
 hyprforge-appearance = { path = "crates/hyprforge-appearance" }
 hyprforge-ecosystem = { path = "crates/hyprforge-ecosystem" }
+hyprforge-session = { path = "crates/hyprforge-session" }
 hyprforge-shortcuts = { path = "crates/hyprforge-shortcuts" }
 hyprforge-lua-import = { path = "crates/hyprforge-lua-import" }
 
