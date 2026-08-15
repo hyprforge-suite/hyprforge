@@ -174,6 +174,78 @@ pub fn expand_tilde(path: &str) -> String {
     format!("{}{}", home.to_string_lossy(), rest)
 }
 
+/// Images and folders worth offering as wallpapers.
+///
+/// **Loose image files only come from directories that are *about*
+/// wallpapers.** Scanning `~/Pictures` for images found 105 entries on
+/// this machine, 100 of them hyprshot screenshots — a picker nobody could
+/// use. Screenshots live in the same folder as wallpapers and are not
+/// wallpapers, and no filename rule separates them, so the directory a
+/// file sits in is the only honest signal available.
+///
+/// `~/Pictures` still contributes its **subfolders**, since a folder is a
+/// legitimate choice — hyprpaper cycles it — and that is how someone with
+/// `~/Pictures/Nature` reaches it without every loose file coming too.
+///
+/// Deliberately shallow: one level per root. A recursive scan of a large
+/// picture library would stall the screen opening, and hyprpaper's own
+/// `recursive` option already covers deep trees once a folder is chosen.
+pub fn discover_images() -> Vec<String> {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return Vec::new();
+    };
+    let mut found = std::collections::BTreeSet::new();
+
+    // Directories that exist to hold wallpapers: take their images.
+    for root in [
+        home.join("Pictures/Wallpapers"),
+        home.join("Wallpapers"),
+        home.join(".local/share/wallpapers"),
+        home.join(".local/share/backgrounds"),
+    ] {
+        collect(&root, true, &mut found);
+    }
+    // General picture directories: folders only. `~/Downloads` is
+    // deliberately not among them — its subfolders are unpacked archives,
+    // not wallpaper collections, and they crowded out the real entries.
+    collect(&home.join("Pictures"), false, &mut found);
+    found.into_iter().collect()
+}
+
+/// Whether a path looks like an image this crate would offer.
+pub fn is_image(path: &std::path::Path) -> bool {
+    const EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "jxl", "bmp"];
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| EXTENSIONS.contains(&e.to_lowercase().as_str()))
+}
+
+fn collect(
+    root: &std::path::Path,
+    include_files: bool,
+    found: &mut std::collections::BTreeSet<String>,
+) {
+    let Ok(read) = std::fs::read_dir(root) else {
+        return;
+    };
+    let mut has_images = false;
+    for entry in read.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.insert(path.to_string_lossy().to_string());
+        } else if is_image(&path) {
+            has_images = true;
+            if include_files {
+                found.insert(path.to_string_lossy().to_string());
+            }
+        }
+    }
+    // The root itself, when there is something in it to cycle.
+    if has_images {
+        found.insert(root.to_string_lossy().to_string());
+    }
+}
+
 /// Renders the generated `wallpaper.conf`.
 pub fn generate(settings: &Settings) -> String {
     let bad: Vec<usize> = settings.invalid().into_iter().map(|(i, _)| i).collect();
@@ -366,6 +438,64 @@ mod tests {
             assert_eq!(FitMode::parse(mode.as_str()), Some(mode));
         }
         assert_eq!(FitMode::parse("stretch"), None);
+    }
+
+    /// A dedicated wallpaper directory contributes its images and
+    /// itself; a general picture directory contributes only folders.
+    /// Scanning `~/Pictures` for images found 105 entries on this
+    /// machine, 100 of them screenshots.
+    #[test]
+    fn only_wallpaper_directories_contribute_loose_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("Pictures");
+        std::fs::create_dir_all(root.join("Screenshots")).unwrap();
+        std::fs::write(root.join("shot.png"), b"").unwrap();
+        std::fs::write(root.join("notes.txt"), b"").unwrap();
+
+        let mut folders_only = std::collections::BTreeSet::new();
+        collect(&root, false, &mut folders_only);
+        assert!(folders_only.contains(&root.join("Screenshots").to_string_lossy().to_string()));
+        assert!(
+            !folders_only.contains(&root.join("shot.png").to_string_lossy().to_string()),
+            "a loose screenshot is not a wallpaper"
+        );
+        assert!(
+            folders_only.contains(&root.to_string_lossy().to_string()),
+            "the folder itself is still cyclable"
+        );
+
+        let mut with_files = std::collections::BTreeSet::new();
+        collect(&root, true, &mut with_files);
+        assert!(with_files.contains(&root.join("shot.png").to_string_lossy().to_string()));
+        assert!(
+            !with_files.contains(&root.join("notes.txt").to_string_lossy().to_string()),
+            "non-images never appear"
+        );
+    }
+
+    #[test]
+    fn image_extensions_are_matched_case_insensitively() {
+        assert!(is_image(std::path::Path::new("/a/B.PNG")));
+        assert!(is_image(std::path::Path::new("/a/b.jxl")));
+        assert!(!is_image(std::path::Path::new("/a/b.txt")));
+        assert!(!is_image(std::path::Path::new("/a/b")));
+    }
+
+    /// An empty folder has nothing to cycle, so offering it would be a
+    /// choice that produces no wallpaper.
+    #[test]
+    fn a_folder_with_no_images_is_not_offered_as_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("Empty");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut found = std::collections::BTreeSet::new();
+        collect(&root, true, &mut found);
+        assert!(!found.contains(&root.to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn discovery_never_panics_on_a_real_machine() {
+        let _ = discover_images();
     }
 
     #[test]
