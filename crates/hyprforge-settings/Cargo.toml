@@ -8,6 +8,7 @@ license.workspace = true
 hyprforge-core = { workspace = true, features = ["gui", "dbus"] }
 hyprforge-windowrules.workspace = true
 hyprforge-input.workspace = true
+hyprforge-appearance.workspace = true
 hyprforge-shortcuts.workspace = true
 hyprforge-lua-import.workspace = true
 # "tokio" selects iced's tokio executor backend, which is what provides

@@ -1407,6 +1407,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures-util",
+ "hyprforge-appearance",
  "hyprforge-core",
  "hyprforge-input",
  "hyprforge-lua-import",

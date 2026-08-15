@@ -62,7 +62,7 @@ with zero GTK/Qt dependency anywhere in the stack.
 | — Bluetooth module | *(planned)* | blueman | talks to BlueZ D-Bus directly | not started |
 | — Audio module | *(planned)* | pavucontrol | talks to PipeWire | not started |
 | — Power module | *(planned)* | — | talks to UPower/power-profiles-daemon | not started |
-| — Appearance module | *(planned)* | — | owns its own config + gsettings bridge | not started |
+| — Appearance module | `hyprforge-appearance` (lib) | GNOME/KDE appearance settings | no (writes gsettings via CLI) | in progress |
 | — Input/keyboard module | `hyprforge-input` (lib) | GNOME/KDE keyboard & touchpad settings | no | in progress |
 | — Users/time module | *(planned)* | — | accountsservice/timedated | not started |
 | **File Manager** | `hyprforge-files-core` (shared logic), `hyprforge-files` (standalone), `hyprforge-files-portal` (xdg-desktop-portal FileChooser backend) | Nautilus/Dolphin/Thunar | portal backend runs as a D-Bus service | not started |
