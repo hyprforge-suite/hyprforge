@@ -7,6 +7,7 @@ use iced::keyboard::{self, key, Key};
 use iced::widget::{column, container, operation, row, text_input, Id};
 use iced::{window, Background, Element, Length, Size, Subscription, Task, Theme};
 use modules::appearance::AppearanceModule;
+use modules::desktop::DesktopModule;
 use modules::displays::DisplaysModule;
 use modules::input::InputModule;
 use modules::shortcuts::ShortcutsModule;
@@ -140,6 +141,7 @@ enum Screen {
     Shortcuts,
     Input,
     Appearance,
+    Desktop,
 }
 
 impl Screen {
@@ -150,6 +152,7 @@ impl Screen {
             Screen::Shortcuts => "Shortcuts",
             Screen::Input => "Input",
             Screen::Appearance => "Appearance",
+            Screen::Desktop => "Desktop",
         }
     }
 }
@@ -180,7 +183,7 @@ const NAV: &[NavCategory] = &[
     },
     NavCategory {
         label: "Appearance",
-        screens: &[Screen::Appearance],
+        screens: &[Screen::Appearance, Screen::Desktop],
     },
 ];
 
@@ -196,6 +199,7 @@ enum Message {
     Shortcuts(modules::shortcuts::Message),
     Input(modules::input::Message),
     Appearance(modules::appearance::Message),
+    Desktop(modules::desktop::Message),
     WindowOpened(window::Id),
     WindowClosed(window::Id),
     RevertPopupOpened(window::Id),
@@ -209,6 +213,7 @@ struct App {
     shortcuts: ShortcutsModule,
     input: InputModule,
     appearance: AppearanceModule,
+    desktop: DesktopModule,
     search_query: String,
     search_id: Id,
     font_scale: FontScale,
@@ -224,6 +229,7 @@ impl App {
         let (shortcuts, shortcuts_task) = ShortcutsModule::new();
         let (input, input_task) = InputModule::new();
         let (appearance, appearance_task) = AppearanceModule::new();
+        let (desktop, desktop_task) = DesktopModule::new();
         (
             App {
                 screen: Screen::Monitors,
@@ -232,6 +238,7 @@ impl App {
                 shortcuts,
                 input,
                 appearance,
+                desktop,
                 search_query: String::new(),
                 search_id: Id::unique(),
                 font_scale: read_global_font_scale(),
@@ -245,6 +252,7 @@ impl App {
                 shortcuts_task.map(Message::Shortcuts),
                 input_task.map(Message::Input),
                 appearance_task.map(Message::Appearance),
+                desktop_task.map(Message::Desktop),
             ]),
         )
     }
@@ -350,6 +358,7 @@ impl App {
                 Screen::Shortcuts => Task::none(),
                 Screen::Input => Task::none(),
                 Screen::Appearance => Task::none(),
+                Screen::Desktop => Task::none(),
             },
             Message::Displays(msg) => {
                 let task = self.displays.update(msg).map(Message::Displays);
@@ -357,6 +366,7 @@ impl App {
             }
             Message::Input(msg) => self.input.update(msg).map(Message::Input),
             Message::Appearance(msg) => self.appearance.update(msg).map(Message::Appearance),
+            Message::Desktop(msg) => self.desktop.update(msg).map(Message::Desktop),
             Message::WindowOpened(id) => {
                 if self.main_window.is_none() {
                     self.main_window = Some(id);
@@ -456,6 +466,7 @@ impl App {
             Screen::Shortcuts => self.shortcuts.icon(),
             Screen::Input => self.input.icon(),
             Screen::Appearance => self.appearance.icon(),
+            Screen::Desktop => self.desktop.icon(),
         };
 
         let query = self.search_query.to_lowercase();
@@ -529,6 +540,7 @@ impl App {
             Screen::Shortcuts => self.shortcuts.view(scale).map(Message::Shortcuts),
             Screen::Input => self.input.view(scale).map(Message::Input),
             Screen::Appearance => self.appearance.view(scale).map(Message::Appearance),
+            Screen::Desktop => self.desktop.view(scale).map(Message::Desktop),
         };
         // The Monitors editor (canvas + full property panel + policy/swap
         // sections) routinely exceeds window height — without scrolling,
