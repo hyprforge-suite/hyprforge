@@ -1,6 +1,7 @@
 pub mod apply_lua;
 pub mod geometry;
 pub mod hlconfig;
+pub mod hyprlang;
 pub mod lua;
 pub mod monitors;
 pub mod lua_setup;

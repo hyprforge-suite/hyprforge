@@ -1,0 +1,285 @@
+//! Writing a generated config and getting the daemon to notice.
+//!
+//! The write half is identical for all three: render, make sure the
+//! user's own config sources it, write atomically. The *notice* half is
+//! not, and pretending otherwise would be the "reports a save that did
+//! nothing" failure this project keeps meeting:
+//!
+//! | Daemon | How a change lands |
+//! |---|---|
+//! | hyprpaper | `hyprctl hyprpaper wallpaper` — immediate |
+//! | hyprsunset | `hyprctl hyprsunset temperature` — immediate |
+//! | hypridle | no IPC at all; must be restarted |
+//!
+//! So [`Applied`] reports what actually happened rather than returning
+//! `()`, and the caller shows the difference.
+
+use crate::{idle, sunset, wallpaper};
+use hyprforge_core::hyprlang;
+use std::path::Path;
+use std::process::Command;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ApplyError {
+    #[error("couldn't write {path}: {source}")]
+    Write {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("couldn't update {path}: {source}")]
+    Setup {
+        path: String,
+        #[source]
+        source: hyprforge_core::lua_setup::SetupError,
+    },
+}
+
+/// What reached the running daemon, if anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Applied {
+    /// Saved and live.
+    Live,
+    /// Saved, but the daemon won't pick it up until it restarts.
+    NeedsRestart,
+    /// Saved; the daemon isn't running, so there was nothing to tell.
+    DaemonNotRunning,
+}
+
+/// Writes `contents` to `generated` and makes sure `target` sources it.
+fn write_and_source(generated: &Path, target: &Path, contents: &str) -> Result<(), ApplyError> {
+    hyprforge_core::paths::write_atomic(generated, contents).map_err(|source| ApplyError::Write {
+        path: generated.display().to_string(),
+        source,
+    })?;
+    // After the generated file exists, never before: a `source =` line
+    // pointing at a missing file is an error the daemon reports on its
+    // next read, and the ordering is the same rule the Lua modules follow.
+    hyprlang::install(target, &hyprlang::source_line(generated)).map_err(|source| {
+        ApplyError::Setup {
+            path: target.display().to_string(),
+            source,
+        }
+    })?;
+    Ok(())
+}
+
+fn running(name: &str) -> bool {
+    Command::new("pgrep")
+        .args(["-x", name])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn hyprctl(args: &[&str]) -> bool {
+    Command::new("hyprctl")
+        .args(args)
+        .output()
+        .map(|o| {
+            let body = String::from_utf8_lossy(&o.stdout).to_lowercase();
+            o.status.success() && !body.contains("error") && !body.contains("invalid")
+        })
+        .unwrap_or(false)
+}
+
+/// Writes the wallpaper config and pushes every entry to hyprpaper.
+///
+/// Each entry is pushed individually because that is the only request
+/// hyprpaper 0.8.4 takes — there is no "reload the config" — so the live
+/// state is built by replaying what was just written.
+pub fn wallpapers(
+    generated: &Path,
+    target: &Path,
+    settings: &wallpaper::Settings,
+) -> Result<Applied, ApplyError> {
+    write_and_source(generated, target, &wallpaper::generate(settings))?;
+    if !running("hyprpaper") {
+        return Ok(Applied::DaemonNotRunning);
+    }
+    let skip: Vec<usize> = settings.invalid().into_iter().map(|(i, _)| i).collect();
+    for (i, entry) in settings.entries.iter().enumerate() {
+        if skip.contains(&i) {
+            continue;
+        }
+        hyprctl(&[
+            "hyprpaper",
+            "wallpaper",
+            &format!(
+                "{},{},{}",
+                entry.monitor.trim(),
+                wallpaper::expand_tilde(&entry.path),
+                entry.fit_mode
+            ),
+        ]);
+    }
+    Ok(Applied::Live)
+}
+
+/// Writes the temperature schedule and pushes the profile that should be
+/// active right now.
+///
+/// `now_minutes` is passed in rather than read from the clock so the
+/// choice is testable — picking the wrong profile means the screen
+/// changes colour to something the schedule doesn't call for.
+pub fn temperature(
+    generated: &Path,
+    target: &Path,
+    settings: &sunset::Settings,
+    now_minutes: u32,
+) -> Result<Applied, ApplyError> {
+    write_and_source(generated, target, &sunset::generate(settings))?;
+    if !running("hyprsunset") {
+        return Ok(Applied::DaemonNotRunning);
+    }
+    if let Some(profile) = active_profile(settings, now_minutes) {
+        if profile.identity {
+            hyprctl(&["hyprsunset", "identity"]);
+        } else {
+            hyprctl(&["hyprsunset", "temperature", &profile.temperature.to_string()]);
+        }
+        // Gamma is a percentage over IPC and a multiplier in the config.
+        hyprctl(&["hyprsunset", "gamma", &format!("{}", (profile.gamma * 100.0).round())]);
+    }
+    Ok(Applied::Live)
+}
+
+/// The profile hyprsunset would be holding at `now_minutes`.
+///
+/// The one whose time has most recently passed — and if none has (every
+/// profile is later today), the **last** one, because the schedule wraps
+/// around midnight. Getting that wrap wrong leaves the morning showing
+/// the daytime profile when the user only configured an evening one.
+pub fn active_profile(settings: &sunset::Settings, now_minutes: u32) -> Option<&sunset::Profile> {
+    let mut timed: Vec<(u32, &sunset::Profile)> = settings
+        .profiles
+        .iter()
+        .filter_map(|p| Some((sunset::parse_time(&p.time)?, p)))
+        .collect();
+    timed.sort_by_key(|(minutes, _)| *minutes);
+    timed
+        .iter()
+        .rev()
+        .find(|(minutes, _)| *minutes <= now_minutes)
+        .or_else(|| timed.last())
+        .map(|(_, p)| *p)
+}
+
+/// Writes the idle config.
+///
+/// Never restarts hypridle. It is the process that locks the session and
+/// blanks the screen, and restarting it out from under a user — who might
+/// be mid-sentence, or relying on it not to lock — is not something a
+/// save button should do silently. The caller reports [`Applied::NeedsRestart`]
+/// and lets them choose.
+pub fn idle(
+    generated: &Path,
+    target: &Path,
+    settings: &idle::Settings,
+) -> Result<Applied, ApplyError> {
+    write_and_source(generated, target, &idle::generate(settings))?;
+    if !running("hypridle") {
+        return Ok(Applied::DaemonNotRunning);
+    }
+    Ok(Applied::NeedsRestart)
+}
+
+/// Restarts hypridle, on explicit request.
+///
+/// `pkill` then respawn, because it is started from `hl.exec_cmd` in the
+/// user's Hyprland config rather than by systemd — there is no unit to
+/// restart. Detached so it outlives the settings app.
+pub fn restart_idle() -> Result<(), std::io::Error> {
+    let _ = Command::new("pkill").args(["-x", "hypridle"]).status();
+    Command::new("hypridle")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn schedule(times: &[(&str, i64)]) -> sunset::Settings {
+        sunset::Settings {
+            max_gamma: None,
+            profiles: times
+                .iter()
+                .map(|(time, temperature)| sunset::Profile {
+                    time: (*time).to_string(),
+                    temperature: *temperature,
+                    ..sunset::Profile::default()
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn the_active_profile_is_the_most_recently_started_one() {
+        let s = schedule(&[("00:00", 6500), ("12:00", 6000), ("21:00", 4000)]);
+        assert_eq!(active_profile(&s, 0).unwrap().temperature, 6500);
+        assert_eq!(active_profile(&s, 11 * 60).unwrap().temperature, 6500);
+        assert_eq!(active_profile(&s, 12 * 60).unwrap().temperature, 6000);
+        assert_eq!(active_profile(&s, 23 * 60).unwrap().temperature, 4000);
+    }
+
+    /// The schedule wraps: before the first profile of the day, the one
+    /// still holding is the *last*. Getting this wrong shows the daytime
+    /// profile all morning to someone who only configured an evening one.
+    #[test]
+    fn before_the_first_profile_the_last_one_is_still_holding() {
+        let s = schedule(&[("08:00", 6500), ("21:00", 4000)]);
+        assert_eq!(active_profile(&s, 0).unwrap().temperature, 4000);
+        assert_eq!(active_profile(&s, 7 * 60).unwrap().temperature, 4000);
+    }
+
+    /// File order isn't schedule order — hyprsunset goes by time.
+    #[test]
+    fn profiles_out_of_order_still_resolve_by_time() {
+        let s = schedule(&[("21:00", 4000), ("00:00", 6500), ("12:00", 6000)]);
+        assert_eq!(active_profile(&s, 13 * 60).unwrap().temperature, 6000);
+    }
+
+    #[test]
+    fn an_unparseable_time_is_left_out_of_the_schedule() {
+        let s = schedule(&[("9:5", 3000), ("00:00", 6500)]);
+        assert_eq!(active_profile(&s, 12 * 60).unwrap().temperature, 6500);
+    }
+
+    #[test]
+    fn an_empty_schedule_has_no_active_profile() {
+        assert!(active_profile(&sunset::Settings::default(), 600).is_none());
+    }
+
+    /// The generated file must exist before anything sources it — a
+    /// `source =` line pointing at nothing is an error the daemon
+    /// reports on its next read.
+    #[test]
+    fn writing_creates_the_file_before_sourcing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let generated = dir.path().join("gen/wallpaper.conf");
+        let target = dir.path().join("hyprpaper.conf");
+        std::fs::write(&target, "# mine\n").unwrap();
+
+        write_and_source(&generated, &target, "# generated\n").unwrap();
+        assert!(generated.exists());
+        let conf = std::fs::read_to_string(&target).unwrap();
+        assert!(conf.starts_with("# mine\n"), "{conf}");
+        assert!(conf.contains(&format!("source = {}", generated.display())), "{conf}");
+    }
+
+    #[test]
+    fn writing_twice_does_not_source_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let generated = dir.path().join("gen.conf");
+        let target = dir.path().join("hyprpaper.conf");
+        write_and_source(&generated, &target, "# a\n").unwrap();
+        write_and_source(&generated, &target, "# b\n").unwrap();
+        let conf = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(conf.matches("source =").count(), 1, "{conf}");
+        assert_eq!(std::fs::read_to_string(&generated).unwrap(), "# b\n");
+    }
+}
