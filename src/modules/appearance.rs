@@ -37,7 +37,7 @@ use iced::widget::{checkbox, column, container, pick_list, row, scrollable, text
 use iced::{Element, Length, Task};
 use std::collections::BTreeMap;
 
-use super::setting_rows::{self, RowContext};
+use super::setting_rows::{self, DynChoice, RowContext};
 
 /// Which part of the screen is showing. All three are long enough that
 /// one scrolling page would bury whichever the user didn't come for.
@@ -82,6 +82,8 @@ pub enum Message {
     DesktopLoaded(Vec<(&'static str, String)>),
     /// The themes and fonts installed on this machine, scanned once.
     InstalledLoaded(Installed),
+    /// The connected monitors, for the settings that name one.
+    MonitorsLoaded(Vec<String>),
     FontFamilyChosen(&'static str, String),
     FontSizeChanged(&'static str, String),
     FontSizeSubmitted(&'static str),
@@ -163,6 +165,9 @@ pub struct AppearanceModule {
     installed: Installed,
     /// Font sizes mid-edit, keyed by gsettings key.
     font_sizes: BTreeMap<&'static str, String>,
+    /// Discovered options per setting, for the rows that can be picked
+    /// rather than typed.
+    choices: BTreeMap<&'static str, Vec<DynChoice>>,
     filter: String,
     config: HyprConfig,
     setup_plan: SetupPlan,
@@ -213,6 +218,7 @@ impl AppearanceModule {
                 desktop_undo: None,
                 installed: Installed::default(),
                 font_sizes: BTreeMap::new(),
+                choices: BTreeMap::new(),
                 filter: String::new(),
                 config: setup.config,
                 setup_plan: setup.plan,
@@ -233,6 +239,7 @@ impl AppearanceModule {
                 Task::perform(read_animations(), |(a, c)| Message::AnimationsLoaded(a, c)),
                 Task::perform(read_desktop(), Message::DesktopLoaded),
                 Task::perform(read_installed(), Message::InstalledLoaded),
+                Task::perform(read_monitors(), Message::MonitorsLoaded),
             ]),
         )
     }
@@ -254,6 +261,7 @@ impl AppearanceModule {
             live: &self.live,
             drafts: &self.drafts,
             draft_errors: &self.draft_errors,
+            choices: &self.choices,
             on_set: Message::Set,
             on_draft: Message::DraftChanged,
             on_reset: Message::Reset,
@@ -508,6 +516,16 @@ impl SettingsModule for AppearanceModule {
             }
             Message::InstalledLoaded(installed) => {
                 self.installed = installed;
+                Task::none()
+            }
+            Message::MonitorsLoaded(monitors) => {
+                self.choices.insert(
+                    "cursor:default_monitor",
+                    monitors
+                        .into_iter()
+                        .map(|name| DynChoice { label: name.clone(), value: name })
+                        .collect(),
+                );
                 Task::none()
             }
             Message::DesktopChosen(key, value) => write_desktop(self, key, value),
@@ -1210,6 +1228,12 @@ async fn read_installed() -> Installed {
     })
     .await
     .unwrap_or_default()
+}
+
+async fn read_monitors() -> Vec<String> {
+    tokio::task::spawn_blocking(hyprforge_core::monitors::connector_names)
+        .await
+        .unwrap_or_default()
 }
 
 async fn read_desktop() -> Vec<(&'static str, String)> {
