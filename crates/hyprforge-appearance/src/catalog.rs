@@ -65,6 +65,36 @@ pub const CATEGORIES: &[Category] = &[
         help: "Blur while windows are moving or resizing.",
     },
     Category {
+        key: "dwindle",
+        label: "Dwindle layout",
+        help: "How the dwindle layout splits. Only applies while it's the active layout.",
+    },
+    Category {
+        key: "master",
+        label: "Master layout",
+        help: "How the master layout arranges windows. Only applies while it's the active layout.",
+    },
+    Category {
+        key: "group",
+        label: "Window groups",
+        help: "Tabbed groups of windows, and how they merge.",
+    },
+    Category {
+        key: "group:col",
+        label: "Group border colours",
+        help: "Border colours for grouped windows.",
+    },
+    Category {
+        key: "group:groupbar",
+        label: "Group bar",
+        help: "The tab strip drawn above a group.",
+    },
+    Category {
+        key: "group:groupbar:col",
+        label: "Group bar colours",
+        help: "Tab backgrounds. Only drawn with gradient backgrounds turned on.",
+    },
+    Category {
         key: "cursor",
         label: "Cursor",
         help: "How the pointer is drawn and when it hides.",
@@ -79,6 +109,10 @@ pub const CATALOG: Catalog = Catalog {
         (
             "decoration:wobble",
             "Wobbly windows aren't in Hyprland 0.56 — the wiki documents them ahead of the release.",
+        ),
+        (
+            "group:groupbar:font_weight",
+            "Group bar font weight isn't in Hyprland 0.56 — the wiki documents it ahead of the release.",
         ),
         (
             "decoration:shadow:offset",
@@ -100,6 +134,28 @@ const RESIZE_CORNER: &[(i64, &str)] = &[
     (3, "Bottom right"),
     (4, "Bottom left"),
 ];
+
+const FORCE_SPLIT: &[(i64, &str)] = &[
+    (0, "Wherever the mouse is"),
+    (1, "Always left or top"),
+    (2, "Always right or bottom"),
+];
+
+const SPLIT_BIAS: &[(i64, &str)] = &[
+    (0, "The top or left window"),
+    (1, "The window being split"),
+];
+
+const DRAG_INTO_GROUP: &[(i64, &str)] = &[
+    (0, "Never"),
+    (1, "Anywhere on the group"),
+    (2, "Only on the tab strip"),
+];
+
+const ORIENTATIONS: &[&str] = &["left", "right", "top", "bottom", "center"];
+const FALLBACK_SIDES: &[&str] = &["left", "right", "top", "bottom"];
+const NEW_STATUS: &[&str] = &["master", "slave", "inherit"];
+const NEW_ON_ACTIVE: &[&str] = &["none", "before", "after"];
 
 const HW_CURSORS: &[(i64, &str)] = &[
     (0, "Use hardware cursors"),
@@ -508,6 +564,429 @@ pub const SETTINGS: &[Setting] = &[
         label: "Motion blur samples",
         help: "How many samples to render. More is smoother and more GPU work.",
         kind: Kind::Int { default: 7, min: Some(1), max: Some(32) },
+    },
+    // ---- dwindle ----
+    Setting {
+        key: "dwindle:force_split",
+        label: "Where new windows go",
+        help: "Which side a new window takes when a window is split.",
+        kind: Kind::IntEnum { default: 0, choices: FORCE_SPLIT },
+    },
+    Setting {
+        key: "dwindle:preserve_split",
+        label: "Keep split direction",
+        help: "A split stays horizontal or vertical whatever happens to the windows around it.",
+        kind: Kind::Bool { default: false },
+    },
+    Setting {
+        key: "dwindle:smart_split",
+        label: "Split by cursor corner",
+        help: "The quarter of the window your cursor is in decides the split direction. Turns on \"keep split direction\" as well.",
+        kind: Kind::Bool { default: false },
+    },
+    Setting {
+        key: "dwindle:smart_resizing",
+        label: "Resize toward the nearest corner",
+        help: "Resizing follows the corner your mouse is closest to, rather than the window's place in the tree.",
+        kind: Kind::Bool { default: true },
+    },
+    Setting {
+        key: "dwindle:use_active_for_splits",
+        label: "Split from the active window",
+        help: "Prefer the focused window over the mouse position when deciding where to split.",
+        kind: Kind::Bool { default: true },
+    },
+    Setting {
+        key: "dwindle:default_split_ratio",
+        label: "Default split ratio",
+        help: "How the space is divided on a new split. 1.0 is an even 50/50.",
+        kind: Kind::Float { default: 1.0, min: Some(0.1), max: Some(1.9) },
+    },
+    Setting {
+        key: "dwindle:split_width_multiplier",
+        label: "Split width multiplier",
+        help: "Biases splits wider. Useful on ultrawide screens where windows stay wider than tall.",
+        kind: Kind::Float { default: 1.0, min: Some(0.1), max: Some(10.0) },
+    },
+    Setting {
+        key: "dwindle:split_bias",
+        label: "Which window keeps the ratio",
+        help: "Which side of a new split gets the larger share.",
+        kind: Kind::IntEnum { default: 0, choices: SPLIT_BIAS },
+    },
+    Setting {
+        key: "dwindle:special_scale_factor",
+        label: "Special workspace scale",
+        help: "How much windows shrink on the special workspace.",
+        kind: Kind::Float { default: 1.0, min: Some(0.0), max: Some(1.0) },
+    },
+    Setting {
+        key: "dwindle:permanent_direction_override",
+        label: "Keep the preselected direction",
+        help: "A preselected split direction stays until it's changed, instead of resetting after one window.",
+        kind: Kind::Bool { default: false },
+    },
+    Setting {
+        key: "dwindle:precise_mouse_move",
+        label: "Precise drag placement",
+        help: "Dragging a window drops it exactly where the mouse is.",
+        kind: Kind::Bool { default: false },
+    },
+    // ---- master ----
+    Setting {
+        key: "master:mfact",
+        label: "Master size",
+        help: "How much of the screen the master window takes, as a fraction. 0.55 is just over half.",
+        kind: Kind::Float { default: 0.55, min: Some(0.0), max: Some(1.0) },
+    },
+    Setting {
+        key: "master:orientation",
+        label: "Master position",
+        help: "Which side of the screen the master window occupies.",
+        kind: Kind::TextEnum { default: "left", choices: ORIENTATIONS },
+    },
+    Setting {
+        key: "master:new_status",
+        label: "New windows become",
+        help: "Whether a new window takes the master slot or joins the stack.",
+        kind: Kind::TextEnum { default: "slave", choices: NEW_STATUS },
+    },
+    Setting {
+        key: "master:new_on_top",
+        label: "Add to the top of the stack",
+        help: "A new window goes to the top of the stack rather than the bottom.",
+        kind: Kind::Bool { default: false },
+    },
+    Setting {
+        key: "master:new_on_active",
+        label: "Place relative to the focused window",
+        help: "Put a new window before or after the focused one, instead of by the setting above.",
+        kind: Kind::TextEnum { default: "none", choices: NEW_ON_ACTIVE },
+    },
+    Setting {
+        key: "master:slave_count_for_center_master",
+        label: "Centre master after",
+        help: "With centre orientation, how many stacked windows before the master centres. 0 always centres it.",
+        kind: Kind::Int { default: 2, min: Some(0), max: Some(20) },
+    },
+    Setting {
+        key: "master:center_master_fallback",
+        label: "Centre master falls back to",
+        help: "Where the master sits while there are too few stacked windows to centre it.",
+        kind: Kind::TextEnum { default: "left", choices: FALLBACK_SIDES },
+    },
+    Setting {
+        key: "master:allow_small_split",
+        label: "Allow extra master windows",
+        help: "More than one master window, split horizontally.",
+        kind: Kind::Bool { default: false },
+    },
+    Setting {
+        key: "master:smart_resizing",
+        label: "Resize toward the nearest corner",
+        help: "Resizing follows the corner your mouse is closest to.",
+        kind: Kind::Bool { default: true },
+    },
+    Setting {
+        key: "master:drop_at_cursor",
+        label: "Drop where the cursor is",
+        help: "A dragged window lands at the cursor rather than at the end of the stack.",
+        kind: Kind::Bool { default: true },
+    },
+    Setting {
+        key: "master:always_keep_position",
+        label: "Keep master in place when alone",
+        help: "The master window stays in its configured position even with nothing stacked beside it.",
+        kind: Kind::Bool { default: false },
+    },
+    Setting {
+        key: "master:focus_master_on_close",
+        label: "Focus master when a window closes",
+        help: "Closing a window moves focus to the master rather than to a neighbour.",
+        kind: Kind::Bool { default: false },
+    },
+    Setting {
+        key: "master:special_scale_factor",
+        label: "Special workspace scale",
+        help: "How much windows shrink on the special workspace.",
+        kind: Kind::Float { default: 1.0, min: Some(0.0), max: Some(1.0) },
+    },
+    // ---- group ----
+    Setting {
+        key: "group:auto_group",
+        label: "Group new windows automatically",
+        help: "A new window joins the focused group instead of tiling beside it.",
+        kind: Kind::Bool { default: true },
+    },
+    Setting {
+        key: "group:insert_after_current",
+        label: "Insert after the current tab",
+        help: "A new window joins next to the current tab rather than at the end.",
+        kind: Kind::Bool { default: true },
+    },
+    Setting {
+        key: "group:focus_removed_window",
+        label: "Follow a window out of its group",
+        help: "Focus moves with a window that's just been pulled out of a group.",
+        kind: Kind::Bool { default: true },
+    },
+    Setting {
+        key: "group:drag_into_group",
+        label: "Drag windows into groups",
+        help: "Whether dropping a window on a group merges it in.",
+        kind: Kind::IntEnum { default: 1, choices: DRAG_INTO_GROUP },
+    },
+    Setting {
+        key: "group:merge_groups_on_drag",
+        label: "Merge groups by dragging",
+        help: "Dragging one group onto another combines them.",
+        kind: Kind::Bool { default: true },
+    },
+    Setting {
+        key: "group:merge_groups_on_groupbar",
+        label: "Merge onto the group bar",
+        help: "Dropping a group on another's tab strip merges them. Needs the two settings above.",
+        kind: Kind::Bool { default: true },
+    },
+    Setting {
+        key: "group:merge_floated_into_tiled_on_groupbar",
+        label: "Merge floating onto the group bar",
+        help: "Dropping a floating window on a tiled window's tab strip merges it in.",
+        kind: Kind::Bool { default: false },
+    },
+    Setting {
+        key: "group:group_on_movetoworkspace",
+        label: "Group when moved to a workspace",
+        help: "Moving a window to a workspace merges it into the group already there.",
+        kind: Kind::Bool { default: false },
+    },
+    // ---- group:col ----
+    Setting {
+        key: "group:col:border_active",
+        label: "Active group border",
+        help: "Border colour of the focused group.",
+        kind: Kind::Color { default: "rgba(ffff0066)" },
+    },
+    Setting {
+        key: "group:col:border_inactive",
+        label: "Inactive group border",
+        help: "Border colour of unfocused groups.",
+        kind: Kind::Color { default: "rgba(77770066)" },
+    },
+    Setting {
+        key: "group:col:border_locked_active",
+        label: "Active locked group border",
+        help: "Border colour of a focused group that won't accept new windows.",
+        kind: Kind::Color { default: "rgba(ff550066)" },
+    },
+    Setting {
+        key: "group:col:border_locked_inactive",
+        label: "Inactive locked group border",
+        help: "Border colour of an unfocused locked group.",
+        kind: Kind::Color { default: "rgba(77550066)" },
+    },
+    // ---- group:groupbar ----
+    //
+    // `font_weight_active` and `font_weight_inactive` are absent: the
+    // wiki documents them with a `font_weight` type, and Hyprland 0.56.1
+    // answers "no such option" for both.
+    Setting {
+        key: "group:groupbar:enabled",
+        label: "Show the group bar",
+        help: "Draw a tab strip above grouped windows.",
+        kind: Kind::Bool { default: true },
+    },
+    Setting {
+        key: "group:groupbar:disable_when_only",
+        label: "Hide it for a single window",
+        help: "No tab strip while a group holds only one window.",
+        kind: Kind::Bool { default: false },
+    },
+    Setting {
+        key: "group:groupbar:stacked",
+        label: "Stack tabs vertically",
+        help: "Draw the tabs stacked rather than in a row.",
+        kind: Kind::Bool { default: false },
+    },
+    Setting {
+        key: "group:groupbar:height",
+        label: "Height",
+        help: "Height of the tab strip, in pixels.",
+        kind: Kind::Int { default: 14, min: Some(1), max: Some(200) },
+    },
+    Setting {
+        key: "group:groupbar:indicator_height",
+        label: "Indicator height",
+        help: "Height of the bar marking the active tab.",
+        kind: Kind::Int { default: 3, min: Some(0), max: Some(100) },
+    },
+    Setting {
+        key: "group:groupbar:indicator_gap",
+        label: "Indicator gap",
+        help: "Space between the indicator and the title.",
+        kind: Kind::Int { default: 0, min: Some(0), max: Some(100) },
+    },
+    Setting {
+        key: "group:groupbar:render_titles",
+        label: "Show window titles",
+        help: "Write each window's title in its tab.",
+        kind: Kind::Bool { default: true },
+    },
+    Setting {
+        key: "group:groupbar:font_family",
+        label: "Font",
+        help: "Font for tab titles. Empty uses the general interface font.",
+        kind: Kind::Text { default: "" },
+    },
+    Setting {
+        key: "group:groupbar:font_size",
+        label: "Font size",
+        help: "Size of tab titles.",
+        kind: Kind::Int { default: 8, min: Some(1), max: Some(100) },
+    },
+    Setting {
+        key: "group:groupbar:text_offset",
+        label: "Title vertical offset",
+        help: "Nudge titles up or down within the tab.",
+        kind: Kind::Int { default: 0, min: Some(-50), max: Some(50) },
+    },
+    Setting {
+        key: "group:groupbar:text_padding",
+        label: "Title horizontal padding",
+        help: "Space either side of a title.",
+        kind: Kind::Int { default: 0, min: Some(0), max: Some(100) },
+    },
+    Setting {
+        key: "group:groupbar:text_color",
+        label: "Title colour",
+        help: "Colour of window titles in the tab strip.",
+        kind: Kind::ColorInt { default: "rgba(ffffffff)" },
+    },
+    Setting {
+        key: "group:groupbar:text_color_inactive",
+        label: "Inactive title colour",
+        help: "Title colour for unfocused tabs. Falls back to the title colour when unset.",
+        kind: Kind::ColorInt { default: "rgba(ffffffff)" },
+    },
+    Setting {
+        key: "group:groupbar:text_color_locked_active",
+        label: "Locked active title colour",
+        help: "Title colour for the focused tab of a locked group.",
+        kind: Kind::ColorInt { default: "rgba(ffffffff)" },
+    },
+    Setting {
+        key: "group:groupbar:text_color_locked_inactive",
+        label: "Locked inactive title colour",
+        help: "Title colour for unfocused tabs of a locked group.",
+        kind: Kind::ColorInt { default: "rgba(ffffffff)" },
+    },
+    Setting {
+        key: "group:groupbar:gradients",
+        label: "Gradient backgrounds",
+        help: "Fill tabs with a colour rather than drawing only the indicator.",
+        kind: Kind::Bool { default: false },
+    },
+    Setting {
+        key: "group:groupbar:col:active",
+        label: "Active tab background",
+        help: "Background of the focused tab. Needs gradient backgrounds on.",
+        kind: Kind::Color { default: "rgba(ffff0066)" },
+    },
+    Setting {
+        key: "group:groupbar:col:inactive",
+        label: "Inactive tab background",
+        help: "Background of unfocused tabs.",
+        kind: Kind::Color { default: "rgba(77770066)" },
+    },
+    Setting {
+        key: "group:groupbar:col:locked_active",
+        label: "Locked active tab background",
+        help: "Background of the focused tab in a locked group.",
+        kind: Kind::Color { default: "rgba(ff550066)" },
+    },
+    Setting {
+        key: "group:groupbar:col:locked_inactive",
+        label: "Locked inactive tab background",
+        help: "Background of unfocused tabs in a locked group.",
+        kind: Kind::Color { default: "rgba(77550066)" },
+    },
+    Setting {
+        key: "group:groupbar:rounding",
+        label: "Indicator corner radius",
+        help: "How rounded the active-tab indicator is.",
+        kind: Kind::Int { default: 1, min: Some(0), max: Some(50) },
+    },
+    Setting {
+        key: "group:groupbar:rounding_power",
+        label: "Indicator corner shape",
+        help: "2.0 is a circular corner, higher is squarer.",
+        kind: Kind::Float { default: 2.0, min: Some(2.0), max: Some(10.0) },
+    },
+    Setting {
+        key: "group:groupbar:gradient_rounding",
+        label: "Background corner radius",
+        help: "How rounded the tab backgrounds are.",
+        kind: Kind::Int { default: 2, min: Some(0), max: Some(50) },
+    },
+    Setting {
+        key: "group:groupbar:gradient_rounding_power",
+        label: "Background corner shape",
+        help: "2.0 is a circular corner, higher is squarer.",
+        kind: Kind::Float { default: 2.0, min: Some(2.0), max: Some(10.0) },
+    },
+    Setting {
+        key: "group:groupbar:round_only_edges",
+        label: "Round only the outer edges",
+        help: "Round the ends of the indicator strip rather than every tab.",
+        kind: Kind::Bool { default: true },
+    },
+    Setting {
+        key: "group:groupbar:gradient_round_only_edges",
+        label: "Round only the outer backgrounds",
+        help: "Round the ends of the background strip rather than every tab.",
+        kind: Kind::Bool { default: true },
+    },
+    Setting {
+        key: "group:groupbar:gaps_in",
+        label: "Gap between tabs",
+        help: "Space between neighbouring tab backgrounds.",
+        kind: Kind::Int { default: 2, min: Some(0), max: Some(50) },
+    },
+    Setting {
+        key: "group:groupbar:gaps_out",
+        label: "Gap below the tabs",
+        help: "Space between the tab strip and the window.",
+        kind: Kind::Int { default: 2, min: Some(0), max: Some(50) },
+    },
+    Setting {
+        key: "group:groupbar:keep_upper_gap",
+        label: "Gap above the tabs",
+        help: "Leave space above the tab strip as well as below.",
+        kind: Kind::Bool { default: true },
+    },
+    Setting {
+        key: "group:groupbar:blur",
+        label: "Blur behind the tabs",
+        help: "Apply the blur effect to tab backgrounds.",
+        kind: Kind::Bool { default: false },
+    },
+    Setting {
+        key: "group:groupbar:scrolling",
+        label: "Scroll to change tab",
+        help: "Scrolling over the tab strip switches which window is shown.",
+        kind: Kind::Bool { default: true },
+    },
+    Setting {
+        key: "group:groupbar:middle_click_close",
+        label: "Middle-click to close",
+        help: "Middle-clicking a tab closes that window.",
+        kind: Kind::Bool { default: true },
+    },
+    Setting {
+        key: "group:groupbar:priority",
+        label: "Decoration priority",
+        help: "Where the tab strip sits relative to other window decorations.",
+        kind: Kind::Int { default: 3, min: Some(0), max: Some(10) },
     },
     // ---- cursor ----
     Setting {

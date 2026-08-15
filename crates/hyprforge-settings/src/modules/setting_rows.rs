@@ -179,7 +179,7 @@ impl<'a, M: Clone + 'static> RowContext<'a, M> {
         // picturing it is not something anyone does reliably, and this is
         // the one control where the value *is* the appearance.
         let control: Element<'a, M> = match setting.kind {
-            Kind::Color { .. } => row![
+            Kind::Color { .. } | Kind::ColorInt { .. } => row![
                 swatch(current.as_text().unwrap_or_default()),
                 container(control).width(Length::Fill),
             ]
@@ -356,7 +356,9 @@ fn placeholder_for(kind: &Kind) -> String {
         Kind::Int { default, .. } | Kind::Gaps { default, .. } => default.to_string(),
         Kind::Float { default, .. } => render_for_edit(&Value::Float(*default)),
         Kind::Text { default: "" } => "not set".to_string(),
-        Kind::Text { default } | Kind::Color { default } => (*default).to_string(),
+        Kind::Text { default } | Kind::Color { default } | Kind::ColorInt { default } => {
+            (*default).to_string()
+        }
         _ => String::new(),
     }
 }
@@ -382,7 +384,7 @@ pub fn parse_for(kind: &Kind, raw: &str) -> Result<Value, String> {
         // A colour is typed as text; `validate` checks the form, so the
         // same rule applies whether it was typed here or written into the
         // TOML by hand.
-        Kind::Color { .. } => Ok(Value::Text(trimmed.to_string())),
+        Kind::Color { .. } | Kind::ColorInt { .. } => Ok(Value::Text(trimmed.to_string())),
         // Text keeps its surrounding whitespace: a layout list like
         // "us, cz" is the user's to format.
         Kind::Text { .. } | Kind::TextEnum { .. } => Ok(Value::Text(raw.to_string())),

@@ -266,7 +266,9 @@ fn probe_value(kind: &Kind) -> Value {
                 _ => bumped,
             })
         }
-        Kind::Text { default } | Kind::Color { default } => Value::Text(default.to_string()),
+        Kind::Text { default } | Kind::Color { default } | Kind::ColorInt { default } => {
+            Value::Text(default.to_string())
+        }
         Kind::TextEnum { default, choices } => Value::Text(
             choices
                 .iter()

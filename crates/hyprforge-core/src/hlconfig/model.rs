@@ -33,7 +33,8 @@ impl Value {
             Kind::Float { default, .. } => Value::Float(default),
             Kind::Text { default }
             | Kind::TextEnum { default, .. }
-            | Kind::Color { default } => Value::Text(default.to_string()),
+            | Kind::Color { default }
+            | Kind::ColorInt { default } => Value::Text(default.to_string()),
         }
     }
 
@@ -168,7 +169,7 @@ fn check(setting: &Setting, value: &Value) -> Option<String> {
             .ok_or("expected a number".to_string())
             .and_then(|f| in_range(f, min, max)),
         Kind::Text { .. } => value.as_text().map(|_| ()).ok_or("expected text".to_string()),
-        Kind::Color { .. } => value
+        Kind::Color { .. } | Kind::ColorInt { .. } => value
             .as_text()
             .ok_or("expected a colour".to_string())
             .and_then(check_color),

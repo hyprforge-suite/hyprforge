@@ -168,6 +168,7 @@ fn read_value(obj: &serde_json::Value, kind: &Kind) -> Option<Value> {
             Some(Value::Text(s.to_string()))
         }
         Kind::Color { .. } => read_gradient(obj.get("gradient")?.as_str()?),
+        Kind::ColorInt { .. } => read_int_color(obj.get("int")?.as_u64()?),
         Kind::Gaps { .. } => read_gaps(obj.get("css")?.as_str()?),
     }
 }
@@ -196,6 +197,25 @@ pub fn read_gradient(raw: &str) -> Option<Value> {
     }
     let (alpha, rgb) = argb.split_at(2);
     Some(Value::Text(format!("rgba({rgb}{alpha})")))
+}
+
+/// Converts a live plain colour back into the form Hyprland accepts.
+///
+/// Reported as a number: `rgba(112233ff)` comes back as `4279312947`,
+/// which is `0xFF112233` — AARRGGBB. Copying the number into a config
+/// would be a different colour entirely, so it is converted rather than
+/// passed through.
+pub fn read_int_color(raw: u64) -> Option<Value> {
+    if raw > u32::MAX as u64 {
+        return None;
+    }
+    let (a, r, g, b) = (
+        (raw >> 24) & 0xff,
+        (raw >> 16) & 0xff,
+        (raw >> 8) & 0xff,
+        raw & 0xff,
+    );
+    Some(Value::Text(format!("rgba({r:02x}{g:02x}{b:02x}{a:02x})")))
 }
 
 /// Converts a live `css` gap back into the integer Hyprland accepts.
@@ -280,7 +300,7 @@ fn coerce(value: &serde_json::Value, kind: &Kind) -> Option<Value> {
         Kind::Bool { .. } => value.as_bool().map(Value::Bool),
         Kind::Int { .. } | Kind::IntEnum { .. } => value.as_i64().map(Value::Int),
         Kind::Float { .. } => value.as_f64().map(Value::Float),
-        Kind::Text { .. } | Kind::TextEnum { .. } | Kind::Color { .. } => {
+        Kind::Text { .. } | Kind::TextEnum { .. } | Kind::Color { .. } | Kind::ColorInt { .. } => {
             value.as_str().map(|s| Value::Text(s.to_string()))
         }
         // A config writes a gap as an integer; the table form is a
@@ -545,6 +565,26 @@ mod tests {
         assert_eq!(read_gradient("ffbd93f9 45deg"), None);
         assert_eq!(read_gradient("ffbd93f9 ff282a36 0deg"), None);
         assert_eq!(read_gradient("nonsense"), None);
+    }
+
+    /// The exact number `hyprctl` reports for `rgba(112233ff)`.
+    /// Copying it into a config would be a different colour entirely.
+    #[test]
+    fn a_live_plain_colour_converts_back_to_the_form_hyprland_accepts() {
+        assert_eq!(
+            read_int_color(4279312947),
+            Some(Value::Text("rgba(112233ff)".into()))
+        );
+        assert_eq!(read_int_color(0), Some(Value::Text("rgba(00000000)".into())));
+        assert_eq!(
+            read_int_color(0xFFFFFFFF),
+            Some(Value::Text("rgba(ffffffff)".into()))
+        );
+    }
+
+    #[test]
+    fn a_number_too_large_for_a_colour_is_refused() {
+        assert_eq!(read_int_color(0x1_0000_0000), None);
     }
 
     /// Gaps are reported as four numbers whatever was written.

@@ -85,6 +85,16 @@ pub enum Kind {
     Color {
         default: &'static str,
     },
+    /// A colour Hyprland stores as a plain number rather than a
+    /// gradient — its `color` type, as opposed to `gradient`.
+    ///
+    /// Written exactly like [`Kind::Color`] (`rgba(rrggbbaa)`), but read
+    /// back as an integer: `rgba(112233ff)` in comes out as
+    /// `4279312947`, which is `0xFF112233` — AARRGGBB, the same byte
+    /// order a gradient uses in its hex form. Measured, not assumed.
+    ColorInt {
+        default: &'static str,
+    },
     /// A gap size. Hyprland's type is `css_gap`, and in Lua it takes
     /// "an integer or a table with optional top/right/bottom/left fields"
     /// — its own words, from the error it returns for anything else. A
@@ -112,6 +122,7 @@ impl Kind {
             Kind::Float { .. } => "float",
             Kind::Text { .. } | Kind::TextEnum { .. } => "str",
             Kind::Color { .. } => "gradient",
+            Kind::ColorInt { .. } => "int",
             Kind::Gaps { .. } => "css",
         }
     }
