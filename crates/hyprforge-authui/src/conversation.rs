@@ -105,6 +105,22 @@ pub trait Backend {
     fn proceed(&mut self) -> Response;
 }
 
+/// Lets a test hold onto its backend while the conversation borrows it,
+/// so what was actually sent can be checked afterwards.
+impl<B: Backend> Backend for &mut B {
+    fn start(&mut self, username: &str) -> Response {
+        (**self).start(username)
+    }
+
+    fn answer(&mut self, answer: &str) -> Response {
+        (**self).answer(answer)
+    }
+
+    fn proceed(&mut self) -> Response {
+        (**self).proceed()
+    }
+}
+
 /// The conversation, driven by the UI.
 pub struct Conversation<B: Backend> {
     backend: B,
@@ -446,19 +462,5 @@ mod tests {
         let rendered = format!("{state:?}");
         assert!(!rendered.contains("hunter2"), "{rendered}");
         assert!(rendered.contains("7 chars"), "{rendered}");
-    }
-}
-
-impl<B: Backend> Backend for &mut B {
-    fn start(&mut self, username: &str) -> Response {
-        (**self).start(username)
-    }
-
-    fn answer(&mut self, answer: &str) -> Response {
-        (**self).answer(answer)
-    }
-
-    fn proceed(&mut self) -> Response {
-        (**self).proceed()
     }
 }
