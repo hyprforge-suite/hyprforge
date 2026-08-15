@@ -9,6 +9,7 @@ use iced::{window, Background, Element, Length, Size, Subscription, Task, Theme}
 use modules::appearance::AppearanceModule;
 use modules::desktop::DesktopModule;
 use modules::session::SessionModule;
+use modules::system::SystemModule;
 use modules::displays::DisplaysModule;
 use modules::input::InputModule;
 use modules::shortcuts::ShortcutsModule;
@@ -144,6 +145,7 @@ enum Screen {
     Appearance,
     Desktop,
     Session,
+    System,
 }
 
 impl Screen {
@@ -156,6 +158,7 @@ impl Screen {
             Screen::Appearance => "Appearance",
             Screen::Desktop => "Desktop",
             Screen::Session => "Session",
+            Screen::System => "System",
         }
     }
 }
@@ -190,7 +193,7 @@ const NAV: &[NavCategory] = &[
     },
     NavCategory {
         label: "Session",
-        screens: &[Screen::Session],
+        screens: &[Screen::Session, Screen::System],
     },
 ];
 
@@ -208,6 +211,7 @@ enum Message {
     Appearance(modules::appearance::Message),
     Desktop(modules::desktop::Message),
     Session(modules::session::Message),
+    System(modules::catalog_screen::Message),
     WindowOpened(window::Id),
     WindowClosed(window::Id),
     RevertPopupOpened(window::Id),
@@ -223,6 +227,7 @@ struct App {
     appearance: AppearanceModule,
     desktop: DesktopModule,
     session: SessionModule,
+    system: SystemModule,
     search_query: String,
     search_id: Id,
     font_scale: FontScale,
@@ -240,6 +245,7 @@ impl App {
         let (appearance, appearance_task) = AppearanceModule::new();
         let (desktop, desktop_task) = DesktopModule::new();
         let (session, session_task) = SessionModule::new();
+        let (system, system_task) = SystemModule::new();
         (
             App {
                 screen: Screen::Monitors,
@@ -250,6 +256,7 @@ impl App {
                 appearance,
                 desktop,
                 session,
+                system,
                 search_query: String::new(),
                 search_id: Id::unique(),
                 font_scale: read_global_font_scale(),
@@ -265,6 +272,7 @@ impl App {
                 appearance_task.map(Message::Appearance),
                 desktop_task.map(Message::Desktop),
                 session_task.map(Message::Session),
+                system_task.map(Message::System),
             ]),
         )
     }
@@ -372,6 +380,7 @@ impl App {
                 Screen::Appearance => Task::none(),
                 Screen::Desktop => Task::none(),
                 Screen::Session => Task::none(),
+                Screen::System => Task::none(),
             },
             Message::Displays(msg) => {
                 let task = self.displays.update(msg).map(Message::Displays);
@@ -381,6 +390,7 @@ impl App {
             Message::Appearance(msg) => self.appearance.update(msg).map(Message::Appearance),
             Message::Desktop(msg) => self.desktop.update(msg).map(Message::Desktop),
             Message::Session(msg) => self.session.update(msg).map(Message::Session),
+            Message::System(msg) => self.system.update(msg).map(Message::System),
             Message::WindowOpened(id) => {
                 if self.main_window.is_none() {
                     self.main_window = Some(id);
@@ -482,6 +492,7 @@ impl App {
             Screen::Appearance => self.appearance.icon(),
             Screen::Desktop => self.desktop.icon(),
             Screen::Session => self.session.icon(),
+            Screen::System => self.system.icon(),
         };
 
         let query = self.search_query.to_lowercase();
@@ -557,6 +568,7 @@ impl App {
             Screen::Appearance => self.appearance.view(scale).map(Message::Appearance),
             Screen::Desktop => self.desktop.view(scale).map(Message::Desktop),
             Screen::Session => self.session.view(scale).map(Message::Session),
+            Screen::System => self.system.view(scale).map(Message::System),
         };
         // The Monitors editor (canvas + full property panel + policy/swap
         // sections) routinely exceeds window height — without scrolling,

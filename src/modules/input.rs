@@ -1,724 +1,142 @@
 //! Keyboard, pointer and touchpad settings.
 //!
-//! The screen is generated from [`hyprforge_input::catalog`] rather than
-//! hand-laid-out: the catalog already knows every option's type, range and
-//! accepted values, and a hand-written form would be a second, drifting
-//! copy of all three. Adding an option means adding a catalog entry.
-//!
-//! The module's central idea shows up directly in the UI: a setting is
-//! either **owned** — Hyprforge writes it, and it wins — or absent, in
-//! which case Hyprland's default or the user's own config decides. Every
-//! row can be handed back with its Reset button, which is not the same as
-//! setting it to the default value: one stops mentioning the key, the other
-//! writes it.
+//! The screen itself is [`super::catalog_screen`], shared with System.
+//! What's here is what is actually about input: the catalogue, the files,
+//! and the pickers built from the XKB data installed on this machine.
 
-use hyprforge_core::lua_setup;
-use hyprforge_core::theme::{spacing, FontScale};
-use hyprforge_core::widgets::{
-    divider, meta_text, primary_button, scaled_text, secondary_button, section, setup_notice,
-};
-use super::setting_rows::{self, DynChoice, RowContext};
-use hyprforge_core::SettingsModule;
-use hyprforge_input::catalog::{self, Setting, CATALOG};
-use hyprforge_core::hlconfig::import::{Discovered, Live};
-use hyprforge_core::hlconfig::{Invalid, Settings, Value};
-use hyprforge_input::setup::{HyprConfig, SetupPlan};
-use iced::widget::{checkbox, column, container, row, scrollable, text_input};
-use iced::{Element, Length, Task};
+use super::catalog_screen::{Catalogued, CatalogScreen, Installed};
+use super::setting_rows::DynChoice;
+use hyprforge_core::hlconfig::import::Live;
+use hyprforge_core::hlconfig::{Catalog, Settings};
+use hyprforge_core::lua_setup::{Placement, SetupError, SetupPlan};
+use hyprforge_input::catalog::CATALOG;
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone)]
-pub enum Message {
-    /// A control whose value is complete the moment it changes — a
-    /// checkbox or a dropdown. Applied immediately, the way every settings
-    /// app behaves.
-    Set(&'static str, Value),
-    /// A character typed into a text or number field. Held as a draft, not
-    /// applied: applying per keystroke would reload Hyprland once per
-    /// character.
-    DraftChanged(&'static str, String),
-    /// Enter in a single field, or the Apply button for all of them.
-    ApplyDrafts,
-    DiscardDrafts,
-    /// Stop writing this key at all, giving it back to Hyprland and the
-    /// user's own config.
-    Reset(&'static str),
-    FilterChanged(String),
-    ImportOpen,
-    /// The user's own config, evaluated. Import reads the config file, not
-    /// the running compositor — see `hyprforge_input::import` for why.
-    ImportEvaluated(hyprforge_lua_import::ImportResult),
-    ImportToggle(usize),
-    ImportConfirm,
-    ImportCancel,
-    /// The compositor's current value for every option, read once on open.
-    LiveLoaded(Vec<Live>),
-    /// The XKB layouts/variants/models installed, and the connected
-    /// monitors — everything a picker on this screen is built from.
-    ChoicesLoaded(hyprforge_input::xkb::Catalogue, Vec<String>),
-    Reloaded(Result<(), String>),
-}
+pub use super::catalog_screen::Message;
 
-/// An import run, from click to review.
-enum ImportState {
-    /// The user's config is being evaluated.
-    Running,
-    Ready(Vec<Candidate>),
-}
+pub type InputModule = CatalogScreen<Input>;
 
-struct Candidate {
-    found: Discovered,
-    selected: bool,
-}
+pub struct Input;
 
-pub struct InputModule {
-    settings: Settings,
-    /// In-progress text for the fields that can't be committed per
-    /// keystroke. Keyed by catalog key; absent means "showing the stored
-    /// value".
-    drafts: BTreeMap<&'static str, String>,
-    /// Per-key reason the draft can't be applied, so a bad number is
-    /// reported next to the field that holds it rather than as one vague
-    /// banner at the top.
-    draft_errors: BTreeMap<&'static str, String>,
-    filter: String,
-    config: HyprConfig,
-    setup_plan: SetupPlan,
-    error: Option<String>,
-    status: Option<String>,
-    /// Why the stored settings couldn't be read, if they couldn't. While
-    /// set, the module refuses to write anything — an unreadable store is
-    /// not an empty one, and saving over it would destroy what's there.
-    store_unreadable: Option<String>,
-    /// Stored values the catalog rejects, from a hand-edited file. Shown
-    /// rather than dropped: they're skipped by codegen, so without this the
-    /// user would see a setting in their TOML quietly doing nothing.
-    invalid: Vec<Invalid>,
-    import_review: Option<ImportState>,
-    /// What Hyprland currently has for each option, and whether the user's
-    /// own config is what put it there.
-    ///
-    /// Without this a row for an unowned key falls back to the *catalog*
-    /// default, which is a different number from what's running whenever
-    /// the user's config sets it — the screen would show `numlock` off
-    /// while it's on. Empty until the read returns, and if it fails the
-    /// rows fall back to the catalog default and say so.
-    live: BTreeMap<&'static str, Live>,
-    /// Discovered options per setting. Empty until the scan returns, and
-    /// a setting with no entry falls back to a text field — a field that
-    /// can't be edited because a scan failed is worse than one that has
-    /// to be typed.
-    choices: BTreeMap<&'static str, Vec<DynChoice>>,
-    /// Kept so the variant list can be rebuilt when the layout changes:
-    /// variants only mean anything under their own layout.
-    xkb: hyprforge_input::xkb::Catalogue,
-}
+impl Catalogued for Input {
+    const TITLE: &'static str = "Input";
+    const ICON: &'static str = "\u{2328}";
+    const SUBJECT: &'static str = "input settings";
+    const STORE: &'static str = "input.toml";
 
-impl InputModule {
-    pub fn new() -> (Self, Task<Message>) {
-        // A failure here must never look like "you've configured nothing":
-        // that reading is what turns one bad parse into a wiped store on
-        // the next save.
-        let (settings, store_unreadable) =
-            match hyprforge_core::hlconfig::storage::load(&hyprforge_core::paths::input_toml_path()) {
-                Ok(settings) => (settings, None),
-                Err(e) => (Settings::default(), Some(e.to_string())),
-            };
-        let invalid = settings.validate(&CATALOG);
-        let setup = lua_setup::bootstrap(
-            &hyprforge_core::paths::hypr_config_dir(),
-            &hyprforge_core::paths::hyprland_lua_path(),
-            lua_setup::ModuleSetup {
-                require_line: hyprforge_input::setup::REQUIRE_LINE,
-                placement: hyprforge_input::setup::PLACEMENT,
-                generated: (
-                    hyprforge_core::paths::input_lua_path(),
-                    hyprforge_input::apply::generate(&Settings::default()),
-                ),
-            },
-        );
-        (
-            InputModule {
-                settings,
-                drafts: BTreeMap::new(),
-                draft_errors: BTreeMap::new(),
-                filter: String::new(),
-                config: setup.config,
-                setup_plan: setup.plan,
-                error: setup.error,
-                status: None,
-                store_unreadable,
-                invalid,
-                import_review: None,
-                live: BTreeMap::new(),
-                choices: BTreeMap::new(),
-                xkb: Default::default(),
-            },
-            // Read what's actually running, so unowned rows show the truth
-            // rather than the catalog default. A failure is silent by
-            // design: the rows still render, they just can't claim to know
-            // what's live.
-            Task::batch([
-                Task::perform(read_live(), Message::LiveLoaded),
-                Task::perform(read_choices(), |(x, m)| Message::ChoicesLoaded(x, m)),
-            ]),
-        )
+    fn catalog() -> &'static Catalog {
+        &CATALOG
     }
 
-    /// Writes the canonical TOML. Nothing irreversible may run unless this
-    /// returned `Ok` — the ordering rule that exists because doing it the
-    /// other way round cost a real user 37 hand-written binds.
-    fn persist(&mut self) -> Result<(), String> {
-        if let Some(reason) = &self.store_unreadable {
-            let message = format!(
-                "Not saving — your input.toml couldn't be read, and overwriting \
-                 it would lose whatever is in it. ({reason})"
-            );
-            self.error = Some(message.clone());
-            return Err(message);
-        }
-        hyprforge_core::hlconfig::storage::save(
-            &hyprforge_core::paths::input_toml_path(),
-            &self.settings,
-        )
-        .map_err(|e| {
-            self.error = Some(e.to_string());
-            e.to_string()
-        })
+    fn require_line() -> &'static str {
+        hyprforge_input::setup::REQUIRE_LINE
     }
 
-    fn save_and_maybe_reload(&mut self) -> Task<Message> {
-        if self.persist().is_err() {
-            return Task::none();
-        }
-        self.invalid = self.settings.validate(&CATALOG);
-        // Without a Lua config there's nothing to source the generated file
-        // from, so reloading would be a no-op dressed up as success. The
-        // TOML is still saved, and takes effect once setup is resolved.
-        if !matches!(self.config, HyprConfig::Lua(_)) {
-            self.error = None;
-            self.status = Some(
-                "Saved. Settings take effect once Hyprland setup is finished — see above."
-                    .to_string(),
-            );
-            return Task::none();
-        }
-        // The require line is installed automatically on open; this only
-        // retries if that attempt failed.
-        if self.setup_plan != SetupPlan::AlreadyPresent {
-            match hyprforge_input::setup::install(&hyprforge_core::paths::hyprland_lua_path()) {
-                Ok(plan) => self.setup_plan = plan,
-                Err(e) => {
-                    self.error = Some(e.to_string());
-                    return Task::none();
-                }
-            }
-        }
-        Task::perform(regenerate_and_reload(self.settings.clone()), Message::Reloaded)
+    fn placement() -> Placement {
+        hyprforge_input::setup::PLACEMENT
     }
 
-    /// Parses every pending draft into the store. All-or-nothing per field:
-    /// a field that doesn't parse keeps its draft and its error, and the
-    /// ones that do parse are still applied, so one typo doesn't discard
-    /// everything else the user typed.
-    fn apply_drafts(&mut self) -> Task<Message> {
-        self.draft_errors.clear();
-        let pending: Vec<(&'static str, String)> =
-            self.drafts.iter().map(|(k, v)| (*k, v.clone())).collect();
-        let mut applied = false;
-        for (key, raw) in pending {
-            let Some(setting) = catalog::get(key) else {
-                continue;
-            };
-            match setting_rows::parse_for(&setting.kind, &raw) {
-                Ok(value) => {
-                    let problems = Settings::from_one(key, value.clone()).validate(&CATALOG);
-                    if let Some(problem) = problems.first() {
-                        self.draft_errors.insert(key, problem.problem.clone());
-                    } else {
-                        self.settings.set(key, value);
-                        self.drafts.remove(key);
-                        applied = true;
-                    }
-                }
-                Err(problem) => {
-                    self.draft_errors.insert(key, problem);
-                }
-            }
-        }
-        if !applied {
-            return Task::none();
-        }
-        self.save_and_maybe_reload()
+    fn toml_path() -> PathBuf {
+        hyprforge_core::paths::input_toml_path()
     }
 
-    /// Rows matching the filter box, so a screen with fifty-odd options is
-    /// still navigable. Matches the label, the key and the help text: a
-    /// user looking for "natural scroll" and one looking for
-    /// `kb_options` both find what they mean.
-    fn matches_filter(&self, setting: &Setting) -> bool {
-        let q = self.filter.trim().to_lowercase();
-        if q.is_empty() {
-            return true;
-        }
-        setting.label.to_lowercase().contains(&q)
-            || setting.key.to_lowercase().contains(&q)
-            || setting.help.to_lowercase().contains(&q)
-    }
-}
-
-impl SettingsModule for InputModule {
-    type Message = Message;
-
-    fn title(&self) -> &str {
-        "Input"
+    fn lua_path() -> PathBuf {
+        hyprforge_core::paths::input_lua_path()
     }
 
-    fn icon(&self) -> &'static str {
-        "⌨"
+    fn generate(settings: &Settings) -> String {
+        hyprforge_input::apply::generate(settings)
     }
 
-    fn update(&mut self, message: Message) -> Task<Message> {
-        match message {
-            Message::Set(key, value) => {
-                self.settings.set(key, value);
-                self.status = None;
-                // Changing the layout changes which variants exist.
-                if key == "input:kb_layout" {
-                    self.rebuild_choices();
-                }
-                self.save_and_maybe_reload()
-            }
-            Message::DraftChanged(key, raw) => {
-                self.drafts.insert(key, raw);
-                self.draft_errors.remove(key);
-                Task::none()
-            }
-            Message::ApplyDrafts => self.apply_drafts(),
-            Message::DiscardDrafts => {
-                self.drafts.clear();
-                self.draft_errors.clear();
-                Task::none()
-            }
-            Message::Reset(key) => {
-                self.settings.clear(key);
-                self.drafts.remove(key);
-                self.draft_errors.remove(key);
-                self.status = None;
-                self.save_and_maybe_reload()
-            }
-            Message::FilterChanged(q) => {
-                self.filter = q;
-                Task::none()
-            }
-            Message::ImportOpen => {
-                self.import_review = Some(ImportState::Running);
-                Task::perform(super::evaluate_user_config(), Message::ImportEvaluated)
-            }
-            Message::ImportEvaluated(result) => {
-                let hyprforge_dir = hyprforge_core::paths::hypr_hyprforge_dir();
-                let mut found = Vec::new();
-                for call in &result.calls {
-                    // Hyprforge's own generated file is `require()`d from
-                    // hyprland.lua too, so it evaluates right alongside the
-                    // user's own. Excluded here — including it would offer
-                    // Hyprforge's own values back as if the user had
-                    // written them, which is exactly how a stray
-                    // `touchdevice:enabled = false` from a test run got
-                    // imported and persisted on a real machine.
-                    if call.source_path.starts_with(&hyprforge_dir) {
-                        continue;
-                    }
-                    found.extend(hyprforge_core::hlconfig::import::settings_from_call(
-                        &call.kind,
-                        &call.args,
-                        &CATALOG,
-                    ));
-                }
-                // Reported rather than swallowed: a file that didn't
-                // evaluate may be exactly the one holding the settings the
-                // user came here to import (vision pillar #3).
-                if !result.failures.is_empty() {
-                    self.error = Some(format!(
-                        "Some config files couldn't be read, so anything they set isn't listed: {}",
-                        result
-                            .failures
-                            .iter()
-                            .map(|(p, why)| format!("{} ({why})", p.display()))
-                            .collect::<Vec<_>>()
-                            .join("; ")
-                    ));
-                }
-                self.import_review = Some(ImportState::Ready(
-                    hyprforge_core::hlconfig::import::candidates_from_config(&found, &CATALOG, &self.settings)
-                        .into_iter()
-                        // Anything already owned starts unticked: the user
-                        // came here to adopt what they haven't got, and
-                        // re-importing would overwrite a value they set in
-                        // this app with one from their config file.
-                        .map(|found| Candidate {
-                            selected: !found.already_owned,
-                            found,
-                        })
-                        .collect(),
-                ));
-                Task::none()
-            }
-            Message::ImportToggle(i) => {
-                if let Some(ImportState::Ready(candidates)) = &mut self.import_review {
-                    if let Some(c) = candidates.get_mut(i) {
-                        c.selected = !c.selected;
-                    }
-                }
-                Task::none()
-            }
-            Message::ImportConfirm => {
-                let chosen: Vec<Discovered> = match &self.import_review {
-                    Some(ImportState::Ready(candidates)) => candidates
-                        .iter()
-                        .filter(|c| c.selected)
-                        .map(|c| c.found.clone())
-                        .collect(),
-                    _ => Vec::new(),
-                };
-                self.import_review = None;
-                if chosen.is_empty() {
-                    return Task::none();
-                }
-                hyprforge_core::hlconfig::import::merge(&mut self.settings, &chosen);
-                self.status = Some(format!("Imported {} setting(s).", chosen.len()));
-                self.save_and_maybe_reload()
-            }
-            Message::ImportCancel => {
-                self.import_review = None;
-                Task::none()
-            }
-            Message::LiveLoaded(live) => {
-                self.live = live.into_iter().map(|l| (l.key, l)).collect();
-                self.rebuild_choices();
-                Task::none()
-            }
-            Message::ChoicesLoaded(xkb, monitors) => {
-                self.xkb = xkb;
-                self.choices.insert(
-                    "input:touchdevice:output",
-                    monitors
-                        .into_iter()
-                        .map(|name| DynChoice { label: name.clone(), value: name })
-                        .collect(),
-                );
-                self.rebuild_choices();
-                Task::none()
-            }
-            Message::Reloaded(Ok(())) => {
-                self.error = None;
-                self.status = Some("Saved.".to_string());
-                // The reload just changed what's running, so the cached
-                // live values are stale. This matters most right after a
-                // Reset: the row falls back to the live value, and without
-                // re-reading it would show the value Hyprforge had been
-                // setting rather than the one the user's config just took
-                // back over.
-                Task::perform(read_live(), Message::LiveLoaded)
-            }
-            Message::Reloaded(Err(e)) => {
-                self.status = None;
-                self.error = Some(e);
-                Task::none()
-            }
+    fn apply(lua_path: &Path, settings: &Settings) -> Result<(), String> {
+        hyprforge_input::apply::apply(lua_path, settings).map_err(|e| e.to_string())
+    }
+
+    fn install(hyprland_lua: &Path) -> Result<SetupPlan, SetupError> {
+        hyprforge_input::setup::install(hyprland_lua)
+    }
+
+    fn discover() -> Installed {
+        Installed {
+            xkb: hyprforge_input::xkb::catalogue(),
+            monitors: hyprforge_core::monitors::connector_names(),
         }
     }
 
-    fn view(&self, scale: FontScale) -> Element<'_, Message> {
-        if let Some(review) = &self.import_review {
-            return self.import_view(review, scale);
-        }
-
-        let mut content = column![].spacing(spacing::LG).width(Length::Fill);
-
-        if let Some(notice) = setup_notice(&self.config, "input settings", scale) {
-            content = content.push(notice);
-        }
-        if let Some(reason) = &self.store_unreadable {
-            content = content.push(section(
-                "Your settings file couldn't be read",
-                scale,
-                column![
-                    scaled_text(
-                        "Nothing will be saved until this is fixed — writing over it \
-                         would lose whatever it contains.",
-                        13.0,
-                        scale,
-                    ),
-                    meta_text(reason.clone(), 12.0, scale),
-                ]
-                .spacing(spacing::SM),
-            ));
-        }
-        if !self.invalid.is_empty() {
-            let mut list = column![scaled_text(
-                "These are in your input.toml but aren't being applied. Fix or \
-                 remove them:",
-                13.0,
-                scale,
-            )]
-            .spacing(spacing::XS);
-            for bad in &self.invalid {
-                list = list.push(meta_text(
-                    format!("{} — {}", bad.key, bad.problem),
-                    12.0,
-                    scale,
-                ));
-            }
-            content = content.push(section("Settings being skipped", scale, list));
-        }
-        if let Some(e) = &self.error {
-            content = content.push(section("Something went wrong", scale, scaled_text(e.clone(), 13.0, scale)));
-        }
-        if let Some(s) = &self.status {
-            content = content.push(meta_text(s.clone(), 12.0, scale));
-        }
-
-        content = content.push(
-            row![
-                text_input("Filter settings…", &self.filter)
-                    .on_input(Message::FilterChanged)
-                    .padding(spacing::SM),
-                secondary_button("Import from Hyprland").on_press(Message::ImportOpen),
-            ]
-            .spacing(spacing::MD)
-            .align_y(iced::Alignment::Center),
-        );
-
-        if !self.drafts.is_empty() {
-            content = content.push(
-                row![
-                    scaled_text(
-                        format!("{} field(s) typed but not applied", self.drafts.len()),
-                        13.0,
-                        scale,
-                    ),
-                    primary_button("Apply").on_press(Message::ApplyDrafts),
-                    secondary_button("Discard").on_press(Message::DiscardDrafts),
-                ]
-                .spacing(spacing::MD)
-                .align_y(iced::Alignment::Center),
-            );
-        }
-
-        let mut any_row = false;
-        for category in CATALOG.categories {
-            let rows: Vec<&'static Setting> = CATALOG.in_category(category.key)
-                .filter(|s| self.matches_filter(s))
-                .collect();
-            if rows.is_empty() {
-                continue;
-            }
-            any_row = true;
-            let mut body = column![meta_text(category.help, 12.0, scale)].spacing(spacing::SM);
-            for setting in rows {
-                body = body.push(divider());
-                body = body.push(self.setting_row(setting, scale));
-            }
-            content = content.push(section(category.label, scale, body));
-        }
-
-        if !any_row {
-            content = content.push(scaled_text(
-                format!("Nothing matches “{}”.", self.filter.trim()),
-                13.0,
-                scale,
-            ));
-        }
-
-        for (category, why) in CATALOG.unsupported {
-            if !self.filter.trim().is_empty() && !category.contains(&self.filter.trim().to_lowercase()) {
-                continue;
-            }
-            content = content.push(meta_text(*why, 12.0, scale));
-        }
-
-        scrollable(container(content).padding(spacing::LG))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
-    }
-}
-
-impl InputModule {
-    /// The shared row renderer, wired to this module's messages.
-    /// Rebuilds the XKB pickers.
+    /// Keyboard layouts, variants and models from the installed XKB data,
+    /// and the connected monitors.
     ///
     /// Variants depend on the chosen layout — the rules file lists over
-    /// 400 of them and only a handful belong to any one layout — so the
-    /// list is rebuilt whenever the layout could have changed rather than
+    /// 400 and only a handful belong to any one layout — so this is
+    /// rebuilt whenever the layout could have changed rather than
     /// computed once.
-    fn rebuild_choices(&mut self) {
+    fn choices(
+        settings: &Settings,
+        live: &BTreeMap<&'static str, Live>,
+        installed: &Installed,
+    ) -> BTreeMap<&'static str, Vec<DynChoice>> {
+        let mut choices = BTreeMap::new();
+        if !installed.monitors.is_empty() {
+            choices.insert(
+                "input:touchdevice:output",
+                installed
+                    .monitors
+                    .iter()
+                    .map(|name| DynChoice { value: name.clone(), label: name.clone() })
+                    .collect(),
+            );
+        }
+        if installed.xkb.layouts.is_empty() {
+            return choices;
+        }
+
         let entries = |list: &[hyprforge_input::xkb::Entry]| -> Vec<DynChoice> {
             list.iter()
                 .map(|e| DynChoice {
                     value: e.code.clone(),
-                    label: format!("{} — {}", e.description, e.code),
+                    label: format!("{} \u{2014} {}", e.description, e.code),
                 })
                 .collect()
         };
-        if self.xkb.layouts.is_empty() {
-            return;
-        }
-        self.choices.insert("input:kb_layout", entries(&self.xkb.layouts));
-        self.choices.insert("input:kb_model", entries(&self.xkb.models));
+        choices.insert("input:kb_layout", entries(&installed.xkb.layouts));
+        choices.insert("input:kb_model", entries(&installed.xkb.models));
 
-        let layout = self
-            .settings
+        let layout = settings
             .get("input:kb_layout")
             .and_then(|v| v.as_text().map(str::to_string))
             .or_else(|| {
-                self.live
-                    .get("input:kb_layout")
+                live.get("input:kb_layout")
                     .and_then(|l| l.value.as_text().map(str::to_string))
             })
             .unwrap_or_default();
-        let variants = self.xkb.variants_for(layout.trim());
-        if variants.is_empty() {
-            // No variants for this layout is a real answer, and an empty
-            // dropdown is not a control. Falls back to a text field.
-            self.choices.remove("input:kb_variant");
-        } else {
+        let variants = installed.xkb.variants_for(layout.trim());
+        // No variants for this layout is a real answer, and an empty
+        // dropdown is not a control — the row falls back to a text field.
+        if !variants.is_empty() {
             let mut list = entries(&variants);
-            // A blank variant is the default for every layout and has to
-            // be selectable, or the field becomes one-way.
+            // A blank variant is every layout's default and has to be
+            // selectable, or the field becomes one-way.
             list.insert(
                 0,
-                DynChoice {
-                    value: String::new(),
-                    label: "Default".to_string(),
-                },
+                DynChoice { value: String::new(), label: "Default".to_string() },
             );
-            self.choices.insert("input:kb_variant", list);
+            choices.insert("input:kb_variant", list);
         }
+        choices
     }
-
-    fn rows(&self) -> RowContext<'_, Message> {
-        RowContext {
-            settings: &self.settings,
-            live: &self.live,
-            drafts: &self.drafts,
-            draft_errors: &self.draft_errors,
-            choices: &self.choices,
-            on_set: Message::Set,
-            on_draft: Message::DraftChanged,
-            on_reset: Message::Reset,
-            on_submit: Message::ApplyDrafts,
-        }
-    }
-
-    fn setting_row(&self, setting: &'static Setting, scale: FontScale) -> Element<'_, Message> {
-        self.rows().row(setting, scale)
-    }
-
-    fn import_view(&self, review: &ImportState, scale: FontScale) -> Element<'_, Message> {
-        let body: Element<'_, Message> = match review {
-            ImportState::Running => scaled_text("Reading your Hyprland config…", 13.0, scale).into(),
-            ImportState::Ready(candidates) if candidates.is_empty() => column![
-                scaled_text(
-                    "Hyprland reports no input options set beyond its own defaults, \
-                     so there's nothing to import.",
-                    13.0,
-                    scale,
-                ),
-                secondary_button("Close").on_press(Message::ImportCancel),
-            ]
-            .spacing(spacing::MD)
-            .into(),
-            ImportState::Ready(candidates) => {
-                let mut list = column![scaled_text(
-                    "These are the input options your own Hyprland config sets. \
-                     Importing one hands it to Hyprforge, which from then on writes \
-                     it and wins over your config file — the line in your config \
-                     stays where it is, it just stops being the one that decides.",
-                    13.0,
-                    scale,
-                )]
-                .spacing(spacing::SM);
-                for (i, c) in candidates.iter().enumerate() {
-                    let mut label = column![row![
-                        checkbox(c.selected).on_toggle(move |_| Message::ImportToggle(i)),
-                        scaled_text(
-                            format!("{} — {}", c.found.label, setting_rows::render_for_edit(&c.found.value)),
-                            13.0,
-                            scale,
-                        ),
-                    ]
-                    .spacing(spacing::SM)
-                    .align_y(iced::Alignment::Center)]
-                    .spacing(2);
-                    if c.found.differs {
-                        label = label.push(meta_text(
-                            "Different from what Hyprforge has — importing replaces it.",
-                            12.0,
-                            scale,
-                        ));
-                    } else if c.found.already_owned {
-                        label = label.push(meta_text("Already imported.", 12.0, scale));
-                    }
-                    list = list.push(label);
-                }
-                column![
-                    list,
-                    row![
-                        primary_button("Import selected").on_press(Message::ImportConfirm),
-                        secondary_button("Cancel").on_press(Message::ImportCancel),
-                    ]
-                    .spacing(spacing::MD),
-                ]
-                .spacing(spacing::LG)
-                .into()
-            }
-        };
-        scrollable(container(section("Import from Hyprland", scale, body)).padding(spacing::LG))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
-    }
-}
-
-/// Reads every option's live value. A failure yields an empty list rather
-/// than an error: the screen is fully usable without it, rows just fall
-/// back to the catalog default, and a banner about a background read the
-/// user never asked for would be noise.
-/// Scans for XKB data and connected monitors. Blocking file and
-/// `hyprctl` work, so it goes on the blocking pool rather than stalling
-/// the first frame.
-async fn read_choices() -> (hyprforge_input::xkb::Catalogue, Vec<String>) {
-    tokio::task::spawn_blocking(|| {
-        (
-            hyprforge_input::xkb::catalogue(),
-            hyprforge_core::monitors::connector_names(),
-        )
-    })
-    .await
-    .unwrap_or_default()
-}
-
-async fn read_live() -> Vec<Live> {
-    tokio::task::spawn_blocking(|| hyprforge_core::hlconfig::import::live(&CATALOG).unwrap_or_default())
-        .await
-        .unwrap_or_default()
-}
-
-async fn regenerate_and_reload(settings: Settings) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || {
-        hyprforge_input::apply::apply(&hyprforge_core::paths::input_lua_path(), &settings)
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::catalog_screen::{Candidate, ImportState};
     use super::super::setting_rows::Source;
     use super::*;
+    use hyprforge_core::hlconfig::import::Discovered;
+    use hyprforge_core::hlconfig::Value;
+    use hyprforge_core::theme::FontScale;
+    use hyprforge_core::SettingsModule;
+    use hyprforge_input::catalog;
 
     /// Runs `f` against a module whose config lives in a throwaway
     /// directory. Without this, `InputModule::new()` reads — and several
@@ -1186,7 +604,7 @@ mod tests {
     fn keyboard_fields_become_pickers_once_xkb_is_read() {
         with_temp_config(|m| {
             assert!(m.choices.is_empty(), "a text field until the scan returns");
-            let _ = m.update(Message::ChoicesLoaded(xkb_sample(), Vec::new()));
+            let _ = m.update(Message::ChoicesLoaded(Installed { xkb: xkb_sample(), monitors: Vec::new() }));
             let layouts = &m.choices["input:kb_layout"];
             assert!(layouts.iter().any(|c| c.value == "us"));
             assert!(
@@ -1202,7 +620,7 @@ mod tests {
     #[test]
     fn the_variant_list_follows_the_chosen_layout() {
         with_temp_config(|m| {
-            let _ = m.update(Message::ChoicesLoaded(xkb_sample(), Vec::new()));
+            let _ = m.update(Message::ChoicesLoaded(Installed { xkb: xkb_sample(), monitors: Vec::new() }));
             let _ = m.update(Message::Set("input:kb_layout", Value::Text("us".into())));
             let variants = &m.choices["input:kb_variant"];
             assert!(variants.iter().any(|c| c.value == "colemak"));
@@ -1220,7 +638,7 @@ mod tests {
     #[test]
     fn the_default_variant_is_selectable() {
         with_temp_config(|m| {
-            let _ = m.update(Message::ChoicesLoaded(xkb_sample(), Vec::new()));
+            let _ = m.update(Message::ChoicesLoaded(Installed { xkb: xkb_sample(), monitors: Vec::new() }));
             let _ = m.update(Message::Set("input:kb_layout", Value::Text("us".into())));
             assert!(m.choices["input:kb_variant"].iter().any(|c| c.value.is_empty()));
         });
@@ -1231,7 +649,7 @@ mod tests {
     #[test]
     fn a_layout_without_variants_falls_back_to_a_text_field() {
         with_temp_config(|m| {
-            let _ = m.update(Message::ChoicesLoaded(xkb_sample(), Vec::new()));
+            let _ = m.update(Message::ChoicesLoaded(Installed { xkb: xkb_sample(), monitors: Vec::new() }));
             let _ = m.update(Message::Set("input:kb_layout", Value::Text("nonesuch".into())));
             assert!(!m.choices.contains_key("input:kb_variant"));
         });
@@ -1244,7 +662,7 @@ mod tests {
     #[test]
     fn a_multi_layout_value_is_not_offered_a_single_select_picker() {
         with_temp_config(|m| {
-            let _ = m.update(Message::ChoicesLoaded(xkb_sample(), Vec::new()));
+            let _ = m.update(Message::ChoicesLoaded(Installed { xkb: xkb_sample(), monitors: Vec::new() }));
             let _ = m.update(Message::Set("input:kb_layout", Value::Text("us,de".into())));
             // The choices still exist; the row is what declines to use
             // them, so building the view is what proves it's handled.
@@ -1261,10 +679,10 @@ mod tests {
     #[test]
     fn the_mapped_display_field_offers_connected_monitors() {
         with_temp_config(|m| {
-            let _ = m.update(Message::ChoicesLoaded(
-                Default::default(),
-                vec!["eDP-2".into(), "DP-3".into()],
-            ));
+            let _ = m.update(Message::ChoicesLoaded(Installed {
+                xkb: Default::default(),
+                monitors: vec!["eDP-2".into(), "DP-3".into()],
+            }));
             let monitors = &m.choices["input:touchdevice:output"];
             assert_eq!(monitors.len(), 2);
             assert!(monitors.iter().any(|c| c.value == "eDP-2"));
