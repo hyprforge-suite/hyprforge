@@ -1330,6 +1330,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 
 [[package]]
+name = "hyprforge-appearance"
+version = "0.1.0"
+dependencies = [
+ "hyprforge-core",
+ "hyprforge-lua-import",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "toml",
+]
+
+[[package]]
 name = "hyprforge-core"
 version = "0.1.0"
 dependencies = [

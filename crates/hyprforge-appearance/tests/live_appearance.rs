@@ -1,29 +1,29 @@
 //! Manual tests that a real Hyprland agrees with everything
-//! [`hyprforge_input::catalog`] claims. Not run by default —
-//! `cargo test --test live_input -- --ignored`, on a machine running
+//! [`hyprforge_appearance::catalog`] claims. Not run by default —
+//! `cargo test --test live_appearance -- --ignored`, on a machine running
 //! Hyprland.
 //!
-//! This is the test that makes the catalog trustworthy. Every entry asserts
-//! two things about the compositor — that the option exists, and what type
-//! it has — and both are exactly the kind of claim that rots quietly as
-//! Hyprland changes. A renamed key or a type that became a float shows up
-//! here, not in someone's config.
+//! This suite has already earned its place: the wiki documents a
+//! `decoration:wobble` subcategory that Hyprland 0.56.1 does not have, and
+//! it documents `css_gaps` as taking a string when the compositor's own
+//! error says "an integer or a table". A catalog built from the wiki alone
+//! would have shipped eight dead settings and a gap control that silently
+//! did nothing.
 //!
-//! Nothing here writes to the user's files. Settings are pushed with
-//! `hyprctl eval`, read back with `hyprctl getoption`, and undone with
-//! `hyprctl reload`, which restores every value from the user's own config
-//! — verified: a `repeat_delay` set to 601 by eval was back to 600 with
-//! `set` false after a reload.
+//! Nothing here writes to the user's files. Values are pushed with
+//! `hyprctl eval` and undone with `hyprctl reload`, which restores
+//! everything from the user's own config.
 
-use hyprforge_input::catalog::{Kind, CATALOG};
-use hyprforge_input::apply::generate;
-use hyprforge_input::{Settings, Value};
+use hyprforge_appearance::animations::{self, Animation, Animations};
+use hyprforge_appearance::apply::generate;
+use hyprforge_appearance::catalog::{Kind, CATALOG};
+use hyprforge_appearance::storage::Appearance;
+use hyprforge_core::hlconfig::{Settings, Value};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 
-/// These tests share one compositor and each reloads to undo itself, so two
-/// running at once would restore each other's values mid-assertion. Same
-/// reason as the shortcuts live suite.
+/// These tests share one compositor and each reloads to undo itself, so
+/// two running at once would restore each other's values mid-assertion.
 static COMPOSITOR: Mutex<()> = Mutex::new(());
 
 fn compositor() -> MutexGuard<'static, ()> {
@@ -48,9 +48,8 @@ fn getoption(key: &str) -> serde_json::Value {
         .unwrap_or_else(|_| panic!("getoption {key} returned no JSON: {raw}"))
 }
 
-/// Every catalog key exists on the running compositor, with the type the
-/// catalog claims. A key Hyprland renamed, or one whose type changed, fails
-/// here rather than producing a config error for a user.
+/// Every catalog key exists on the running compositor with the type this
+/// crate claims. This is what caught `decoration:wobble` not existing.
 #[test]
 #[ignore]
 fn hyprland_has_every_catalogued_option_with_the_declared_type() {
@@ -82,9 +81,22 @@ fn hyprland_has_every_catalogued_option_with_the_declared_type() {
     assert!(wrong.is_empty(), "catalog disagrees with Hyprland:\n{}", wrong.join("\n"));
 }
 
-/// The generated file loads cleanly with every option set at once — the
-/// broadest check that the Lua this crate writes is Lua Hyprland accepts,
-/// including the nesting and the number formatting.
+/// The categories this crate declares unsupported must actually be
+/// unsupportable — if `decoration:wobble` ever ships, the note telling
+/// users it doesn't exist becomes the wrong answer.
+#[test]
+#[ignore]
+fn declared_unsupported_categories_are_still_absent_or_still_untyped() {
+    let _live = compositor();
+    let raw = hyprctl(&["getoption", "decoration:wobble:enabled", "-j"]);
+    assert!(
+        !raw.trim_start().starts_with('{'),
+        "decoration:wobble exists now — the catalog should carry it instead of \
+         calling it unreleased: {raw}"
+    );
+}
+
+/// The generated file loads cleanly with every option set at once.
 #[test]
 #[ignore]
 fn hyprland_accepts_a_file_setting_every_option() {
@@ -102,106 +114,129 @@ fn hyprland_accepts_a_file_setting_every_option() {
     }
     assert_eq!(settings.validate(&CATALOG), vec![], "the probe values must be storable");
 
-    eval_and_assert_clean(&generate(&settings));
+    eval_and_assert_clean(&generate(&Appearance {
+        settings,
+        animations: Animations::default(),
+    }));
     reload();
 }
 
-/// A saved setting actually reaches the compositor. Without this the module
-/// could generate perfect Lua that Hyprland loads and ignores, and every
-/// test above would still pass.
+/// Colours are the type most likely to be written in a form Hyprland
+/// refuses, and a refused value takes the whole file with it.
 #[test]
 #[ignore]
-fn a_generated_setting_takes_effect() {
+fn hyprland_accepts_the_colour_form_this_crate_writes() {
     let _live = compositor();
     reload();
-
-    // Deliberately not a value anything else here uses, and read back
-    // before the reload that undoes it.
-    let mut settings = Settings::default();
-    settings.set("input:repeat_delay", Value::Int(637));
-    settings.set("input:touchpad:scroll_factor", Value::Float(1.5));
-    eval_and_assert_clean(&generate(&settings));
-
-    assert_eq!(getoption("input:repeat_delay")["int"], 637);
-    let factor = getoption("input:touchpad:scroll_factor")["float"]
-        .as_f64()
-        .unwrap();
-    assert!((factor - 1.5).abs() < 1e-6, "got {factor}");
-
-    reload();
-    assert_ne!(
-        getoption("input:repeat_delay")["int"],
-        637,
-        "reload should have restored the user's own value"
-    );
-}
-
-/// The fact the whole design rests on: a later `hl.config` beats an earlier
-/// one. If this ever stopped being true, `setup::PLACEMENT` would be
-/// backwards and every save would silently do nothing.
-#[test]
-#[ignore]
-fn a_later_config_call_wins_over_an_earlier_one() {
-    let _live = compositor();
-    reload();
-
-    eval_and_assert_clean("hl.config({ input = { repeat_delay = 611 } })\n");
-    assert_eq!(getoption("input:repeat_delay")["int"], 611);
-    eval_and_assert_clean("hl.config({ input = { repeat_delay = 622 } })\n");
-    assert_eq!(
-        getoption("input:repeat_delay")["int"],
-        622,
-        "the later call must win"
-    );
-
-    reload();
-}
-
-/// The other half of the design: a call updates only the keys it passes, so
-/// the generated overlay leaves everything else to the user's own config.
-#[test]
-#[ignore]
-fn a_partial_config_call_leaves_other_keys_alone() {
-    let _live = compositor();
-    reload();
-    let layout_before = getoption("input:kb_layout")["str"].clone();
+    assert!(config_errors().is_empty(), "config already has errors");
 
     let mut settings = Settings::default();
-    settings.set("input:repeat_delay", Value::Int(644));
-    eval_and_assert_clean(&generate(&settings));
+    settings.set("general:col:active_border", Value::Text("rgba(bd93f9ff)".into()));
+    settings.set("decoration:shadow:color", Value::Text("rgb(1a1a1a)".into()));
+    eval_and_assert_clean(&generate(&Appearance {
+        settings,
+        animations: Animations::default(),
+    }));
 
+    // And it round-trips: what comes back converts to what went in.
+    let live = getoption("general:col:active_border")["gradient"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert_eq!(
-        getoption("input:kb_layout")["str"],
-        layout_before,
-        "writing repeat_delay must not disturb the layout"
+        hyprforge_core::hlconfig::import::read_gradient(&live),
+        Some(Value::Text("rgba(bd93f9ff)".into())),
+        "live gradient {live} didn't convert back"
     );
     reload();
 }
 
-/// What [`hyprforge_input::import`] reads has to mean what it thinks it
-/// means: `set` false before anything writes the key, true after.
+/// A gap written as an integer takes effect, and reads back as the four
+/// numbers `read_gaps` collapses. The wiki calls this type `css_gaps` and
+/// implies a string; the compositor refuses one.
 #[test]
 #[ignore]
-fn the_set_flag_tracks_whether_a_key_was_written() {
+fn a_gap_written_as_an_integer_takes_effect_and_reads_back() {
     let _live = compositor();
     reload();
-    assert_eq!(
-        getoption("input:follow_mouse_shrink")["set"],
-        false,
-        "picked because this machine's config doesn't set it"
-    );
 
     let mut settings = Settings::default();
-    settings.set("input:follow_mouse_shrink", Value::Int(3));
-    eval_and_assert_clean(&generate(&settings));
-    assert_eq!(getoption("input:follow_mouse_shrink")["set"], true);
+    settings.set("general:gaps_in", Value::Int(7));
+    eval_and_assert_clean(&generate(&Appearance {
+        settings,
+        animations: Animations::default(),
+    }));
+
+    let live = getoption("general:gaps_in")["css"].as_str().unwrap().to_string();
+    assert_eq!(
+        hyprforge_core::hlconfig::import::read_gaps(&live),
+        Some(Value::Int(7)),
+        "live gaps {live} didn't convert back"
+    );
+    reload();
+}
+
+/// An animation this crate writes actually reaches the compositor, and a
+/// later call for the same leaf wins — the fact that lets animations share
+/// the settings' placement instead of needing their own.
+#[test]
+#[ignore]
+fn a_later_animation_call_overrides_the_same_leaf() {
+    let _live = compositor();
+    reload();
+
+    let write = |speed: f64, bezier: &str| {
+        let mut animations = Animations::default();
+        animations.set(
+            "windows",
+            Animation {
+                enabled: true,
+                speed,
+                bezier: bezier.to_string(),
+                style: String::new(),
+            },
+        );
+        eval_and_assert_clean(&generate(&Appearance {
+            settings: Settings::default(),
+            animations,
+        }));
+    };
+
+    write(4.79, "easeOutQuint");
+    assert_eq!(live_speed("windows"), Some(4.79));
+    write(9.99, "linear");
+    assert_eq!(live_speed("windows"), Some(9.99), "the later call must win");
 
     reload();
 }
 
-/// A value the catalog declares within range that Hyprland nonetheless
-/// refuses would be a range this crate got wrong. Every catalogued minimum
-/// and maximum is pushed at the compositor.
+/// The leaf names and curve names this crate offers come from the
+/// compositor rather than a hardcoded list, so this checks the parsing
+/// against the real thing.
+#[test]
+#[ignore]
+fn live_animations_and_curves_parse() {
+    let _live = compositor();
+    reload();
+    let (leaves, curves) = animations::live().expect("hyprctl animations");
+    assert!(leaves.len() > 20, "expected the full leaf list, got {}", leaves.len());
+    assert!(
+        leaves.iter().all(|l| !l.leaf.starts_with("__internal")),
+        "internal leaves must be filtered out"
+    );
+    assert!(
+        curves.iter().any(|c| c.name == "default"),
+        "the built-in curve should always exist"
+    );
+}
+
+fn live_speed(leaf: &str) -> Option<f64> {
+    let (leaves, _) = animations::parse_live(&hyprctl(&["animations", "-j"]));
+    leaves.iter().find(|l| l.leaf == leaf).map(|l| l.animation.speed)
+}
+
+/// A value the catalog declares within range that Hyprland refuses would
+/// be a range this crate got wrong.
 #[test]
 #[ignore]
 fn hyprland_accepts_the_extremes_of_every_declared_range() {
@@ -216,7 +251,10 @@ fn hyprland_accepts_the_extremes_of_every_declared_range() {
                 settings.set(setting.key, v);
             }
         }
-        eval_and_assert_clean(&generate(&settings));
+        eval_and_assert_clean(&generate(&Appearance {
+            settings,
+            animations: Animations::default(),
+        }));
     }
     reload();
 }
@@ -259,7 +297,7 @@ fn probe_value(kind: &Kind) -> Value {
                 .unwrap_or(default),
         ),
         Kind::Float { default, min, max } => {
-            let bumped = default + 0.5;
+            let bumped = default + 0.1;
             Value::Float(match (min, max) {
                 (_, Some(hi)) if bumped > hi => hi,
                 (Some(lo), _) if bumped < lo => lo,
@@ -278,7 +316,7 @@ fn probe_value(kind: &Kind) -> Value {
 }
 
 fn eval_and_assert_clean(lua: &str) {
-    let dir = std::env::temp_dir().join("hyprforge-live-input");
+    let dir = std::env::temp_dir().join("hyprforge-live-appearance");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("probe.lua");
     std::fs::write(&path, lua).unwrap();
@@ -288,9 +326,8 @@ fn eval_and_assert_clean(lua: &str) {
     let _ = std::fs::remove_file(&path);
 
     // A failing probe panics, which would skip the caller's reload and
-    // leave the session running whatever this just set — swapped mouse
-    // buttons and no focus-follows-mouse, in the broadest test. Undo first,
-    // then report.
+    // leave the session running whatever this just set. Undo first, then
+    // report.
     if out.to_lowercase().contains("error") || !errors.is_empty() {
         reload();
     }

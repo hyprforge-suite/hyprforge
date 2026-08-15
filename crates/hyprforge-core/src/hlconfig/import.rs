@@ -160,14 +160,57 @@ fn read_value(obj: &serde_json::Value, kind: &Kind) -> Option<Value> {
         Kind::Bool { .. } => obj.get("bool")?.as_bool().map(Value::Bool),
         Kind::Int { .. } | Kind::IntEnum { .. } => obj.get("int")?.as_i64().map(Value::Int),
         Kind::Float { .. } => obj.get("float")?.as_f64().map(Value::Float),
-        Kind::Text { .. } | Kind::TextEnum { .. } | Kind::Color { .. } => {
+        Kind::Text { .. } | Kind::TextEnum { .. } => {
             let s = obj.get("str")?.as_str()?;
             if SENTINELS.contains(&s) {
                 return None;
             }
             Some(Value::Text(s.to_string()))
         }
+        Kind::Color { .. } => read_gradient(obj.get("gradient")?.as_str()?),
+        Kind::Gaps { .. } => read_gaps(obj.get("css")?.as_str()?),
     }
+}
+
+/// Converts a live gradient back into a form Hyprland would accept as
+/// input.
+///
+/// `hyprctl` reports `ffbd93f9 0deg` — `AARRGGBB` plus an angle — for a
+/// colour written as `rgba(bd93f9ff)`. Copying that string into a config
+/// would be refused, so it is converted rather than passed through.
+///
+/// Anything that is a real gradient (several stops, or a non-zero angle)
+/// returns `None`: it can't be represented as the single colour this
+/// editor offers, and showing one stop of it would be a quiet lie about
+/// what is running.
+pub fn read_gradient(raw: &str) -> Option<Value> {
+    let mut parts = raw.split_whitespace();
+    let argb = parts.next()?;
+    match parts.next() {
+        None | Some("0deg") => {}
+        // An angle means a real gradient, and so does a second colour.
+        Some(_) => return None,
+    }
+    if parts.next().is_some() || argb.len() != 8 || !argb.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let (alpha, rgb) = argb.split_at(2);
+    Some(Value::Text(format!("rgba({rgb}{alpha})")))
+}
+
+/// Converts a live `css` gap back into the integer Hyprland accepts.
+///
+/// Reported as four numbers (`5 5 5 5`) whatever was written. Only a
+/// uniform gap round-trips: per-side gaps need the table form, which this
+/// editor doesn't offer, and collapsing them to one number would silently
+/// change three of the four sides.
+pub fn read_gaps(raw: &str) -> Option<Value> {
+    let parts: Vec<&str> = raw.split_whitespace().collect();
+    let first = parts.first()?.parse::<i64>().ok()?;
+    if parts.iter().any(|p| p.parse::<i64>().ok() != Some(first)) {
+        return None;
+    }
+    Some(Value::Int(first))
 }
 
 /// Flattens one recorded `hl.config({...})` call into catalog keys.
@@ -240,6 +283,10 @@ fn coerce(value: &serde_json::Value, kind: &Kind) -> Option<Value> {
         Kind::Text { .. } | Kind::TextEnum { .. } | Kind::Color { .. } => {
             value.as_str().map(|s| Value::Text(s.to_string()))
         }
+        // A config writes a gap as an integer; the table form is a
+        // per-side gap this editor can't represent, and it arrives here
+        // as an object, which `flatten` has already recursed into.
+        Kind::Gaps { .. } => value.as_i64().map(Value::Int),
     }
 }
 
@@ -474,6 +521,45 @@ mod tests {
         let found = call(serde_json::json!({ "demo": { "name": "us" } }));
         let candidates = candidates_from_config(&found, &CATALOG, &current);
         assert!(candidates[0].already_owned && candidates[0].differs);
+    }
+
+    /// The exact string `hyprctl` reports for a colour written as
+    /// `rgba(bd93f9ff)`. Copying it into a config would be refused, so it
+    /// has to be converted back, not passed through.
+    #[test]
+    fn a_live_gradient_converts_back_to_the_form_hyprland_accepts() {
+        assert_eq!(
+            read_gradient("ffbd93f9 0deg"),
+            Some(Value::Text("rgba(bd93f9ff)".into()))
+        );
+        assert_eq!(
+            read_gradient("ee1a1a1a"),
+            Some(Value::Text("rgba(1a1a1aee)".into()))
+        );
+    }
+
+    /// A real gradient can't be shown as the single colour this editor
+    /// offers, and showing one stop of it would misreport what's running.
+    #[test]
+    fn a_real_gradient_is_not_flattened_to_one_colour() {
+        assert_eq!(read_gradient("ffbd93f9 45deg"), None);
+        assert_eq!(read_gradient("ffbd93f9 ff282a36 0deg"), None);
+        assert_eq!(read_gradient("nonsense"), None);
+    }
+
+    /// Gaps are reported as four numbers whatever was written.
+    #[test]
+    fn a_uniform_live_gap_reads_back_as_its_integer() {
+        assert_eq!(read_gaps("5 5 5 5"), Some(Value::Int(5)));
+        assert_eq!(read_gaps("0 0 0 0"), Some(Value::Int(0)));
+    }
+
+    /// Collapsing per-side gaps to one number would silently change three
+    /// of the four sides.
+    #[test]
+    fn per_side_gaps_are_not_collapsed_into_one_number() {
+        assert_eq!(read_gaps("5 10 5 10"), None);
+        assert_eq!(read_gaps(""), None);
     }
 
     /// Everything imported has to be storable, or import hands the user a

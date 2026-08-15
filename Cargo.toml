@@ -5,6 +5,7 @@ members = [
     "crates/hyprforge-displayd",
     "crates/hyprforge-windowrules",
     "crates/hyprforge-input",
+    "crates/hyprforge-appearance",
     "crates/hyprforge-shortcuts",
     "crates/hyprforge-lua-import",
     "crates/hyprforge-settings",
@@ -21,6 +22,7 @@ license = "MIT"
 hyprforge-core = { path = "crates/hyprforge-core", default-features = false }
 hyprforge-windowrules = { path = "crates/hyprforge-windowrules" }
 hyprforge-input = { path = "crates/hyprforge-input" }
+hyprforge-appearance = { path = "crates/hyprforge-appearance" }
 hyprforge-shortcuts = { path = "crates/hyprforge-shortcuts" }
 hyprforge-lua-import = { path = "crates/hyprforge-lua-import" }
 

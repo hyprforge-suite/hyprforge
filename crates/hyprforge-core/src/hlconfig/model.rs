@@ -27,7 +27,9 @@ impl Value {
     pub fn default_for(kind: &Kind) -> Value {
         match *kind {
             Kind::Bool { default } => Value::Bool(default),
-            Kind::Int { default, .. } | Kind::IntEnum { default, .. } => Value::Int(default),
+            Kind::Int { default, .. }
+            | Kind::IntEnum { default, .. }
+            | Kind::Gaps { default, .. } => Value::Int(default),
             Kind::Float { default, .. } => Value::Float(default),
             Kind::Text { default }
             | Kind::TextEnum { default, .. }
@@ -145,7 +147,7 @@ impl Settings {
 fn check(setting: &Setting, value: &Value) -> Option<String> {
     match setting.kind {
         Kind::Bool { .. } => value.as_bool().map(|_| ()).ok_or("expected true or false".to_string()),
-        Kind::Int { min, max, .. } => value
+        Kind::Int { min, max, .. } | Kind::Gaps { min, max, .. } => value
             .as_int()
             .ok_or("expected a whole number".to_string())
             .and_then(|i| in_range(i as f64, min.map(|m| m as f64), max.map(|m| m as f64))),

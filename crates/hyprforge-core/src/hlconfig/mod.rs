@@ -76,8 +76,28 @@ pub enum Kind {
     /// Stored as text, but distinct from [`Kind::Text`] so an editor can
     /// offer a colour control and so the format is validated: a malformed
     /// colour is refused by Hyprland and takes the generated file with it.
+    ///
+    /// Hyprland calls the type `gradient` and reads it back in a different
+    /// form than it accepts — `rgba(bd93f9ff)` going in comes out as
+    /// `ffbd93f9 0deg`, which is `AARRGGBB` plus an angle. Reading a live
+    /// value therefore needs converting, not copying; see
+    /// [`import::read_gradient`].
     Color {
         default: &'static str,
+    },
+    /// A gap size. Hyprland's type is `css_gap`, and in Lua it takes
+    /// "an integer or a table with optional top/right/bottom/left fields"
+    /// — its own words, from the error it returns for anything else. A
+    /// string is refused, despite the wiki calling the type `css_gaps`.
+    ///
+    /// Only the uniform integer form is editable here. Per-side gaps need
+    /// the table form, which an overlay of scalar values can't express;
+    /// a config using one imports as nothing rather than as a wrong
+    /// number.
+    Gaps {
+        default: i64,
+        min: Option<i64>,
+        max: Option<i64>,
     },
 }
 
@@ -90,7 +110,9 @@ impl Kind {
             Kind::Bool { .. } => "bool",
             Kind::Int { .. } | Kind::IntEnum { .. } => "int",
             Kind::Float { .. } => "float",
-            Kind::Text { .. } | Kind::TextEnum { .. } | Kind::Color { .. } => "str",
+            Kind::Text { .. } | Kind::TextEnum { .. } => "str",
+            Kind::Color { .. } => "gradient",
+            Kind::Gaps { .. } => "css",
         }
     }
 }

@@ -768,7 +768,7 @@ fn render_for_edit(value: &Value) -> String {
 
 fn placeholder_for(kind: &Kind) -> String {
     match kind {
-        Kind::Int { default, .. } => default.to_string(),
+        Kind::Int { default, .. } | Kind::Gaps { default, .. } => default.to_string(),
         Kind::Float { default, .. } => render_for_edit(&Value::Float(*default)),
         Kind::Text { default: "" } => "not set".to_string(),
         Kind::Text { default } => (*default).to_string(),
@@ -782,7 +782,7 @@ fn placeholder_for(kind: &Kind) -> String {
 fn parse_for(kind: &Kind, raw: &str) -> Result<Value, String> {
     let trimmed = raw.trim();
     match kind {
-        Kind::Int { .. } | Kind::IntEnum { .. } => trimmed
+        Kind::Int { .. } | Kind::IntEnum { .. } | Kind::Gaps { .. } => trimmed
             .parse::<i64>()
             .map(Value::Int)
             .map_err(|_| "expected a whole number".to_string()),
