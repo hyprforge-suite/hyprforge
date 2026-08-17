@@ -89,35 +89,52 @@ impl State {
 
 /// Whatever actually decides: PAM on a lock screen, greetd on a greeter.
 ///
-/// Deliberately synchronous and single-stepped. Both real backends are
-/// request/response, and a host that pumps one step at a time can keep
-/// the UI drawing between them — which matters on a lock screen, where a
-/// frozen surface is indistinguishable from a crashed one.
+/// **Nothing here blocks.** The three verbs post a request and return;
+/// answers come back from [`Backend::poll`] whenever they are ready.
+///
+/// That split is the whole point. `pam_unix` deliberately sleeps for
+/// about two seconds after a wrong password, and greetd is a socket
+/// round trip — if answering meant waiting, the surface would stop
+/// repainting for exactly as long as the authenticator took. On a lock
+/// screen that is indistinguishable from a crash, and the user's only
+/// other option is a hard reboot.
+///
+/// A backend that can answer immediately simply returns it from the
+/// next `poll`, so synchronous implementations stay trivial.
 pub trait Backend {
-    /// Begin, or begin again after a failure. Returns the first thing to
-    /// do.
-    fn start(&mut self, username: &str) -> Response;
+    /// Begin, or begin again after a failure.
+    fn start(&mut self, username: &str);
 
     /// Supply the answer to the last [`Response::Ask`].
-    fn answer(&mut self, answer: &str) -> Response;
+    fn answer(&mut self, answer: &str);
 
     /// Acknowledge a [`Response::Tell`] and continue.
-    fn proceed(&mut self) -> Response;
+    fn proceed(&mut self);
+
+    /// The next response, if one is ready. Must not block.
+    ///
+    /// Returning `None` means "not yet", never "nothing more" — the
+    /// host will ask again when something wakes it.
+    fn poll(&mut self) -> Option<Response>;
 }
 
 /// Lets a test hold onto its backend while the conversation borrows it,
 /// so what was actually sent can be checked afterwards.
 impl<B: Backend> Backend for &mut B {
-    fn start(&mut self, username: &str) -> Response {
+    fn start(&mut self, username: &str) {
         (**self).start(username)
     }
 
-    fn answer(&mut self, answer: &str) -> Response {
+    fn answer(&mut self, answer: &str) {
         (**self).answer(answer)
     }
 
-    fn proceed(&mut self) -> Response {
+    fn proceed(&mut self) {
         (**self).proceed()
+    }
+
+    fn poll(&mut self) -> Option<Response> {
+        (**self).poll()
     }
 }
 
@@ -141,9 +158,27 @@ impl<B: Backend> Conversation<B> {
             state: State::Working,
             failures: 0,
         };
-        let first = conversation.backend.start(&conversation.username.clone());
-        conversation.apply(first);
+        conversation.backend.start(&conversation.username.clone());
+        conversation.pump();
         conversation
+    }
+
+    /// Applies whatever the backend has ready. Never blocks.
+    ///
+    /// Returns whether anything changed, so a host can avoid repainting
+    /// for nothing. Call it whenever something might have woken the
+    /// backend — and it is always safe to call.
+    pub fn pump(&mut self) -> bool {
+        let mut changed = false;
+        // A loop, not an `if`: PAM can emit a message and the next
+        // prompt in one go, and leaving the second sitting in the queue
+        // would stall the conversation until an unrelated event
+        // happened to pump it again.
+        while let Some(response) = self.backend.poll() {
+            self.apply(response);
+            changed = true;
+        }
+        changed
     }
 
     pub fn state(&self) -> &State {
@@ -185,8 +220,8 @@ impl<B: Backend> Conversation<B> {
         };
         let answer = entered.clone();
         self.state = State::Working;
-        let next = self.backend.answer(&answer);
-        self.apply(next);
+        self.backend.answer(&answer);
+        self.pump();
     }
 
     /// Acknowledges a message and continues.
@@ -195,8 +230,8 @@ impl<B: Backend> Conversation<B> {
             return;
         }
         self.state = State::Working;
-        let next = self.backend.proceed();
-        self.apply(next);
+        self.backend.proceed();
+        self.pump();
     }
 
     /// Starts over after a failure.
@@ -205,8 +240,8 @@ impl<B: Backend> Conversation<B> {
             return;
         }
         self.state = State::Working;
-        let first = self.backend.start(&self.username.clone());
-        self.apply(first);
+        self.backend.start(&self.username.clone());
+        self.pump();
     }
 
     /// Clears whatever has been typed without sending it.
@@ -265,36 +300,50 @@ mod tests {
         at: usize,
         answers: Vec<String>,
         starts: u32,
+        /// Queued for the next `poll`. A script answers immediately, so
+        /// this never holds more than one — but it goes through the same
+        /// post-then-poll path a real backend uses.
+        ready: std::collections::VecDeque<Response>,
     }
 
     impl Script {
         fn new(steps: Vec<Response>) -> Script {
-            Script { steps, at: 0, answers: Vec::new(), starts: 0 }
+            Script {
+                steps,
+                at: 0,
+                answers: Vec::new(),
+                starts: 0,
+                ready: std::collections::VecDeque::new(),
+            }
         }
 
-        fn next(&mut self) -> Response {
+        fn queue_next(&mut self) {
             let response = self.steps.get(self.at).cloned().unwrap_or(Response::Failure {
                 reason: "script ended".into(),
             });
             self.at += 1;
-            response
+            self.ready.push_back(response);
         }
     }
 
     impl Backend for Script {
-        fn start(&mut self, _username: &str) -> Response {
+        fn start(&mut self, _username: &str) {
             self.starts += 1;
             self.at = 0;
-            self.next()
+            self.queue_next();
         }
 
-        fn answer(&mut self, answer: &str) -> Response {
+        fn answer(&mut self, answer: &str) {
             self.answers.push(answer.to_string());
-            self.next()
+            self.queue_next();
         }
 
-        fn proceed(&mut self) -> Response {
-            self.next()
+        fn proceed(&mut self) {
+            self.queue_next();
+        }
+
+        fn poll(&mut self) -> Option<Response> {
+            self.ready.pop_front()
         }
     }
 
@@ -449,6 +498,66 @@ mod tests {
             assert!(!state.is_authenticated(), "{state:?} must not read as success");
         }
         assert!(State::Authenticated.is_authenticated());
+    }
+
+    /// A backend that takes its time — `pam_unix` sleeps about two
+    /// seconds after a wrong password — must leave the conversation
+    /// usable rather than stopping it. A host that couldn't repaint
+    /// through this would look exactly like one that had crashed.
+    #[test]
+    fn a_slow_backend_leaves_the_conversation_working_rather_than_stuck() {
+        /// Answers only when told to, standing in for a backend whose
+        /// reply arrives on another thread.
+        struct Slow {
+            ready: Option<Response>,
+        }
+        impl Backend for Slow {
+            fn start(&mut self, _username: &str) {
+                self.ready = Some(Response::Ask(Prompt::secret("Password:")));
+            }
+            fn answer(&mut self, _answer: &str) {}
+            fn proceed(&mut self) {}
+            fn poll(&mut self) -> Option<Response> {
+                self.ready.take()
+            }
+        }
+
+        let mut c = Conversation::new(Slow { ready: None }, "apost");
+        c.type_into("hunter2".into());
+        c.submit();
+
+        // The answer has not arrived, so the state says so and nothing
+        // claims success.
+        assert_eq!(c.state(), &State::Working);
+        assert!(!c.state().is_authenticated());
+        // Pumping with nothing ready changes nothing and does not block.
+        assert!(!c.pump());
+        assert_eq!(c.state(), &State::Working);
+
+        // When it does arrive, pumping applies it.
+        c.backend.ready = Some(Response::Success);
+        assert!(c.pump());
+        assert!(c.state().is_authenticated());
+    }
+
+    /// PAM can emit a message and the next prompt together. Applying
+    /// only one per pump would stall the conversation until some
+    /// unrelated event happened to pump it again.
+    #[test]
+    fn several_responses_arriving_at_once_are_all_applied() {
+        let script = Script::new(vec![
+            Response::Ask(Prompt::secret("Password:")),
+            Response::Success,
+        ]);
+        let mut c = Conversation::new(script, "apost");
+        c.backend.ready.push_back(Response::Tell { text: "notice".into(), error: false });
+        c.backend.ready.push_back(Response::Ask(Prompt::visible("Code:")));
+
+        assert!(c.pump());
+        match c.state() {
+            State::Asking { prompt, .. } => assert_eq!(prompt.text, "Code:"),
+            other => panic!("the last response should have won, got {other:?}"),
+        }
     }
 
     /// What was typed is a password. It must not reach a log, a panic
