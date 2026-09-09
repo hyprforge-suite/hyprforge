@@ -658,7 +658,7 @@ fn already_imported_note<'a>(scale: FontScale) -> Element<'a, Message> {
         12.0,
         scale,
     )
-    .color(hyprforge_ui::theme::WARNING)
+    .color(hyprforge_ui::theme::warning())
     .into()
 }
 
@@ -1199,7 +1199,7 @@ impl SettingsModule for WindowRulesModule {
                         13.0,
                         scale,
                     )
-                    .color(hyprforge_ui::theme::WARNING),
+                    .color(hyprforge_ui::theme::warning()),
                     meta_text(
                         format!(
                             "{}\n{reason}",
@@ -1532,7 +1532,7 @@ impl WindowRulesModule {
                         12.0,
                         scale,
                     )
-                    .color(hyprforge_ui::theme::WARNING),
+                    .color(hyprforge_ui::theme::warning()),
                 );
             }
             list = list.push(entry);
@@ -1971,7 +1971,7 @@ impl WindowRulesModule {
         let blockers = draft.blockers();
         if let Some(first) = blockers.first() {
             body = body.push(
-                scaled_text(first.clone(), 12.0, scale).color(hyprforge_ui::theme::WARNING),
+                scaled_text(first.clone(), 12.0, scale).color(hyprforge_ui::theme::warning()),
             );
         }
         let save = primary_button("Save");
