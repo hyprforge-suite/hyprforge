@@ -284,22 +284,12 @@ fn swatch<'a, M: 'a>(value: &str) -> Element<'a, M> {
 /// Hyprland's `rgba(rrggbbaa)` / `rgb(rrggbb)` forms. Anything else — a
 /// real gradient, `0xAARRGGBB`, a half-typed value — yields `None`.
 ///
-/// The digit count is tied to the prefix, matching what
-/// `hlconfig::model` accepts: `rgba()` takes eight and `rgb()` six. Being
-/// more lenient here would draw a confident swatch beside a value the
-/// validator is about to refuse.
+/// Strictness is the point: the shared parser accepts exactly what
+/// `hlconfig::model` accepts, so the swatch can never draw a confident
+/// colour beside a value the validator is about to refuse.
 fn parse_color(value: &str) -> Option<iced::Color> {
-    let (body, want) = match value.strip_prefix("rgba(") {
-        Some(rest) => (rest.strip_suffix(')')?, 8),
-        None => (value.strip_prefix("rgb(")?.strip_suffix(')')?, 6),
-    };
-    if body.len() != want || !body.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    let byte = |i: usize| u8::from_str_radix(body.get(i..i + 2)?, 16).ok();
-    let (r, g, b) = (byte(0)?, byte(2)?, byte(4)?);
-    let a = if want == 8 { byte(6)? } else { 255 };
-    Some(iced::Color::from_rgba8(r, g, b, a as f32 / 255.0))
+    let c = hyprforge_look::Color::parse(value).ok()?;
+    Some(iced::Color::from_rgba8(c.r, c.g, c.b, c.a as f32 / 255.0))
 }
 
 /// A dropdown entry for a [`Kind::IntEnum`]. Carries the number so the
