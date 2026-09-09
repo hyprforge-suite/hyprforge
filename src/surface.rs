@@ -43,11 +43,29 @@ use wayland_client::{Connection, QueueHandle};
 
 use hyprforge_authui::conversation::{Backend, Conversation, State};
 use hyprforge_authui::Theme;
+use iced_runtime::core::{mouse, renderer, Rectangle, Size};
+use iced_runtime::user_interface::{Cache, UserInterface};
+use iced_tiny_skia::graphics::Viewport;
+
+/// The screen sends no messages: input reaches the conversation through
+/// `key` rather than through iced, because the compositor hands
+/// keystrokes to this process directly.
+#[derive(Debug, Clone)]
+enum Nothing {}
+
+/// The shared colour type as iced wants it.
+fn iced_color(c: hyprforge_look::Color) -> iced_runtime::core::Color {
+    iced_runtime::core::Color::from_rgba8(c.r, c.g, c.b, c.a as f32 / 255.0)
+}
 
 /// How often the surface repaints while the authenticator is busy.
 ///
 /// Only while busy — an idle lock screen still draws nothing at all.
 const PULSE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// How often the surface repaints otherwise — enough to keep the clock
+/// from being visibly wrong.
+const CLOCK_TICK: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Why the lock screen stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,9 +130,13 @@ pub struct LockScreen<B: Backend + 'static> {
     /// has none either, and mistaking that for "never locked" would
     /// report the session as open when it is held.
     granted: bool,
-    /// Advances while the authenticator is busy, so the surface has
-    /// something to animate and a user can see it is still alive.
-    tick: u64,
+    /// Kept across frames so glyph rasterisation and layout are not
+    /// redone from scratch every repaint.
+    renderer: iced_tiny_skia::Renderer,
+    cache: Cache,
+    /// Shown on the screen, so it has to be here rather than only in the
+    /// conversation — which does not exist until the lock is granted.
+    username: String,
     /// Text to type in by itself once something has been drawn, for
     /// testing against a nested compositor. `None` in every real run;
     /// `main` refuses to set it without an explicit `--display`.
@@ -147,6 +169,7 @@ impl<B: Backend + 'static> LockScreen<B> {
         self_test: Option<String>,
     ) -> Result<Outcome, LockError> {
         let username = username.into();
+        let theme_font_size = theme.font_size;
         let mut pending = Some(backend);
         let (globals, mut queue) = registry_queue_init(&connection)?;
         let qh = queue.handle();
@@ -174,7 +197,12 @@ impl<B: Backend + 'static> LockScreen<B> {
             dirty: true,
             frames: 0,
             granted: false,
-            tick: 0,
+            renderer: iced_tiny_skia::Renderer::new(
+                iced_runtime::core::Font::DEFAULT,
+                iced_runtime::core::Pixels(theme_font_size),
+            ),
+            cache: Cache::default(),
+            username: username.clone(),
             self_testing: self_test.is_some(),
             self_test,
         };
@@ -219,11 +247,16 @@ impl<B: Backend + 'static> LockScreen<B> {
         let pulse = calloop::timer::Timer::from_duration(PULSE);
         handle
             .insert_source(pulse, |_, _, screen: &mut LockScreen<B>| {
-                if matches!(screen.state(), State::Working) {
-                    screen.tick = screen.tick.wrapping_add(1);
-                    screen.dirty = true;
-                }
-                calloop::timer::TimeoutAction::ToDuration(PULSE)
+                screen.dirty = true;
+                // Fast while the authenticator is busy so the screen is
+                // visibly alive through pam_unix's deliberate pause;
+                // otherwise slow, which is what the clock needs. An idle
+                // lock screen no longer costs *nothing* — it costs one
+                // repaint a second — but a clock that does not tick is
+                // worse than the saving.
+                calloop::timer::TimeoutAction::ToDuration(
+                    if matches!(screen.state(), State::Working) { PULSE } else { CLOCK_TICK },
+                )
             })
             .map_err(|e| LockError::EventLoop(e.to_string()))?;
 
@@ -318,96 +351,88 @@ impl<B: Backend + 'static> LockScreen<B> {
     /// the surface that stands between a locked machine and its user; it
     /// has no business depending on a GPU being in a good mood.
     fn draw(&mut self, index: usize) {
-        let Some(locked) = self.surfaces.get(index) else {
+        // Destructured rather than reached through `self`, because the
+        // shm buffer borrows the pool for as long as it is being painted
+        // and the renderer has to be usable at the same time. These are
+        // disjoint fields; only the compiler needs telling.
+        let LockScreen {
+            pool,
+            renderer,
+            cache,
+            theme,
+            username,
+            conversation,
+            surfaces,
+            frames,
+            ..
+        } = self;
+
+        let Some(locked) = surfaces.get(index) else {
             return;
         };
         // Nothing is drawn before the compositor says how big the surface
         // is. Drawing into a guessed size is what produced the first
-        // panic here: a 1px-wide canvas with a panel clamped to a 280px
-        // minimum underflowed on the centring subtraction.
+        // panic here, when a 1px-wide canvas met a panel with a minimum
+        // width.
         let (width, height) = (locked.width, locked.height);
         if width == 0 || height == 0 {
             return;
         }
-        let stride = width as i32 * 4;
 
-        // One dot per typed character, and a colour that says what state
-        // the conversation is in. No text: a font renderer is a
-        // dependency this surface doesn't need yet, and the shape of the
-        // feedback is what the spike is proving.
-        let working = matches!(self.state(), State::Working);
-        let (indicator, count) = match self.state() {
-            State::Asking { entered, .. } => (self.theme.accent.to_argb(), entered.chars().count()),
-            State::Working => (self.theme.accent.to_argb(), 0),
-            State::Failed { .. } => (self.theme.error.to_argb(), 0),
-            State::Telling { error, .. } => {
-                (if *error { self.theme.error } else { self.theme.foreground }.to_argb(), 0)
-            }
-            State::Authenticated => (self.theme.foreground.to_argb(), 0),
-        };
-
-        let background = self.theme.background.to_argb();
-        let surface_colour = self.theme.surface.to_argb();
-
-        let Ok((buffer, canvas)) = self.pool.create_buffer(
-            width as i32,
-            height as i32,
-            stride,
-            wl_shm::Format::Argb8888,
-        ) else {
+        let Ok((buffer, canvas)) =
+            pool.create_buffer(width as i32, height as i32, width as i32 * 4, wl_shm::Format::Argb8888)
+        else {
             // Out of memory for a buffer. Leaving the previous frame up
             // is right: the surface stays as it was rather than going
             // blank, and the next event tries again.
             return;
         };
 
-        for pixel in canvas.chunks_exact_mut(4) {
-            pixel.copy_from_slice(&background.to_le_bytes());
-        }
+        // `Argb8888` is `[31:0] A:R:G:B` little endian, so the bytes in
+        // memory are B, G, R, A — which is exactly what iced_tiny_skia
+        // writes, because its `into_color` swaps red and blue on
+        // purpose. The buffer needs no channel shuffle at all, and
+        // adding one "to fix" it would break every colour. There is a
+        // test.
+        let Some(mut pixels) = tiny_skia::PixmapMut::from_bytes(canvas, width, height) else {
+            return;
+        };
+        let Some(mut mask) = tiny_skia::Mask::new(width, height) else {
+            return;
+        };
 
-        // A panel, centred, sized as a fraction of the output so it
-        // looks the same on every screen rather than tiny on a 4K one.
-        //
-        // Every step saturates. The size the compositor asks for is not
-        // this program's to assume, and a panic here is the one failure
-        // with no recovery: the session stays locked with nothing left
-        // running to unlock it.
-        let (panel_w, panel_h) = panel_size(width, height);
-        let panel_x = width.saturating_sub(panel_w) / 2;
-        let panel_y = height.saturating_sub(panel_h) / 2;
-        fill(canvas, width, panel_x, panel_y, panel_w, panel_h, surface_colour);
+        let state = conversation
+            .as_ref()
+            .map_or(&State::Working, |c| c.state());
+        let size = Size::new(width as f32, height as f32);
 
-        let dot = 14u32;
-        let gap = 10u32;
-        let dots = count.min(16) as u32;
-        let row_w = dots * dot + dots.saturating_sub(1) * gap;
-        let row_x = panel_x + panel_w.saturating_sub(row_w) / 2;
-        let row_y = panel_y + (panel_h / 2).saturating_sub(dot / 2);
-        for i in 0..dots {
-            fill(canvas, width, row_x + i * (dot + gap), row_y, dot, dot, indicator);
-        }
-        // A bar under the panel carries the state even with nothing
-        // typed — otherwise a failure with an empty field shows nothing
-        // at all.
-        let bar_y = panel_y + panel_h.saturating_sub(4);
-        if working {
-            // While the authenticator is busy the bar becomes a segment
-            // sliding along a dim track. It is the only thing on screen
-            // that says "still thinking" rather than "stopped": PAM can
-            // sit for seconds on a wrong password, and a still frame for
-            // that long reads as a crash.
-            fill(canvas, width, panel_x, bar_y, panel_w, 4, surface_lit(surface_colour));
-            let travel = panel_w.saturating_sub(BAR_SEGMENT);
-            fill(canvas, width, panel_x + sweep(self.tick, travel), bar_y, BAR_SEGMENT, 4, indicator);
-        } else {
-            fill(canvas, width, panel_x, bar_y, panel_w, 4, indicator);
-        }
+        let mut ui = UserInterface::<Nothing, iced_widget::Theme, iced_tiny_skia::Renderer>::build(
+            hyprforge_authui::screen::view(state, username, theme, chrono::Local::now()),
+            size,
+            std::mem::take(cache),
+            renderer,
+        );
+        ui.draw(
+            renderer,
+            &iced_widget::Theme::Dark,
+            &renderer::Style { text_color: iced_color(theme.foreground) },
+            mouse::Cursor::Unavailable,
+        );
+        *cache = ui.into_cache();
+
+        renderer.draw(
+            &mut pixels,
+            &mut mask,
+            &Viewport::with_physical_size(Size::new(width, height), 1.0),
+            &[Rectangle::with_size(size)],
+            iced_color(theme.background),
+        );
 
         let surface = locked.surface.wl_surface();
         surface.damage_buffer(0, 0, width as i32, height as i32);
         if buffer.attach_to(surface).is_ok() {
             surface.commit();
-            self.frames += 1;
+            *frames += 1;
         }
     }
 
@@ -447,69 +472,6 @@ fn conclude(decided: Option<Outcome>, authenticated: bool, holds_lock: bool) -> 
     // unlock and nothing was unlocked. Whatever asked for a lock hasn't
     // got one, which is exactly what `Refused` reports.
     Some(if holds_lock { Outcome::Unlocked } else { Outcome::Refused })
-}
-
-/// How wide the moving segment is while the authenticator is busy.
-const BAR_SEGMENT: u32 = 64;
-
-/// Where the busy segment sits at `tick`, sweeping `travel` pixels and
-/// coming back rather than jumping.
-///
-/// Pulled out to be tested: an off-by-one at either end would push the
-/// segment past the panel, and `fill` would quietly clip it into a bar
-/// that looks stuck exactly when it is meant to prove liveness.
-fn sweep(tick: u64, travel: u32) -> u32 {
-    if travel == 0 {
-        return 0;
-    }
-    let span = u64::from(travel);
-    // A triangle wave: 0..span, then span..0.
-    let phase = tick % (span * 2);
-    (if phase < span { phase } else { span * 2 - phase }) as u32
-}
-
-/// A slightly brighter version of the panel, for the track the busy
-/// segment slides along. Derived rather than themed: it is a shade of
-/// the surface, not a colour anyone should have to configure.
-fn surface_lit(surface: u32) -> u32 {
-    let lift = |shift: u32| {
-        let channel = (surface >> shift) & 0xff;
-        (channel + (0xff - channel) / 6) << shift
-    };
-    (surface & 0xff00_0000) | lift(16) | lift(8) | lift(0)
-}
-
-/// The panel's size for an output of `width` by `height`.
-///
-/// Never larger than the surface. A minimum that exceeds the output is
-/// how the first version panicked, and a tiny surface is not
-/// hypothetical — a compositor may configure one before the real size
-/// is known.
-fn panel_size(width: u32, height: u32) -> (u32, u32) {
-    let panel_w = (width / 3).clamp(280, 640).min(width);
-    let panel_h = (height / 6).clamp(120, 260).min(height);
-    (panel_w, panel_h)
-}
-
-/// Fills a rectangle, clipped to the canvas.
-///
-/// Clipped rather than asserted: a configure can arrive with a size that
-/// doesn't match the buffer in flight, and panicking on a lock screen is
-/// the one outcome with no recovery.
-fn fill(canvas: &mut [u8], canvas_w: u32, x: u32, y: u32, w: u32, h: u32, colour: u32) {
-    let bytes = colour.to_le_bytes();
-    let canvas_h = (canvas.len() / 4) as u32 / canvas_w.max(1);
-    // Saturating, not wrapping: these are clamped to the canvas on the
-    // very next line anyway, so the only thing an overflow could add is
-    // a panic on the one surface that must never panic.
-    for row in y..y.saturating_add(h).min(canvas_h) {
-        for column in x..x.saturating_add(w).min(canvas_w) {
-            let offset = ((row * canvas_w + column) * 4) as usize;
-            if let Some(pixel) = canvas.get_mut(offset..offset + 4) {
-                pixel.copy_from_slice(&bytes);
-            }
-        }
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -881,41 +843,43 @@ mod tests {
         );
     }
 
-    /// The busy segment must stay inside the panel. Overshooting would
-    /// get clipped by `fill` into a segment that sits still at the edge
-    /// — looking stuck at the exact moment it is there to show the
-    /// screen is alive.
-    #[test]
-    fn the_busy_segment_never_leaves_its_track() {
-        for travel in [0, 1, 2, 63, 64, 500, u32::MAX] {
-            for tick in 0..300u64 {
-                assert!(sweep(tick, travel) <= travel, "travel {travel} tick {tick}");
-            }
-        }
-    }
 
-    /// It has to actually move, and it has to come back rather than
-    /// jump — a segment that teleported to the start would read as a
-    /// repaint glitch.
-    #[test]
-    fn the_busy_segment_sweeps_out_and_back() {
-        let travel = 10;
-        let path: Vec<u32> = (0..=20).map(|tick| sweep(tick, travel)).collect();
-        assert_eq!(path[0], 0);
-        assert_eq!(path[10], 10, "reaches the far end");
-        assert_eq!(path[20], 0, "and returns");
-        // Never more than one step at a time, in either direction.
-        for pair in path.windows(2) {
-            assert_eq!(pair[0].abs_diff(pair[1]), 1, "{path:?}");
-        }
-    }
 
-    /// A zero-width track is what a tiny surface produces, and dividing
-    /// into it must not panic on the surface that cannot recover.
+
+    /// The lock copies iced_tiny_skia's output straight into a Wayland
+    /// `Argb8888` buffer with no channel shuffle, and that is only
+    /// correct because iced_tiny_skia writes B, G, R, A — its
+    /// `into_color` swaps red and blue deliberately.
+    ///
+    /// It looks like a bug. Someone will eventually "fix" it by adding
+    /// a swizzle, at which point every colour on the lock screen is
+    /// wrong and nothing else fails. So it is pinned here: render a
+    /// known red and assert the bytes are the ones `Argb8888` wants.
     #[test]
-    fn a_track_with_no_room_stays_put() {
-        assert_eq!(sweep(0, 0), 0);
-        assert_eq!(sweep(12345, 0), 0);
+    fn iced_writes_the_byte_order_a_wayland_buffer_wants() {
+        let red = iced_runtime::core::Color::from_rgb8(0xff, 0x00, 0x00);
+        let mut pixmap = tiny_skia::Pixmap::new(1, 1).expect("1x1 pixmap");
+        let mut mask = tiny_skia::Mask::new(1, 1).expect("1x1 mask");
+        let mut renderer = iced_tiny_skia::Renderer::new(
+            iced_runtime::core::Font::DEFAULT,
+            iced_runtime::core::Pixels(14.0),
+        );
+        renderer.draw(
+            &mut pixmap.as_mut(),
+            &mut mask,
+            &Viewport::with_physical_size(Size::new(1, 1), 1.0),
+            &[Rectangle::with_size(Size::new(1.0, 1.0))],
+            red,
+        );
+
+        // Argb8888 is [31:0] A:R:G:B little endian, so red is
+        // 0xffff0000, whose bytes in memory are 00 00 ff ff.
+        assert_eq!(
+            pixmap.data()[0..4],
+            0xffff_0000u32.to_le_bytes(),
+            "red must land where Argb8888 keeps red; if this fails, do not add a swizzle \
+             without checking what iced_tiny_skia::engine::into_color does"
+        );
     }
 
     /// Reporting a successful unlock for a session that was never
@@ -950,57 +914,6 @@ mod tests {
         assert_eq!(conclude(None, false, false), None);
     }
 
-    /// A configure can arrive with a size that doesn't match the buffer
-    /// in flight. Panicking on a lock screen is the one outcome with no
-    /// recovery, so the fill clips instead.
-    #[test]
-    fn filling_outside_the_canvas_clips_rather_than_panicking() {
-        let mut canvas = vec![0u8; 4 * 4 * 4]; // 4x4 pixels
-        fill(&mut canvas, 4, 2, 2, 100, 100, 0xffff_ffff);
-        fill(&mut canvas, 4, 10, 10, 4, 4, 0xffff_ffff);
-        fill(&mut canvas, 4, 0, 0, 0, 0, 0xffff_ffff);
-        // Coordinates whose sum overflows u32. Clamped on the next line
-        // either way, so the only thing an overflow could add is a panic.
-        fill(&mut canvas, 4, u32::MAX - 1, u32::MAX - 1, 8, 8, 0xffff_ffff);
-        fill(&mut canvas, 4, 1, 1, u32::MAX, u32::MAX, 0xffff_ffff);
 
-        // The bottom-right pixel was inside the first rectangle.
-        assert_eq!(&canvas[(3 * 4 + 3) * 4..][..4], &0xffff_ffffu32.to_le_bytes());
-        // The top-left was outside all of them.
-        assert_eq!(&canvas[0..4], &[0, 0, 0, 0]);
-    }
 
-    /// The first version of this panicked on a 1x1 surface, which is
-    /// exactly what a compositor hands over before the real size is
-    /// known. A panic on a lock screen leaves the session locked with
-    /// nothing running to unlock it.
-    #[test]
-    fn the_panel_never_exceeds_the_surface_at_any_size() {
-        for (width, height) in [
-            (1, 1),
-            (2, 2),
-            (100, 50),
-            (279, 119),
-            (280, 120),
-            (1280, 800),
-            (3840, 2160),
-            (u32::MAX, u32::MAX),
-        ] {
-            let (panel_w, panel_h) = panel_size(width, height);
-            assert!(panel_w <= width, "{width}x{height} gave a panel {panel_w} wide");
-            assert!(panel_h <= height, "{width}x{height} gave a panel {panel_h} tall");
-            // The centring arithmetic that actually overflowed.
-            let _ = width.saturating_sub(panel_w) / 2;
-            let _ = height.saturating_sub(panel_h) / 2;
-        }
-    }
-
-    #[test]
-    fn filling_writes_the_colour_in_little_endian_argb() {
-        let mut canvas = vec![0u8; 4 * 4];
-        fill(&mut canvas, 4, 1, 0, 2, 1, 0xffbd93f9);
-        assert_eq!(&canvas[4..8], &0xffbd93f9u32.to_le_bytes());
-        assert_eq!(&canvas[8..12], &0xffbd93f9u32.to_le_bytes());
-        assert_eq!(&canvas[0..4], &[0, 0, 0, 0], "outside the rectangle is untouched");
-    }
 }
