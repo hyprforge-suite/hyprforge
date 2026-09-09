@@ -9,5 +9,6 @@
 //! why the one widget that *did* know — the "your config can't take a
 //! require line" banner — lives in the Settings app instead.
 
+pub mod color;
 pub mod theme;
 pub mod widgets;

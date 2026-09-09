@@ -1,7 +1,7 @@
 mod module;
 mod modules;
 
-use hyprforge_ui::theme::{app_theme, spacing, surface, FontScale, TEXT_DIM};
+use hyprforge_ui::theme::{app_theme, spacing, surface, FontScale, text_dim};
 use hyprforge_ui::widgets::{primary_button, scaled_text, secondary_button};
 use crate::module::SettingsModule;
 use iced::keyboard::{self, key, Key};
@@ -444,7 +444,7 @@ impl App {
                     13.0,
                     scale,
                 )
-                .color(TEXT_DIM),
+                .color(text_dim()),
                 row![
                     secondary_button("Revert now")
                         .on_press(Message::Displays(modules::displays::Message::RevertLayoutNow)),
@@ -460,11 +460,11 @@ impl App {
         .height(Length::Fill)
         .center(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(Background::Color(surface::CARD)),
+            background: Some(Background::Color(surface::card())),
             border: iced::Border {
                 radius: 10.0.into(),
                 width: 1.0,
-                color: surface::CARD_BORDER,
+                color: surface::card_border(),
             },
             ..container::Style::default()
         })
@@ -521,7 +521,7 @@ impl App {
             // sub-item, not just a static label — "Displays" takes you to
             // Monitors the same way clicking "Monitors" does.
             let header = iced::widget::button(
-                scaled_text(category.label.to_uppercase(), 11.0, scale).color(TEXT_DIM),
+                scaled_text(category.label.to_uppercase(), 11.0, scale).color(text_dim()),
             )
             .style(|_theme: &Theme, _status| iced::widget::button::Style::default())
             .padding(0)
@@ -539,7 +539,7 @@ impl App {
             );
         }
         if !any_visible {
-            nav = nav.push(scaled_text("No matches", 13.0, scale).color(TEXT_DIM));
+            nav = nav.push(scaled_text("No matches", 13.0, scale).color(text_dim()));
         }
 
         let sidebar = container(
@@ -557,7 +557,7 @@ impl App {
         )
         .height(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(Background::Color(surface::SIDEBAR)),
+            background: Some(Background::Color(surface::sidebar())),
             ..container::Style::default()
         });
 
@@ -594,7 +594,7 @@ impl App {
 
         container(row![sidebar, content])
             .style(|_theme: &Theme| container::Style {
-                background: Some(Background::Color(surface::ROOT)),
+                background: Some(Background::Color(surface::root())),
                 ..container::Style::default()
             })
             .into()

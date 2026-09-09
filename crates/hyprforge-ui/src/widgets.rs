@@ -1,4 +1,4 @@
-use crate::theme::{spacing, surface, FontScale, TEXT_DIM};
+use crate::theme::{self, spacing, surface, FontScale};
 use iced::widget::{button, column, container, row, text, text::IntoFragment, Text};
 use iced::{Background, Border, Color, Element, Length, Theme};
 
@@ -18,7 +18,7 @@ pub fn scaled_text<'a>(
 /// `scaled_text` alone so "this is metadata, not content" is visible at a
 /// glance rather than relying on size difference only.
 pub fn meta_text<'a>(content: impl IntoFragment<'a>, base_size: f32, scale: FontScale) -> Text<'a> {
-    scaled_text(content, base_size, scale).color(TEXT_DIM)
+    scaled_text(content, base_size, scale).color(theme::text_dim())
 }
 
 /// The raised-card look used for every section and dialog — a real step
@@ -27,11 +27,11 @@ pub fn meta_text<'a>(content: impl IntoFragment<'a>, base_size: f32, scale: Font
 /// at all" on a real monitor).
 fn card_style(_theme: &Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(surface::CARD)),
+        background: Some(Background::Color(surface::card())),
         border: Border {
             radius: 10.0.into(),
             width: 1.0,
-            color: surface::CARD_BORDER,
+            color: surface::card_border(),
         },
         ..container::Style::default()
     }
@@ -66,7 +66,7 @@ pub fn divider<'a, Message: 'a>() -> Element<'a, Message> {
         .width(Length::Fill)
         .height(Length::Fixed(1.0))
         .style(|_theme: &Theme| container::Style {
-            background: Some(Background::Color(surface::CARD_BORDER)),
+            background: Some(Background::Color(surface::card_border())),
             ..container::Style::default()
         })
         .into()
@@ -129,18 +129,18 @@ fn primary_style(theme: &Theme, status: button::Status) -> button::Style {
 
 fn secondary_style(_theme: &Theme, status: button::Status) -> button::Style {
     let base = button::Style {
-        background: Some(Background::Color(surface::ROW)),
-        text_color: crate::theme::TEXT,
+        background: Some(Background::Color(surface::row())),
+        text_color: crate::theme::text(),
         border: Border {
             radius: 8.0.into(),
             width: 1.0,
-            color: surface::CARD_BORDER,
+            color: surface::card_border(),
         },
         ..button::Style::default()
     };
     match status {
         button::Status::Hovered => button::Style {
-            background: Some(Background::Color(surface::CARD_BORDER)),
+            background: Some(Background::Color(surface::card_border())),
             ..base
         },
         button::Status::Disabled => button::Style {
@@ -157,7 +157,7 @@ fn secondary_style(_theme: &Theme, status: button::Status) -> button::Style {
 fn danger_style(theme: &Theme, status: button::Status) -> button::Style {
     let palette = theme.extended_palette();
     let base = button::Style {
-        background: Some(Background::Color(surface::ROW)),
+        background: Some(Background::Color(surface::row())),
         text_color: palette.danger.base.color,
         border: Border {
             radius: 8.0.into(),
@@ -244,11 +244,11 @@ pub fn confirm_dialog<'a, Message: Clone + 'a>(
         .padding(spacing::SM)
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {
-            background: Some(Background::Color(surface::ROW)),
+            background: Some(Background::Color(surface::row())),
             border: Border {
                 radius: 6.0.into(),
                 width: 1.0,
-                color: surface::CARD_BORDER,
+                color: surface::card_border(),
             },
             ..container::Style::default()
         });

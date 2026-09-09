@@ -1128,7 +1128,7 @@ impl SettingsModule for ShortcutsModule {
                         13.0,
                         scale,
                     )
-                    .color(hyprforge_ui::theme::WARNING),
+                    .color(hyprforge_ui::theme::warning()),
                     meta_text(
                         format!(
                             "{}\n{reason}",
@@ -1192,7 +1192,7 @@ impl SettingsModule for ShortcutsModule {
                             12.0,
                             scale,
                         )
-                        .color(hyprforge_ui::theme::WARNING),
+                        .color(hyprforge_ui::theme::warning()),
                     );
                 }
 
@@ -1331,7 +1331,7 @@ impl ShortcutsModule {
                             12.0,
                             scale,
                         )
-                        .color(hyprforge_ui::theme::WARNING),
+                        .color(hyprforge_ui::theme::warning()),
                     );
                 }
                 list = list.push(
@@ -1387,7 +1387,7 @@ impl ShortcutsModule {
         let blockers = draft.blockers();
         if let Some(first) = blockers.first() {
             body = body.push(
-                scaled_text(first.clone(), 12.0, scale).color(hyprforge_ui::theme::WARNING),
+                scaled_text(first.clone(), 12.0, scale).color(hyprforge_ui::theme::warning()),
             );
         }
 
@@ -1477,7 +1477,7 @@ impl ShortcutsModule {
         }
         if let Some(conflict) = &draft.conflict {
             form = form.push(
-                scaled_text(conflict.clone(), 12.0, scale).color(hyprforge_ui::theme::WARNING),
+                scaled_text(conflict.clone(), 12.0, scale).color(hyprforge_ui::theme::warning()),
             );
         }
         form.into()
@@ -1590,7 +1590,7 @@ impl ShortcutsModule {
 
         if let Some(conflict) = draft.flags.conflict() {
             form = form.push(
-                scaled_text(conflict, 12.0, scale).color(hyprforge_ui::theme::WARNING),
+                scaled_text(conflict, 12.0, scale).color(hyprforge_ui::theme::warning()),
             );
         }
         form.into()
