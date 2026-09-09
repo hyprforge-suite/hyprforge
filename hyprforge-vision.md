@@ -68,7 +68,8 @@ with zero GTK/Qt dependency anywhere in the stack.
 | — Session module (autostart, environment, gestures, permissions) | `hyprforge-session` (lib) | hand-edited hyprland.lua | no | in progress |
 | — System module (behaviour, shortcuts behaviour, X11, rendering) | `hyprforge-system` (lib) | hand-edited hyprland.lua | no | in progress |
 | — Users/time module | *(planned)* | — | accountsservice/timedated | not started |
-| **Lock screen** | `hyprforge-lock` (binary), `hyprforge-authui` (shared conversation model + theme) | hyprlock | no (a client holding `ext-session-lock-v1`) | working; look and feel not started |
+| **Lock screen** | `hyprforge-lock` (binary), `hyprforge-authui` (conversation model) | hyprlock | no (a client holding `ext-session-lock-v1`) | working; look and feel not started |
+| *(shared foundation)* | `hyprforge-paths` (xdg + atomic writes), `hyprforge-look` (colour type + runtime Theme), `hyprforge-ui` (iced widgets and palette) | — | no | in place; every future app builds on these |
 | **Greeter / display manager** | `hyprforge-greet` (planned), on `hyprforge-authui` | greetd greeters (gtkgreet/tuigreet) | runs under greetd | not started |
 | **File Manager** | `hyprforge-files-core` (shared logic), `hyprforge-files` (standalone), `hyprforge-files-portal` (xdg-desktop-portal FileChooser backend) | Nautilus/Dolphin/Thunar | portal backend runs as a D-Bus service | not started |
 | **Photo Viewer** | `hyprforge-photos` | eog/gwenview | no | not started |
@@ -141,6 +142,21 @@ NOT the whole suite. The Displays + Window Rules work (see
 `hyprforge-v1-prompt.md`) is one slice of the Settings app, not the
 entirety of Hyprforge. Do not expand scope to other components without
 it being explicitly requested for that session.
+
+### The shared look
+
+Every app reads one `hyprforge_look::Theme`, resolved from settings the user
+already controls: the accent is Hyprland's `general:col:active_border`, the
+fonts and text scale come from gsettings. There is deliberately no Hyprforge
+theme file — that would be a second place to configure colours that already
+exist, and one the user would have to find.
+
+This was not the original arrangement. The Settings app and the lock screen
+each had their own palette and had already drifted apart, which is precisely
+the "looks like two different systems" problem this suite exists to solve,
+occurring inside the suite. A new app should depend on `hyprforge-ui` and get
+the look for free; if it ever needs to define a colour of its own, that is a
+sign something belongs in `hyprforge-look` instead.
 
 ### Where things stand (2026-08-16)
 

@@ -7,43 +7,68 @@ so far.
 
 ## Workspace layout
 
+Four layers, and the order matters: anything lower may be used by an app that
+has never heard of Hyprland.
+
 ```
-crates/
-  hyprforge-core/          SettingsModule trait, shared theme/widgets, xdg
-                            paths, the D-Bus client proxy for displayd, and
-                            hlconfig: the generic hl.config overlay machinery
-                            (catalog, storage, codegen, import) every
-                            settings category shares
-  hyprforge-displayd/      daemon + CLI binaries (hyprforge-displayd,
-                            hyprforge-displayctl)
-  hyprforge-windowrules/   library: TOML rule storage, Lua codegen, the
-                            one-time hyprland.lua setup flow
-  hyprforge-shortcuts/     library: TOML shortcut storage, Lua codegen, live
-                            conflict detection against hyprctl binds, the
-                            one-time hyprland.lua setup flow
-  hyprforge-input/         library: the input option catalog (51 options) and
-                            its require line — everything else is core::hlconfig
-  hyprforge-appearance/    library: the appearance catalog (88 options), the
-                            animation model, gsettings bridge, and theme/font
-                            discovery
-  hyprforge-ecosystem/     library: the hypr* daemons (hyprpaper, hyprsunset,
-                            hypridle) — their config files, generation and
-                            the `source =` line that installs them
-  hyprforge-session/       library: autostart programs and environment
-                            variables
-  hyprforge-system/        library: the misc/debug/render catalogue, sharing
-                            catalog_screen with Input
-  hyprforge-authui/        library: the authentication *conversation* model
-                            and the shared theme, so the lock screen and the
-                            greeter cannot drift into looking like two
-                            different systems
-  hyprforge-lock/          binary: our own ext-session-lock-v1 lock screen,
-                            authenticating against PAM
+Shared by every app in the suite
+  hyprforge-paths/         where config lives and how to write it atomically.
+                            No dependencies at all.
+  hyprforge-look/          the Color type with the one rgba() parser, and the
+                            runtime Theme every app draws from. No iced — the
+                            lock screen and greeter paint into a raw Wayland
+                            buffer and must be able to use this.
+  hyprforge-ui/            the iced layer: spacing scale, palette, widgets.
+                            Knows nothing about Hyprland.
+
+Hyprland-facing
+  hyprforge-core/          the config machinery: hlconfig (the generic
+                            hl.config overlay: catalog, storage, codegen,
+                            import), hyprlang, Lua codegen, the one-time
+                            hyprland.lua setup, monitor geometry, and the
+                            D-Bus proxy for displayd
+  hyprforge-displayd/      daemon + CLI (hyprforge-displayd, hyprforge-displayctl)
+  hyprforge-windowrules/   TOML rule storage, Lua codegen
+  hyprforge-shortcuts/     TOML shortcut storage, Lua codegen, live conflict
+                            detection against hyprctl binds
+  hyprforge-input/         the input option catalog (51 options)
+  hyprforge-appearance/    the appearance catalog (88 options), the animation
+                            model, the gsettings bridge, theme/font discovery,
+                            and `look::resolve()` — which turns all of that
+                            into the shared Theme
+  hyprforge-ecosystem/     hyprpaper / hyprsunset / hypridle config
+  hyprforge-session/       autostart programs and environment variables
+  hyprforge-system/        the misc/debug/render catalog
   hyprforge-lua-import/    sandboxed mlua evaluator that imports hand-written
                             hl.bind()/hl.window_rule()/hl.monitor() calls —
                             the only crate depending on mlua
+
+Apps
   hyprforge-settings/      the iced GUI, hosting the settings modules
+  hyprforge-authui/        the authentication conversation model, shared by
+                            the lock screen and the greeter
+  hyprforge-lock/          the ext-session-lock-v1 lock screen
 ```
+
+### Why the look is one crate
+
+The Settings app and the lock screen each grew their own palette and drifted
+to different accents, different backgrounds and different reds — two products
+out of one project, which is the failure this suite exists to avoid. They now
+read one `hyprforge_look::Theme`.
+
+Nothing in it is invented. `look::resolve()` derives the accent from Hyprland's
+own `general:col:active_border`, the fonts and text scale from gsettings. There
+is no Hyprforge theme file to discover, because that would be a second place to
+set colours that already exist. The old hardcoded violet had a comment saying it
+"matches this desktop's own window-border accent" — it was eyeballed, and it was
+wrong by a few points. Now it is read.
+
+Settings publishes the resolved theme to `~/.config/hyprforge/lock.toml` on save,
+and exports a copy to `/var/lib/hyprforge/greet`. The export exists because a
+greeter runs as its own user and a home directory is `drwx------`: it cannot
+traverse into `$HOME` at all, so continuity across the login boundary has to be
+an export rather than a shared path.
 
 ## Checking everything works
 
