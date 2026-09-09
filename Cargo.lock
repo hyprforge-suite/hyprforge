@@ -1349,7 +1349,7 @@ dependencies = [
 name = "hyprforge-authui"
 version = "0.1.0"
 dependencies = [
- "hyprforge-core",
+ "hyprforge-paths",
  "serde",
  "tempfile",
  "thiserror 2.0.19",
@@ -1360,6 +1360,7 @@ dependencies = [
 name = "hyprforge-core"
 version = "0.1.0"
 dependencies = [
+ "hyprforge-paths",
  "iced",
  "serde",
  "serde_json",
@@ -1424,7 +1425,7 @@ dependencies = [
  "calloop-wayland-source 0.4.1",
  "clap",
  "hyprforge-authui",
- "hyprforge-core",
+ "hyprforge-paths",
  "pam-client2",
  "smithay-client-toolkit 0.20.0",
  "thiserror 2.0.19",
@@ -1439,6 +1440,13 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "hyprforge-paths"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
 ]
 
 [[package]]

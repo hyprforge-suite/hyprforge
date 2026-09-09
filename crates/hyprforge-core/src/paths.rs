@@ -1,22 +1,14 @@
+//! Where Hyprforge's *Hyprland* files live.
+//!
+//! The generic answers — which directory is mine, how do I write a file
+//! atomically — moved to `hyprforge-paths`, so that an app with no
+//! interest in Hyprland can have them without this crate. They are
+//! re-exported here so the ~70 existing call sites keep working.
+
 use std::path::PathBuf;
 
-/// `$XDG_CONFIG_HOME`, falling back to `~/.config`.
-pub fn config_home() -> PathBuf {
-    if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME") {
-        let dir = PathBuf::from(dir);
-        if dir.is_absolute() {
-            return dir;
-        }
-    }
-    let home = std::env::var_os("HOME").expect("HOME must be set");
-    PathBuf::from(home).join(".config")
-}
+pub use hyprforge_paths::{config_home, hyprforge_config_dir, write_atomic};
 
-/// `$XDG_CONFIG_HOME/hyprforge` — canonical storage for all Hyprforge-owned
-/// config (display profiles, window-rules TOML).
-pub fn hyprforge_config_dir() -> PathBuf {
-    config_home().join("hyprforge")
-}
 
 /// `$XDG_CONFIG_HOME/hypr` — the user's own Hyprland config directory.
 /// Hyprforge only ever writes to `hypr/hyprforge/` inside this, and only
@@ -72,21 +64,6 @@ pub fn keybinds_lua_path() -> PathBuf {
 /// running to reassert it.
 pub fn monitors_lua_path() -> PathBuf {
     hypr_hyprforge_dir().join("monitors.lua")
-}
-
-/// Write `contents` to `path` atomically: write to a sibling temp file, then
-/// rename over the target. Avoids ever leaving a half-written config file.
-pub fn write_atomic(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension(format!(
-        "{}.tmp",
-        path.extension().and_then(|e| e.to_str()).unwrap_or("")
-    ));
-    std::fs::write(&tmp, contents)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -146,33 +123,6 @@ mod tests {
     }
 
     #[test]
-    fn absolute_xdg_config_home_is_used_as_is() {
-        let _g = EnvGuard::set(Some("/custom/config"), Some("/home/someone"));
-        assert_eq!(config_home(), PathBuf::from("/custom/config"));
-    }
-
-    #[test]
-    fn unset_xdg_config_home_falls_back_to_home_dot_config() {
-        let _g = EnvGuard::set(None, Some("/home/someone"));
-        assert_eq!(config_home(), PathBuf::from("/home/someone/.config"));
-    }
-
-    #[test]
-    fn relative_xdg_config_home_is_ignored_per_the_xdg_spec() {
-        // The spec says a relative value is invalid and must be treated as
-        // unset — not resolved against the cwd, which would scatter config
-        // wherever the app happened to be launched from.
-        let _g = EnvGuard::set(Some("relative/path"), Some("/home/someone"));
-        assert_eq!(config_home(), PathBuf::from("/home/someone/.config"));
-    }
-
-    #[test]
-    fn empty_xdg_config_home_falls_back_too() {
-        let _g = EnvGuard::set(Some(""), Some("/home/someone"));
-        assert_eq!(config_home(), PathBuf::from("/home/someone/.config"));
-    }
-
-    #[test]
     fn derived_paths_all_hang_off_config_home() {
         let _g = EnvGuard::set(Some("/custom/config"), Some("/home/someone"));
         assert_eq!(
@@ -205,39 +155,5 @@ mod tests {
             monitors_lua_path(),
             PathBuf::from("/custom/config/hypr/hyprforge/monitors.lua")
         );
-    }
-
-    #[test]
-    fn write_atomic_creates_parent_directories() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a").join("b").join("file.toml");
-        write_atomic(&path, "hello").unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
-    }
-
-    #[test]
-    fn write_atomic_overwrites_and_leaves_no_temp_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("file.toml");
-        write_atomic(&path, "first").unwrap();
-        write_atomic(&path, "second").unwrap();
-
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
-        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .filter(|n| n.to_string_lossy().contains(".tmp"))
-            .collect();
-        assert!(leftovers.is_empty(), "temp file left behind: {leftovers:?}");
-    }
-
-    #[test]
-    fn write_atomic_handles_an_extensionless_path() {
-        // `with_extension` on a name with no extension is the easy way to
-        // accidentally produce a temp path that collides with the target.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("noext");
-        write_atomic(&path, "body").unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "body");
     }
 }

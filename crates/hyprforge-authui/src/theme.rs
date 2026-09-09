@@ -181,7 +181,7 @@ impl Theme {
 
         let contents = toml::to_string_pretty(&exported)?;
         let theme_path = dir.join("theme.toml");
-        hyprforge_core::paths::write_atomic(&theme_path, &contents).map_err(|source| {
+        hyprforge_paths::write_atomic(&theme_path, &contents).map_err(|source| {
             ThemeError::Write {
                 path: theme_path.display().to_string(),
                 source,

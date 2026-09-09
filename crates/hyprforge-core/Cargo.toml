@@ -14,6 +14,7 @@ gui = ["dep:iced"]
 dbus = ["dep:zbus"]
 
 [dependencies]
+hyprforge-paths.workspace = true
 iced = { workspace = true, optional = true }
 zbus = { workspace = true, optional = true }
 serde.workspace = true

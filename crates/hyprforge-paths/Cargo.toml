@@ -1,0 +1,14 @@
+[package]
+name = "hyprforge-paths"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Deliberately no dependencies at all. Every Hyprforge app needs to know
+# where its config lives and how to write a file without leaving a
+# half-written one behind; nothing about that should drag in a GUI
+# toolkit, a Lua runtime, or Hyprland.
+[dependencies]
+
+[dev-dependencies]
+tempfile = "3"
