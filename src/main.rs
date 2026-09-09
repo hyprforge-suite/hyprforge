@@ -184,5 +184,5 @@ fn main() -> std::process::ExitCode {
 
 /// The user's own theme, which the greeter gets an exported copy of.
 fn theme_path() -> std::path::PathBuf {
-    hyprforge_core::paths::hyprforge_config_dir().join("lock.toml")
+    hyprforge_paths::lock_toml_path()
 }
