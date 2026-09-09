@@ -337,17 +337,17 @@ impl<B: Backend + 'static> LockScreen<B> {
         // feedback is what the spike is proving.
         let working = matches!(self.state(), State::Working);
         let (indicator, count) = match self.state() {
-            State::Asking { entered, .. } => (argb(&self.theme.accent), entered.chars().count()),
-            State::Working => (argb(&self.theme.accent), 0),
-            State::Failed { .. } => (argb(&self.theme.error), 0),
+            State::Asking { entered, .. } => (self.theme.accent.to_argb(), entered.chars().count()),
+            State::Working => (self.theme.accent.to_argb(), 0),
+            State::Failed { .. } => (self.theme.error.to_argb(), 0),
             State::Telling { error, .. } => {
-                (argb(if *error { &self.theme.error } else { &self.theme.foreground }), 0)
+                (if *error { self.theme.error } else { self.theme.foreground }.to_argb(), 0)
             }
-            State::Authenticated => (argb(&self.theme.foreground), 0),
+            State::Authenticated => (self.theme.foreground.to_argb(), 0),
         };
 
-        let background = argb(&self.theme.background);
-        let surface_colour = argb(&self.theme.surface);
+        let background = self.theme.background.to_argb();
+        let surface_colour = self.theme.surface.to_argb();
 
         let Ok((buffer, canvas)) = self.pool.create_buffer(
             width as i32,
@@ -510,19 +510,6 @@ fn fill(canvas: &mut [u8], canvas_w: u32, x: u32, y: u32, w: u32, h: u32, colour
             }
         }
     }
-}
-
-/// `rgba(rrggbbaa)` to the packed ARGB a Wayland shm buffer wants.
-///
-/// Falls back to opaque black rather than failing, and the fallback is
-/// written here rather than inherited from the parser: a lock screen
-/// with an unparseable colour should be plain, not absent, and that is a
-/// decision about what a locked-out user sees. It belongs next to the
-/// code that depends on it.
-pub fn argb(colour: &str) -> u32 {
-    hyprforge_look::Color::parse(colour)
-        .unwrap_or(hyprforge_look::Color::BLACK)
-        .to_argb()
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -874,36 +861,24 @@ delegate_registry!(@<B: Backend + 'static> LockScreen<B>);
 mod tests {
     use super::*;
 
-    /// The colours come from the shared theme as `rgba()` strings and
-    /// have to reach the framebuffer as ARGB.
-    #[test]
-    fn theme_colours_convert_to_argb() {
-        assert_eq!(argb("rgba(bd93f9ff)"), 0xffbd93f9);
-        assert_eq!(argb("rgb(282a36)"), 0xff282a36);
-        assert_eq!(argb("rgba(00000080)"), 0x8000_0000);
-    }
-
-    /// A lock screen with an unparseable colour should be plain, not
-    /// absent — so anything unrecognised is opaque black.
-    #[test]
-    fn an_unparseable_colour_falls_back_to_opaque_black() {
-        for bad in ["", "nonsense", "rgba(", "rgba(zz)", "0xffbd93f9"] {
-            assert_eq!(argb(bad), 0xff00_0000, "{bad}");
-        }
-    }
-
-    /// Digit counts that don't match their prefix now fall back too.
+    /// A theme file whose colours don't parse falls back to the default
+    /// theme *as a whole*, rather than rendering some fields black.
     ///
-    /// This used to render a colour: the old parser ignored the prefix
-    /// and switched on the digit count alone. Both of these are refused
-    /// by Hyprland and by the settings validator, so rendering them was
-    /// showing a colour the rest of the system would not accept. Black
-    /// is the honest answer, and pinned here because it is the only
-    /// behaviour this crate changed when the parsers were unified.
+    /// That moved when the colour type became typed: parsing now happens
+    /// once, when the file loads, instead of on every draw. A single
+    /// typo therefore discards the file — which is the better failure
+    /// for a lock screen, since the alternative was invisible black text
+    /// on a dark panel.
     #[test]
-    fn a_digit_count_that_contradicts_its_prefix_is_not_guessed_at() {
-        assert_eq!(argb("rgba(282a36)"), 0xff00_0000, "six digits in rgba(");
-        assert_eq!(argb("rgb(bd93f9ff)"), 0xff00_0000, "eight digits in rgb(");
+    fn a_theme_with_an_unparseable_colour_falls_back_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lock.toml");
+        std::fs::write(&path, "accent = \"not a colour\"\n").unwrap();
+        assert!(Theme::load(&path).is_err(), "a bad colour must not be silently ignored");
+        assert_eq!(
+            Theme::load(&path).unwrap_or_default().accent,
+            Theme::default().accent
+        );
     }
 
     /// The busy segment must stay inside the panel. Overshooting would
