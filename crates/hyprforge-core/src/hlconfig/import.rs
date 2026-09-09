@@ -192,11 +192,10 @@ pub fn read_gradient(raw: &str) -> Option<Value> {
         // An angle means a real gradient, and so does a second colour.
         Some(_) => return None,
     }
-    if parts.next().is_some() || argb.len() != 8 || !argb.chars().all(|c| c.is_ascii_hexdigit()) {
+    if parts.next().is_some() {
         return None;
     }
-    let (alpha, rgb) = argb.split_at(2);
-    Some(Value::Text(format!("rgba({rgb}{alpha})")))
+    Some(Value::Text(hyprforge_look::Color::from_argb_hex(argb)?.to_string()))
 }
 
 /// Converts a live plain colour back into the form Hyprland accepts.
@@ -206,16 +205,8 @@ pub fn read_gradient(raw: &str) -> Option<Value> {
 /// would be a different colour entirely, so it is converted rather than
 /// passed through.
 pub fn read_int_color(raw: u64) -> Option<Value> {
-    if raw > u32::MAX as u64 {
-        return None;
-    }
-    let (a, r, g, b) = (
-        (raw >> 24) & 0xff,
-        (raw >> 16) & 0xff,
-        (raw >> 8) & 0xff,
-        raw & 0xff,
-    );
-    Some(Value::Text(format!("rgba({r:02x}{g:02x}{b:02x}{a:02x})")))
+    let packed = u32::try_from(raw).ok()?;
+    Some(Value::Text(hyprforge_look::Color::from_argb_u32(packed).to_string()))
 }
 
 /// Converts a live `css` gap back into the integer Hyprland accepts.

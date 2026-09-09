@@ -203,22 +203,16 @@ fn check(setting: &Setting, value: &Value) -> Option<String> {
 /// letting it through — a wrong "invalid" is a dead end, an unchecked
 /// valid value is merely unchecked.
 fn check_color(s: &str) -> Result<(), String> {
-    let digits = |body: &str, want: usize| {
-        body.len() == want && body.chars().all(|c| c.is_ascii_hexdigit())
-    };
-    let ok = match s.strip_prefix("rgba(").and_then(|r| r.strip_suffix(')')) {
-        Some(body) => digits(body, 8),
-        None => match s.strip_prefix("rgb(").and_then(|r| r.strip_suffix(')')) {
-            Some(body) => digits(body, 6),
-            // Anything that isn't an rgb()/rgba() call is left alone.
-            None => true,
-        },
-    };
-    if ok {
-        Ok(())
-    } else {
-        Err("expected rgba(rrggbbaa) or rgb(rrggbb) in hex".to_string())
+    // Only things that claim to be an rgb()/rgba() call are checked.
+    // Anything else is left alone — see the doc comment: refusing a form
+    // Hyprland accepts is worse than leaving one unchecked, so this is
+    // the one place the strict parser must not spread to.
+    if !s.starts_with("rgba(") && !s.starts_with("rgb(") {
+        return Ok(());
     }
+    hyprforge_look::Color::parse(s)
+        .map(|_| ())
+        .map_err(|_| "expected rgba(rrggbbaa) or rgb(rrggbb) in hex".to_string())
 }
 
 fn in_range(v: f64, min: Option<f64>, max: Option<f64>) -> Result<(), String> {

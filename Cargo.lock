@@ -1360,6 +1360,7 @@ dependencies = [
 name = "hyprforge-core"
 version = "0.1.0"
 dependencies = [
+ "hyprforge-look",
  "hyprforge-paths",
  "iced",
  "serde",
@@ -1482,6 +1483,7 @@ dependencies = [
  "hyprforge-core",
  "hyprforge-ecosystem",
  "hyprforge-input",
+ "hyprforge-look",
  "hyprforge-lua-import",
  "hyprforge-session",
  "hyprforge-shortcuts",

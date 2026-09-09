@@ -15,6 +15,7 @@ dbus = ["dep:zbus"]
 
 [dependencies]
 hyprforge-paths.workspace = true
+hyprforge-look.workspace = true
 iced = { workspace = true, optional = true }
 zbus = { workspace = true, optional = true }
 serde.workspace = true
