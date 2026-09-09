@@ -1435,7 +1435,6 @@ dependencies = [
 name = "hyprforge-lua-import"
 version = "0.1.0"
 dependencies = [
- "hyprforge-core",
  "mlua",
  "serde_json",
  "tempfile",
