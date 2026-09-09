@@ -514,20 +514,15 @@ fn fill(canvas: &mut [u8], canvas_w: u32, x: u32, y: u32, w: u32, h: u32, colour
 
 /// `rgba(rrggbbaa)` to the packed ARGB a Wayland shm buffer wants.
 ///
-/// Falls back to opaque black rather than failing: a lock screen with an
-/// unparseable colour should be plain, not absent.
+/// Falls back to opaque black rather than failing, and the fallback is
+/// written here rather than inherited from the parser: a lock screen
+/// with an unparseable colour should be plain, not absent, and that is a
+/// decision about what a locked-out user sees. It belongs next to the
+/// code that depends on it.
 pub fn argb(colour: &str) -> u32 {
-    let body = colour
-        .strip_prefix("rgba(")
-        .or_else(|| colour.strip_prefix("rgb("))
-        .and_then(|rest| rest.strip_suffix(')'))
-        .unwrap_or("");
-    let byte = |i: usize| u32::from_str_radix(body.get(i..i + 2).unwrap_or("00"), 16).unwrap_or(0);
-    match body.len() {
-        6 => 0xff00_0000 | (byte(0) << 16) | (byte(2) << 8) | byte(4),
-        8 => (byte(6) << 24) | (byte(0) << 16) | (byte(2) << 8) | byte(4),
-        _ => 0xff00_0000,
-    }
+    hyprforge_look::Color::parse(colour)
+        .unwrap_or(hyprforge_look::Color::BLACK)
+        .to_argb()
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -895,6 +890,20 @@ mod tests {
         for bad in ["", "nonsense", "rgba(", "rgba(zz)", "0xffbd93f9"] {
             assert_eq!(argb(bad), 0xff00_0000, "{bad}");
         }
+    }
+
+    /// Digit counts that don't match their prefix now fall back too.
+    ///
+    /// This used to render a colour: the old parser ignored the prefix
+    /// and switched on the digit count alone. Both of these are refused
+    /// by Hyprland and by the settings validator, so rendering them was
+    /// showing a colour the rest of the system would not accept. Black
+    /// is the honest answer, and pinned here because it is the only
+    /// behaviour this crate changed when the parsers were unified.
+    #[test]
+    fn a_digit_count_that_contradicts_its_prefix_is_not_guessed_at() {
+        assert_eq!(argb("rgba(282a36)"), 0xff00_0000, "six digits in rgba(");
+        assert_eq!(argb("rgb(bd93f9ff)"), 0xff00_0000, "eight digits in rgb(");
     }
 
     /// The busy segment must stay inside the panel. Overshooting would
