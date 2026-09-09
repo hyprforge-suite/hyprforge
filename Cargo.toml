@@ -50,6 +50,13 @@ hyprforge-lua-import = { path = "crates/hyprforge-lua-import" }
 mlua = { version = "0.12", features = ["lua54", "vendored", "serde"] }
 
 iced = "0.14"
+# The auth screen's clock. default-features off: no serde, no oldtime,
+# no wasm bindings — a lock screen wants the smallest thing that can
+# format a strftime string.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+iced_widget = "0.14"
+iced_runtime = "0.14"
+iced_tiny_skia = "0.14"
 # Run zbus on tokio rather than its default async-io executor. Without this
 # zbus polls connections on its own thread, so D-Bus method handlers execute
 # outside any tokio runtime and anything they spawn (the displayd revert

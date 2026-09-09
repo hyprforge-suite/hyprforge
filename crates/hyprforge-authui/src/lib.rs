@@ -19,6 +19,7 @@
 //! it's an export. See [`theme::Theme::export`].
 
 pub mod conversation;
+pub mod screen;
 
 pub use conversation::{Backend, Conversation, Prompt, Response, State};
 // Re-exported rather than owned: the theme is shared with every other
