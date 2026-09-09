@@ -284,7 +284,22 @@ impl AppearanceModule {
         hyprforge_appearance::storage::save(&appearance_toml_path(), &self.stored).map_err(|e| {
             self.error = Some(e.to_string());
             e.to_string()
-        })
+        })?;
+
+        // The look the lock screen and the greeter read is derived from
+        // what was just saved, so it is republished here rather than on
+        // some later trigger. Without this the lock screen keeps its own
+        // colours forever and the two drift apart again — which is the
+        // whole reason any of this is shared.
+        //
+        // A failure here does not fail the save: the appearance settings
+        // *are* saved by this point, and reporting otherwise would send
+        // the user to fix something that already worked.
+        if let Err(e) = hyprforge_appearance::look::publish(&hyprforge_appearance::look::resolve())
+        {
+            tracing::warn!(error = %e, "couldn't publish the look for the lock screen");
+        }
+        Ok(())
     }
 
     fn save_and_maybe_reload(&mut self) -> Task<Message> {
