@@ -1476,14 +1476,19 @@ version = "0.1.0"
 dependencies = [
  "calloop 0.14.4",
  "calloop-wayland-source 0.4.1",
+ "chrono",
  "clap",
  "hyprforge-authui",
  "hyprforge-look",
  "hyprforge-paths",
+ "iced_runtime",
+ "iced_tiny_skia",
+ "iced_widget",
  "pam-client2",
  "smithay-client-toolkit 0.20.0",
  "tempfile",
  "thiserror 2.0.19",
+ "tiny-skia",
  "wayland-client",
 ]
 
