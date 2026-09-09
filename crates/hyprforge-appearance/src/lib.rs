@@ -18,6 +18,7 @@ pub mod animations;
 pub mod apply;
 pub mod catalog;
 pub mod desktop;
+pub mod look;
 pub mod setup;
 pub mod storage;
 pub mod themes;

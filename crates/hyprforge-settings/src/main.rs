@@ -24,6 +24,13 @@ fn main() -> iced::Result {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    // Resolve the shared look before the first frame. This is the one
+    // place that joins the two halves: hyprforge-appearance knows what
+    // the user set, hyprforge-ui knows how to draw it, and neither
+    // depends on the other — the app they are both part of does the
+    // introduction.
+    hyprforge_ui::theme::init(hyprforge_appearance::look::resolve());
+
     // `daemon` rather than `application` because the revert countdown needs
     // its own window: a change that blanks a screen may well leave the
     // settings window itself invisible, so the prompt to undo it can't live
@@ -117,24 +124,6 @@ async fn pin_revert_popup() {
             }
         }
     }
-}
-
-/// Reads the desktop's own accessibility text-scaling-factor once at
-/// startup (vision pillar #7: accessibility, but following the *system*
-/// setting rather than a bespoke per-app control the user would have to
-/// discover and set separately). `FontScale` itself stays fully wired
-/// through the shared widget layer — this is the only thing that changed:
-/// where the value comes from.
-fn read_global_font_scale() -> FontScale {
-    std::process::Command::new("gsettings")
-        .args(["get", "org.gnome.desktop.interface", "text-scaling-factor"])
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .and_then(|out| String::from_utf8(out.stdout).ok())
-        .and_then(|s| s.trim().parse::<f32>().ok())
-        .map(FontScale)
-        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,7 +249,7 @@ impl App {
                 system,
                 search_query: String::new(),
                 search_id: Id::unique(),
-                font_scale: read_global_font_scale(),
+                font_scale: FontScale(hyprforge_ui::theme::active().font_scale),
                 main_window: None,
                 revert_popup: None,
             },

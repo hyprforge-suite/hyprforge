@@ -1337,12 +1337,15 @@ name = "hyprforge-appearance"
 version = "0.1.0"
 dependencies = [
  "hyprforge-core",
+ "hyprforge-look",
  "hyprforge-lua-import",
+ "hyprforge-paths",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
  "toml",
+ "tracing",
 ]
 
 [[package]]

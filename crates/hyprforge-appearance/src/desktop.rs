@@ -200,6 +200,28 @@ pub fn read_all() -> Result<Vec<(&'static str, String)>, DesktopError> {
     Ok(out)
 }
 
+/// The desktop's accessibility text scaling, as a multiplier.
+///
+/// Not in [`SETTINGS`] on purpose: that list is the controls the
+/// Appearance screen offers, and this is read-only input. Hyprforge
+/// follows the system's accessibility setting rather than adding a
+/// second, per-app text-size control the user would have to find.
+///
+/// Anything unreadable — no gsettings, no schema, a value that isn't a
+/// number — is 1.0. A wrong scale is a UI nobody asked for; no scale is
+/// simply the normal one.
+pub fn text_scaling_factor() -> f32 {
+    read(TEXT_SCALING)
+        .ok()
+        .flatten()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(1.0)
+}
+
+/// Read, never written, so it stays out of [`SETTINGS`].
+const TEXT_SCALING: &str = "text-scaling-factor";
+
 /// One key's current value, or `None` if this desktop's schema lacks it.
 pub fn read(key: &str) -> Result<Option<String>, DesktopError> {
     let out = Command::new("gsettings")

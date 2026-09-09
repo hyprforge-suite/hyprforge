@@ -414,3 +414,36 @@ mod tests {
         assert!((0.0..=1.0).contains(&theme.dim));
     }
 }
+
+#[cfg(test)]
+mod shared_look {
+    use super::*;
+
+    /// The Settings app and the lock screen must resolve the same accent
+    /// from the same input.
+    ///
+    /// This test exists because its absence is precisely how they
+    /// diverged: one hardcoded `#9b8cf5` with a comment saying it
+    /// "matches this desktop's window-border accent", the other
+    /// defaulted to `#bd93f9`, and nothing anywhere compared them. They
+    /// now read one struct, so the only way to reintroduce the split is
+    /// to give one of them a second source — which this would catch.
+    #[test]
+    fn every_host_reads_the_accent_from_the_same_place() {
+        let theme = Theme {
+            accent: Color::rgba(0x12, 0x34, 0x56, 0xff),
+            ..Theme::default()
+        };
+
+        // What the lock screen paints with.
+        assert_eq!(theme.accent.to_argb(), 0xff123456);
+        // What the iced palette is built from. Kept as the same field
+        // rather than a parallel one, which is the whole point.
+        assert_eq!(theme.accent, Color::parse("rgba(123456ff)").unwrap());
+
+        // And it survives the file the greeter reads, since that is the
+        // one hop where a mismatch would be invisible until login.
+        let round_tripped: Theme = toml::from_str(&toml::to_string(&theme).unwrap()).unwrap();
+        assert_eq!(round_tripped.accent, theme.accent);
+    }
+}
