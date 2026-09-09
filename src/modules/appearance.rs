@@ -27,12 +27,12 @@ use hyprforge_appearance::storage::Appearance;
 use hyprforge_core::hlconfig::import::{Discovered, Live};
 use hyprforge_core::hlconfig::{Invalid, Setting, Settings, Value};
 use hyprforge_core::lua_setup;
-use hyprforge_core::theme::{spacing, FontScale};
-use hyprforge_core::widgets::{
+use hyprforge_ui::theme::{spacing, FontScale};
+use hyprforge_ui::widgets::{
     danger_button, divider, meta_text, primary_button, scaled_text, secondary_button, section,
-    setup_notice,
 };
-use hyprforge_core::SettingsModule;
+use crate::modules::setup_notice::setup_notice;
+use crate::module::SettingsModule;
 use iced::widget::{checkbox, column, container, pick_list, row, scrollable, text_input};
 use iced::{Element, Length, Task};
 use std::collections::BTreeMap;
@@ -406,9 +406,6 @@ impl AppearanceModule {
 impl SettingsModule for AppearanceModule {
     type Message = Message;
 
-    fn title(&self) -> &str {
-        "Appearance"
-    }
 
     fn icon(&self) -> &'static str {
         "🎨"

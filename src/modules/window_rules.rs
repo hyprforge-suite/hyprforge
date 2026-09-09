@@ -1,10 +1,10 @@
 use hyprforge_core::lua_setup;
-use hyprforge_core::theme::{spacing, FontScale};
-use hyprforge_core::widgets::{
+use hyprforge_ui::theme::{spacing, FontScale};
+use hyprforge_ui::widgets::{
     danger_button, divider, meta_text, primary_button, row_field, scaled_text, secondary_button,
     section, tri_state,
 };
-use hyprforge_core::SettingsModule;
+use crate::module::SettingsModule;
 use hyprforge_windowrules::clients::Client;
 use hyprforge_windowrules::model::{
     generate_rule_name, Effects, Matcher, Opacity, Workspace, WorkspaceRule,
@@ -658,7 +658,7 @@ fn already_imported_note<'a>(scale: FontScale) -> Element<'a, Message> {
         12.0,
         scale,
     )
-    .color(hyprforge_core::theme::WARNING)
+    .color(hyprforge_ui::theme::WARNING)
     .into()
 }
 
@@ -850,16 +850,13 @@ impl WindowRulesModule {
     /// failed; the reason is already in `self.error`, shown generically
     /// above this.
     fn setup_notice(&self, scale: FontScale) -> Option<Element<'_, Message>> {
-        hyprforge_core::widgets::setup_notice(&self.config, "rules", scale)
+        crate::modules::setup_notice::setup_notice(&self.config, "rules", scale)
     }
 }
 
 impl SettingsModule for WindowRulesModule {
     type Message = Message;
 
-    fn title(&self) -> &str {
-        "Window Rules"
-    }
 
     fn icon(&self) -> &'static str {
         "\u{1FA9F}"
@@ -1202,7 +1199,7 @@ impl SettingsModule for WindowRulesModule {
                         13.0,
                         scale,
                     )
-                    .color(hyprforge_core::theme::WARNING),
+                    .color(hyprforge_ui::theme::WARNING),
                     meta_text(
                         format!(
                             "{}\n{reason}",
@@ -1535,7 +1532,7 @@ impl WindowRulesModule {
                         12.0,
                         scale,
                     )
-                    .color(hyprforge_core::theme::WARNING),
+                    .color(hyprforge_ui::theme::WARNING),
                 );
             }
             list = list.push(entry);
@@ -1974,7 +1971,7 @@ impl WindowRulesModule {
         let blockers = draft.blockers();
         if let Some(first) = blockers.first() {
             body = body.push(
-                scaled_text(first.clone(), 12.0, scale).color(hyprforge_core::theme::WARNING),
+                scaled_text(first.clone(), 12.0, scale).color(hyprforge_ui::theme::WARNING),
             );
         }
         let save = primary_button("Save");

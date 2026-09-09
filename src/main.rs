@@ -1,8 +1,9 @@
+mod module;
 mod modules;
 
-use hyprforge_core::theme::{app_theme, spacing, surface, FontScale, TEXT_DIM};
-use hyprforge_core::widgets::{primary_button, scaled_text, secondary_button};
-use hyprforge_core::SettingsModule;
+use hyprforge_ui::theme::{app_theme, spacing, surface, FontScale, TEXT_DIM};
+use hyprforge_ui::widgets::{primary_button, scaled_text, secondary_button};
+use crate::module::SettingsModule;
 use iced::keyboard::{self, key, Key};
 use iced::widget::{column, container, operation, row, text_input, Id};
 use iced::{window, Background, Element, Length, Size, Subscription, Task, Theme};

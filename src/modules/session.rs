@@ -14,12 +14,12 @@
 //!   settings app that is no longer running. Those names are flagged.
 
 use hyprforge_core::lua_setup;
-use hyprforge_core::theme::{spacing, FontScale};
-use hyprforge_core::widgets::{
+use hyprforge_ui::theme::{spacing, FontScale};
+use hyprforge_ui::widgets::{
     danger_button, divider, meta_text, primary_button, scaled_text, secondary_button, section,
-    setup_notice,
 };
-use hyprforge_core::SettingsModule;
+use crate::modules::setup_notice::setup_notice;
+use crate::module::SettingsModule;
 use hyprforge_session::storage::Session;
 use hyprforge_session::{autostart, environment, gestures, permissions};
 use hyprforge_session::setup::{HyprConfig, SetupPlan};
@@ -294,9 +294,6 @@ impl SessionModule {
 impl SettingsModule for SessionModule {
     type Message = Message;
 
-    fn title(&self) -> &str {
-        "Session"
-    }
 
     fn icon(&self) -> &'static str {
         "⚙"

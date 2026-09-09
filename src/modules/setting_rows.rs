@@ -16,8 +16,8 @@
 
 use hyprforge_core::hlconfig::import::Live;
 use hyprforge_core::hlconfig::{Kind, Setting, Settings, Value};
-use hyprforge_core::theme::{spacing, FontScale};
-use hyprforge_core::widgets::{danger_button, meta_text, scaled_text};
+use hyprforge_ui::theme::{spacing, FontScale};
+use hyprforge_ui::widgets::{danger_button, meta_text, scaled_text};
 use iced::widget::{checkbox, column, container, pick_list, row, text_input};
 use iced::{Element, Length};
 use std::collections::BTreeMap;
