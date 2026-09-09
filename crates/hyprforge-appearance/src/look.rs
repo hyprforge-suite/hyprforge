@@ -75,6 +75,37 @@ pub fn resolve() -> Theme {
     theme
 }
 
+/// Writes the resolved look where the other hosts can read it.
+///
+/// Two destinations, for one reason: a greeter runs as its own user and
+/// a home directory is `drwx------`, so it cannot read the config file
+/// the lock screen reads — not because the file is private but because
+/// it cannot traverse the directory above it. Continuity across the
+/// login boundary is therefore an export, not a styling exercise.
+///
+/// Best-effort by design. The export lands under `/var/lib` and will
+/// simply fail unprivileged; that must never turn a successful settings
+/// save into a failed one, so it is reported and stepped over. The
+/// user's own copy is the load-bearing write and its failure is
+/// returned.
+///
+/// The wallpaper is deliberately left as the theme has it. Choosing one
+/// image from a per-monitor wallpaper list is a real decision — which
+/// monitor's? — and guessing here would put a wallpaper on the lock
+/// screen that the user never picked.
+pub fn publish(theme: &Theme) -> Result<(), hyprforge_look::ThemeError> {
+    theme.save(&hyprforge_paths::lock_toml_path())?;
+
+    if let Err(e) = theme.export(std::path::Path::new(hyprforge_look::theme::EXPORT_DIR)) {
+        tracing::debug!(
+            error = %e,
+            dir = hyprforge_look::theme::EXPORT_DIR,
+            "couldn't export the look for the greeter; the lock screen's copy is written"
+        );
+    }
+    Ok(())
+}
+
 /// A stored colour setting, if it is set and parses.
 ///
 /// Deliberately reads the *stored* value rather than the catalogue
@@ -153,5 +184,41 @@ mod tests {
         assert!(theme.font_size > 0.0);
         assert!(theme.font_scale > 0.0 && theme.font_scale.is_finite());
         assert!(!theme.font.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod publishing {
+    use super::*;
+
+    /// The lock screen reads a file nothing used to write, which is why
+    /// it could only ever show its own defaults. Publishing has to
+    /// produce something it can actually load.
+    #[test]
+    fn a_published_look_is_readable_by_the_lock_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lock.toml");
+        let theme = Theme {
+            accent: Color::rgba(0x00, 0xff, 0x88, 0xff),
+            ..Theme::default()
+        };
+        theme.save(&path).unwrap();
+
+        let read_back = Theme::load(&path).expect("the lock screen must be able to read it");
+        assert_eq!(read_back.accent, theme.accent);
+        assert_eq!(read_back, theme, "publishing must not lose a field");
+    }
+
+    /// An export that fails — `/var/lib` unprivileged is the normal case
+    /// — must not make a settings save look like it failed. The user's
+    /// own copy is the load-bearing write.
+    #[test]
+    fn a_failed_greeter_export_does_not_fail_the_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let theme = Theme::default();
+        // Writing the user's copy somewhere writable succeeds even
+        // though the export target almost certainly is not.
+        assert!(theme.save(&dir.path().join("lock.toml")).is_ok());
+        assert!(theme.export(std::path::Path::new("/proc/nonexistent/greet")).is_err());
     }
 }

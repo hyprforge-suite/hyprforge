@@ -194,6 +194,19 @@ impl Theme {
         Theme::load(&Path::new(EXPORT_DIR).join("theme.toml")).unwrap_or_default()
     }
 
+    /// Writes the theme to `path`, as the lock screen reads it.
+    ///
+    /// The wallpaper path is stored as-is, because the reader runs as
+    /// the same user and can follow it. [`export`](Self::export) is the
+    /// version for a reader that cannot.
+    pub fn save(&self, path: &Path) -> Result<(), ThemeError> {
+        let contents = toml::to_string_pretty(self)?;
+        hyprforge_paths::write_atomic(path, &contents).map_err(|source| ThemeError::Write {
+            path: path.display().to_string(),
+            source,
+        })
+    }
+
     /// Writes the theme and a copy of its wallpaper into `dir`.
     ///
     /// The wallpaper is **copied**, and the stored path rewritten to the
