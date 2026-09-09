@@ -21,6 +21,7 @@
 //! permissioned, and a symlink doesn't change that — the traversal is
 //! what fails.
 
+use crate::Color;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -67,15 +68,15 @@ pub struct Theme {
     /// flat, which is also the fallback when the file can't be read.
     pub wallpaper: Option<PathBuf>,
     /// Behind everything, and behind the wallpaper while it loads.
-    pub background: String,
+    pub background: Color,
     /// The panel the prompt sits on.
-    pub surface: String,
+    pub surface: Color,
     /// Text on `surface`.
-    pub foreground: String,
+    pub foreground: Color,
     /// The focused/active colour — the same one window borders use.
-    pub accent: String,
+    pub accent: Color,
     /// Failure text.
-    pub error: String,
+    pub error: Color,
     pub font: String,
     pub font_size: f32,
     /// `strftime` format for the clock. Empty hides it.
@@ -87,6 +88,54 @@ pub struct Theme {
     pub dim: f32,
     /// Blur radius behind the prompt. 0 disables it.
     pub blur: u32,
+
+    /// Scale applied to every text size, following the desktop's own
+    /// accessibility setting rather than a control of ours.
+    pub font_scale: f32,
+    /// Warnings — a setting that won't take effect, a conflicting bind.
+    pub warning: Color,
+    /// Confirmation that something applied.
+    pub success: Color,
+    /// The elevation ramp the window apps are built from. The auth
+    /// screen only needs `background` and `surface`; a settings window
+    /// needs the steps in between.
+    pub surfaces: Surfaces,
+}
+
+/// The shades a windowed app layers on top of each other.
+///
+/// Separate from the auth screen's flat `background`/`surface` pair
+/// because the two are drawing different things: a lock screen is one
+/// panel on a wallpaper, a settings window is a sidebar beside cards
+/// beside rows. Both are the same look; only one needs the ramp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Surfaces {
+    pub root: Color,
+    pub sidebar: Color,
+    pub card: Color,
+    pub card_border: Color,
+    pub row: Color,
+    pub text: Color,
+    pub text_dim: Color,
+}
+
+impl Default for Surfaces {
+    fn default() -> Self {
+        // Byte-for-byte the values the Settings app shipped as compile
+        // time constants. Unifying the look must not quietly restyle
+        // anything: the only colour that changes is the accent, and it
+        // changes because it is now read rather than guessed at.
+        Surfaces {
+            root: Color::rgba(0x19, 0x1a, 0x21, 0xff),
+            sidebar: Color::rgba(0x12, 0x13, 0x19, 0xff),
+            card: Color::rgba(0x25, 0x27, 0x31, 0xff),
+            card_border: Color::rgba(0x37, 0x3a, 0x47, 0xff),
+            row: Color::rgba(0x1f, 0x21, 0x29, 0xff),
+            text: Color::rgba(0xe9, 0xea, 0xef, 0xff),
+            text_dim: Color::rgba(0x92, 0x96, 0xa4, 0xff),
+        }
+    }
 }
 
 impl Default for Theme {
@@ -96,11 +145,11 @@ impl Default for Theme {
             // Deliberately dark and neutral rather than pretty: this is
             // what shows when everything else has failed, and it must be
             // legible rather than fashionable.
-            background: "rgba(16161eff)".into(),
-            surface: "rgba(26263aff)".into(),
-            foreground: "rgba(f8f8f2ff)".into(),
-            accent: "rgba(bd93f9ff)".into(),
-            error: "rgba(ff5555ff)".into(),
+            background: Color::rgba(0x16, 0x16, 0x1e, 0xff),
+            surface: Color::rgba(0x26, 0x26, 0x3a, 0xff),
+            foreground: Color::rgba(0xf8, 0xf8, 0xf2, 0xff),
+            accent: Color::rgba(0xbd, 0x93, 0xf9, 0xff),
+            error: Color::rgba(0xff, 0x55, 0x55, 0xff),
             font: "Sans".into(),
             font_size: 15.0,
             clock_format: "%H:%M".into(),
@@ -108,6 +157,10 @@ impl Default for Theme {
             rounding: 12,
             dim: 0.35,
             blur: 0,
+            font_scale: 1.0,
+            warning: Color::rgba(0xf5, 0xb9, 0x42, 0xff),
+            success: Color::rgba(0x3e, 0xcf, 0x8e, 0xff),
+            surfaces: Surfaces::default(),
         }
     }
 }
@@ -209,7 +262,7 @@ mod tests {
     fn theme_with_wallpaper(path: &Path) -> Theme {
         Theme {
             wallpaper: Some(path.to_path_buf()),
-            accent: "rgba(bd93f9ff)".into(),
+            accent: Color::rgba(0xbd, 0x93, 0xf9, 0xff),
             ..Theme::default()
         }
     }
@@ -330,6 +383,20 @@ mod tests {
         assert!(!Theme::default().wallpaper_readable(), "no wallpaper is not readable");
     }
 
+    /// The on-disk spelling is a contract between three programs that
+    /// never run at the same time: Settings writes the file, the lock
+    /// screen reads it, and the greeter reads an exported copy as a
+    /// different user. A serde change that quietly altered the
+    /// representation would break the two readers with no compile error
+    /// anywhere, so it is pinned literally.
+    #[test]
+    fn colours_are_written_as_rgba_strings() {
+        let text = toml::to_string(&Theme::default()).unwrap();
+        assert!(text.contains(r#"accent = "rgba(bd93f9ff)""#), "{text}");
+        assert!(text.contains(r#"background = "rgba(16161eff)""#), "{text}");
+        assert!(text.contains(r#"card = "rgba(252731ff)""#), "{text}");
+    }
+
     /// The default is what shows when everything else has failed. It has
     /// to be legible on its own.
     #[test]
@@ -337,7 +404,12 @@ mod tests {
         let theme = Theme::default();
         assert!(theme.wallpaper.is_none());
         assert!(theme.font_size > 0.0);
-        assert!(!theme.background.is_empty() && !theme.foreground.is_empty());
+        // Typed colours make the old "is it a non-empty string" check
+        // meaningless, but the thing it was standing in for is now
+        // directly assertable: a fully transparent background or text
+        // renders nothing at all.
+        assert_eq!(theme.background.a, 0xff, "a transparent background shows nothing");
+        assert_eq!(theme.foreground.a, 0xff, "transparent text shows nothing");
         assert_ne!(theme.background, theme.foreground, "text must be legible");
         assert!((0.0..=1.0).contains(&theme.dim));
     }

@@ -11,6 +11,8 @@
 //! actually shared. The iced side converts at its own boundary.
 
 pub mod color;
+pub mod theme;
 
 
 pub use color::{Color, ColorError};
+pub use theme::{Surfaces, Theme, ThemeError};

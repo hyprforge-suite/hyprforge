@@ -19,7 +19,9 @@
 //! it's an export. See [`theme::Theme::export`].
 
 pub mod conversation;
-pub mod theme;
 
 pub use conversation::{Backend, Conversation, Prompt, Response, State};
-pub use theme::Theme;
+// Re-exported rather than owned: the theme is shared with every other
+// Hyprforge app, not just the two auth hosts, so it lives in
+// `hyprforge-look`. Both hosts still say `hyprforge_authui::Theme`.
+pub use hyprforge_look::{Color, Theme, ThemeError};
