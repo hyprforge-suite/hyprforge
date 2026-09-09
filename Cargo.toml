@@ -11,6 +11,7 @@ members = [
     "crates/hyprforge-system",
     "crates/hyprforge-authui",
     "crates/hyprforge-paths",
+    "crates/hyprforge-look",
     "crates/hyprforge-lock",
     "crates/hyprforge-shortcuts",
     "crates/hyprforge-lua-import",
@@ -34,6 +35,7 @@ hyprforge-session = { path = "crates/hyprforge-session" }
 hyprforge-system = { path = "crates/hyprforge-system" }
 hyprforge-authui = { path = "crates/hyprforge-authui" }
 hyprforge-paths = { path = "crates/hyprforge-paths" }
+hyprforge-look = { path = "crates/hyprforge-look" }
 hyprforge-lock = { path = "crates/hyprforge-lock" }
 hyprforge-shortcuts = { path = "crates/hyprforge-shortcuts" }
 hyprforge-lua-import = { path = "crates/hyprforge-lua-import" }

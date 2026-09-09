@@ -1,0 +1,18 @@
+[package]
+name = "hyprforge-look"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# No iced. The lock screen and the greeter draw into a raw Wayland
+# buffer and must be able to use everything here; a GUI toolkit
+# dependency would put the shared look out of their reach, which is the
+# precise way the look forked in the first place.
+[dependencies]
+hyprforge-paths.workspace = true
+serde.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

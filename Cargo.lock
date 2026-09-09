@@ -1433,6 +1433,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyprforge-look"
+version = "0.1.0"
+dependencies = [
+ "hyprforge-paths",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.19",
+ "toml",
+]
+
+[[package]]
 name = "hyprforge-lua-import"
 version = "0.1.0"
 dependencies = [
