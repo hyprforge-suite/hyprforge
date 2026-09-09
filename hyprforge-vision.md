@@ -68,6 +68,8 @@ with zero GTK/Qt dependency anywhere in the stack.
 | — Session module (autostart, environment, gestures, permissions) | `hyprforge-session` (lib) | hand-edited hyprland.lua | no | in progress |
 | — System module (behaviour, shortcuts behaviour, X11, rendering) | `hyprforge-system` (lib) | hand-edited hyprland.lua | no | in progress |
 | — Users/time module | *(planned)* | — | accountsservice/timedated | not started |
+| **Lock screen** | `hyprforge-lock` (binary), `hyprforge-authui` (shared conversation model + theme) | hyprlock | no (a client holding `ext-session-lock-v1`) | working; look and feel not started |
+| **Greeter / display manager** | `hyprforge-greet` (planned), on `hyprforge-authui` | greetd greeters (gtkgreet/tuigreet) | runs under greetd | not started |
 | **File Manager** | `hyprforge-files-core` (shared logic), `hyprforge-files` (standalone), `hyprforge-files-portal` (xdg-desktop-portal FileChooser backend) | Nautilus/Dolphin/Thunar | portal backend runs as a D-Bus service | not started |
 | **Photo Viewer** | `hyprforge-photos` | eog/gwenview | no | not started |
 | **Video Viewer** | `hyprforge-videos` | — (likely thin mpv wrapper; revisit build-vs-wrap) | no | not started |
@@ -139,3 +141,20 @@ NOT the whole suite. The Displays + Window Rules work (see
 `hyprforge-v1-prompt.md`) is one slice of the Settings app, not the
 entirety of Hyprforge. Do not expand scope to other components without
 it being explicitly requested for that session.
+
+### Where things stand (2026-08-16)
+
+The Settings modules above marked *in progress* are functional; their look
+and feel is deliberately unfinished, functionality first.
+
+`hyprforge-lock` locks, draws, authenticates against PAM and unlocks. What
+it does not have is any text on screen — no prompt, username, clock or
+error message — so the next piece of work on it is the look, and that is
+the one place worth designing rather than defaulting, because the greeter
+has to match it. That match is the whole reason `hyprforge-authui` exists:
+the problem being solved is that a greeter and a lock screen normally look
+like two different systems.
+
+`hyprforge-greet` is the next component. It inherits a `Backend` trait that
+already handles an authenticator answering on its own schedule, which is
+exactly greetd's shape.

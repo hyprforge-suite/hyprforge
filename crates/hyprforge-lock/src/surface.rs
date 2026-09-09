@@ -628,6 +628,7 @@ impl<B: Backend + 'static> KeyboardHandler for LockScreen<B> {
         _: &[u32],
         _: &[Keysym],
     ) {
+        eprintln!("keyboard focus entered a lock surface");
     }
 
     fn leave(
@@ -696,6 +697,11 @@ impl<B: Backend + 'static> LockScreen<B> {
     /// compositor releasing the session runs here, and only the
     /// `wl_keyboard` delivery is left out.
     fn key(&mut self, keysym: Keysym, utf8: Option<String>) {
+        // Nothing about a keystroke is logged here, ever. A keysym name
+        // *is* the character — `XK_a` for `a`, `XK_comma` for `,` — so
+        // logging "just the keysym" to debug input writes the password
+        // to disk in a barely-encoded form. This comment exists because
+        // that mistake was made here once already.
         // Nothing is being asked until the lock is granted, so a key
         // pressed in that window has nowhere to go.
         let Some(conversation) = self.conversation.as_mut() else {
@@ -751,6 +757,7 @@ impl<B: Backend + 'static> SeatHandler for LockScreen<B> {
     ) {
         if capability == Capability::Keyboard && self.keyboard.is_none() {
             self.keyboard = self.seats.get_keyboard(qh, &seat, None).ok();
+            eprintln!("keyboard bound: {}", self.keyboard.is_some());
         }
     }
 

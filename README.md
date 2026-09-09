@@ -26,10 +26,23 @@ crates/
   hyprforge-appearance/    library: the appearance catalog (88 options), the
                             animation model, gsettings bridge, and theme/font
                             discovery
+  hyprforge-ecosystem/     library: the hypr* daemons (hyprpaper, hyprsunset,
+                            hypridle) — their config files, generation and
+                            the `source =` line that installs them
+  hyprforge-session/       library: autostart programs and environment
+                            variables
+  hyprforge-system/        library: the misc/debug/render catalogue, sharing
+                            catalog_screen with Input
+  hyprforge-authui/        library: the authentication *conversation* model
+                            and the shared theme, so the lock screen and the
+                            greeter cannot drift into looking like two
+                            different systems
+  hyprforge-lock/          binary: our own ext-session-lock-v1 lock screen,
+                            authenticating against PAM
   hyprforge-lua-import/    sandboxed mlua evaluator that imports hand-written
                             hl.bind()/hl.window_rule()/hl.monitor() calls —
                             the only crate depending on mlua
-  hyprforge-settings/      the iced GUI, hosting all five modules
+  hyprforge-settings/      the iced GUI, hosting the settings modules
 ```
 
 ## Checking everything works
@@ -500,6 +513,89 @@ picker never drops a value it doesn't recognise — an unplugged monitor or
 a theme outside the search paths stays selectable, marked. A
 comma-separated value (`kb_layout = "us,cz"`) falls back to a text field,
 because a single-select dropdown can't express it.
+
+## The lock screen
+
+`hyprforge-lock` locks the session with `ext-session-lock-v1` and
+authenticates against PAM. It shares `hyprforge-authui`'s conversation
+model with the greeter, because the problem being solved is that a
+greeter and a lock screen usually look like two different systems.
+
+### It needs its own PAM file
+
+```
+sudo install -m 644 crates/hyprforge-lock/pam/hyprforge-lock /etc/pam.d/hyprforge-lock
+```
+
+Without it, `service_name()` falls back to `hyprlock` — and that
+**rejects correct passwords**. `/etc/pam.d/hyprlock` declares only
+`auth include login`, so the account stack for that service is empty and
+falls through to `/etc/pam.d/other`, which is `account required
+pam_deny.so`. hyprlock itself never notices because it only calls
+`pam_authenticate`; this checks `pam_acct_mgmt` too, since an account can
+have the right password and still be expired, locked, or barred from the
+host. The failure message names the file to fix.
+
+### Testing it without locking yourself out
+
+**Never run it against the session you are using.** `--fake-password`
+refuses to start without an explicit `--display` for that reason.
+
+```
+./crates/hyprforge-lock/testing/nested.sh        # nested Hyprland on wayland-2
+WAYLAND_DISPLAY=wayland-2 ./target/debug/hyprforge-lock \
+    --display wayland-2 --fake-password hunter2 --type-in hunter2
+```
+
+Run `nested.sh` before *every* attempt. A lock client killed while
+holding the lock leaves the session locked with nothing left to unlock
+it — that is the design, not a bug, and it is what makes writing your own
+lock screen reasonable rather than reckless. Restarting the nested
+compositor is the clean way back; the other is
+`hyprctl --instance <N> eval 'hl.clear_crashed_lockscreen()'`.
+
+| Flag | For |
+|---|---|
+| `--type-in TEXT` | types TEXT and presses Enter once a frame is drawn, driving the real path from keystroke to compositor release without a keyboard |
+| `--fake-delay MS` | makes the fake backend take MS to answer, standing in for `pam_unix`'s ~2s pause after a wrong password |
+
+Both require `--fake-password`. Passing something other than the fake
+password exercises the failure path against the fake backend, so no real
+account collects a failed attempt — which matters where `pam_faillock` is
+active.
+
+### Nothing blocks the drawing
+
+`pam_unix` deliberately sleeps for about two seconds after a wrong
+password. If answering meant waiting, the surface would stop repainting
+for exactly that long, and a surface that stops repainting is
+indistinguishable from one that crashed — on a lock screen, the user's
+only other option is a hard reboot.
+
+So `Backend` never blocks: `start`/`answer`/`proceed` post a request and
+return, `poll` collects answers, and a calloop ping wakes the event loop
+when one arrives. `--fake-delay 3000` draws ~60 frames where a blocking
+version drew 2.
+
+Authentication also starts only *after* the compositor grants the lock.
+Building the conversation is what starts PAM talking, so doing it any
+earlier held the screen unlocked for as long as a slow module took.
+
+### Never log a keystroke
+
+Not the character, and **not the keysym either** — `XK_a` is `a`,
+`XK_comma` is `,`, so "just the keysym" writes the password to disk in a
+barely-encoded form. This has already happened here once. `Debug for
+State` is hand-written to render what was typed as `<N chars>`; use that.
+
+### What it does not do yet
+
+There is no text on screen: no prompt, no username, no clock, no error
+message, no wallpaper — just a panel, one dot per typed character, and a
+bar that carries the state. A font renderer was a dependency the spike
+did not need. The look and feel is the next piece of work, and it is the
+one place worth designing rather than defaulting, since the greeter has
+to match it.
 
 ## Scales are 120ths, and most of the ones you'd want don't exist
 

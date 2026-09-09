@@ -196,8 +196,16 @@ fn authenticate(
     // Authentication is not authorisation: an account can be valid and
     // still be expired, locked, or barred from this host. Skipping this
     // would unlock a session PAM had refused.
+    //
+    // Reported separately from the password check, because the two mean
+    // opposite things to the person standing there. Saying "incorrect
+    // password" when the password was right sends someone typing it
+    // again and again — which is exactly what a misconfigured account
+    // stack produced here: `/etc/pam.d/hyprlock` declares only an auth
+    // stack, so the account check fell through to `other`'s pam_deny
+    // and refused every correct password.
     if let Err(e) = context.acct_mgmt(pam_client2::Flag::NONE) {
-        return Response::Failure { reason: describe(e.code(), &e) };
+        return Response::Failure { reason: describe_account(e.code(), &e, service) };
     }
     Response::Success
 }
@@ -221,6 +229,35 @@ fn describe(code: pam_client2::ErrorCode, error: &dyn std::fmt::Display) -> Stri
         ErrorCode::USER_UNKNOWN => "Unknown user".into(),
         ErrorCode::AUTHINFO_UNAVAIL => "Authentication service unavailable".into(),
         _ => format!("Authentication failed: {error}"),
+    }
+}
+
+/// The account check's failures, which are not password failures.
+///
+/// The password was already accepted by the time this runs, so none of
+/// these may say "incorrect password". The common case in practice is
+/// not an expired account at all but a service with no account stack —
+/// worth naming outright, because "authentication failed" sends a user
+/// retyping a password that was right the first time, and on a machine
+/// with `pam_faillock` that costs them attempts they cannot spare.
+fn describe_account(
+    code: pam_client2::ErrorCode,
+    error: &dyn std::fmt::Display,
+    service: &str,
+) -> String {
+    use pam_client2::ErrorCode;
+    match code {
+        ErrorCode::ACCT_EXPIRED => "This account has expired".into(),
+        ErrorCode::NEW_AUTHTOK_REQD => "Your password has expired and must be changed".into(),
+        ErrorCode::USER_UNKNOWN => "Unknown user".into(),
+        // pam_deny in the account stack, which is what an unconfigured
+        // service falls through to.
+        ErrorCode::PERM_DENIED | ErrorCode::AUTH_ERR => format!(
+            "Password accepted, but the account check failed. \
+             /etc/pam.d/{service} probably has no `account` rules — \
+             install the one shipped with hyprforge-lock."
+        ),
+        _ => format!("Password accepted, but the account check failed: {error}"),
     }
 }
 
@@ -338,6 +375,56 @@ mod tests {
     fn an_unmapped_error_still_reports_something() {
         let message = describe(pam_client2::ErrorCode::ABORT, &"aborted");
         assert!(message.contains("aborted"), "{message}");
+    }
+
+    /// The account check runs *after* the password was accepted, so
+    /// none of its failures may talk about the password. Saying
+    /// "incorrect password" for a correct one is what sent a real user
+    /// retyping a password that was right — and on a machine with
+    /// pam_faillock, retrying costs attempts that are not free.
+    #[test]
+    fn an_account_failure_never_blames_the_password() {
+        use pam_client2::ErrorCode;
+        for code in [
+            ErrorCode::PERM_DENIED,
+            ErrorCode::AUTH_ERR,
+            ErrorCode::ACCT_EXPIRED,
+            ErrorCode::NEW_AUTHTOK_REQD,
+            ErrorCode::ABORT,
+        ] {
+            let message = describe_account(code, &"raw", "hyprlock");
+            let lowered = message.to_lowercase();
+            assert!(
+                !lowered.contains("incorrect password"),
+                "{code:?} blamed the password: {message}"
+            );
+        }
+    }
+
+    /// A service with no `account` rules is the failure people will
+    /// actually hit, so the message has to name the file to fix rather
+    /// than describe a permissions problem.
+    #[test]
+    fn a_missing_account_stack_says_which_file_is_wrong() {
+        let message = describe_account(pam_client2::ErrorCode::PERM_DENIED, &"raw", "hyprlock");
+        assert!(message.contains("/etc/pam.d/hyprlock"), "{message}");
+        assert!(message.contains("account"), "{message}");
+    }
+
+    /// The PAM file shipped with the crate has to declare both stacks:
+    /// shipping one that only did `auth` would recreate the exact bug
+    /// it exists to fix.
+    #[test]
+    fn the_shipped_pam_file_declares_both_stacks() {
+        let shipped = include_str!("../pam/hyprforge-lock");
+        let rule = |kind: &str| {
+            shipped
+                .lines()
+                .filter(|line| !line.trim_start().starts_with('#'))
+                .any(|line| line.split_whitespace().next() == Some(kind))
+        };
+        assert!(rule("auth"), "no auth stack:\n{shipped}");
+        assert!(rule("account"), "no account stack:\n{shipped}");
     }
 
     /// A dead PAM thread must report failure rather than panicking or

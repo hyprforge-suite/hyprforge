@@ -1972,7 +1972,7 @@ impl DisplaysModule {
                 }
             }
             // Largest first — the order every other display panel uses.
-            resolutions.sort_by(|a, b| (b.width, b.height).cmp(&(a.width, a.height)));
+            resolutions.sort_by_key(|r| std::cmp::Reverse((r.width, r.height)));
 
             let selected_resolution = stored.map(|(w, h)| ResolutionOption {
                 width: w,
@@ -1993,7 +1993,7 @@ impl DisplaysModule {
                     refresh_rates.push(RefreshOption { mhz });
                 }
             }
-            refresh_rates.sort_by(|a, b| b.mhz.cmp(&a.mhz));
+            refresh_rates.sort_by_key(|r| std::cmp::Reverse(r.mhz));
             refresh_rates.dedup();
 
             let resolution_field: Element<'_, Message> = column![

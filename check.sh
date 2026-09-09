@@ -17,6 +17,12 @@
 # talking to — a renamed option, a type that changed, a misspelled key that
 # the daemon silently ignores rather than rejecting.
 #
+# Not covered here: the lock screen's live behaviour. Its unit tests run
+# in tier 1 like everything else, but proving it actually locks, draws
+# and unlocks needs a nested compositor, and must never be pointed at the
+# session you are using. See "The lock screen" in the README and
+# crates/hyprforge-lock/testing/nested.sh.
+#
 # Usage:
 #   ./check.sh          everything available on this machine
 #   ./check.sh --quick  tier 1 only (no compositor, no daemons)
