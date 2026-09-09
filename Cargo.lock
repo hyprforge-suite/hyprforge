@@ -1359,7 +1359,6 @@ version = "0.1.0"
 dependencies = [
  "hyprforge-look",
  "hyprforge-paths",
- "iced",
  "serde",
  "serde_json",
  "tempfile",
@@ -1487,6 +1486,7 @@ dependencies = [
  "hyprforge-session",
  "hyprforge-shortcuts",
  "hyprforge-system",
+ "hyprforge-ui",
  "hyprforge-windowrules",
  "iced",
  "serde",
@@ -1520,6 +1520,14 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "hyprforge-ui"
+version = "0.1.0"
+dependencies = [
+ "hyprforge-look",
+ "iced",
 ]
 
 [[package]]

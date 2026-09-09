@@ -20,7 +20,6 @@ pub type InputModule = CatalogScreen<Input>;
 pub struct Input;
 
 impl Catalogued for Input {
-    const TITLE: &'static str = "Input";
     const ICON: &'static str = "\u{2328}";
     const SUBJECT: &'static str = "input settings";
     const STORE: &'static str = "input.toml";
@@ -134,8 +133,8 @@ mod tests {
     use super::*;
     use hyprforge_core::hlconfig::import::Discovered;
     use hyprforge_core::hlconfig::Value;
-    use hyprforge_core::theme::FontScale;
-    use hyprforge_core::SettingsModule;
+    use hyprforge_ui::theme::FontScale;
+    use crate::module::SettingsModule;
     use hyprforge_input::catalog;
 
     /// Runs `f` against a module whose config lives in a throwaway

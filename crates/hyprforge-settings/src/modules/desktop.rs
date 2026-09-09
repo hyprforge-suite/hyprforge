@@ -11,11 +11,11 @@
 //! restarts. Every save reports which of those happened rather than
 //! saying "Saved." at all three.
 
-use hyprforge_core::theme::{spacing, FontScale};
-use hyprforge_core::widgets::{
+use hyprforge_ui::theme::{spacing, FontScale};
+use hyprforge_ui::widgets::{
     danger_button, divider, meta_text, primary_button, scaled_text, secondary_button, section,
 };
-use hyprforge_core::SettingsModule;
+use crate::module::SettingsModule;
 use hyprforge_ecosystem::apply::{self, Applied};
 use hyprforge_ecosystem::{idle, sunset, wallpaper};
 use iced::widget::{checkbox, column, container, pick_list, row, scrollable, text_input};
@@ -366,9 +366,6 @@ impl DesktopModule {
 impl SettingsModule for DesktopModule {
     type Message = Message;
 
-    fn title(&self) -> &str {
-        "Desktop"
-    }
 
     fn icon(&self) -> &'static str {
         "🖼"

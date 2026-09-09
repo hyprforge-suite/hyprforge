@@ -12,6 +12,7 @@ members = [
     "crates/hyprforge-authui",
     "crates/hyprforge-paths",
     "crates/hyprforge-look",
+    "crates/hyprforge-ui",
     "crates/hyprforge-lock",
     "crates/hyprforge-shortcuts",
     "crates/hyprforge-lua-import",
@@ -24,8 +25,8 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
-# default-features = false here so each consumer opts into `gui` (iced)
-# explicitly; only hyprforge-settings actually wants it.
+# default-features = false so nobody picks up the optional `dbus`
+# (zbus) support by accident; only the settings app and displayctl want it.
 hyprforge-core = { path = "crates/hyprforge-core", default-features = false }
 hyprforge-windowrules = { path = "crates/hyprforge-windowrules" }
 hyprforge-input = { path = "crates/hyprforge-input" }
@@ -36,6 +37,7 @@ hyprforge-system = { path = "crates/hyprforge-system" }
 hyprforge-authui = { path = "crates/hyprforge-authui" }
 hyprforge-paths = { path = "crates/hyprforge-paths" }
 hyprforge-look = { path = "crates/hyprforge-look" }
+hyprforge-ui = { path = "crates/hyprforge-ui" }
 hyprforge-lock = { path = "crates/hyprforge-lock" }
 hyprforge-shortcuts = { path = "crates/hyprforge-shortcuts" }
 hyprforge-lua-import = { path = "crates/hyprforge-lua-import" }

@@ -19,12 +19,13 @@
 //! other writes it.
 
 use hyprforge_core::lua_setup;
-use hyprforge_core::theme::{spacing, FontScale};
-use hyprforge_core::widgets::{
-    divider, meta_text, primary_button, scaled_text, secondary_button, section, setup_notice,
+use hyprforge_ui::theme::{spacing, FontScale};
+use hyprforge_ui::widgets::{
+    divider, meta_text, primary_button, scaled_text, secondary_button, section,
 };
 use super::setting_rows::{self, DynChoice, RowContext};
-use hyprforge_core::SettingsModule;
+use crate::modules::setup_notice::setup_notice;
+use crate::module::SettingsModule;
 use hyprforge_core::hlconfig::Catalog;
 use hyprforge_core::hlconfig::Setting;
 use hyprforge_core::lua_setup::{Placement, SetupError};
@@ -39,8 +40,6 @@ use std::collections::BTreeMap;
 
 /// Everything a catalogue-backed screen needs that isn't the screen.
 pub trait Catalogued: 'static {
-    /// Shown in the sidebar and in the generated file's header.
-    const TITLE: &'static str;
     const ICON: &'static str;
     /// Named in error and status messages: "your {SUBJECT} couldn't be
     /// read".
@@ -334,9 +333,6 @@ impl<M: Catalogued> CatalogScreen<M> {
 impl<M: Catalogued> SettingsModule for CatalogScreen<M> {
     type Message = Message;
 
-    fn title(&self) -> &str {
-        M::TITLE
-    }
 
     fn icon(&self) -> &'static str {
         M::ICON

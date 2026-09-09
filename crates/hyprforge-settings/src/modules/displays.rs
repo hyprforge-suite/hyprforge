@@ -2,12 +2,12 @@ use crate::modules::layout_canvas::{CanvasHead, LayoutCanvas};
 use hyprforge_core::geometry::{logical_size, nearest_valid_scale};
 use hyprforge_core::displayd_proxy::DisplaydProxy;
 use hyprforge_core::lua_setup::{self, HyprConfig, Placement, SetupPlan};
-use hyprforge_core::theme::{spacing, FontScale};
-use hyprforge_core::widgets::{
+use hyprforge_ui::theme::{spacing, FontScale};
+use hyprforge_ui::widgets::{
     confirm_dialog, danger_button, divider, meta_text, primary_button, row_field, scaled_text,
     secondary_button, section,
 };
-use hyprforge_core::SettingsModule;
+use crate::module::SettingsModule;
 
 /// Monitors goes first among the user's own `require()` calls, same
 /// reasoning as window rules: the exact precedence of repeated
@@ -1069,9 +1069,6 @@ impl DisplaysModule {
 impl SettingsModule for DisplaysModule {
     type Message = Message;
 
-    fn title(&self) -> &str {
-        "Monitors"
-    }
 
     fn icon(&self) -> &'static str {
         "\u{1F5A5}"

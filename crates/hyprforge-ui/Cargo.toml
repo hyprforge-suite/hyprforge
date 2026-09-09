@@ -1,0 +1,14 @@
+[package]
+name = "hyprforge-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The shared iced layer: one spacing scale, one palette, one set of
+# widgets, so a sidebar in Settings and a sidebar in the file manager
+# breathe the same amount. Depends on hyprforge-look for the values and
+# on nothing that knows about Hyprland — a calculator should be able to
+# use this without inheriting Lua codegen.
+[dependencies]
+hyprforge-look.workspace = true
+iced.workspace = true

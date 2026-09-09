@@ -8,6 +8,7 @@ pub mod layout_canvas;
 pub mod session;
 pub mod system;
 pub mod setting_rows;
+pub mod setup_notice;
 pub mod shortcuts;
 pub mod window_rules;
 

@@ -5,7 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-hyprforge-core = { workspace = true, features = ["gui", "dbus"] }
+hyprforge-core = { workspace = true, features = ["dbus"] }
+hyprforge-ui.workspace = true
 hyprforge-windowrules.workspace = true
 hyprforge-input.workspace = true
 hyprforge-appearance.workspace = true

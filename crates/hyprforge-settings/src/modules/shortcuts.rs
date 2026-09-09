@@ -1,10 +1,10 @@
 use hyprforge_core::lua_setup;
-use hyprforge_core::theme::{spacing, FontScale};
-use hyprforge_core::widgets::{
+use hyprforge_ui::theme::{spacing, FontScale};
+use hyprforge_ui::widgets::{
     danger_button, divider, meta_text, primary_button, row_field, scaled_text, secondary_button,
     section,
 };
-use hyprforge_core::SettingsModule;
+use crate::module::SettingsModule;
 use hyprforge_shortcuts::binds::LiveBind;
 use hyprforge_shortcuts::catalog::{self, Category, Entry, ParamKind};
 use hyprforge_shortcuts::model::{description_for, generate_shortcut_name};
@@ -785,16 +785,13 @@ impl ShortcutsModule {
     /// failed; the reason is already in `self.error`, shown generically
     /// above this.
     fn setup_notice(&self, scale: FontScale) -> Option<Element<'_, Message>> {
-        hyprforge_core::widgets::setup_notice(&self.config, "binds", scale)
+        crate::modules::setup_notice::setup_notice(&self.config, "binds", scale)
     }
 }
 
 impl SettingsModule for ShortcutsModule {
     type Message = Message;
 
-    fn title(&self) -> &str {
-        "Shortcuts"
-    }
 
     fn icon(&self) -> &'static str {
         "\u{2328}"
@@ -1131,7 +1128,7 @@ impl SettingsModule for ShortcutsModule {
                         13.0,
                         scale,
                     )
-                    .color(hyprforge_core::theme::WARNING),
+                    .color(hyprforge_ui::theme::WARNING),
                     meta_text(
                         format!(
                             "{}\n{reason}",
@@ -1195,7 +1192,7 @@ impl SettingsModule for ShortcutsModule {
                             12.0,
                             scale,
                         )
-                        .color(hyprforge_core::theme::WARNING),
+                        .color(hyprforge_ui::theme::WARNING),
                     );
                 }
 
@@ -1334,7 +1331,7 @@ impl ShortcutsModule {
                             12.0,
                             scale,
                         )
-                        .color(hyprforge_core::theme::WARNING),
+                        .color(hyprforge_ui::theme::WARNING),
                     );
                 }
                 list = list.push(
@@ -1390,7 +1387,7 @@ impl ShortcutsModule {
         let blockers = draft.blockers();
         if let Some(first) = blockers.first() {
             body = body.push(
-                scaled_text(first.clone(), 12.0, scale).color(hyprforge_core::theme::WARNING),
+                scaled_text(first.clone(), 12.0, scale).color(hyprforge_ui::theme::WARNING),
             );
         }
 
@@ -1480,7 +1477,7 @@ impl ShortcutsModule {
         }
         if let Some(conflict) = &draft.conflict {
             form = form.push(
-                scaled_text(conflict.clone(), 12.0, scale).color(hyprforge_core::theme::WARNING),
+                scaled_text(conflict.clone(), 12.0, scale).color(hyprforge_ui::theme::WARNING),
             );
         }
         form.into()
@@ -1593,7 +1590,7 @@ impl ShortcutsModule {
 
         if let Some(conflict) = draft.flags.conflict() {
             form = form.push(
-                scaled_text(conflict, 12.0, scale).color(hyprforge_core::theme::WARNING),
+                scaled_text(conflict, 12.0, scale).color(hyprforge_ui::theme::WARNING),
             );
         }
         form.into()

@@ -1,4 +1,4 @@
-use crate::theme::FontScale;
+use hyprforge_ui::theme::FontScale;
 use iced::{Element, Subscription, Task};
 
 /// Shared shape for anything hosted inside the Settings app shell, modeled
@@ -7,7 +7,6 @@ use iced::{Element, Subscription, Task};
 pub trait SettingsModule {
     type Message: std::fmt::Debug + Send + Clone + 'static;
 
-    fn title(&self) -> &str;
     fn icon(&self) -> &'static str;
 
     fn update(&mut self, message: Self::Message) -> Task<Self::Message>;
