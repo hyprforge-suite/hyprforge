@@ -596,6 +596,40 @@ Passing something other than the fake password exercises the failure path
 against the fake backend, so no real account collects a failed attempt —
 which matters where `pam_faillock` is active.
 
+### Surfaces are created when the lock is *requested*, not when it is granted
+
+The protocol says: *"The locked event must not be sent until a new 'locked'
+frame has been presented on all outputs."* The compositor is waiting for the
+surfaces. Creating them in the `locked` handler is therefore a standoff, and the
+only thing that breaks it is Hyprland giving up after five seconds and painting
+its "lockscreen app died" recovery screen in front of the real one.
+
+That is what the delay was, and the tell was that it measured 5002ms every
+single run and never varied with load, build profile or wallpaper size. A
+suspiciously round number is a timeout somewhere else, not slowness here. Ours
+finished in 1ms. Correct order now: request, cover every output, draw, commit —
+then `locked` arrives, around 80ms.
+
+`locked` no longer creates anything. It means the session is genuinely secured,
+which is the right thing to gate the authenticator on and nothing else.
+
+### The wallpaper is scaled once, on save
+
+An 8001x4501 photograph is 36 megapixels: 144MB decoded, near 300MB once the
+renderer holds its own premultiplied copy. Measured on the lock surface, that is
+RSS 170MB and a 296MB peak, against 54MB/72MB for the same image capped at 4K.
+
+This is a correctness fix rather than a tidy-up. `renderable` guards the
+wallpaper by reading its *header*, but an allocation failure happens during full
+decode — and that is exactly the case that caches as "no entry" in
+`iced_tiny_skia` and panics on the next frame. A header check cannot catch it;
+not decoding 36 megapixels can.
+
+So the Settings app scales it when settings are saved, capped at 4K's long edge,
+reusing a current copy rather than re-encoding every time. Doing it per lock
+would pay the same cost repeatedly in the process where failing is
+unrecoverable.
+
 ### Nothing blocks the drawing
 
 `pam_unix` deliberately sleeps for about two seconds after a wrong

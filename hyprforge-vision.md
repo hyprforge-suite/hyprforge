@@ -138,9 +138,8 @@ hyprforge/
 
 Unless told otherwise, assume the active work session is scoped to
 whatever is described in the accompanying session-specific prompt, and
-NOT the whole suite. The Displays + Window Rules work (see
-`hyprforge-v1-prompt.md`) is one slice of the Settings app, not the
-entirety of Hyprforge. Do not expand scope to other components without
+NOT the whole suite. The Displays + Window Rules work is one slice of the
+Settings app, not the entirety of Hyprforge. Do not expand scope to other components without
 it being explicitly requested for that session.
 
 ### The shared look
