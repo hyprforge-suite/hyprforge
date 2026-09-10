@@ -31,31 +31,62 @@ const DOT_GAP: f32 = 10.0;
 /// a row that grows without limit would push the panel apart.
 const MAX_DOTS: usize = 24;
 
-/// The theme, with a wallpaper the renderer cannot actually draw
-/// removed.
+/// The smallest and largest text this screen will render at.
 ///
-/// This is not tidiness. `iced_tiny_skia` 0.14 caches a failed image
-/// load as "no entry", and its *next* attempt to draw the same handle
-/// hits an `expect` and panics. On a lock screen that is the one failure
-/// with no recovery: the compositor keeps the session locked and the
-/// process that could have unlocked it is gone.
-///
-/// So the path is checked before it can reach the renderer. Only the
-/// header is read — enough to know whether there is a decoder for this
-/// format and whether the file is really an image — so the cost does not
-/// scale with the size of the picture.
-pub fn with_drawable_wallpaper(mut theme: Theme) -> Theme {
-    let Some(path) = theme.wallpaper.clone() else {
-        return theme;
-    };
-    let readable = image::ImageReader::open(&path)
-        .and_then(|reader| reader.with_guessed_format())
-        .ok()
-        .and_then(|reader| reader.into_dimensions().ok())
-        .is_some_and(|(w, h)| w > 0 && h > 0);
+/// Not taste — survival. `cosmic-text` asserts that a line height is
+/// non-zero, so a font size of zero panics the renderer outright, and a
+/// size in the millions makes it try to lay out glyphs the size of a
+/// building.
+const MIN_FONT: f32 = 6.0;
+const MAX_FONT: f32 = 96.0;
+/// Corner radius and blur are bounded for the same reason: the geometry
+/// they feed ends in `tiny_skia` path builders that return `None` for
+/// degenerate shapes, and iced unwraps those.
+const MAX_ROUNDING: u32 = 64;
+const MAX_BLUR: u32 = 64;
 
-    if !readable {
-        theme.wallpaper = None;
+/// A theme that cannot panic the renderer.
+///
+/// `lock.toml` is a file people edit by hand, and one that a program
+/// writes without a schema. Anything can be in it: a zero font size, a
+/// NaN, a wallpaper that is really a text file. The renderer underneath
+/// this screen is not defensive — `iced_tiny_skia` and `cosmic-text` are
+/// full of `expect`s on geometry, and one of them fires on a font size
+/// of zero.
+///
+/// A panic here is the failure with no recovery. The compositor keeps
+/// the session locked whatever happens to this process, so a crash
+/// leaves a machine that cannot be unlocked without another TTY. Worse,
+/// the font system is behind a global mutex, so the first panic poisons
+/// it and every later attempt to draw fails too — there is no retrying
+/// out of it.
+///
+/// So every value is brought into a range the renderer will accept,
+/// rather than trusted or validated-and-rejected. Rejecting would mean
+/// refusing to show a lock screen, which is the same lockout by a
+/// politer route.
+pub fn renderable(mut theme: Theme) -> Theme {
+    let finite = |value: f32, fallback: f32| if value.is_finite() { value } else { fallback };
+
+    theme.font_size = finite(theme.font_size, Theme::default().font_size).clamp(MIN_FONT, MAX_FONT);
+    theme.font_scale = finite(theme.font_scale, 1.0).clamp(0.5, 3.0);
+    theme.dim = finite(theme.dim, 0.0).clamp(0.0, 1.0);
+    theme.rounding = theme.rounding.min(MAX_ROUNDING);
+    theme.blur = theme.blur.min(MAX_BLUR);
+
+    // A wallpaper the renderer cannot decode is its own hazard:
+    // iced_tiny_skia 0.14 caches a failed load as "no entry", and its
+    // next draw of the same handle hits an `expect`. Only the header is
+    // read, so the cost does not scale with the size of the picture.
+    if let Some(path) = theme.wallpaper.clone() {
+        let drawable = image::ImageReader::open(&path)
+            .and_then(|reader| reader.with_guessed_format())
+            .ok()
+            .and_then(|reader| reader.into_dimensions().ok())
+            .is_some_and(|(w, h)| w > 0 && h > 0);
+        if !drawable {
+            theme.wallpaper = None;
+        }
     }
     theme
 }
@@ -292,6 +323,13 @@ fn status_text(state: &State) -> (String, bool) {
 mod tests {
     use super::*;
     use crate::conversation::Prompt;
+    use hyprforge_look::Color;
+    use iced_runtime::core::Pixels;
+    use iced_runtime::user_interface::{Cache, UserInterface};
+
+    /// The screen sends no messages.
+    #[derive(Debug, Clone)]
+    enum Nothing {}
 
     /// The one thing this screen must never do. Every string it produces
     /// is checked, because a password reaching a label is the same class
@@ -313,6 +351,235 @@ mod tests {
         }
     }
 
+    /// Renders once, reporting a panic rather than propagating it.
+    fn try_render(state: &State, theme: &Theme, w: u32, h: u32) -> Result<(), String> {
+        let state = state.clone();
+        let theme = theme.clone();
+        std::panic::catch_unwind(move || {
+            // Exactly what the hosts do: nothing reaches the renderer
+            // without passing through `renderable` first.
+            let theme = renderable(theme);
+            let mut renderer = iced_tiny_skia::Renderer::new(font(&theme), Pixels(theme.font_size));
+            let size = iced_runtime::core::Size::new(w as f32, h as f32);
+            let mut ui = UserInterface::<Nothing, iced_widget::Theme, iced_tiny_skia::Renderer>::build(
+                view(&state, "apost", &theme, chrono::Local::now()),
+                size,
+                Cache::default(),
+                &mut renderer,
+            );
+            ui.draw(
+                &mut renderer,
+                &iced_widget::Theme::Dark,
+                &iced_runtime::core::renderer::Style {
+                    text_color: iced_runtime::core::Color::WHITE,
+                },
+                iced_runtime::core::mouse::Cursor::Unavailable,
+            );
+            let mut pixmap = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+            let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+            renderer.draw(
+                &mut pixmap.as_mut(),
+                &mut mask,
+                &iced_tiny_skia::graphics::Viewport::with_physical_size(
+                    iced_runtime::core::Size::new(w, h),
+                    1.0,
+                ),
+                &[iced_runtime::core::Rectangle::with_size(size)],
+                iced_runtime::core::Color::BLACK,
+            );
+        })
+        .map_err(|e| {
+            let msg = e
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| e.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "non-string panic".into());
+            msg
+        })
+    }
+
+    /// Every hostile theme worth worrying about.
+    ///
+    /// `lock.toml` is a file a person edits by hand and a program writes
+    /// atomically but not transactionally. Any value in it can be
+    /// nonsense, and the renderer this screen uses is full of `expect`s
+    /// that fire on degenerate geometry. A panic here is the failure
+    /// with no recovery: the compositor keeps the session locked and the
+    /// process that could unlock it is gone.
+    fn hostile_themes() -> Vec<(&'static str, Theme)> {
+        let base = Theme::default();
+        vec![
+            ("default", base.clone()),
+            ("font_size 0", Theme { font_size: 0.0, ..base.clone() }),
+            ("font_size negative", Theme { font_size: -20.0, ..base.clone() }),
+            ("font_size NaN", Theme { font_size: f32::NAN, ..base.clone() }),
+            ("font_size inf", Theme { font_size: f32::INFINITY, ..base.clone() }),
+            ("font_size enormous", Theme { font_size: 1.0e9, ..base.clone() }),
+            ("dim negative", Theme { dim: -3.0, ..base.clone() }),
+            ("dim over one", Theme { dim: 9.0, ..base.clone() }),
+            ("dim NaN", Theme { dim: f32::NAN, ..base.clone() }),
+            ("rounding max", Theme { rounding: u32::MAX, ..base.clone() }),
+            ("empty font", Theme { font: String::new(), ..base.clone() }),
+            ("blur max", Theme { blur: u32::MAX, ..base.clone() }),
+            (
+                "empty formats",
+                Theme { clock_format: String::new(), date_format: String::new(), ..base.clone() },
+            ),
+            (
+                "absurd clock format",
+                Theme { clock_format: "%".repeat(200), ..base.clone() },
+            ),
+            (
+                "transparent everything",
+                Theme {
+                    background: Color::rgba(0, 0, 0, 0),
+                    surface: Color::rgba(0, 0, 0, 0),
+                    foreground: Color::rgba(0, 0, 0, 0),
+                    ..base.clone()
+                },
+            ),
+        ]
+    }
+
+    /// Sizes a compositor can hand over, including the ones it hands
+    /// over before it knows the real answer.
+    const HOSTILE_SIZES: &[(u32, u32)] = &[
+        (1, 1),
+        (1, 800),
+        (800, 1),
+        (2, 2),
+        (64, 64),
+        (771, 906),
+        (3840, 2160),
+    ];
+
+    /// Input is the other thing this screen does not control.
+    ///
+    /// A passphrase can be any length and any script; PAM's prompts and
+    /// failure text come from modules this project did not write; and a
+    /// keyboard can deliver control characters.
+    fn hostile_states() -> Vec<State> {
+        vec![
+            State::Working,
+            State::Authenticated,
+            State::Asking { prompt: Prompt::secret("Password:"), entered: "hunter2".into() },
+            State::Failed { reason: "Incorrect password".into() },
+            // A passphrase far longer than the dot row can show.
+            State::Asking { prompt: Prompt::secret("Password:"), entered: "x".repeat(10_000) },
+            // Scripts that shape and combine, plus an emoji with a
+            // zero-width joiner — the kind of thing that has broken text
+            // layout engines before.
+            State::Asking {
+                prompt: Prompt::visible("رمز المرور:"),
+                entered: "\u{1f9d1}\u{200d}\u{1f680}é\u{200d}\u{915}\u{94d}".repeat(20),
+            },
+            // Control characters, which the key handler filters but a PAM
+            // module's own text is not obliged to.
+            State::Telling { text: "line\u{0}one\ttwo\r\n".into(), error: true },
+            // Text long enough to need wrapping inside a fixed panel.
+            State::Asking { prompt: Prompt::secret("y".repeat(4_000)), entered: String::new() },
+            State::Failed { reason: "z".repeat(4_000) },
+        ]
+    }
+
+    /// Nothing in a theme file, a surface size, or a conversation can
+    /// panic the renderer.
+    ///
+    /// Swept additively rather than as a full cross product: every
+    /// hostile theme against one representative size, every size against
+    /// one theme, every state against one of each. The multiplicative
+    /// version covered ~1000 combinations and cost half a minute, which
+    /// is too slow to run on every change — and a guard nobody runs is
+    /// not a guard.
+    #[test]
+    fn nothing_can_panic_the_renderer() {
+        let ordinary_size = (771, 906);
+        let ordinary_state = State::Asking {
+            prompt: Prompt::secret("Password:"),
+            entered: "hunter2".into(),
+        };
+        let ordinary_theme = Theme::default();
+
+        let mut failures = Vec::new();
+        let mut check = |what: String, state: &State, theme: &Theme, (w, h): (u32, u32)| {
+            if let Err(why) = try_render(state, theme, w, h) {
+                failures.push(format!("{what}: {why}"));
+            }
+        };
+
+        for (label, theme) in hostile_themes() {
+            check(format!("theme {label}"), &ordinary_state, &theme, ordinary_size);
+        }
+        for &size in HOSTILE_SIZES {
+            check(format!("size {size:?}"), &ordinary_state, &ordinary_theme, size);
+        }
+        for state in hostile_states() {
+            check(format!("state {state:?}"), &state, &ordinary_theme, ordinary_size);
+            // And once at a single pixel, which is what a compositor can
+            // hand over before it knows the real size.
+            check(format!("state {state:?} at 1x1"), &state, &ordinary_theme, (1, 1));
+        }
+
+        assert!(failures.is_empty(), "{} panic(s):\n{}", failures.len(), failures.join("\n"));
+    }
+
+    /// The specific value that panics `cosmic-text`, pinned separately
+    /// from the sweep.
+    ///
+    /// A font size of zero fails an assertion deep in text layout —
+    /// "line height cannot be 0" — and that poisons the global font
+    /// mutex, so every later attempt to draw fails too. There is no
+    /// recovering from it inside the process, which on a lock screen
+    /// means a machine that cannot be unlocked.
+    #[test]
+    fn a_zero_font_size_never_reaches_the_renderer() {
+        for size in [0.0, -1.0, -1.0e9, f32::NAN, f32::NEG_INFINITY] {
+            let theme = renderable(Theme { font_size: size, ..Theme::default() });
+            assert!(
+                theme.font_size >= MIN_FONT && theme.font_size <= MAX_FONT,
+                "{size} became {}",
+                theme.font_size
+            );
+        }
+    }
+
+    /// Everything else the renderer unwraps geometry from.
+    ///
+    /// Two different treatments, deliberately. A value that is merely
+    /// too large is clamped, because the intent is legible — someone
+    /// wanted big text. A value that is not a number at all carries no
+    /// intent, so it falls back to the default rather than to whichever
+    /// end of the range it happens to clamp toward.
+    #[test]
+    fn every_out_of_range_theme_value_is_brought_back_into_range() {
+        let clamped = renderable(Theme {
+            font_size: 1.0e9,
+            dim: 12.0,
+            rounding: u32::MAX,
+            blur: u32::MAX,
+            ..Theme::default()
+        });
+        assert_eq!(clamped.font_size, MAX_FONT);
+        assert_eq!(clamped.dim, 1.0);
+        assert_eq!(clamped.rounding, MAX_ROUNDING);
+        assert_eq!(clamped.blur, MAX_BLUR);
+
+        let nonsense = renderable(Theme {
+            font_size: f32::INFINITY,
+            font_scale: f32::NAN,
+            dim: f32::NAN,
+            ..Theme::default()
+        });
+        assert_eq!(nonsense.font_size, Theme::default().font_size);
+        assert_eq!(nonsense.font_scale, 1.0);
+        assert_eq!(nonsense.dim, 0.0, "an undimmed wallpaper is legible; a NaN one is not");
+
+        // And a sane theme is left exactly as it was, or the guard would
+        // be quietly restyling everyone's lock screen.
+        let sane = Theme::default();
+        assert_eq!(renderable(sane.clone()), sane);
+    }
+
     /// A wallpaper the renderer cannot draw must never reach it.
     ///
     /// iced_tiny_skia 0.14 caches a failed load as "no entry" and then
@@ -328,7 +595,7 @@ mod tests {
         let missing = dir.path().join("gone.png");
 
         for path in [not_an_image, missing, dir.path().to_path_buf()] {
-            let theme = with_drawable_wallpaper(Theme {
+            let theme = renderable(Theme {
                 wallpaper: Some(path.clone()),
                 ..Theme::default()
             });
@@ -345,7 +612,7 @@ mod tests {
         let pixel = image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255]));
         pixel.save(&path).unwrap();
 
-        let theme = with_drawable_wallpaper(Theme {
+        let theme = renderable(Theme {
             wallpaper: Some(path.clone()),
             ..Theme::default()
         });

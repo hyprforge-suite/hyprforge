@@ -568,8 +568,8 @@ refuses to start without an explicit `--display` for that reason.
 
 ```
 ./crates/hyprforge-lock/testing/nested.sh        # nested Hyprland on wayland-2
-WAYLAND_DISPLAY=wayland-2 ./target/debug/hyprforge-lock \
-    --display wayland-2 --fake-password hunter2 --type-in hunter2
+./target/debug/hyprforge-lock --display wayland-2 \
+    --fake-password hunter2 --type-in hunter2
 ```
 
 Run `nested.sh` before *every* attempt. A lock client killed while
@@ -584,10 +584,17 @@ compositor is the clean way back; the other is
 | `--type-in TEXT` | types TEXT and presses Enter once a frame is drawn, driving the real path from keystroke to compositor release without a keyboard |
 | `--fake-delay MS` | makes the fake backend take MS to answer, standing in for `pam_unix`'s ~2s pause after a wrong password |
 
-Both require `--fake-password`. Passing something other than the fake
-password exercises the failure path against the fake backend, so no real
-account collects a failed attempt — which matters where `pam_faillock` is
-active.
+Both require `--fake-password`, which **does not exist in a release
+build** — the fake backend is compiled out, so a lock screen that opens
+to a known string is not one flag away in the binary people install. In a
+debug build it additionally refuses when the display it is given is the
+one the process would have connected to anyway; requiring `--display`
+alone proved only that a display was named, not that it was a different
+one.
+
+Passing something other than the fake password exercises the failure path
+against the fake backend, so no real account collects a failed attempt —
+which matters where `pam_faillock` is active.
 
 ### Nothing blocks the drawing
 

@@ -62,7 +62,7 @@ fn main() {
         wallpaper: std::env::var_os("PREVIEW_WALLPAPER").map(std::path::PathBuf::from),
         ..Theme::default()
     };
-    let theme = hyprforge_authui::screen::with_drawable_wallpaper(theme);
+    let theme = hyprforge_authui::screen::renderable(theme);
     println!("wallpaper in use: {:?}", theme.wallpaper);
     shot("auth-asking.png", State::Asking { prompt: Prompt::secret("Password:"), entered: "hunter2!".into() }, &theme);
     shot("auth-failed.png", State::Failed { reason: "Incorrect password".into() }, &theme);
