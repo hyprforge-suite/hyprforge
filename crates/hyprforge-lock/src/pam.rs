@@ -64,6 +64,14 @@ pub struct PamBackend {
     /// all. Reported through the same path as any other failure so the
     /// UI has one way of hearing bad news.
     lost: Option<Response>,
+    /// Whether the thread's death has already been reported.
+    ///
+    /// Without this, `poll` answered a disconnected channel with
+    /// `Some(Failure)` *every* time, and `Conversation::pump` loops
+    /// while `poll` keeps yielding — so a dead PAM thread span the lock
+    /// screen at 100% CPU and stopped it ever drawing again. The comment
+    /// below always said "once"; this is what makes it once.
+    reported_loss: bool,
 }
 
 impl PamBackend {
@@ -83,7 +91,7 @@ impl PamBackend {
             .spawn(move || run(service, requests, responses, ping))
             .expect("failed to start the PAM thread");
 
-        (PamBackend { to_pam, from_pam, lost: None }, source)
+        (PamBackend { to_pam, from_pam, lost: None, reported_loss: false }, source)
     }
 
     /// Posts a request without waiting for the answer.
@@ -94,6 +102,13 @@ impl PamBackend {
     /// hang looks identical to one.
     fn post(&mut self, request: Request) {
         if self.to_pam.send(request).is_err() {
+            // A failed send and a disconnected receiver are the same
+            // fact — the thread is gone — so they share one "already
+            // said" flag. Reporting it twice would be harmless here but
+            // the point is that it is reported a bounded number of
+            // times, and two mechanisms each counting to one is how
+            // that stops being true.
+            self.reported_loss = true;
             self.lost = Some(Response::Failure {
                 reason: "the authentication service stopped responding".into(),
             });
@@ -125,9 +140,15 @@ impl Backend for PamBackend {
             // Disconnected means the thread is gone for good. Saying so
             // once beats a lock screen that waits forever for an answer
             // nobody is going to give.
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Response::Failure {
-                reason: "the authentication service stopped responding".into(),
-            }),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) if !self.reported_loss => {
+                self.reported_loss = true;
+                Some(Response::Failure {
+                    reason: "the authentication service stopped responding".into(),
+                })
+            }
+            // Already said. Saying it again forever is a spin, not a
+            // report.
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
         }
     }
 }
@@ -377,6 +398,27 @@ mod tests {
         assert!(message.contains("aborted"), "{message}");
     }
 
+    /// A dead thread is reported once, not forever.
+    ///
+    /// `poll` used to answer a disconnected channel with the same
+    /// failure every time, and `Conversation::pump` loops while `poll`
+    /// yields — so a dead PAM thread span the lock screen instead of
+    /// drawing it. The comment always claimed "once"; nothing enforced
+    /// it.
+    #[test]
+    fn a_dead_thread_is_reported_once_and_then_stays_quiet() {
+        let (to_pam, requests) = std::sync::mpsc::channel::<Request>();
+        let (responses, from_pam) = std::sync::mpsc::channel::<Response>();
+        drop(requests);
+        drop(responses);
+
+        let mut backend = PamBackend { to_pam, from_pam, lost: None, reported_loss: false };
+        backend.start("apost");
+        assert!(matches!(backend.poll(), Some(Response::Failure { .. })), "said once");
+        assert!(backend.poll().is_none(), "and then stops, or the host spins");
+        assert!(backend.poll().is_none());
+    }
+
     /// The account check runs *after* the password was accepted, so
     /// none of its failures may talk about the password. Saying
     /// "incorrect password" for a correct one is what sent a real user
@@ -436,7 +478,7 @@ mod tests {
         drop(requests);
         drop(responses);
 
-        let mut backend = PamBackend { to_pam, from_pam, lost: None };
+        let mut backend = PamBackend { to_pam, from_pam, lost: None, reported_loss: false };
         backend.start("apost");
         assert!(
             matches!(backend.poll(), Some(Response::Failure { .. })),

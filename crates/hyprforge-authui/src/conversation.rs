@@ -138,6 +138,12 @@ impl<B: Backend> Backend for &mut B {
     }
 }
 
+/// How many responses one `pump` will apply before giving up.
+///
+/// A real step yields one or two. This exists only so a backend that
+/// answers every poll cannot hang the host — see [`Conversation::pump`].
+const MAX_RESPONSES_PER_PUMP: usize = 64;
+
 /// The conversation, driven by the UI.
 pub struct Conversation<B: Backend> {
     backend: B,
@@ -174,11 +180,32 @@ impl<B: Backend> Conversation<B> {
         // prompt in one go, and leaving the second sitting in the queue
         // would stall the conversation until an unrelated event
         // happened to pump it again.
-        while let Some(response) = self.backend.poll() {
+        //
+        // Bounded, though. A backend whose `poll` never returns `None`
+        // would spin here forever, and both real backends had exactly
+        // that bug: a dead worker thread answered every poll with the
+        // same failure. On a lock screen that is not a busy loop, it is
+        // a screen that never draws again. The contract says `None`
+        // means "not yet" — but the host must not be the thing that
+        // depends on every backend honouring it.
+        for _ in 0..MAX_RESPONSES_PER_PUMP {
+            let Some(response) = self.backend.poll() else {
+                return changed;
+            };
             self.apply(response);
             changed = true;
         }
         changed
+    }
+
+    /// The backend, for what only the host can do with it.
+    ///
+    /// The conversation covers the exchange; it does not cover what
+    /// happens after. A lock screen unlocks a compositor, a greeter asks
+    /// greetd to start a session — neither belongs in a trait about
+    /// asking questions, and both need the concrete backend.
+    pub fn backend(&mut self) -> &mut B {
+        &mut self.backend
     }
 
     pub fn state(&self) -> &State {
@@ -498,6 +525,36 @@ mod tests {
             assert!(!state.is_authenticated(), "{state:?} must not read as success");
         }
         assert!(State::Authenticated.is_authenticated());
+    }
+
+    /// A backend that answers every poll must not hang the host.
+    ///
+    /// This is not hypothetical: both real backends did exactly that.
+    /// `poll` reported a dead worker thread with `Some(Failure)` every
+    /// time it was asked, so `pump` — which loops while `poll` yields —
+    /// span forever. On a lock screen that is a screen which never
+    /// draws again, which is the failure this whole crate is arranged
+    /// to avoid. The backends are fixed; this makes sure the host
+    /// survives one that is not.
+    #[test]
+    fn a_backend_that_never_stops_answering_cannot_hang_the_host() {
+        /// Always has something to say, like a disconnected channel.
+        struct Endless;
+        impl Backend for Endless {
+            fn start(&mut self, _username: &str) {}
+            fn answer(&mut self, _answer: &str) {}
+            fn proceed(&mut self) {}
+            fn poll(&mut self) -> Option<Response> {
+                Some(Response::Failure { reason: "gone".into() })
+            }
+        }
+
+        // Returns at all, which is the property under test — a failure
+        // here is a hang, not an assertion.
+        let mut c = Conversation::new(Endless, "apost");
+        assert!(matches!(c.state(), State::Failed { .. }));
+        assert!(c.pump(), "a yielding backend still reports a change");
+        assert!(matches!(c.state(), State::Failed { .. }));
     }
 
     /// A backend that takes its time — `pam_unix` sleeps about two

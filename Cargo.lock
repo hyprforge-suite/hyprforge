@@ -1302,6 +1302,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "greetd_ipc"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "700d2e5bfc91a042d1d531b46de245085c6a179debedf149aa97c7ca71492078"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "guillotiere"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1462,6 +1473,23 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "toml",
+]
+
+[[package]]
+name = "hyprforge-greet"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "greetd_ipc",
+ "hyprforge-authui",
+ "hyprforge-look",
+ "iced",
+ "iced_widget",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

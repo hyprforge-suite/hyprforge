@@ -1,0 +1,33 @@
+[package]
+name = "hyprforge-greet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hyprforge-greet"
+path = "src/main.rs"
+
+[dependencies]
+hyprforge-authui.workspace = true
+hyprforge-look.workspace = true
+# The same crate greetd itself uses, so the framing and the JSON tags
+# cannot drift from the daemon's. sync-codec rather than tokio: this
+# talks to greetd from a worker thread, exactly as the lock screen talks
+# to PAM, so there is nothing here for an async runtime to do.
+greetd_ipc = { version = "0.10", features = ["sync-codec"] }
+thiserror.workspace = true
+# image support comes via iced_widget rather than iced's own `image`
+# feature: that one pulls the avif encoder (ravif -> rav1e -> profiling
+# 1.0.18), whose macro crate is not published at a matching version, so
+# the workspace stops resolving. Features are additive, so enabling it
+# on iced_widget reaches the same renderer without the encoder.
+iced = { workspace = true, features = ["tokio"] }
+iced_widget = { workspace = true, features = ["image"] }
+chrono.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
