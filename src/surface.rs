@@ -141,6 +141,8 @@ pub struct LockScreen<B: Backend + 'static> {
     /// has none either, and mistaking that for "never locked" would
     /// report the session as open when it is held.
     granted: bool,
+    /// Whether Caps Lock is on, so the screen can say so.
+    caps_lock: bool,
     /// When the lock was requested, so a compositor that never answers
     /// can be reported rather than waited on in silence.
     requested_at: std::time::Instant,
@@ -213,6 +215,7 @@ impl<B: Backend + 'static> LockScreen<B> {
             dirty: true,
             frames: 0,
             granted: false,
+            caps_lock: false,
             requested_at: std::time::Instant::now(),
             warned_about_grant: false,
             renderer: iced_tiny_skia::Renderer::new(
@@ -397,6 +400,7 @@ impl<B: Backend + 'static> LockScreen<B> {
             conversation,
             surfaces,
             frames,
+            caps_lock,
             ..
         } = self;
 
@@ -440,7 +444,13 @@ impl<B: Backend + 'static> LockScreen<B> {
         let size = Size::new(width as f32, height as f32);
 
         let mut ui = UserInterface::<Nothing, iced_widget::Theme, iced_tiny_skia::Renderer>::build(
-            hyprforge_authui::screen::view(state, username, theme, chrono::Local::now()),
+            hyprforge_authui::screen::view(
+                state,
+                username,
+                theme,
+                chrono::Local::now(),
+                *caps_lock,
+            ),
             size,
             std::mem::take(cache),
             renderer,
@@ -645,10 +655,18 @@ impl<B: Backend + 'static> KeyboardHandler for LockScreen<B> {
         _: &QueueHandle<Self>,
         _: &wl_keyboard::WlKeyboard,
         _: u32,
-        _: Modifiers,
+        modifiers: Modifiers,
         _: smithay_client_toolkit::seat::keyboard::RawModifiers,
         _: u32,
     ) {
+        // Caps Lock is the one modifier this screen has to show. Without
+        // it a stuck key looks exactly like a forgotten password, and
+        // where pam_faillock is configured that costs attempts against
+        // the account rather than just the screen.
+        if self.caps_lock != modifiers.caps_lock {
+            self.caps_lock = modifiers.caps_lock;
+            self.mark_dirty();
+        }
     }
 
     /// Held keys repeat, so a held backspace clears a password the way
