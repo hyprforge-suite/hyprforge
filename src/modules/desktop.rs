@@ -1008,7 +1008,11 @@ async fn apply_idle(
 /// is UTC and the schedule is in the user's local time, and the timezone
 /// offset isn't something to reimplement.
 fn minutes_now() -> u32 {
-    let Ok(out) = std::process::Command::new("date").arg("+%H:%M").output() else {
+    let queried = hyprforge_core::command::output(
+        std::process::Command::new("date").arg("+%H:%M"),
+        hyprforge_core::command::TIMEOUT,
+    );
+    let Ok(out) = queried else {
         return 0;
     };
     sunset::parse_time(String::from_utf8_lossy(&out.stdout).trim()).unwrap_or(0)
