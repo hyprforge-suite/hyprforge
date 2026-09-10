@@ -53,6 +53,14 @@ hl.config({
 -- starting the real session — a compositor that outlived its greeter
 -- would leave the machine at a blank screen.
 --
+-- **It waits for the compositor's socket first**, and that is not
+-- belt-and-braces. `hl.exec_cmd` runs while the config is being parsed,
+-- which is before Hyprland accepts clients — so without the wait the
+-- greeter loses a race it did not know it was in, fails to open a
+-- window, and exits. greetd then reports `conversation failed` for a
+-- password nobody was ever asked for, which is a thoroughly misleading
+-- place to start debugging. Reproduced and fixed by exactly this loop.
+--
 -- `--user` must name the account to log in. There is no user picker
 -- yet, so this is where the choice is made.
 --
@@ -60,6 +68,11 @@ hl.config({
 -- machine that uses uwsm that is `uwsm start hyprland.desktop` — the
 -- `.desktop` matters, `uwsm start hyprland` is not the same thing and
 -- fails at the point where there is nothing left to look at.
-hl.exec_cmd(
-    [[sh -c 'hyprforge-greet --user CHANGE_ME --command "uwsm start hyprland.desktop"; hyprctl dispatch exit']]
-)
+hl.exec_cmd([[sh -c '
+    n=0
+    until [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ] || [ $n -ge 100 ]; do
+        n=$((n+1)); sleep 0.1
+    done
+    hyprforge-greet --user apost --command "uwsm start hyprland.desktop"
+    hyprctl dispatch exit
+']])
