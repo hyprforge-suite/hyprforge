@@ -55,6 +55,11 @@ hl.config({
 --
 -- `--user` must name the account to log in. There is no user picker
 -- yet, so this is where the choice is made.
+--
+-- `--command` must be exactly how the session is started by hand. On a
+-- machine that uses uwsm that is `uwsm start hyprland.desktop` — the
+-- `.desktop` matters, `uwsm start hyprland` is not the same thing and
+-- fails at the point where there is nothing left to look at.
 hl.exec_cmd(
-    [[sh -c 'hyprforge-greet --user CHANGE_ME --command "uwsm start hyprland"; hyprctl dispatch exit']]
+    [[sh -c 'hyprforge-greet --user CHANGE_ME --command "uwsm start hyprland.desktop"; hyprctl dispatch exit']]
 )
