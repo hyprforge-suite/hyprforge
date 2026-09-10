@@ -98,12 +98,17 @@ async fn pin_revert_popup() {
     for dispatcher in ["float", "pin"] {
         let call =
             format!("hl.dsp.window.{dispatcher}({{ action = \"set\", window = {selector} }})");
-        match tokio::process::Command::new("hyprctl")
-            .arg("dispatch")
-            .arg(&call)
-            .output()
-            .await
-        {
+        let dispatched = tokio::time::timeout(
+            hyprforge_core::command::TIMEOUT,
+            tokio::process::Command::new("hyprctl").arg("dispatch").arg(&call).output(),
+        )
+        .await;
+        match dispatched.unwrap_or_else(|_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "hyprctl did not answer",
+            ))
+        }) {
             Ok(out) => {
                 // hyprctl exits 0 even when the Lua call itself errored, so
                 // the response body is what actually reports success.

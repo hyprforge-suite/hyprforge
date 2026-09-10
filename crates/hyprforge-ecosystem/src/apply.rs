@@ -69,17 +69,19 @@ fn write_and_source(generated: &Path, target: &Path, contents: &str) -> Result<(
 }
 
 fn running(name: &str) -> bool {
-    Command::new("pgrep")
-        .args(["-x", name])
-        .output()
+    hyprforge_core::command::output(
+        Command::new("pgrep").args(["-x", name]),
+        hyprforge_core::command::TIMEOUT,
+    )
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
 fn hyprctl(args: &[&str]) -> bool {
-    Command::new("hyprctl")
-        .args(args)
-        .output()
+    hyprforge_core::command::output(
+        Command::new("hyprctl").args(args),
+        hyprforge_core::command::TIMEOUT,
+    )
         .map(|o| {
             let body = String::from_utf8_lossy(&o.stdout).to_lowercase();
             o.status.success() && !body.contains("error") && !body.contains("invalid")
@@ -215,7 +217,12 @@ pub fn idle(
 /// user's Hyprland config rather than by systemd — there is no unit to
 /// restart. Detached so it outlives the settings app.
 pub fn restart_idle() -> Result<(), std::io::Error> {
-    let _ = Command::new("pkill").args(["-x", "hypridle"]).status();
+    // Bounded like every other subprocess: a pkill that never returns
+    // would hold up restarting the daemon it was clearing the way for.
+    let _ = hyprforge_core::command::output(
+        Command::new("pkill").args(["-x", "hypridle"]),
+        hyprforge_core::command::TIMEOUT,
+    );
     Command::new("hypridle")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

@@ -1,4 +1,5 @@
 pub mod apply_lua;
+pub mod command;
 pub mod geometry;
 pub mod hlconfig;
 pub mod hyprlang;

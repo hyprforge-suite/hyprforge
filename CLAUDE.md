@@ -36,6 +36,13 @@ parse is a problem the user has to hear about. Collapsing the two once cost a
 user 37 hand-written binds. `hyprforge-core::hlconfig::storage` documents the
 distinction; `look::resolve` follows it by warning and carrying on.
 
+**Never wait on another process without a bound.** `Command::output()` waits
+forever, and every external program here — `hyprctl`, `gsettings`, `fc-list` —
+can stop answering. Use `hyprforge_core::command::output(.., command::TIMEOUT)`,
+or `tokio::time::timeout` in async code. A timeout arrives as
+`io::ErrorKind::TimedOut`, so callers that already handle a failed spawn need no
+new branch: not answering and not starting are the same problem from their side.
+
 **`pkill -f <pattern>` matches the shell running it**, because the pattern
 appears in that shell's own command line. It kills the shell and exits 144. Use
 `pkill -x <name>` or a literal PID.

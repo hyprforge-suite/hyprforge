@@ -15,7 +15,11 @@ use std::process::Command;
 /// An empty list means the compositor couldn't be read, which a caller
 /// must treat as "can't offer a list" rather than "no monitors".
 pub fn connector_names() -> Vec<String> {
-    let Ok(out) = Command::new("hyprctl").args(["monitors", "-j"]).output() else {
+    let queried = crate::command::output(
+        Command::new("hyprctl").args(["monitors", "-j"]),
+        crate::command::TIMEOUT,
+    );
+    let Ok(out) = queried else {
         return Vec::new();
     };
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {

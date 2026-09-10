@@ -24,6 +24,7 @@
 use hyprforge_core::lua::lua_string;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use hyprforge_core::command;
 use std::process::Command;
 
 /// Hyprland's own bookkeeping, not something a user configures.
@@ -227,9 +228,10 @@ pub enum LiveError {
 /// Every animation leaf and every defined curve, from the running
 /// compositor.
 pub fn live() -> Result<(Vec<LiveAnimation>, Vec<Curve>), LiveError> {
-    let out = Command::new("hyprctl")
-        .args(["animations", "-j"])
-        .output()
+    let out = command::output(
+        Command::new("hyprctl").args(["animations", "-j"]),
+        command::TIMEOUT,
+    )
         .map_err(LiveError::Hyprctl)?;
     let body = String::from_utf8_lossy(&out.stdout).to_string();
     if body.trim().is_empty() {

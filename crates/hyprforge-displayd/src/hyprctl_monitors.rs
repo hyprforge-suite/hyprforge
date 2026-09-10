@@ -29,12 +29,15 @@ struct HyprctlMonitor {
 /// Connector name → Hyprland's own description string for it, as
 /// `hyprctl monitors -j` reports right now. Empty on any failure.
 pub async fn connector_descriptions() -> HashMap<String, String> {
-    let Ok(output) = tokio::process::Command::new("hyprctl")
-        .arg("monitors")
-        .arg("-j")
-        .output()
-        .await
-    else {
+    // Bounded, like every other subprocess in this project: a wedged
+    // compositor must not hold up the daemon that is trying to describe
+    // its monitors.
+    let queried = tokio::time::timeout(
+        hyprforge_core::command::TIMEOUT,
+        tokio::process::Command::new("hyprctl").arg("monitors").arg("-j").output(),
+    )
+    .await;
+    let Ok(Ok(output)) = queried else {
         return HashMap::new();
     };
     if !output.status.success() {

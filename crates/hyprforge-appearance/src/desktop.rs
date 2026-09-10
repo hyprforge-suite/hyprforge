@@ -25,6 +25,7 @@
 //! well-understood dependency-free call, and a missing binary degrades to
 //! "this section is unavailable" instead of failing to build.
 
+use hyprforge_core::command;
 use std::process::Command;
 
 /// The GNOME interface schema. Qt apps read it too via qt5ct/qt6ct
@@ -224,10 +225,11 @@ const TEXT_SCALING: &str = "text-scaling-factor";
 
 /// One key's current value, or `None` if this desktop's schema lacks it.
 pub fn read(key: &str) -> Result<Option<String>, DesktopError> {
-    let out = Command::new("gsettings")
-        .args(["get", SCHEMA, key])
-        .output()
-        .map_err(DesktopError::Spawn)?;
+    let out = command::output(
+        Command::new("gsettings").args(["get", SCHEMA, key]),
+        command::TIMEOUT,
+    )
+    .map_err(DesktopError::Spawn)?;
     if !out.status.success() {
         return Ok(None);
     }
@@ -244,10 +246,11 @@ pub fn read(key: &str) -> Result<Option<String>, DesktopError> {
 /// needs X to be true regardless.
 pub fn set(key: &str, value: &str) -> Result<Option<String>, DesktopError> {
     let previous = read(key)?;
-    let out = Command::new("gsettings")
-        .args(["set", SCHEMA, key, value])
-        .output()
-        .map_err(DesktopError::Spawn)?;
+    let out = command::output(
+        Command::new("gsettings").args(["set", SCHEMA, key, value]),
+        command::TIMEOUT,
+    )
+    .map_err(DesktopError::Spawn)?;
     if !out.status.success() {
         return Err(DesktopError::Refused {
             key: key.to_string(),

@@ -38,6 +38,7 @@
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use hyprforge_core::command;
 use std::process::Command;
 
 /// A directory that is a pointer to the real theme rather than a theme.
@@ -150,7 +151,8 @@ pub fn cursor_themes() -> Vec<String> {
 /// fontconfig isn't available, which the caller must treat as "can't
 /// offer a list" rather than "no fonts installed".
 pub fn font_families() -> Vec<String> {
-    let Ok(out) = Command::new("fc-list").args([":", "family"]).output() else {
+    let fc = command::output(Command::new("fc-list").args([":", "family"]), command::TIMEOUT);
+    let Ok(out) = fc else {
         return Vec::new();
     };
     let mut found = BTreeSet::new();

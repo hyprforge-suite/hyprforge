@@ -94,10 +94,10 @@ impl LiveBind {
 }
 
 pub fn list_binds() -> Result<Vec<LiveBind>, BindsError> {
-    let out = Command::new("hyprctl")
-        .arg("binds")
-        .arg("-j")
-        .output()
+    let out = hyprforge_core::command::output(
+        Command::new("hyprctl").arg("binds").arg("-j"),
+        hyprforge_core::command::TIMEOUT,
+    )
         .map_err(BindsError::Spawn)?;
     if !out.status.success() {
         return Err(BindsError::Failed {

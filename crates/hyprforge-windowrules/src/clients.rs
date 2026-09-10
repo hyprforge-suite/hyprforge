@@ -90,10 +90,10 @@ impl Client {
 /// neither can be pointed at, and a rule matching an empty class would match
 /// nothing.
 pub fn list_clients() -> Result<Vec<Client>, ClientsError> {
-    let out = Command::new("hyprctl")
-        .arg("clients")
-        .arg("-j")
-        .output()
+    let out = hyprforge_core::command::output(
+        Command::new("hyprctl").arg("clients").arg("-j"),
+        hyprforge_core::command::TIMEOUT,
+    )
         .map_err(ClientsError::Spawn)?;
 
     if !out.status.success() {

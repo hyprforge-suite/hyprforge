@@ -58,10 +58,10 @@ impl Monitor {
 }
 
 pub fn list_monitors() -> Result<Vec<Monitor>, MonitorsError> {
-    let out = Command::new("hyprctl")
-        .arg("monitors")
-        .arg("-j")
-        .output()
+    let out = hyprforge_core::command::output(
+        Command::new("hyprctl").arg("monitors").arg("-j"),
+        hyprforge_core::command::TIMEOUT,
+    )
         .map_err(MonitorsError::Spawn)?;
     if !out.status.success() {
         return Err(MonitorsError::Failed {

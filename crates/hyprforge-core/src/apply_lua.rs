@@ -84,9 +84,10 @@ pub fn apply(file: GeneratedFile<'_>) -> Result<(), ApplyError> {
         source,
     })?;
 
-    let output = Command::new("hyprctl")
-        .arg("reload")
-        .output()
+    let output = crate::command::output(
+        Command::new("hyprctl").arg("reload"),
+        crate::command::TIMEOUT,
+    )
         .map_err(ApplyError::Spawn)?;
 
     let rejected = |details: String| ApplyError::ConfigRejected {
@@ -143,7 +144,10 @@ fn last_good(path: &Path, empty: &str) -> String {
 /// useful of the two.
 fn roll_back(path: &Path, previous: &str, error: ApplyError) -> ApplyError {
     if write_atomic(path, previous).is_ok() {
-        let _ = Command::new("hyprctl").arg("reload").output();
+        let _ = crate::command::output(
+            Command::new("hyprctl").arg("reload"),
+            crate::command::TIMEOUT,
+        );
     }
     error
 }
@@ -171,7 +175,11 @@ fn error_in_body(body: &str) -> Option<String> {
 /// already reports that case, and inventing a second failure here would turn
 /// "not running Hyprland" into a save failure.
 fn config_errors() -> Vec<String> {
-    let Ok(out) = Command::new("hyprctl").arg("configerrors").output() else {
+    let queried = crate::command::output(
+        Command::new("hyprctl").arg("configerrors"),
+        crate::command::TIMEOUT,
+    );
+    let Ok(out) = queried else {
         return Vec::new();
     };
     String::from_utf8_lossy(&out.stdout)

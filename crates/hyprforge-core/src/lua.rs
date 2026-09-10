@@ -129,7 +129,11 @@ mod tests {
     fn lua_eval_string(quoted: &str) -> Option<String> {
         use std::process::Command;
         let script = format!("io.write({quoted})");
-        let out = match Command::new("lua").arg("-e").arg(&script).output() {
+        let evaluated = crate::command::output(
+            Command::new("lua").arg("-e").arg(&script),
+            crate::command::TIMEOUT,
+        );
+        let out = match evaluated {
             Ok(out) => out,
             Err(_) => return None,
         };

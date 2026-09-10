@@ -70,6 +70,25 @@ greeter runs as its own user and a home directory is `drwx------`: it cannot
 traverse into `$HOME` at all, so continuity across the login boundary has to be
 an export rather than a shared path.
 
+## Nothing waits on another process forever
+
+`Command::output()` waits indefinitely, and every external program here —
+`hyprctl`, `gsettings`, `fc-list`, `lua` — is one that can stop answering: a
+wedged compositor, a hung dconf, a home directory on a stalled mount. All twenty
+call sites go through `hyprforge_core::command::output`, which kills the child
+and reports `io::ErrorKind::TimedOut` after five seconds; the async ones use
+`tokio::time::timeout`.
+
+This is the same category of mistake as waiting forever for a compositor to
+grant a session lock, which is what put a recovery screen in front of the lock
+screen for five seconds. Unbounded waits on another process are worth treating
+as a class rather than one at a time.
+
+The child's pipes are drained on their own threads rather than after it exits.
+A pipe holds about 64KB before it blocks, and `fc-list` on a machine with many
+fonts prints more than that, so reading only after exit would deadlock — the
+child waiting for the pipe to drain, the parent waiting for the child.
+
 ## Checking everything works
 
 ```

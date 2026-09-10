@@ -90,11 +90,10 @@ fn run_hyprctl(catalog: &Catalog) -> Result<String, ImportError> {
         .map(|s| format!("getoption {}", s.key))
         .collect::<Vec<_>>()
         .join(";");
-    let out = Command::new("hyprctl")
-        .arg("-j")
-        .arg("--batch")
-        .arg(batch)
-        .output()
+    let out = crate::command::output(
+        Command::new("hyprctl").arg("-j").arg("--batch").arg(batch),
+        crate::command::TIMEOUT,
+    )
         .map_err(ImportError::Hyprctl)?;
     let body = String::from_utf8_lossy(&out.stdout).to_string();
     if body.trim().is_empty() {
