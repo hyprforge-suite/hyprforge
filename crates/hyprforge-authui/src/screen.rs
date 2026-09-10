@@ -20,7 +20,7 @@ use crate::conversation::State;
 use chrono::{DateTime, Local};
 use hyprforge_look::Theme;
 use hyprforge_ui::color::to_iced;
-use iced_runtime::core::{Element, Length, Padding};
+use iced_runtime::core::{Element, Font, Length, Padding};
 use iced_widget::{column, container, row, text, Space};
 
 /// How wide the prompt panel is, and how big the dots are.
@@ -30,6 +30,59 @@ const DOT_GAP: f32 = 10.0;
 /// Beyond this many characters the dots stop being countable anyway, and
 /// a row that grows without limit would push the panel apart.
 const MAX_DOTS: usize = 24;
+
+/// The theme, with a wallpaper the renderer cannot actually draw
+/// removed.
+///
+/// This is not tidiness. `iced_tiny_skia` 0.14 caches a failed image
+/// load as "no entry", and its *next* attempt to draw the same handle
+/// hits an `expect` and panics. On a lock screen that is the one failure
+/// with no recovery: the compositor keeps the session locked and the
+/// process that could have unlocked it is gone.
+///
+/// So the path is checked before it can reach the renderer. Only the
+/// header is read — enough to know whether there is a decoder for this
+/// format and whether the file is really an image — so the cost does not
+/// scale with the size of the picture.
+pub fn with_drawable_wallpaper(mut theme: Theme) -> Theme {
+    let Some(path) = theme.wallpaper.clone() else {
+        return theme;
+    };
+    let readable = image::ImageReader::open(&path)
+        .and_then(|reader| reader.with_guessed_format())
+        .ok()
+        .and_then(|reader| reader.into_dimensions().ok())
+        .is_some_and(|(w, h)| w > 0 && h > 0);
+
+    if !readable {
+        theme.wallpaper = None;
+    }
+    theme
+}
+
+/// The theme's font, as iced needs it.
+///
+/// iced wants a `&'static str` for a family name, and the theme's font
+/// comes from gsettings at runtime, so the name is leaked. That is why
+/// this is a function with a cache rather than a conversion: it leaks at
+/// most once per process, and a lock screen outlives everything else in
+/// its own anyway.
+///
+/// An empty or unresolvable family falls back to iced's default rather
+/// than failing. A screen in the wrong font is a cosmetic problem; a
+/// screen that refused to start over one would be a machine nobody can
+/// get into.
+pub fn font(theme: &Theme) -> Font {
+    static FAMILY: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    let family = FAMILY.get_or_init(|| {
+        let name = theme.font.trim();
+        (!name.is_empty()).then(|| &*Box::leak(name.to_owned().into_boxed_str()))
+    });
+    match family {
+        Some(name) => Font::with_name(name),
+        None => Font::DEFAULT,
+    }
+}
 
 /// The whole screen, for a conversation in `state`.
 ///
@@ -43,7 +96,9 @@ pub fn view<'a, Message, Renderer>(
 ) -> Element<'a, Message, iced_widget::Theme, Renderer>
 where
     Message: 'a,
-    Renderer: iced_runtime::core::text::Renderer<Font = iced_runtime::core::Font> + 'a,
+    Renderer: iced_runtime::core::text::Renderer<Font = iced_runtime::core::Font>
+        + iced_runtime::core::image::Renderer<Handle = iced_runtime::core::image::Handle>
+        + 'a,
 {
     let foreground = to_iced(theme.foreground);
     let dim = to_iced(theme.surfaces.text_dim);
@@ -79,16 +134,48 @@ where
         ..Default::default()
     });
 
-    container(column![clock, Space::new().height(48), panel].spacing(0))
+    let content = container(column![clock, Space::new().height(48), panel].spacing(0))
         .width(Length::Fill)
         .height(Length::Fill)
         .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .style(move |_: &iced_widget::Theme| container::Style {
-            background: Some(to_iced(theme.background).into()),
-            ..Default::default()
-        })
-        .into()
+        .center_y(Length::Fill);
+
+    match &theme.wallpaper {
+        Some(path) => iced_widget::stack![
+            // `Cover` rather than `Contain`: letterbox bars around a lock
+            // screen look like a rendering fault, and the wallpaper is
+            // backdrop rather than something being examined.
+            iced_widget::image(path)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .content_fit(iced_runtime::core::ContentFit::Cover),
+            // Dimming is what keeps the prompt readable over an
+            // arbitrary photograph. Without it the whole screen depends
+            // on the user having chosen a dark wallpaper.
+            container(Space::new().width(Length::Fill).height(Length::Fill)).style(move |_: &iced_widget::Theme| {
+                container::Style {
+                    background: Some(
+                        iced_runtime::core::Color {
+                            a: theme.dim.clamp(0.0, 1.0),
+                            ..to_iced(theme.background)
+                        }
+                        .into(),
+                    ),
+                    ..Default::default()
+                }
+            }),
+            content,
+        ]
+        .into(),
+        // No wallpaper is not a failure — it is the normal case on a
+        // fresh install, and the flat background is legible on its own.
+        None => content
+            .style(move |_: &iced_widget::Theme| container::Style {
+                background: Some(to_iced(theme.background).into()),
+                ..Default::default()
+            })
+            .into(),
+    }
 }
 
 /// What is being asked, in PAM's own words.
@@ -224,6 +311,45 @@ mod tests {
             assert!(!prompt_label(&state).contains(secret), "{state:?}");
             assert!(!status_text(&state).0.contains(secret), "{state:?}");
         }
+    }
+
+    /// A wallpaper the renderer cannot draw must never reach it.
+    ///
+    /// iced_tiny_skia 0.14 caches a failed load as "no entry" and then
+    /// panics on the next draw of the same handle. On a lock screen that
+    /// is unrecoverable, so anything that is not a decodable image is
+    /// dropped here and the screen falls back to its flat background.
+    #[test]
+    fn a_wallpaper_the_renderer_cannot_draw_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let not_an_image = dir.path().join("notes.png");
+        std::fs::write(&not_an_image, b"this is not a PNG").unwrap();
+        let missing = dir.path().join("gone.png");
+
+        for path in [not_an_image, missing, dir.path().to_path_buf()] {
+            let theme = with_drawable_wallpaper(Theme {
+                wallpaper: Some(path.clone()),
+                ..Theme::default()
+            });
+            assert_eq!(theme.wallpaper, None, "{}", path.display());
+        }
+    }
+
+    /// A real image survives, or the wallpaper feature does nothing at
+    /// all and the guard above would be indistinguishable from a bug.
+    #[test]
+    fn a_real_image_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wall.png");
+        let pixel = image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255]));
+        pixel.save(&path).unwrap();
+
+        let theme = with_drawable_wallpaper(Theme {
+            wallpaper: Some(path.clone()),
+            ..Theme::default()
+        });
+        assert_eq!(theme.wallpaper, Some(path));
     }
 
     /// One dot per character, so the count is the only feedback — and it

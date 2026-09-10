@@ -170,6 +170,7 @@ impl<B: Backend + 'static> LockScreen<B> {
     ) -> Result<Outcome, LockError> {
         let username = username.into();
         let theme_font_size = theme.font_size;
+        let screen_font = hyprforge_authui::screen::font(&theme);
         let mut pending = Some(backend);
         let (globals, mut queue) = registry_queue_init(&connection)?;
         let qh = queue.handle();
@@ -198,7 +199,7 @@ impl<B: Backend + 'static> LockScreen<B> {
             frames: 0,
             granted: false,
             renderer: iced_tiny_skia::Renderer::new(
-                iced_runtime::core::Font::DEFAULT,
+                screen_font,
                 iced_runtime::core::Pixels(theme_font_size),
             ),
             cache: Cache::default(),

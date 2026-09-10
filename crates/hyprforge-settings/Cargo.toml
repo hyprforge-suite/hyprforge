@@ -11,6 +11,7 @@ hyprforge-windowrules.workspace = true
 hyprforge-input.workspace = true
 hyprforge-appearance.workspace = true
 hyprforge-look.workspace = true
+hyprforge-paths.workspace = true
 hyprforge-ecosystem.workspace = true
 hyprforge-session.workspace = true
 hyprforge-system.workspace = true

@@ -2,7 +2,7 @@
 //! without locking anything.
 use hyprforge_authui::conversation::{Prompt, State};
 use hyprforge_look::Theme;
-use iced_runtime::core::{Color, Font, Pixels, Rectangle, Size, mouse, renderer::Style};
+use iced_runtime::core::{Color, Pixels, Rectangle, Size, mouse, renderer::Style};
 use iced_runtime::user_interface::{Cache, UserInterface};
 use iced_tiny_skia::Renderer;
 use iced_tiny_skia::graphics::Viewport;
@@ -19,7 +19,7 @@ fn out_dir() -> std::path::PathBuf {
 
 fn shot(name: &str, state: State, theme: &Theme) {
     let (w, h) = (900u32, 620u32);
-    let mut renderer = Renderer::new(Font::DEFAULT, Pixels(theme.font_size));
+    let mut renderer = Renderer::new(hyprforge_authui::screen::font(theme), Pixels(theme.font_size));
     let now = chrono::Local::now();
 
     let view = hyprforge_authui::screen::view::<Message, Renderer>(&state, "apost", theme, now);
@@ -57,7 +57,13 @@ fn shot(name: &str, state: State, theme: &Theme) {
 }
 
 fn main() {
-    let theme = Theme::default();
+    // A wallpaper if one was named, so the dim and the fit can be seen.
+    let theme = Theme {
+        wallpaper: std::env::var_os("PREVIEW_WALLPAPER").map(std::path::PathBuf::from),
+        ..Theme::default()
+    };
+    let theme = hyprforge_authui::screen::with_drawable_wallpaper(theme);
+    println!("wallpaper in use: {:?}", theme.wallpaper);
     shot("auth-asking.png", State::Asking { prompt: Prompt::secret("Password:"), entered: "hunter2!".into() }, &theme);
     shot("auth-failed.png", State::Failed { reason: "Incorrect password".into() }, &theme);
     shot("auth-working.png", State::Working, &theme);

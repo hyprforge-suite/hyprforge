@@ -295,10 +295,7 @@ impl AppearanceModule {
         // A failure here does not fail the save: the appearance settings
         // *are* saved by this point, and reporting otherwise would send
         // the user to fix something that already worked.
-        if let Err(e) = hyprforge_appearance::look::publish(&hyprforge_appearance::look::resolve())
-        {
-            tracing::warn!(error = %e, "couldn't publish the look for the lock screen");
-        }
+        crate::look::republish();
         Ok(())
     }
 

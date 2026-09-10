@@ -174,6 +174,35 @@ pub fn expand_tilde(path: &str) -> String {
     format!("{}{}", home.to_string_lossy(), rest)
 }
 
+/// The one image to show behind the lock screen and the greeter.
+///
+/// Those screens have a single background, while this list has one entry
+/// per monitor, so something has to be chosen. The fallback entry — the
+/// one with no monitor name, which hyprpaper applies to every output
+/// that has no block of its own — is the closest thing to "the
+/// desktop's wallpaper", so it wins. Otherwise the first entry, which is
+/// the one the user added first.
+///
+/// A directory is skipped rather than resolved. A directory means the
+/// wallpaper is cycling, and picking one image out of a rotation would
+/// show something that is probably not what is on screen — a flat
+/// background is the honest answer.
+///
+/// `None` means draw the theme's flat background, which is not a
+/// failure: it is the normal case on a fresh install.
+pub fn for_auth_screen(settings: &Settings) -> Option<std::path::PathBuf> {
+    let usable = |entry: &&Entry| {
+        let path = std::path::PathBuf::from(expand_tilde(&entry.path));
+        path.is_file().then_some(path)
+    };
+    settings
+        .entries
+        .iter()
+        .find(|e| e.is_fallback())
+        .and_then(|e| usable(&e))
+        .or_else(|| settings.entries.iter().find_map(|e| usable(&e)))
+}
+
 /// Images and folders worth offering as wallpapers.
 ///
 /// **Loose image files only come from directories that are *about*
@@ -504,5 +533,84 @@ mod tests {
         s.entries.push(entry("eDP-2", "/a.png"));
         s.entries.push(entry("", "/b.png"));
         assert_eq!(generate(&s), generate(&s));
+    }
+}
+
+
+#[cfg(test)]
+mod auth_screen_wallpaper {
+    use super::*;
+
+    fn entry(monitor: &str, path: &std::path::Path) -> Entry {
+        Entry {
+            monitor: monitor.into(),
+            path: path.display().to_string(),
+            ..Entry::default()
+        }
+    }
+
+    /// The fallback entry is the one hyprpaper applies to every output
+    /// without a block of its own, so it is the closest thing this list
+    /// has to "the desktop's wallpaper".
+    #[test]
+    fn the_every_monitor_entry_wins_over_a_specific_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (specific, every) = (dir.path().join("a.png"), dir.path().join("b.png"));
+        std::fs::write(&specific, b"x").unwrap();
+        std::fs::write(&every, b"x").unwrap();
+
+        let settings = Settings {
+            entries: vec![entry("eDP-2", &specific), entry("", &every)],
+            ..Settings::default()
+        };
+        assert_eq!(for_auth_screen(&settings), Some(every));
+    }
+
+    /// With only per-monitor entries there is no right answer, so it
+    /// takes the first — the one the user added first.
+    #[test]
+    fn without_a_fallback_the_first_entry_is_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("a.png");
+        std::fs::write(&first, b"x").unwrap();
+        let settings = Settings {
+            entries: vec![entry("eDP-2", &first), entry("HDMI-A-1", &dir.path().join("b.png"))],
+            ..Settings::default()
+        };
+        assert_eq!(for_auth_screen(&settings), Some(first));
+    }
+
+    /// A directory means the wallpaper is cycling. Picking one image out
+    /// of a rotation would show something that is probably not what is
+    /// on screen, and a flat background is the honest answer.
+    #[test]
+    fn a_cycling_directory_is_skipped_rather_than_resolved() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = Settings {
+            entries: vec![entry("", dir.path())],
+            ..Settings::default()
+        };
+        assert_eq!(for_auth_screen(&settings), None);
+    }
+
+    /// A path that no longer exists must not reach the greeter, which
+    /// would then show nothing and invite someone to debug a permissions
+    /// problem that isn't there.
+    #[test]
+    fn a_missing_file_falls_through_to_the_next_usable_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.png");
+        std::fs::write(&real, b"x").unwrap();
+        let settings = Settings {
+            entries: vec![entry("", &dir.path().join("gone.png")), entry("eDP-2", &real)],
+            ..Settings::default()
+        };
+        assert_eq!(for_auth_screen(&settings), Some(real));
+    }
+
+    /// No wallpaper configured is the normal case on a fresh install.
+    #[test]
+    fn nothing_configured_means_nothing_to_show() {
+        assert_eq!(for_auth_screen(&Settings::default()), None);
     }
 }
