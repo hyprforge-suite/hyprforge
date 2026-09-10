@@ -68,6 +68,13 @@ at three attempts, so two typos lock the *account*, which is far worse than a
 locked screen. `--type-in <wrong>` exercises the failure path against the fake
 backend instead.
 
+**The way into a greeter is its compositor, not its code.** Every keybind the
+compositor running the greeter has belongs to whoever is standing at the keyboard,
+authenticated or not — so `SUPER + Q -> terminal` is a shell as the greeter user
+without logging in. `crates/hyprforge-greet/config/hyprland-greeter.lua` has no
+binds at all, deliberately, and adding a "harmless" one breaks that property. No
+amount of care in the greeter program can compensate.
+
 **Run the Settings app against an isolated `XDG_CONFIG_HOME`.** It writes real
 config, and one of its jobs is editing `hyprland.lua`.
 

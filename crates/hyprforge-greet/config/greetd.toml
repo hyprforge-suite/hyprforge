@@ -1,0 +1,22 @@
+# greetd's own configuration. Install as /etc/greetd/config.toml.
+#
+# A template, not a drop-in: `vt`, the username and the session command
+# all have to match the machine. Read it before installing it — getting
+# this wrong means a login screen that does not appear, on the VT you
+# normally log in through.
+
+[terminal]
+# The VT the greeter takes over. On a machine that currently logs in at
+# a console, this is the VT that stops being a console.
+vt = 1
+
+[default_session]
+# Hyprland, configured to have no keybinds, running the greeter and
+# exiting with it. See hyprland-greeter.lua for why the config matters
+# more than the greeter does.
+command = "Hyprland --config /etc/greetd/hyprland-greeter.lua"
+
+# The greeter runs as its own unprivileged user — greetd's packaging
+# creates it. This is why the theme is an export: `greeter` cannot
+# traverse into a home directory to read the real one.
+user = "greeter"
