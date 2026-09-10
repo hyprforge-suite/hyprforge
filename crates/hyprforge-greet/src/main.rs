@@ -66,6 +66,15 @@ enum Message {
 
 struct Greeter {
     conversation: Conversation<GreetdBackend>,
+    /// Whether a frame was ever drawn.
+    ///
+    /// A greeter that exits without having shown anything has not
+    /// "finished"; it has failed, and saying so is the difference
+    /// between a one-line diagnosis and an afternoon. This one exited
+    /// with status 0 and printed nothing when it lost a startup race
+    /// with the compositor, so greetd reported `conversation failed`
+    /// for a password nobody had been asked for.
+    drew: std::rc::Rc<std::cell::Cell<bool>>,
     #[cfg(debug_assertions)]
     type_in: Option<String>,
     theme: Theme,
@@ -143,6 +152,7 @@ impl Greeter {
     }
 
     fn view(&self) -> Element<'_, Message, iced_widget::Theme, iced::Renderer> {
+        self.drew.set(true);
         // Caps Lock is passed as false because iced's modifier state does
         // not carry it. The lock screen shows it, and this should too —
         // it is the difference between a stuck key and an apparently
@@ -210,8 +220,10 @@ fn main() -> iced::Result {
     // A single-window application boots exactly once; if that ever stops
     // being true, this will say so loudly rather than silently open a
     // second login screen with no way to authenticate.
+    let drew = std::rc::Rc::new(std::cell::Cell::new(false));
     let once = std::cell::RefCell::new(Some(Greeter {
         conversation: Conversation::new(backend, args.user.clone()),
+        drew: std::rc::Rc::clone(&drew),
         #[cfg(debug_assertions)]
         type_in: args.type_in.clone(),
         theme,
@@ -238,5 +250,19 @@ fn main() -> iced::Result {
         decorations: false,
         ..iced::window::Settings::default()
     })
-    .run()
+    .run()?;
+
+    // Ending without ever having drawn is a failure, whatever the event
+    // loop thought. Reporting it as success is what made a lost startup
+    // race look like a rejected password.
+    if !drew.get() {
+        eprintln!(
+            "the greeter exited without ever drawing — it could not open a window on \
+             WAYLAND_DISPLAY={}. If it was started alongside the compositor, it has to \
+             wait for the compositor's socket first; see config/hyprland-greeter.lua.",
+            std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "(unset)".into())
+        );
+        std::process::exit(1);
+    }
+    Ok(())
 }

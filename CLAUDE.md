@@ -47,6 +47,12 @@ new branch: not answering and not starting are the same problem from their side.
 appears in that shell's own command line. It kills the shell and exits 144. Use
 `pkill -x <name>` or a literal PID.
 
+**`hl.exec_cmd` runs while the config is being parsed**, which is before Hyprland
+accepts clients. Anything it launches that needs a Wayland connection has to wait
+for `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY` to exist first. Losing that race made the
+greeter exit silently with status 0, which greetd then reported as
+`conversation failed` for a password nobody had been asked for.
+
 **Find a Hyprland instance with `hyprctl instances -j`**, keyed on `wl_socket`.
 Picking the newest directory under `/run/user/*/hypr/` can hand you the real
 session, because it writes its log continuously. Also: `hyprctl keyword` does
