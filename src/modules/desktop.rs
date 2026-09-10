@@ -191,6 +191,12 @@ impl DesktopModule {
             Tab::NightLight => hyprforge_ecosystem::storage::save(&sunset_toml(), &self.sunset),
             Tab::Idle => hyprforge_ecosystem::storage::save(&idle_toml(), &self.idle),
         };
+        // The wallpaper is also the auth screens' background, so saving
+        // it has to reach them too. Doing this only in Appearance is how
+        // the lock screen ends up showing last week's wallpaper.
+        if result.is_ok() && tab == Tab::Wallpaper {
+            crate::look::republish();
+        }
         if let Err(e) = result {
             self.error = Some(e.to_string());
             return Task::none();
