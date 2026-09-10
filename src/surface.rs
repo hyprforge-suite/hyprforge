@@ -67,6 +67,17 @@ const PULSE: std::time::Duration = std::time::Duration::from_millis(100);
 /// from being visibly wrong.
 const CLOCK_TICK: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// How long to wait for the compositor to answer the lock request before
+/// saying out loud that it hasn't.
+///
+/// Deliberately a warning and not a timeout. If this process gave up and
+/// exited, the lock request would still be outstanding, and a compositor
+/// that answered a moment later would lock the session with no client
+/// left to draw on it or unlock it — trading a rare hang for a
+/// guaranteed lockout. So it complains and keeps waiting, which at least
+/// makes a silent hang diagnosable instead of invisible.
+const GRANT_WARNING: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Why the lock screen stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -130,6 +141,10 @@ pub struct LockScreen<B: Backend + 'static> {
     /// has none either, and mistaking that for "never locked" would
     /// report the session as open when it is held.
     granted: bool,
+    /// When the lock was requested, so a compositor that never answers
+    /// can be reported rather than waited on in silence.
+    requested_at: std::time::Instant,
+    warned_about_grant: bool,
     /// Kept across frames so glyph rasterisation and layout are not
     /// redone from scratch every repaint.
     renderer: iced_tiny_skia::Renderer,
@@ -198,6 +213,8 @@ impl<B: Backend + 'static> LockScreen<B> {
             dirty: true,
             frames: 0,
             granted: false,
+            requested_at: std::time::Instant::now(),
+            warned_about_grant: false,
             renderer: iced_tiny_skia::Renderer::new(
                 screen_font,
                 iced_runtime::core::Pixels(theme_font_size),
@@ -248,6 +265,21 @@ impl<B: Backend + 'static> LockScreen<B> {
         let pulse = calloop::timer::Timer::from_duration(PULSE);
         handle
             .insert_source(pulse, |_, _, screen: &mut LockScreen<B>| {
+                // A lock that was requested and never granted means the
+                // session is still open while something upstream
+                // believes it is locked. Nothing here can fix that, but
+                // it must not be invisible.
+                if !screen.granted
+                    && !screen.warned_about_grant
+                    && screen.requested_at.elapsed() >= GRANT_WARNING
+                {
+                    screen.warned_about_grant = true;
+                    eprintln!(
+                        "the compositor still hasn't granted the lock after {}s — \
+                         the session is NOT locked yet",
+                        GRANT_WARNING.as_secs()
+                    );
+                }
                 screen.dirty = true;
                 // Fast while the authenticator is busy so the screen is
                 // visibly alive through pam_unix's deliberate pause;

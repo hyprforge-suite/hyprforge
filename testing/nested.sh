@@ -18,8 +18,14 @@
 #
 # Usage, from the repo root:
 #   ./crates/hyprforge-lock/testing/nested.sh
-#   WAYLAND_DISPLAY=wayland-2 ./target/debug/hyprforge-lock \
-#       --display wayland-2 --fake-password hunter2 --type-in hunter2
+#   ./target/debug/hyprforge-lock --display wayland-2 \
+#       --fake-password hunter2 --type-in hunter2
+#
+# Do NOT also export WAYLAND_DISPLAY=wayland-2: --display already sets
+# it, and --fake-password refuses when the display it is given is the one
+# the process would have used anyway. That check is what stops
+# `--display $WAYLAND_DISPLAY --fake-password x` from locking the real
+# session with a known password.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
