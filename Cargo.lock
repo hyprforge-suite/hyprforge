@@ -1559,6 +1559,7 @@ dependencies = [
  "hyprforge-ui",
  "hyprforge-windowrules",
  "iced",
+ "image",
  "serde",
  "serde_json",
  "tempfile",
