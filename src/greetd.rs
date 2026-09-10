@@ -16,12 +16,45 @@
 //! same: PAM sits behind greetd, so a wrong password still costs the
 //! deliberate `pam_unix` delay, and a login screen that stops repainting
 //! for two seconds looks broken.
+//!
+//! # What is trusted, and what is not
+//!
+//! greetd's socket is created by greetd, owned by root, and reachable
+//! only by the greeter user. Whatever comes down it is therefore taken
+//! at its word, and that includes a `Success` in reply to
+//! `CreateSession` with nothing asked in between — which is how
+//! autologin works, and must keep working. Requiring a question first
+//! would look like hardening and would only break `pam_permit`.
+//!
+//! Everything an *attacker* can reach is treated as hostile, and was
+//! tested that way: malformed frames, an unknown message type, a length
+//! prefix claiming four gigabytes, and a greetd that answers nothing.
+//! None of them start a session and none of them bring the greeter
+//! down.
+//!
+//! The real way into a greeter is not through this socket at all. It is
+//! the compositor the greeter runs under: every keybind that compositor
+//! has belongs to whoever is standing at the keyboard, authenticated or
+//! not. See `config/hyprland-greeter.lua`, which has none.
 
 use greetd_ipc::codec::SyncCodec;
 use greetd_ipc::{AuthMessageType, ErrorType, Request, Response as Greetd};
 use hyprforge_authui::conversation::{Backend, Prompt, Response};
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{Receiver, Sender};
+
+/// How long to wait for greetd to answer one request.
+///
+/// Bounded because nothing may wait on another process forever, and
+/// because the consequence here is specific: a greetd that stops
+/// answering leaves the screen saying "Checking…" with no way to retry
+/// and no way in. That is a denial of login, not an inconvenience.
+///
+/// Generous, though. greetd is relaying PAM, and PAM can legitimately
+/// take a while — `pam_unix` sleeps about two seconds after a wrong
+/// password, and a directory-backed stack can take far longer. Cutting
+/// off a slow-but-working login would be worse than the hang.
+const REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Where greetd told us to talk to it.
 ///
@@ -87,6 +120,17 @@ impl GreetdBackend {
     /// greetd speaking the real wire format, with no daemon installed
     /// and nothing touching how this machine logs in.
     pub fn over(stream: UnixStream) -> GreetdBackend {
+        GreetdBackend::over_with_timeout(stream, REPLY_TIMEOUT)
+    }
+
+    /// [`over`](Self::over) with the reply bound spelled out, so a test
+    /// need not wait a minute to exercise a missed reply.
+    pub fn over_with_timeout(stream: UnixStream, timeout: std::time::Duration) -> GreetdBackend {
+        // Best effort: a socket that will not take a timeout is still
+        // better than no greeter, and the loop below reports a failure
+        // either way.
+        let _ = stream.set_read_timeout(Some(timeout));
+        let _ = stream.set_write_timeout(Some(timeout));
         let (to_greetd, asks) = std::sync::mpsc::channel();
         let (answers, from_greetd) = std::sync::mpsc::channel();
         std::thread::Builder::new()
@@ -167,6 +211,14 @@ fn run(mut stream: UnixStream, asks: Receiver<Ask>, answers: Sender<Response>) {
             return;
         }
         let Ok(reply) = Greetd::read_from(&mut stream) else {
+            // Returning rather than trying again, and this is the
+            // security-relevant part. A timed-out read leaves the
+            // connection desynchronised: greetd's late answer to *this*
+            // question would be read as the answer to the next one, so
+            // a stale `Success` could be matched to a later attempt.
+            // Once a reply is missed the socket is unusable, and the way
+            // back is a fresh greeter — which is greetd's job when this
+            // process exits.
             let _ = answers.send(unreachable_service());
             return;
         };
@@ -398,6 +450,44 @@ mod tests {
             }
             other => panic!("expected a failure, got {other:?}"),
         }
+    }
+
+    /// A greetd that stops answering must not hang the login screen.
+    ///
+    /// Found by pointing the greeter at a greetd that accepted the
+    /// connection, read the request, and said nothing: the worker thread
+    /// blocked forever and the screen sat on "Checking…" with no way to
+    /// retry and no way in. Which is a denial of login, and a violation
+    /// of this project's own rule that nothing waits on another process
+    /// without a bound.
+    #[test]
+    fn a_greetd_that_never_answers_reports_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Bound to a short relative name: AF_UNIX paths cap near 108
+        // bytes and a temp dir can exceed it.
+        let cwd = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(dir.path()).expect("chdir");
+        let listener = UnixListener::bind("sock").expect("bind");
+        let client = UnixStream::connect("sock").expect("connect");
+        std::env::set_current_dir(cwd).expect("restore cwd");
+
+        // Accepted and then ignored, which is the case that hung.
+        let server = listener.accept().expect("accept").0;
+
+        // A real reply timeout is a minute, which no test should wait
+        // for; the behaviour under test is what happens when the read
+        // fails, so the read is made to fail promptly.
+        let mut conversation = Conversation::new(
+            GreetdBackend::over_with_timeout(client, std::time::Duration::from_millis(200)),
+            "apost",
+        );
+        settle(&mut conversation);
+        assert!(
+            matches!(conversation.state(), State::Failed { .. }),
+            "a silent greetd must be reported, got {:?}",
+            conversation.state()
+        );
+        drop(server);
     }
 
     /// greetd going away must not hang the login screen, which would be
