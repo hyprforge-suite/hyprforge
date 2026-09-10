@@ -93,26 +93,40 @@ pub fn renderable(mut theme: Theme) -> Theme {
 
 /// The theme's font, as iced needs it.
 ///
-/// iced wants a `&'static str` for a family name, and the theme's font
-/// comes from gsettings at runtime, so the name is leaked. That is why
-/// this is a function with a cache rather than a conversion: it leaks at
-/// most once per process, and a lock screen outlives everything else in
-/// its own anyway.
+/// iced wants a `&'static str` for a family name and the theme's font
+/// arrives from gsettings at runtime, so the name has to be leaked.
+/// Leaking is bounded by caching per family rather than per call: a
+/// process ends up holding one small string per distinct font it was
+/// ever asked for, which for a lock screen is one.
+///
+/// Deliberately not a `OnceLock` of a single name. That would make the
+/// *first* theme's font win for the life of the process, so a greeter
+/// or a reloaded theme would silently render in the wrong font with
+/// nothing to explain why.
 ///
 /// An empty or unresolvable family falls back to iced's default rather
 /// than failing. A screen in the wrong font is a cosmetic problem; a
 /// screen that refused to start over one would be a machine nobody can
 /// get into.
 pub fn font(theme: &Theme) -> Font {
-    static FAMILY: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
-    let family = FAMILY.get_or_init(|| {
-        let name = theme.font.trim();
-        (!name.is_empty()).then(|| &*Box::leak(name.to_owned().into_boxed_str()))
-    });
-    match family {
-        Some(name) => Font::with_name(name),
-        None => Font::DEFAULT,
+    static FAMILIES: std::sync::Mutex<Option<std::collections::HashMap<String, &'static str>>> =
+        std::sync::Mutex::new(None);
+
+    let name = theme.font.trim();
+    if name.is_empty() {
+        return Font::DEFAULT;
     }
+    // A poisoned lock is recovered from rather than propagated: the only
+    // thing in here is a font-name cache, and panicking a lock screen
+    // over it would be trading a cosmetic problem for a lockout.
+    let mut guard = FAMILIES.lock().unwrap_or_else(|e| e.into_inner());
+    let cache = guard.get_or_insert_with(std::collections::HashMap::new);
+    if let Some(existing) = cache.get(name) {
+        return Font::with_name(existing);
+    }
+    let leaked: &'static str = Box::leak(name.to_owned().into_boxed_str());
+    cache.insert(name.to_owned(), leaked);
+    Font::with_name(leaked)
 }
 
 /// The whole screen, for a conversation in `state`.
@@ -124,6 +138,7 @@ pub fn view<'a, Message, Renderer>(
     username: &'a str,
     theme: &'a Theme,
     now: DateTime<Local>,
+    caps_lock: bool,
 ) -> Element<'a, Message, iced_widget::Theme, Renderer>
 where
     Message: 'a,
@@ -135,10 +150,10 @@ where
     let dim = to_iced(theme.surfaces.text_dim);
 
     let clock = column![
-        text(now.format(&theme.clock_format).to_string())
+        text(formatted(&now, &theme.clock_format, "%H:%M"))
             .size(theme.font_size * 5.0)
             .color(foreground),
-        text(now.format(&theme.date_format).to_string())
+        text(formatted(&now, &theme.date_format, "%A, %e %B"))
             .size(theme.font_size * 1.2)
             .color(dim),
     ]
@@ -151,6 +166,7 @@ where
             prompt_line(state, theme),
             dots(state, theme),
             status_line(state, theme),
+            caps_lock_warning(caps_lock, theme),
         ]
         .spacing(10),
     )
@@ -209,6 +225,30 @@ where
     }
 }
 
+/// Formats the time, without trusting the format string.
+///
+/// `chrono`'s `format(..).to_string()` **panics** on an invalid
+/// specifier — `%E`, `%O`, a trailing `%-` — because `to_string` unwraps
+/// a `Display` that returned an error. The format strings here come out
+/// of a config file, so a typo would take the lock screen down, and on a
+/// lock screen that is a machine you need another TTY to get into.
+///
+/// Writing through `fmt::Write` surfaces that as a `Result` instead, so
+/// a bad format degrades to the default and then, if even that fails, to
+/// no clock at all. A missing clock is a cosmetic loss; a panic is not.
+fn formatted(now: &DateTime<Local>, format: &str, fallback: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    if write!(out, "{}", now.format(format)).is_ok() {
+        return out;
+    }
+    let mut out = String::new();
+    if write!(out, "{}", now.format(fallback)).is_ok() {
+        return out;
+    }
+    String::new()
+}
+
 /// What is being asked, in PAM's own words.
 ///
 /// PAM's prompts are not always "Password:" — a fingerprint reader or a
@@ -225,6 +265,28 @@ where
     text(prompt_label(state))
         .size(theme.font_size)
         .color(to_iced(theme.surfaces.text_dim))
+        .into()
+}
+
+/// Says so when Caps Lock is on.
+///
+/// Not a nicety. Without it the password is simply wrong, over and over,
+/// with nothing on screen to explain why — and where `pam_faillock` is
+/// configured (it is, on the machine this was written on, at three
+/// attempts) that turns a stuck key into a locked *account*, which is a
+/// much worse afternoon than a locked screen. hyprlock and swaylock both
+/// show this, and they are right to.
+fn caps_lock_warning<'a, Message, Renderer>(
+    on: bool,
+    theme: &'a Theme,
+) -> Element<'a, Message, iced_widget::Theme, Renderer>
+where
+    Message: 'a,
+    Renderer: iced_runtime::core::text::Renderer<Font = iced_runtime::core::Font> + 'a,
+{
+    text(if on { "Caps Lock is on" } else { "" })
+        .size(theme.font_size * 0.9)
+        .color(to_iced(theme.warning))
         .into()
 }
 
@@ -353,6 +415,16 @@ mod tests {
 
     /// Renders once, reporting a panic rather than propagating it.
     fn try_render(state: &State, theme: &Theme, w: u32, h: u32) -> Result<(), String> {
+        try_render_with_caps(state, theme, w, h, false)
+    }
+
+    fn try_render_with_caps(
+        state: &State,
+        theme: &Theme,
+        w: u32,
+        h: u32,
+        caps: bool,
+    ) -> Result<(), String> {
         let state = state.clone();
         let theme = theme.clone();
         std::panic::catch_unwind(move || {
@@ -362,7 +434,7 @@ mod tests {
             let mut renderer = iced_tiny_skia::Renderer::new(font(&theme), Pixels(theme.font_size));
             let size = iced_runtime::core::Size::new(w as f32, h as f32);
             let mut ui = UserInterface::<Nothing, iced_widget::Theme, iced_tiny_skia::Renderer>::build(
-                view(&state, "apost", &theme, chrono::Local::now()),
+                view(&state, "apost", &theme, chrono::Local::now(), caps),
                 size,
                 Cache::default(),
                 &mut renderer,
@@ -501,26 +573,79 @@ mod tests {
         let ordinary_theme = Theme::default();
 
         let mut failures = Vec::new();
-        let mut check = |what: String, state: &State, theme: &Theme, (w, h): (u32, u32)| {
-            if let Err(why) = try_render(state, theme, w, h) {
-                failures.push(format!("{what}: {why}"));
-            }
-        };
+        {
+            let mut check = |what: String, state: &State, theme: &Theme, (w, h): (u32, u32)| {
+                if let Err(why) = try_render(state, theme, w, h) {
+                    failures.push(format!("{what}: {why}"));
+                }
+            };
 
-        for (label, theme) in hostile_themes() {
-            check(format!("theme {label}"), &ordinary_state, &theme, ordinary_size);
+            for (label, theme) in hostile_themes() {
+                check(format!("theme {label}"), &ordinary_state, &theme, ordinary_size);
+            }
+            for &size in HOSTILE_SIZES {
+                check(format!("size {size:?}"), &ordinary_state, &ordinary_theme, size);
+            }
+            for state in hostile_states() {
+                check(format!("state {state:?}"), &state, &ordinary_theme, ordinary_size);
+                // And once at a single pixel, which is what a compositor
+                // can hand over before it knows the real size.
+                check(format!("state {state:?} at 1x1"), &state, &ordinary_theme, (1, 1));
+            }
+
         }
-        for &size in HOSTILE_SIZES {
-            check(format!("size {size:?}"), &ordinary_state, &ordinary_theme, size);
-        }
-        for state in hostile_states() {
-            check(format!("state {state:?}"), &state, &ordinary_theme, ordinary_size);
-            // And once at a single pixel, which is what a compositor can
-            // hand over before it knows the real size.
-            check(format!("state {state:?} at 1x1"), &state, &ordinary_theme, (1, 1));
+
+        // Caps Lock adds a line to the panel, so it is its own shape.
+        if let Err(why) = try_render_with_caps(&ordinary_state, &ordinary_theme, 771, 906, true) {
+            failures.push(format!("caps lock on: {why}"));
         }
 
         assert!(failures.is_empty(), "{} panic(s):\n{}", failures.len(), failures.join("\n"));
+    }
+
+    /// Two themes must not share one font.
+    ///
+    /// The first version cached a single name in a `OnceLock`, so
+    /// whichever theme asked first won for the life of the process and
+    /// every later one silently rendered in the wrong font.
+    #[test]
+    fn each_theme_gets_its_own_font_family() {
+        let of = |name: &str| font(&Theme { font: name.into(), ..Theme::default() });
+        let sans = of("DejaVu Sans");
+        let mono = of("DejaVu Sans Mono");
+        assert_ne!(sans.family, mono.family);
+        // And asking again is stable rather than leaking a new name.
+        assert_eq!(of("DejaVu Sans").family, sans.family);
+        // An unnamed font is iced's default, not an empty family.
+        assert_eq!(of("   ").family, Font::DEFAULT.family);
+    }
+
+    /// A typo in a clock format must not take the machine down.
+    ///
+    /// `chrono::format(..).to_string()` panics on an invalid specifier,
+    /// and these strings come from a config file. The realistic formats
+    /// are fine — `%-I:%M %p` works — but `%E` is one slip away, and the
+    /// consequence of that slip is needing another TTY to log in.
+    #[test]
+    fn an_invalid_clock_format_falls_back_instead_of_panicking() {
+        let now = Local::now();
+        for bad in ["%", "%-", "%E", "%O", "%Q", &"%".repeat(200)] {
+            let shown = formatted(&now, bad, "%H:%M");
+            assert!(
+                !shown.is_empty(),
+                "{bad:?} produced nothing; the fallback should have run"
+            );
+        }
+    }
+
+    /// And a valid format is still used as written, or the fallback
+    /// would be silently replacing everyone's clock.
+    #[test]
+    fn a_valid_clock_format_is_used_as_written() {
+        let now = Local::now();
+        assert_eq!(formatted(&now, "%Y", "%H:%M"), now.format("%Y").to_string());
+        // The 12-hour form people actually write.
+        assert!(formatted(&now, "%-I:%M %p", "%H:%M").contains(':'));
     }
 
     /// The specific value that panics `cosmic-text`, pinned separately

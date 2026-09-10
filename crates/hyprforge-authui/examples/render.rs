@@ -17,12 +17,20 @@ fn out_dir() -> std::path::PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
+fn shot_caps(name: &str, state: State, theme: &Theme) {
+    render(name, state, theme, true)
+}
+
 fn shot(name: &str, state: State, theme: &Theme) {
+    render(name, state, theme, false)
+}
+
+fn render(name: &str, state: State, theme: &Theme, caps: bool) {
     let (w, h) = (900u32, 620u32);
     let mut renderer = Renderer::new(hyprforge_authui::screen::font(theme), Pixels(theme.font_size));
     let now = chrono::Local::now();
 
-    let view = hyprforge_authui::screen::view::<Message, Renderer>(&state, "apost", theme, now);
+    let view = hyprforge_authui::screen::view::<Message, Renderer>(&state, "apost", theme, now, caps);
     let mut ui = UserInterface::<Message, iced_widget::Theme, Renderer>::build(
         view,
         Size::new(w as f32, h as f32),
@@ -67,4 +75,7 @@ fn main() {
     shot("auth-asking.png", State::Asking { prompt: Prompt::secret("Password:"), entered: "hunter2!".into() }, &theme);
     shot("auth-failed.png", State::Failed { reason: "Incorrect password".into() }, &theme);
     shot("auth-working.png", State::Working, &theme);
+    // Caps Lock on, which is the state that otherwise looks like a
+    // forgotten password.
+    shot_caps("auth-caps.png", State::Asking { prompt: Prompt::secret("Password:"), entered: "HUNTER2".into() }, &theme);
 }

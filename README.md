@@ -620,14 +620,42 @@ Not the character, and **not the keysym either** — `XK_a` is `a`,
 barely-encoded form. This has already happened here once. `Debug for
 State` is hand-written to render what was typed as `<N chars>`; use that.
 
+### Where it deliberately differs from hyprlock and swaylock
+
+Two choices are unusual and worth knowing about.
+
+**It renders with a full GUI toolkit.** swaylock draws with cairo;
+hyprlock uses the GPU. This drives iced through `iced_tiny_skia` into the
+buffer the compositor hands over. gtklock does something similar with
+GTK, so it is not unprecedented, but the trade is real: far more code
+behind the screen, and that code is not written defensively —
+`iced_tiny_skia` and `cosmic-text` are full of `expect`s on geometry.
+`screen::renderable` exists because of that, and it is why a panic sweep
+runs on every change.
+
+**It checks the account as well as the password.** `pam_acct_mgmt` on top
+of `pam_authenticate`, which neither hyprlock nor swaylock does. It is
+more correct — an expired or barred account should not unlock a session —
+and it is why this ships its own PAM file rather than borrowing one.
+
 ### What it does not do yet
 
-There is no text on screen: no prompt, no username, no clock, no error
-message, no wallpaper — just a panel, one dot per typed character, and a
-bar that carries the state. A font renderer was a dependency the spike
-did not need. The look and feel is the next piece of work, and it is the
-one place worth designing rather than defaulting, since the greeter has
-to match it.
+Three gaps, none of them a security hole, all of them things an
+established lock screen has:
+
+- **No input-method support.** A password typed through an IME cannot be
+  entered. swaylock is the same; it still means some users cannot log in.
+- **The password is not zeroized.** `entered` is a plain `String`, cloned
+  into the backend, and PAM holds its own copy. A core dump or swap could
+  contain it.
+- **No attempt limiting of its own**, on purpose: rate limiting belongs in
+  `/etc/pam.d`, where an administrator can see and change it, rather than
+  hidden in a settings app.
+
+Caps Lock *is* shown, which is not decoration: without it a stuck key
+looks exactly like a forgotten password, and where `pam_faillock` is
+configured that spends attempts against the account rather than the
+screen.
 
 ## Scales are 120ths, and most of the ones you'd want don't exist
 
