@@ -237,6 +237,14 @@ impl<B: Backend + 'static> LockScreen<B> {
         queue.roundtrip(&mut screen).map_err(|_| LockError::Disconnected)?;
         screen.lock = Some(lock_state.lock(&qh)?);
 
+        // Immediately, not on `locked`. The protocol says the compositor
+        // "must not send locked until a new locked frame has been
+        // presented on all outputs" — so it is waiting for these. Waiting
+        // for `locked` before creating them is a standoff, and the only
+        // thing that breaks it is the compositor giving up after five
+        // seconds and showing its "lockscreen app died" screen instead.
+        screen.cover_every_output(&qh);
+
         // From here on the loop waits on calloop rather than on the
         // Wayland queue alone. That is what lets the authenticator
         // answer on its own schedule: the backend's ping is just another
@@ -336,7 +344,7 @@ impl<B: Backend + 'static> LockScreen<B> {
                 // that proves there is something on screen; the rest
                 // are just a person typing.
                 if before == 0 && screen.frames > 0 {
-                    eprintln!("first frame drawn");
+                    eprintln!("first frame drawn (+{}ms)", screen.requested_at.elapsed().as_millis());
                 }
             }
             // Checked after dispatching rather than inside a handler:
@@ -372,6 +380,32 @@ impl<B: Backend + 'static> LockScreen<B> {
             eprintln!("self test: {} frame(s) drawn in total", screen.frames);
         }
         Ok(screen.outcome.unwrap_or(Outcome::Disconnected))
+    }
+
+    /// A lock surface on every output the compositor has told us about.
+    ///
+    /// One per output, because an output without one keeps showing
+    /// whatever was on it — which on a second monitor is the desktop of
+    /// a machine that is supposed to be locked.
+    fn cover_every_output(&mut self, qh: &QueueHandle<Self>) {
+        let Some(lock) = self.lock.clone() else {
+            return;
+        };
+        for output in self.outputs.outputs() {
+            if self.surfaces.iter().any(|l| l.output == output) {
+                continue;
+            }
+            let surface = self.compositor.create_surface(qh);
+            let locked = lock.create_lock_surface(surface, &output, qh);
+            self.surfaces.push(Locked { surface: locked, width: 0, height: 0, output });
+        }
+        if self.surfaces.is_empty() {
+            // No outputs means nothing can be drawn on, so the
+            // compositor will never see a locked frame and will never
+            // send `locked`. Say so rather than sit in a standoff.
+            eprintln!("no outputs to cover — the compositor cannot lock the session");
+        }
+        self.mark_dirty();
     }
 
     fn draw_all(&mut self) {
@@ -538,24 +572,21 @@ pub enum LockError {
 }
 
 impl<B: Backend + 'static> SessionLockHandler for LockScreen<B> {
-    fn locked(&mut self, _conn: &Connection, qh: &QueueHandle<Self>, lock: SessionLock) {
-        // From here the session is locked whatever happens to this
-        // process. A surface per output, because an output without one
-        // keeps showing what was on it.
-        for output in self.outputs.outputs() {
-            let surface = self.compositor.create_surface(qh);
-            let locked = lock.create_lock_surface(surface, &output, qh);
-            self.surfaces.push(Locked { surface: locked, width: 0, height: 0, output });
-        }
-        eprintln!("locked: {} surface(s) created", self.surfaces.len());
-        if self.surfaces.is_empty() {
-            // Nothing to draw on means a locked session showing nothing,
-            // which is indistinguishable from a crash and just as
-            // unrecoverable. Say so loudly rather than sit there.
-            eprintln!("no outputs to draw on — the session is locked with nothing visible");
-        }
+    fn locked(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _lock: SessionLock) {
+        // The surfaces already exist — see `cover_every_output`, called
+        // as soon as the lock was requested. By the time this arrives the
+        // compositor has presented a locked frame on every output, which
+        // is precisely what it was waiting for.
+        //
+        // So there is nothing to create here. What changes is that the
+        // session is now genuinely locked, and stays locked whatever
+        // happens to this process.
         self.granted = true;
-        self.lock = Some(lock);
+        eprintln!(
+            "locked: session secured with {} surface(s) (+{}ms)",
+            self.surfaces.len(),
+            self.requested_at.elapsed().as_millis()
+        );
         self.mark_dirty();
     }
 
@@ -598,7 +629,7 @@ impl<B: Backend + 'static> SessionLockHandler for LockScreen<B> {
         {
             locked.width = width;
             locked.height = height;
-            eprintln!("configure: {width}x{height}");
+            eprintln!("configure: {width}x{height} (+{}ms)", self.requested_at.elapsed().as_millis());
         }
         self.mark_dirty();
     }
