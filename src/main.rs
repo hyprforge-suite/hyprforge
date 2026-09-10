@@ -136,7 +136,12 @@ fn main() -> std::process::ExitCode {
     }
 
     let username = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
-    let theme = Theme::load(&theme_path()).unwrap_or_default();
+    // A wallpaper the renderer cannot decode would panic it — see
+    // `with_drawable_wallpaper` — and a panic here leaves the session
+    // locked with nothing running to unlock it.
+    let theme = hyprforge_authui::screen::with_drawable_wallpaper(
+        Theme::load(&theme_path()).unwrap_or_default(),
+    );
 
     let connection = match wayland_client::Connection::connect_to_env() {
         Ok(connection) => connection,
