@@ -24,22 +24,133 @@ use serde_json::{Map, Value};
 /// any other newly-added rule. `None` if the call has no matcher at all
 /// (Hyprland requires one, so a call missing every match field couldn't
 /// have been a real window rule).
-pub fn rule_from_call(kind: &str, args: &[Value]) -> Option<(Matcher, Effects, bool)> {
+pub fn rule_from_call(kind: &str, args: &[Value]) -> Option<ImportedRule> {
     if kind != "window_rule" {
         return None;
     }
     let table = args.first()?.as_object()?;
-    let matcher = matcher_from_json(table.get("match")?.as_object()?);
-    if matcher.is_empty() {
+    let match_table = table.get("match")?.as_object()?;
+    let matcher = matcher_from_json(match_table);
+
+    let mut dropped = unknown_keys(match_table, MATCHER_KEYS);
+    dropped.extend(unknown_keys(table, EFFECT_KEYS));
+    dropped.sort();
+    dropped.dedup();
+
+    // An empty matcher used to mean "not a window rule". It also means
+    // "every field this rule matched on is one we don't model" — a rule
+    // like `match = { workspace = "3" }` is perfectly real, and reading
+    // it as absent is what let the caller delete the source line for a
+    // rule it was never going to regenerate.
+    if matcher.is_empty() && dropped.is_empty() {
         return None;
     }
+
     let enabled = table.get("enabled").and_then(Value::as_bool).unwrap_or(true);
-    Some((matcher, effects_from_json(table), enabled))
+    Some(ImportedRule { matcher, effects: effects_from_json(table), enabled, dropped })
+}
+
+/// A window rule recovered from a call, and what could not be recovered
+/// with it.
+///
+/// `dropped` is the whole point of the struct. This importer models a
+/// fixed set of keys, Hyprland accepts more, and the caller *deletes the
+/// user's original line* once a rule is imported. Without a record of
+/// what was not understood, a rule is silently widened — `class` kept,
+/// `workspace` dropped — and the line that said otherwise is removed. A
+/// rule that floated one Steam window on workspace 3 then floats every
+/// Steam window everywhere, and the review screen shows a clean import.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportedRule {
+    pub matcher: Matcher,
+    pub effects: Effects,
+    pub enabled: bool,
+    /// Keys present in the call that this importer does not model, in
+    /// sorted order. Empty means the rule round-trips exactly.
+    pub dropped: Vec<String>,
+}
+
+impl ImportedRule {
+    /// Whether regenerating this rule reproduces what the user wrote.
+    ///
+    /// Only a rule that does may have its hand-written source line
+    /// removed — the same rule `hyprforge-shortcuts` applies through
+    /// `is_complete`, for the same reason: codegen emits nothing for an
+    /// empty matcher, so removing the original would delete a working
+    /// rule and put nothing back.
+    pub fn is_faithful(&self) -> bool {
+        self.dropped.is_empty() && !self.matcher.is_empty()
+    }
+}
+
+/// Keys of `match = { .. }` that [`matcher_from_json`] reads.
+const MATCHER_KEYS: &[&str] = &[
+    "class",
+    "title",
+    "initial_class",
+    "initial_title",
+    "fullscreen",
+    "float",
+    "xwayland",
+    "tag",
+    "content",
+];
+
+/// Top-level keys of `hl.window_rule({ .. })` that this importer reads.
+/// `match` and `enabled` are structural rather than effects.
+const EFFECT_KEYS: &[&str] = &[
+    "match",
+    "enabled",
+    "workspace",
+    "tag",
+    "float",
+    "move",
+    "size",
+    "opacity",
+    "border_color",
+    "no_blur",
+    "rounding",
+    "opaque",
+    "no_anim",
+    "no_focus",
+    "stay_focused",
+    "dim_around",
+    "keep_aspect_ratio",
+    "border_size",
+    "min_size",
+    "max_size",
+    "animation",
+    "idle_inhibit",
+    "tile",
+    "fullscreen",
+    "maximize",
+    "pin",
+    "center",
+    "no_initial_focus",
+    "monitor",
+    "suppress_event",
+    "group",
+    "no_close_for",
+];
+
+/// Keys of `hl.workspace_rule({ .. })` that this importer reads.
+const WORKSPACE_KEYS: &[&str] = &["workspace", "monitor", "default", "persistent"];
+
+/// Keys present in `t` that are not in `known`.
+///
+/// A `null` counts as absent: the evaluator records an unset Lua field
+/// that way, and reporting it as unmodelled would make every rule look
+/// lossy.
+fn unknown_keys(t: &Map<String, Value>, known: &[&str]) -> Vec<String> {
+    t.iter()
+        .filter(|(k, v)| !v.is_null() && !known.contains(&k.as_str()))
+        .map(|(k, _)| k.clone())
+        .collect()
 }
 
 /// A `WorkspaceRule`, recovered from a recorded `hl.workspace_rule({...})`
 /// call. `None` if it has no workspace (Hyprland requires one).
-pub fn workspace_rule_from_call(kind: &str, args: &[Value]) -> Option<WorkspaceRule> {
+pub fn workspace_rule_from_call(kind: &str, args: &[Value]) -> Option<ImportedWorkspaceRule> {
     if kind != "workspace_rule" {
         return None;
     }
@@ -48,12 +159,36 @@ pub fn workspace_rule_from_call(kind: &str, args: &[Value]) -> Option<WorkspaceR
     if workspace.is_empty() {
         return None;
     }
-    Some(WorkspaceRule {
-        workspace: workspace.to_string(),
-        monitor: get_str(table, "monitor").unwrap_or_default(),
-        default: get_bool(table, "default").unwrap_or(false),
-        persistent: get_bool(table, "persistent").unwrap_or(false),
+    Some(ImportedWorkspaceRule {
+        rule: WorkspaceRule {
+            workspace: workspace.to_string(),
+            monitor: get_str(table, "monitor").unwrap_or_default(),
+            default: get_bool(table, "default").unwrap_or(false),
+            persistent: get_bool(table, "persistent").unwrap_or(false),
+        },
+        dropped: {
+            let mut d = unknown_keys(table, WORKSPACE_KEYS);
+            d.sort();
+            d
+        },
     })
+}
+
+/// A workspace rule recovered from a call, and what could not be
+/// recovered with it. See [`ImportedRule`] for why `dropped` exists —
+/// this importer reads four of Hyprland's keys and drops the rest
+/// (`on_created_empty`, `gaps_in`, `gaps_out`, `decorate`, ...).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportedWorkspaceRule {
+    pub rule: WorkspaceRule,
+    pub dropped: Vec<String>,
+}
+
+impl ImportedWorkspaceRule {
+    /// Whether regenerating this rule reproduces what the user wrote.
+    pub fn is_faithful(&self) -> bool {
+        self.dropped.is_empty()
+    }
 }
 
 fn get_str(t: &Map<String, Value>, k: &str) -> Option<String> {
@@ -200,7 +335,7 @@ mod tests {
     fn a_plain_literal_rule_round_trips() {
         let result = evaluated(r#"hl.window_rule({ match = { class = "^discord$" }, float = true, workspace = "name:coding silent" })"#);
         let call = &result.calls[0];
-        let (matcher, effects, enabled) =
+        let ImportedRule { matcher, effects, enabled, .. } =
             rule_from_call(&call.kind, &call.args).expect("should parse as a rule");
         assert_eq!(matcher.class.as_deref(), Some("^discord$"));
         assert_eq!(effects.float, Some(true));
@@ -214,7 +349,7 @@ mod tests {
     #[test]
     fn the_matcher_float_key_maps_to_the_floating_field() {
         let result = evaluated(r#"hl.window_rule({ match = { float = false } })"#);
-        let (matcher, _, _) = rule_from_call(&result.calls[0].kind, &result.calls[0].args).unwrap();
+        let matcher = rule_from_call(&result.calls[0].kind, &result.calls[0].args).unwrap().matcher;
         assert_eq!(matcher.floating, Some(false));
     }
 
@@ -223,7 +358,7 @@ mod tests {
         let result = evaluated(
             r#"hl.window_rule({ match = { class = "x" }, opacity = "0.9 override 0.7 override 1 override" })"#,
         );
-        let (_, effects, _) = rule_from_call(&result.calls[0].kind, &result.calls[0].args).unwrap();
+        let effects = rule_from_call(&result.calls[0].kind, &result.calls[0].args).unwrap().effects;
         assert_eq!(effects.opacity.active, Some(0.9));
         assert_eq!(effects.opacity.inactive, Some(0.7));
         assert_eq!(effects.opacity.fullscreen, Some(1.0));
@@ -235,7 +370,7 @@ mod tests {
         let result = evaluated(
             r#"hl.window_rule({ match = { class = "x" }, move = { "cursor_x-(window_w*0.5)", 40 } })"#,
         );
-        let (_, effects, _) = rule_from_call(&result.calls[0].kind, &result.calls[0].args).unwrap();
+        let effects = rule_from_call(&result.calls[0].kind, &result.calls[0].args).unwrap().effects;
         assert_eq!(
             effects.r#move,
             Some(["cursor_x-(window_w*0.5)".to_string(), "40".to_string()])
@@ -253,15 +388,96 @@ mod tests {
         let result =
             evaluated(r#"hl.workspace_rule({ workspace = "name:gaming", monitor = "desc:BOE 0x0BC9", default = true })"#);
         let wr = workspace_rule_from_call(&result.calls[0].kind, &result.calls[0].args).unwrap();
-        assert_eq!(wr.workspace, "name:gaming");
-        assert_eq!(wr.monitor, "desc:BOE 0x0BC9");
-        assert!(wr.default);
-        assert!(!wr.persistent);
+        assert_eq!(wr.rule.workspace, "name:gaming");
+        assert_eq!(wr.rule.monitor, "desc:BOE 0x0BC9");
+        assert!(wr.rule.default);
+        assert!(!wr.rule.persistent);
     }
 
     #[test]
     fn a_bind_call_is_not_mistaken_for_a_rule() {
         let result = evaluated(r#"hl.bind("SUPER + Q", hl.dsp.window.close())"#);
         assert!(rule_from_call(&result.calls[0].kind, &result.calls[0].args).is_none());
+    }
+}
+
+#[cfg(test)]
+mod fidelity {
+    use super::*;
+
+    fn imported(lua: &str) -> ImportedRule {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("hyprland.lua"), lua).unwrap();
+        let result = hyprforge_lua_import::evaluate(dir.path());
+        assert!(result.failures.is_empty(), "unexpected failures: {:?}", result.failures);
+        let call = &result.calls[0];
+        rule_from_call(&call.kind, &call.args).expect("should parse as a rule")
+    }
+
+    /// The scenario that motivated all of this: a rule narrowed by a key
+    /// we do not model. Importing it is fine; reporting it as faithful is
+    /// not, because the caller deletes the source line for anything
+    /// faithful and this rule comes back matching every Steam window on
+    /// every workspace.
+    #[test]
+    fn a_matcher_key_we_cannot_read_makes_the_rule_unfaithful() {
+        let rule = imported(
+            r#"hl.window_rule({ match = { class = "^steam$", workspace = "3" }, float = true })"#,
+        );
+        assert_eq!(rule.matcher.class.as_deref(), Some("^steam$"));
+        assert_eq!(rule.dropped, vec!["workspace".to_string()]);
+        assert!(
+            !rule.is_faithful(),
+            "a widened rule must never earn the removal of its original line"
+        );
+    }
+
+    /// A rule matched *only* by an unmodelled key used to read as "not a
+    /// window rule at all", which is how it reached the caller as
+    /// something safe to delete.
+    #[test]
+    fn a_rule_matched_only_by_an_unmodelled_key_is_still_a_rule() {
+        let rule = imported(r#"hl.window_rule({ match = { workspace = "3" }, float = true })"#);
+        assert!(rule.matcher.is_empty(), "nothing in the matcher is readable");
+        assert!(!rule.dropped.is_empty(), "but the call said something we dropped");
+        assert!(!rule.is_faithful());
+    }
+
+    /// The other half of the contract: a rule we read completely must
+    /// stay faithful, or the gate would keep every original line forever
+    /// and the import would never clean anything up.
+    #[test]
+    fn a_fully_understood_rule_is_faithful() {
+        let rule = imported(
+            r#"hl.window_rule({ match = { class = "^steam$" }, float = true, rounding = 4 })"#,
+        );
+        assert!(rule.dropped.is_empty(), "dropped: {:?}", rule.dropped);
+        assert!(rule.is_faithful());
+    }
+
+    /// An unset Lua field arrives as JSON null. Counting it as dropped
+    /// would make every rule look lossy and the gate would never open.
+    #[test]
+    fn an_unset_field_is_not_a_dropped_one() {
+        let rule = imported(
+            r#"hl.window_rule({ match = { class = "^steam$", title = nil }, float = true })"#,
+        );
+        assert!(rule.dropped.is_empty(), "dropped: {:?}", rule.dropped);
+    }
+
+    #[test]
+    fn a_workspace_rule_reports_the_keys_it_cannot_read() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("hyprland.lua"),
+            r#"hl.workspace_rule({ workspace = "3", monitor = "eDP-1", on_created_empty = "kitty" })"#,
+        )
+        .unwrap();
+        let result = hyprforge_lua_import::evaluate(dir.path());
+        let call = &result.calls[0];
+        let wr = workspace_rule_from_call(&call.kind, &call.args).unwrap();
+        assert_eq!(wr.rule.workspace, "3");
+        assert_eq!(wr.dropped, vec!["on_created_empty".to_string()]);
+        assert!(!wr.is_faithful());
     }
 }

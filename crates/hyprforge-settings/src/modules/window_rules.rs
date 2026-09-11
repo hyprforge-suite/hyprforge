@@ -545,6 +545,14 @@ struct ImportCandidateRule {
     effects: Effects,
     enabled: bool,
     checked: bool,
+    /// Keys of the original call this importer does not model.
+    ///
+    /// Non-empty means regenerating the rule would *widen* it — a rule
+    /// that matched `class` and `workspace` comes back matching `class`
+    /// alone. Such a rule is still worth importing, but its hand-written
+    /// source line must survive, or the narrower rule is gone and the
+    /// broader one replaces it everywhere.
+    dropped: Vec<String>,
     /// A rule with this exact matcher is already stored.
     ///
     /// This matters more here than it looks: a `hl.window_rule` is usually
@@ -567,6 +575,10 @@ struct ImportCandidateRule {
 struct ImportCandidateWorkspaceRule {
     rule: WorkspaceRule,
     checked: bool,
+    /// Keys of the original call this importer does not model — see
+    /// [`ImportCandidateRule::dropped`]. `on_created_empty`, `gaps_in`,
+    /// `gaps_out` and `decorate` are all in this category.
+    dropped: Vec<String>,
     /// A pin for this workspace is already stored — see
     /// [`ImportCandidateRule::already_imported`].
     already_imported: bool,
@@ -655,6 +667,27 @@ enum PendingDelete {
 fn already_imported_note<'a>(scale: FontScale) -> Element<'a, Message> {
     scaled_text(
         "Already in your rules — importing it again would apply it twice.",
+        12.0,
+        scale,
+    )
+    .color(hyprforge_ui::theme::warning())
+    .into()
+}
+
+/// Shown against a candidate whose original call used keys this importer
+/// does not model.
+///
+/// Says what will happen rather than that something went wrong: the rule
+/// is still worth importing, it just comes back *wider* than it was
+/// written, so the hand-written line has to stay. Without this the
+/// review screen showed a widened rule as a clean import.
+fn dropped_keys_note<'a>(dropped: &[String], scale: FontScale) -> Element<'a, Message> {
+    scaled_text(
+        format!(
+            "Can't read {} yet, so your original line is kept as well. \
+             Delete it by hand once you're happy with the imported rule.",
+            dropped.join(", ")
+        ),
         12.0,
         scale,
     )
@@ -1059,9 +1092,15 @@ impl SettingsModule for WindowRulesModule {
                     if call.source_path.starts_with(&hyprforge_dir) {
                         continue;
                     }
-                    if let Some((matcher, effects, enabled)) =
+                    if let Some(imported) =
                         hyprforge_windowrules::import::rule_from_call(&call.kind, &call.args)
                     {
+                        let hyprforge_windowrules::import::ImportedRule {
+                            matcher,
+                            effects,
+                            enabled,
+                            dropped,
+                        } = imported;
                         // Matched on the matcher alone: it's what decides
                         // which windows a rule claims, so a second rule with
                         // the same one is a duplicate however its effects
@@ -1074,18 +1113,22 @@ impl SettingsModule for WindowRulesModule {
                             enabled,
                             checked: !already_imported,
                             already_imported,
+                            dropped,
                             source_path: call.source_path.clone(),
                             line: call.line,
                         });
                     } else if let Some(rule) =
                         hyprforge_windowrules::import::workspace_rule_from_call(&call.kind, &call.args)
                     {
+                        let dropped = rule.dropped.clone();
+                        let rule = rule.rule;
                         let already_imported = self
                             .workspace_rules
                             .iter()
                             .any(|w| w.workspace.trim() == rule.workspace.trim());
                         workspace_rules.push(ImportCandidateWorkspaceRule {
                             rule,
+                            dropped,
                             checked: !already_imported,
                             already_imported,
                             source_path: call.source_path.clone(),
@@ -1135,7 +1178,15 @@ impl SettingsModule for WindowRulesModule {
                             .or_else(|| candidate.matcher.title.clone())
                             .unwrap_or_else(|| "rule".to_string());
                         let name = generate_rule_name(&label, &existing);
-                        if let Some(line) = candidate.line {
+                        // Only a rule that will really be regenerated
+                        // earns the removal of its original. A rule whose
+                        // matcher lost a key we don't model comes back
+                        // *wider* than it was written — `class` kept,
+                        // `workspace` dropped — so deleting the source
+                        // line replaces a narrow rule with a broad one
+                        // and nothing says it happened. Same gate
+                        // hyprforge-shortcuts applies via `is_complete`.
+                        if let (Some(line), true) = (candidate.line, candidate.dropped.is_empty()) {
                             to_remove.push((candidate.source_path.clone(), line));
                         }
                         self.rules.push(Rule {
@@ -1146,7 +1197,8 @@ impl SettingsModule for WindowRulesModule {
                         });
                     }
                     for candidate in review.workspace_rules.into_iter().filter(|c| c.checked) {
-                        if let Some(line) = candidate.line {
+                        // Same gate as the window rules above.
+                        if let (Some(line), true) = (candidate.line, candidate.dropped.is_empty()) {
                             to_remove.push((candidate.source_path.clone(), line));
                         }
                         self.workspace_rules.push(candidate.rule);
@@ -1352,6 +1404,9 @@ impl WindowRulesModule {
                 if candidate.already_imported {
                     info = info.push(already_imported_note(scale));
                 }
+                if !candidate.dropped.is_empty() {
+                    info = info.push(dropped_keys_note(&candidate.dropped, scale));
+                }
                 list = list.push(
                     row![
                         checkbox(candidate.checked)
@@ -1374,6 +1429,9 @@ impl WindowRulesModule {
                         .width(Length::Fill);
                 if candidate.already_imported {
                     info = info.push(already_imported_note(scale));
+                }
+                if !candidate.dropped.is_empty() {
+                    info = info.push(dropped_keys_note(&candidate.dropped, scale));
                 }
                 list = list.push(
                     row![
@@ -2573,6 +2631,7 @@ mod tests {
                     enabled: true,
                     checked: true,
                     already_imported: false,
+                    dropped: Vec::new(),
                     source_path: config.clone(),
                     line: Some(1),
                 }],
