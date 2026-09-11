@@ -251,6 +251,17 @@ signals. Plain `ApplyProfile` stays immediate and irreversible — that's what
 `displayctl apply` uses, since a scripted caller has no banner to click and
 shouldn't have its change silently undone.
 
+The snapshot a revert would restore is taken by the first mutation of an
+edit, not by the apply — the GUI issues several `SetHeadGeometry` calls
+before applying, and snapshotting at apply time would capture the
+already-edited profile. It expires after two minutes if nothing arms it,
+because several paths mutate without ever applying (`displayctl apply`,
+and the GUI's save-without-apply). Without that bound an abandoned edit
+would leave a snapshot alive for the daemon's lifetime, and the *next*
+reversible change would arm it — so letting the window lapse would roll
+back to a state from hours earlier, discarding every profile learned in
+between.
+
 `simulate-topology`'s spec format is a comma-separated list of
 `make:model:serial` triples; any field may be left blank (e.g. `BOE:0x0BC9:`
 for a blank-serial panel, mirroring real hardware — this machine's own
