@@ -1018,3 +1018,85 @@ async fn a_change_that_cannot_be_saved_is_reported_rather_than_swallowed() {
         "the error should name what couldn't be saved: {err}"
     );
 }
+
+/// An edit that is saved but never applied — the GUI's "save without
+/// apply", `displayctl apply`, a policy change. Each takes a revert
+/// snapshot; none of them ever arms or clears it.
+async fn edit_without_applying(h: &Harness, id: &str) {
+    h.daemon
+        .set_head_geometry(
+            id,
+            "MOCK-1",
+            500,
+            600,
+            1920,
+            1080,
+            60000,
+            2.0,
+            hyprforge_displayd::types::Transform::Rotate180,
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_old_unapplied_edit_cannot_become_the_state_a_later_change_reverts_to() {
+    let mut h = Harness::new();
+    h.backend.set_topology(vec![identity("BOE", "0x0BC9", "")]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await;
+    let id = h.daemon.profiles().await[0].id.clone();
+
+    // Someone edits geometry in the GUI and never applies it. The
+    // snapshot this leaves behind has nothing to arm or clear it.
+    edit_without_applying(&h, &id).await;
+
+    // Much later. An absolute duration, deliberately not derived from
+    // SNAPSHOT_FRESHNESS: a test that scales with the constant it is
+    // testing still passes when that constant is wrong, which is exactly
+    // what this test exists to notice.
+    tokio::time::advance(Duration::from_secs(10 * 60)).await;
+    h.daemon.rename_profile(&id, "Renamed since").await.unwrap();
+
+    // Now an unrelated reversible change is made and left to lapse.
+    edit_and_apply_reversibly(&h, &id).await;
+    settle().await;
+    tokio::time::advance(REVERT_WINDOW + Duration::from_secs(1)).await;
+    settle().await;
+
+    // The rollback must undo that change, not resurrect the world as it
+    // was before the abandoned edit. Restoring the stale snapshot would
+    // put the old name back and discard everything learned since.
+    let profiles = h.daemon.profiles().await;
+    assert_eq!(
+        profiles[0].name, "Renamed since",
+        "a revert restored a profile list captured before an unrelated, unapplied edit"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_edit_and_its_apply_still_share_one_snapshot() {
+    // The other half of the contract: the freshness bound must not break
+    // the normal flow, where "Save & Apply" issues several mutations and
+    // then applies, milliseconds apart, and must revert to the state
+    // before the *first* of them.
+    let mut h = Harness::new();
+    h.backend.set_topology(vec![identity("BOE", "0x0BC9", "")]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await;
+    let id = h.daemon.profiles().await[0].id.clone();
+
+    h.daemon.rename_profile(&id, "Before the edit").await.unwrap();
+    edit_and_apply_reversibly(&h, &id).await;
+    h.daemon.rename_profile(&id, "During the edit").await.unwrap();
+
+    settle().await;
+    tokio::time::advance(REVERT_WINDOW + Duration::from_secs(1)).await;
+    settle().await;
+
+    assert_eq!(
+        h.daemon.profiles().await[0].name,
+        "Before the edit",
+        "the lapse should have restored the state from before the edit began"
+    );
+}

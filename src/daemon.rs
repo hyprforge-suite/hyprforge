@@ -58,6 +58,22 @@ pub const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(500);
 /// blanked screen recovers on its own before the user reaches for a TTY.
 pub const REVERT_WINDOW: Duration = Duration::from_secs(12);
 
+/// How long an *unarmed* snapshot stays usable.
+///
+/// A snapshot is taken by the first mutation of an edit and armed by the
+/// apply that follows, which is milliseconds later. But several paths
+/// mutate without ever applying — `displayctl apply` is deliberately
+/// irreversible, and the GUI can save geometry, swap heads or change a
+/// policy without applying anything. Those leave a snapshot behind that
+/// nothing will ever arm or clear.
+///
+/// Without a lifetime that snapshot lives as long as the daemon, and the
+/// *next* reversible apply arms it — so letting the window lapse would
+/// restore a profile list captured hours ago, discarding every edit and
+/// every auto-learned profile made in between. An expiry bounds that to
+/// an interval in which "put it back how it was" still means something.
+pub const SNAPSHOT_FRESHNESS: Duration = Duration::from_secs(120);
+
 /// The state captured before a layout edit, so it can be put back.
 ///
 /// Both halves are needed: restoring only the compositor would leave the bad
@@ -74,6 +90,20 @@ struct PendingRevert {
     /// False until a timer is actually running (the snapshot is taken at the
     /// first mutation, which may be several D-Bus calls before the apply).
     armed: bool,
+    /// When it was captured, so an unarmed one can expire. See
+    /// [`SNAPSHOT_FRESHNESS`].
+    taken_at: tokio::time::Instant,
+}
+
+impl PendingRevert {
+    /// Whether this snapshot is too old to be worth restoring.
+    ///
+    /// Only ever true of an unarmed snapshot: once a timer is running the
+    /// snapshot is owned by that timer, and age is no longer what decides
+    /// its fate.
+    fn is_stale(&self) -> bool {
+        !self.armed && self.taken_at.elapsed() > SNAPSHOT_FRESHNESS
+    }
 }
 
 pub struct Daemon {
@@ -217,8 +247,18 @@ impl Daemon {
     /// and revert to nothing.
     async fn ensure_revert_snapshot(&self, profiles: &[Profile]) {
         let mut pending = self.pending_revert.lock().await;
-        if pending.is_some() {
-            return;
+        // The first mutation of an edit wins — unless what is held is a
+        // leftover from an edit that was never applied, in which case
+        // "first" would mean an arbitrarily old state.
+        match pending.as_ref() {
+            Some(held) if !held.is_stale() => return,
+            Some(_) => {
+                tracing::debug!(
+                    "discarding an unapplied revert snapshot older than {}s",
+                    SNAPSHOT_FRESHNESS.as_secs()
+                );
+            }
+            None => {}
         }
         let Ok(heads) = self.backend.list_outputs() else {
             // No readable live state means nothing trustworthy to restore;
@@ -235,6 +275,7 @@ impl Daemon {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                 + 1,
             armed: false,
+            taken_at: tokio::time::Instant::now(),
         });
     }
 
@@ -245,6 +286,20 @@ impl Daemon {
     pub async fn arm_revert(self: &Arc<Self>) -> Option<Duration> {
         let generation = {
             let mut pending = self.pending_revert.lock().await;
+            // Never arm a stale snapshot. Arming one is the failure this
+            // guards: the countdown would look completely normal and roll
+            // back to a state nobody recognises. Dropping it makes the
+            // change irreversible instead, which is the same contract
+            // `ensure_revert_snapshot` already gives when live outputs
+            // cannot be read.
+            if pending.as_ref().is_some_and(PendingRevert::is_stale) {
+                tracing::warn!(
+                    "the pending revert snapshot is older than {}s and was never applied; \
+                     this change won't be reversible",
+                    SNAPSHOT_FRESHNESS.as_secs()
+                );
+                *pending = None;
+            }
             let p = pending.as_mut()?;
             if p.armed {
                 return Some(REVERT_WINDOW);
