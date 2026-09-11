@@ -10,6 +10,17 @@
 # a console, this is the VT that stops being a console.
 vt = 1
 
+# Whether starting greetd also *switches the display* to that VT.
+#
+# true is right for the installed configuration: at boot the greeter
+# should be what you see. It is wrong while testing, because it yanks the
+# screen away from whatever you were doing the instant greetd starts —
+# which is not what "test it without committing to anything" should mean.
+#
+# While testing on a spare VT, set this false and switch with ctrl+alt+F2
+# when you are ready to look.
+switch = true
+
 [default_session]
 # Hyprland, configured to have no keybinds, running the greeter and
 # exiting with it. See hyprland-greeter.lua for why the config matters
