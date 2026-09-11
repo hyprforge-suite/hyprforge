@@ -191,7 +191,19 @@ impl Theme {
     /// nothing better to do than draw something usable — so a corrupt or
     /// unreadable export degrades to plain rather than to a blank screen.
     pub fn load_exported() -> Theme {
-        Theme::load(&Path::new(EXPORT_DIR).join("theme.toml")).unwrap_or_default()
+        Theme::load_exported_from(Path::new(EXPORT_DIR))
+    }
+
+    /// [`load_exported`](Self::load_exported) against a named directory.
+    ///
+    /// Split out so the degrade-to-default behaviour can be tested
+    /// without reading a real system path. The test that did read one
+    /// asserted the export "won't exist in a test environment", which
+    /// stopped being true the moment the greeter was installed on the
+    /// machine running the tests — it then failed because the product
+    /// was working.
+    pub fn load_exported_from(dir: &Path) -> Theme {
+        Theme::load(&dir.join("theme.toml")).unwrap_or_default()
     }
 
     /// Writes the theme to `path`, as the lock screen reads it.
@@ -301,10 +313,17 @@ mod tests {
     /// an error to.
     #[test]
     fn an_unreadable_export_degrades_to_plain_rather_than_failing() {
-        // `load_exported` reads a fixed system path that won't exist in a
-        // test environment, which is exactly the case being checked.
-        let theme = Theme::load_exported();
-        assert_eq!(theme, Theme::default());
+        let dir = tempfile::tempdir().unwrap();
+
+        // Nothing there at all: a machine where nothing has been exported.
+        assert_eq!(Theme::load_exported_from(dir.path()), Theme::default());
+
+        // There, and not parseable: a half-finished hand edit, or a write
+        // interrupted before this file was whole. A greeter has nobody to
+        // report the error to and nothing better to do than draw
+        // something usable.
+        std::fs::write(dir.path().join("theme.toml"), "accent = [not toml").unwrap();
+        assert_eq!(Theme::load_exported_from(dir.path()), Theme::default());
     }
 
     /// A partial file — a half-finished hand edit — must not take the
