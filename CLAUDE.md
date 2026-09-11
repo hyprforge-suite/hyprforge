@@ -47,6 +47,15 @@ new branch: not answering and not starting are the same problem from their side.
 appears in that shell's own command line. It kills the shell and exits 144. Use
 `pkill -x <name>` or a literal PID.
 
+**iced reports three things for a key press and only one of them is what was
+typed.** `key` is the *unmodified* logical key, `modified_key` has modifiers
+applied, `text` is what the press produced. Reading `key` turns `SHIFT + j` into
+`j`, so a password loses every capital and symbol, PAM rejects a password the
+user typed correctly, and each attempt spends a `faillock` slot. Use `text` for
+character input and `key` only to recognise Enter, Escape and Backspace — which
+produce text of their own (`\r`, `\u{1b}`, `\u{8}`) and must never reach a
+password field.
+
 **`hl.exec_cmd` runs while the config is being parsed**, which is before Hyprland
 accepts clients. Anything it launches that needs a Wayland connection has to wait
 for `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY` to exist first. Losing that race made the
