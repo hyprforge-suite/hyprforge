@@ -19,6 +19,9 @@ path = "src/bin/displayctl.rs"
 [dependencies]
 # No `gui`: the daemon has no UI, so it skips iced entirely.
 hyprforge-core = { workspace = true, features = ["dbus"] }
+# For EXPORT_DIR only: the greeter reads the layout from there, and the
+# location must have exactly one definition.
+hyprforge-look.workspace = true
 zbus.workspace = true
 wayland-client.workspace = true
 wayland-protocols-wlr.workspace = true
