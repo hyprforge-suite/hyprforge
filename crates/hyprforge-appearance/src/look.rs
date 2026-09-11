@@ -97,10 +97,20 @@ pub fn publish(theme: &Theme) -> Result<(), hyprforge_look::ThemeError> {
     theme.save(&hyprforge_paths::lock_toml_path())?;
 
     if let Err(e) = theme.export(std::path::Path::new(hyprforge_look::theme::EXPORT_DIR)) {
-        tracing::debug!(
+        // Warn, not debug. This failing is invisible from the outside:
+        // the save succeeds, the lock screen restyles, and only the
+        // greeter — seen once per boot, before this process exists —
+        // keeps the old look. Logged at debug it read as "nothing
+        // configured" when the truth was "the directory isn't there",
+        // which is the distinction this project has already been
+        // bitten by once. The remedy is an install step, so name it.
+        tracing::warn!(
             error = %e,
             dir = hyprforge_look::theme::EXPORT_DIR,
-            "couldn't export the look for the greeter; the lock screen's copy is written"
+            "couldn't export the look for the greeter, so the login screen keeps its \
+             previous appearance; the lock screen's copy is written. If the greeter is \
+             installed, this directory needs to exist and be writable by this user - see \
+             crates/hyprforge-greet/config/hyprforge-greet.tmpfiles"
         );
     }
     Ok(())
