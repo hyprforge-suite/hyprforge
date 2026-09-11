@@ -72,7 +72,37 @@ pub struct PamBackend {
     /// screen at 100% CPU and stopped it ever drawing again. The comment
     /// below always said "once"; this is what makes it once.
     reported_loss: bool,
+    /// When the outstanding request was posted, if one is outstanding.
+    ///
+    /// PAM modules can block indefinitely — `pam_sss` against an
+    /// unreachable directory server, `pam_krb5`, a fingerprint reader
+    /// waiting on a finger that never arrives — and `authenticate` is a
+    /// blocking C call on another thread that cannot be cancelled. What
+    /// *can* be bounded is how long this side waits before telling the
+    /// person in front of the screen something.
+    ///
+    /// The greeter has bounded greetd at 60s since it was written; the
+    /// lock screen bounded nothing, so a hung module left it on
+    /// "Checking…" forever — and `State::Working` refuses all input, so
+    /// no key helped. The only way out was another TTY.
+    waiting_since: Option<std::time::Instant>,
+    /// Set once the wait has been given up on.
+    ///
+    /// The PAM thread may still answer afterwards. That answer is about
+    /// a question the user has already been told failed, and a late
+    /// `Success` must never unlock a session — so once abandoned, this
+    /// transaction is over and nothing it says is read again.
+    abandoned: bool,
 }
+
+/// How long the lock screen waits for PAM before saying so.
+///
+/// Longer than the greeter's 60s greetd bound, because `pam_unix`
+/// deliberately sleeps for seconds after a wrong password and a stacked
+/// module can legitimately take a while. Short enough that someone
+/// standing at a locked screen gets an answer rather than a machine they
+/// assume has crashed.
+const PAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 impl PamBackend {
     /// Builds the backend and the event source that wakes the host.
@@ -91,7 +121,17 @@ impl PamBackend {
             .spawn(move || run(service, requests, responses, ping))
             .expect("failed to start the PAM thread");
 
-        (PamBackend { to_pam, from_pam, lost: None, reported_loss: false }, source)
+        (
+            PamBackend {
+                to_pam,
+                from_pam,
+                lost: None,
+                reported_loss: false,
+                waiting_since: None,
+                abandoned: false,
+            },
+            source,
+        )
     }
 
     /// Posts a request without waiting for the answer.
@@ -101,6 +141,12 @@ impl PamBackend {
     /// lock screen leaves the compositor locked with no way in, and a
     /// hang looks identical to one.
     fn post(&mut self, request: Request) {
+        if self.abandoned {
+            // Nothing more is asked of a transaction that was given up
+            // on; the thread may still be inside the previous call.
+            return;
+        }
+        self.waiting_since = Some(std::time::Instant::now());
         if self.to_pam.send(request).is_err() {
             // A failed send and a disconnected receiver are the same
             // fact — the thread is gone — so they share one "already
@@ -133,8 +179,24 @@ impl Backend for PamBackend {
         if let Some(lost) = self.lost.take() {
             return Some(lost);
         }
+        if self.abandoned {
+            return None;
+        }
+        if self.waiting_since.is_some_and(|at| at.elapsed() >= PAM_TIMEOUT) {
+            self.abandoned = true;
+            self.waiting_since = None;
+            return Some(Response::Failure {
+                reason: "the authentication service didn't answer".into(),
+            });
+        }
         match self.from_pam.try_recv() {
-            Ok(response) => Some(response),
+            Ok(response) => {
+                // An answer arrived, so nothing is outstanding. A prompt
+                // is an answer too: it means the far side is alive and
+                // the clock restarts when the reply goes back.
+                self.waiting_since = None;
+                Some(response)
+            }
             // Empty means "not yet"; the ping will bring the host back.
             Err(std::sync::mpsc::TryRecvError::Empty) => None,
             // Disconnected means the thread is gone for good. Saying so
@@ -412,7 +474,14 @@ mod tests {
         drop(requests);
         drop(responses);
 
-        let mut backend = PamBackend { to_pam, from_pam, lost: None, reported_loss: false };
+        let mut backend = PamBackend {
+            to_pam,
+            from_pam,
+            lost: None,
+            reported_loss: false,
+            waiting_since: None,
+            abandoned: false,
+        };
         backend.start("apost");
         assert!(matches!(backend.poll(), Some(Response::Failure { .. })), "said once");
         assert!(backend.poll().is_none(), "and then stops, or the host spins");
@@ -478,7 +547,14 @@ mod tests {
         drop(requests);
         drop(responses);
 
-        let mut backend = PamBackend { to_pam, from_pam, lost: None, reported_loss: false };
+        let mut backend = PamBackend {
+            to_pam,
+            from_pam,
+            lost: None,
+            reported_loss: false,
+            waiting_since: None,
+            abandoned: false,
+        };
         backend.start("apost");
         assert!(
             matches!(backend.poll(), Some(Response::Failure { .. })),
@@ -489,5 +565,105 @@ mod tests {
         // waiting on when the thread dies mid-attempt.
         backend.answer("x");
         assert!(matches!(backend.poll(), Some(Response::Failure { .. })));
+    }
+}
+
+#[cfg(test)]
+mod waiting {
+    use super::*;
+
+    /// A backend whose PAM thread is alive but stuck inside
+    /// `authenticate` — no answer, no disconnect. This is the case a
+    /// dead-thread check cannot see.
+    fn stuck() -> PamBackend {
+        let (to_pam, requests) = std::sync::mpsc::channel::<Request>();
+        let (responses, from_pam) = std::sync::mpsc::channel::<Response>();
+        // Both far ends leaked, so neither channel ever reads as
+        // disconnected. That is the whole point: a thread wedged inside
+        // `authenticate` is alive, and the dead-thread check cannot see
+        // it.
+        std::mem::forget(requests);
+        std::mem::forget(responses);
+        PamBackend {
+            to_pam,
+            from_pam,
+            lost: None,
+            reported_loss: false,
+            waiting_since: None,
+            abandoned: false,
+        }
+    }
+
+    #[test]
+    fn a_pam_module_that_never_answers_is_eventually_reported() {
+        let mut backend = stuck();
+        backend.answer("anything");
+        assert!(backend.poll().is_none(), "not yet — it may simply be slow");
+
+        // Reach back past the bound rather than sleeping for it.
+        backend.waiting_since = Some(std::time::Instant::now() - PAM_TIMEOUT);
+
+        match backend.poll() {
+            Some(Response::Failure { reason }) => {
+                assert!(!reason.is_empty());
+                assert!(
+                    !reason.to_lowercase().contains("password"),
+                    "a service that didn't answer must never be blamed on the password: {reason}"
+                );
+            }
+            other => panic!("expected a failure once the bound passed, got {other:?}"),
+        }
+    }
+
+    /// Once given up on, the transaction is over. A late `Success` is an
+    /// answer to a question the user has already been told failed, and
+    /// acting on it would unlock the session.
+    #[test]
+    fn a_late_answer_after_giving_up_is_never_read() {
+        let (to_pam, requests) = std::sync::mpsc::channel::<Request>();
+        let (responses, from_pam) = std::sync::mpsc::channel::<Response>();
+        std::mem::forget(requests);
+        let mut backend = PamBackend {
+            to_pam,
+            from_pam,
+            lost: None,
+            reported_loss: false,
+            waiting_since: Some(std::time::Instant::now() - PAM_TIMEOUT),
+            abandoned: false,
+        };
+
+        assert!(matches!(backend.poll(), Some(Response::Failure { .. })));
+
+        // PAM finally finishes, and says yes.
+        responses.send(Response::Success).unwrap();
+
+        assert!(
+            backend.poll().is_none(),
+            "a success for an abandoned transaction must never reach the screen"
+        );
+    }
+
+    /// The bound must not fire on a conversation that is progressing —
+    /// a prompt is evidence the far side is alive.
+    #[test]
+    fn an_answered_prompt_restarts_the_clock() {
+        let (to_pam, requests) = std::sync::mpsc::channel::<Request>();
+        let (responses, from_pam) = std::sync::mpsc::channel::<Response>();
+        std::mem::forget(requests);
+        let mut backend = PamBackend {
+            to_pam,
+            from_pam,
+            lost: None,
+            reported_loss: false,
+            waiting_since: Some(std::time::Instant::now() - PAM_TIMEOUT / 2),
+            abandoned: false,
+        };
+
+        responses
+            .send(Response::Ask(hyprforge_authui::conversation::Prompt::secret("Password:")))
+            .unwrap();
+        assert!(matches!(backend.poll(), Some(Response::Ask(_))));
+        assert!(backend.waiting_since.is_none(), "nothing is outstanding after an answer");
+        assert!(!backend.abandoned);
     }
 }
