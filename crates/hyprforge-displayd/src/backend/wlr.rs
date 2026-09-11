@@ -232,7 +232,14 @@ impl Dispatch<ZwlrOutputManagerV1, ()> for WlrState {
                 }
             }
             zwlr_output_manager_v1::Event::Finished => {
+                // The manager is gone, so no further topology event can
+                // ever arrive. Dropping the subscribers ends the run
+                // loop and lets systemd restart us against a compositor
+                // that will talk — staying alive here is staying alive
+                // as something that can only report stale state.
                 tracing::warn!("compositor closed the wlr-output-management-v1 manager");
+                state.manager = None;
+                lock(&state.subscribers).clear();
             }
             _ => {}
         }
@@ -426,11 +433,29 @@ impl WlrBackend {
 
         std::thread::Builder::new()
             .name("hyprforge-wlr-output".to_string())
-            .spawn(move || loop {
-                if let Err(e) = event_queue.blocking_dispatch(&mut state) {
-                    tracing::error!(error = %e, "wlr-output-management-v1 event queue closed; stopping dispatch thread");
-                    break;
+            .spawn(move || {
+                loop {
+                    if let Err(e) = event_queue.blocking_dispatch(&mut state) {
+                        tracing::error!(error = %e, "wlr-output-management-v1 event queue closed; stopping dispatch thread");
+                        break;
+                    }
                 }
+                // Explicitly, because dropping `state` does not do it.
+                // The systemd unit's comment claims "its event senders
+                // drop, the run loop sees a closed channel and main
+                // exits 0" — that was the intent and not the behaviour:
+                // `subscribers` is an `Arc` the backend also holds, so
+                // dropping this clone leaves every sender alive and
+                // `events.recv()` blocks forever.
+                //
+                // The daemon then stayed up serving a stale snapshot —
+                // hotplugs unnoticed, `monitors.lua` never updated again,
+                // Settings showing monitors that are not there — with no
+                // failed unit and nothing for `Restart=always` to
+                // restart. Clearing the list is what turns a dead
+                // dispatch thread into an exit, which is the one thing
+                // that recovers it.
+                lock(&state.subscribers).clear();
             })?;
 
         Ok(WlrBackend {

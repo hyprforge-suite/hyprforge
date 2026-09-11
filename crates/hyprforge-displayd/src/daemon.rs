@@ -650,6 +650,15 @@ impl Daemon {
 
         if let Err(e) = plan.validate() {
             tracing::error!(error = %e, profile = %profile_id, "refusing to apply invalid plan");
+            // Nothing was applied, so the live heads are untouched and
+            // worth recording — the stored plan is the broken thing, not
+            // what is on screen. Without this a profile that can never
+            // validate leaves the fallback stale indefinitely.
+            tokio::spawn(write_monitors_fallback(
+                heads.clone(),
+                self.monitors_lua_path.clone(),
+                self.greet_monitors_path.clone(),
+            ));
             return;
         }
 
@@ -693,10 +702,37 @@ impl Daemon {
                     profile = %profile_id,
                     "compositor did not accept this layout; not retrying until the topology changes"
                 );
+                // Record what is actually on screen before giving up.
+                // This branch is where a layout the hardware will not do
+                // comes to rest — the fractional-scale case documented
+                // below is one users really hit — so it is not a
+                // transient state, it is the *permanent* one for that
+                // profile. Returning without writing left `monitors.lua`
+                // describing some other set of monitors for as long as
+                // the profile stayed in effect: greeter at the wrong
+                // scale, layout lost whenever the daemon is not running.
+                //
+                // These heads are the same kind as the satisfied branch
+                // writes: observed, not requested. The compositor
+                // declined the plan, so what is here is what it chose.
+                tokio::spawn(write_monitors_fallback(
+                    heads.clone(),
+                    self.monitors_lua_path.clone(),
+                    self.greet_monitors_path.clone(),
+                ));
                 return;
             }
             if let Err(e) = self.backend.apply_configuration(&plan) {
                 tracing::error!(error = %e, profile = %profile_id, "failed to apply layout");
+                // The change did not land, so the screen still shows what
+                // these heads describe. Same argument as the two branches
+                // above: record the working layout rather than leave the
+                // fallback pointing at a different set of monitors.
+                tokio::spawn(write_monitors_fallback(
+                    heads.clone(),
+                    self.monitors_lua_path.clone(),
+                    self.greet_monitors_path.clone(),
+                ));
                 return;
             }
             *self.unsatisfied_plan.lock().await = Some(plan.clone());
