@@ -44,8 +44,22 @@ pub fn appearance_toml_path() -> PathBuf {
     hyprforge_config_dir().join("appearance.toml")
 }
 
-/// Write `contents` to `path` atomically: write to a sibling temp file, then
-/// rename over the target. Avoids ever leaving a half-written config file.
+/// Write `contents` to `path` atomically and durably: write a sibling temp
+/// file, flush it to disk, rename over the target, then flush the
+/// directory.
+///
+/// The rename alone makes the change atomic *for a concurrent reader* —
+/// nobody ever sees half a file. It does not make it survive a power
+/// loss, and those are two different guarantees that are easy to
+/// conflate. Without the first fsync the rename can land while the new
+/// file's contents are still only in page cache, so the file comes back
+/// empty; without the second the rename itself can be lost, so the file
+/// comes back missing or with its previous contents.
+///
+/// The cost is one flush per config write. These files are written when
+/// a user changes a setting or a layout settles, not in a loop, and what
+/// is being protected is the only record of something the user cannot
+/// reconstruct — their profiles, their keybinds.
 pub fn write_atomic(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -54,8 +68,30 @@ pub fn write_atomic(path: &std::path::Path, contents: &str) -> std::io::Result<(
         "{}.tmp",
         path.extension().and_then(|e| e.to_str()).unwrap_or("")
     ));
-    std::fs::write(&tmp, contents)?;
+
+    {
+        let file = std::fs::File::create(&tmp)?;
+        {
+            use std::io::Write as _;
+            let mut writer = std::io::BufWriter::new(&file);
+            writer.write_all(contents.as_bytes())?;
+            writer.flush()?;
+        }
+        file.sync_all()?;
+    }
+
     std::fs::rename(&tmp, path)?;
+
+    // Flushing the directory is what makes the rename itself durable.
+    // Best-effort: some filesystems refuse to open a directory for this,
+    // and failing the whole write because the *extra* guarantee could not
+    // be had would be worse than the guarantee being missing — the data
+    // is already on disk and already renamed into place.
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
     Ok(())
 }
 

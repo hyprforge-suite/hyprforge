@@ -1100,3 +1100,29 @@ async fn an_edit_and_its_apply_still_share_one_snapshot() {
         "the lapse should have restored the state from before the edit began"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn learning_a_topology_also_writes_the_fallback_for_it() {
+    // The fallback is what Hyprland applies when the daemon is not
+    // running. A newly learned topology is exactly the case that has no
+    // fallback yet, so if learning does not write one, the file goes on
+    // describing some other set of monitors until a later settle happens
+    // to take the matched path.
+    let mut h = Harness::new();
+    h.backend.set_topology(vec![identity("BOE", "0x0BC9", "")]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await;
+
+    // The fallback write is spawned and asks `hyprctl` for the
+    // connector->description map under a timeout, so it needs both the
+    // clock moved on and a chance to be polled afterwards.
+    for _ in 0..10 {
+        settle().await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+    }
+    settle().await;
+
+    let lua = std::fs::read_to_string(h._dir.path().join("monitors.lua"))
+        .expect("learning a topology must leave a monitors.lua behind");
+    assert!(lua.contains("hl.monitor("), "got: {lua}");
+}
