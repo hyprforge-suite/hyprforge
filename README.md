@@ -215,6 +215,24 @@ topology change — "no stored profile matches" is exactly the condition that
 triggers learning. The GUI's confirmation dialog says which of the two you're
 about to get.
 
+## What the static fallback deliberately does not copy
+
+`monitors.lua` describes enabled outputs only. A disabled one is named in
+a comment and given no rule at all.
+
+The reason is that a rule is matched against whatever is plugged in when
+*Hyprland* reads the file, not what was plugged in when the daemon wrote
+it. Dock with the lid shut and the internal panel is genuinely disabled,
+so writing `disabled = true` for it is an accurate record of that moment.
+Undock and boot before the daemon starts, and that rule still matches —
+switching off the only display present, by the very file whose job is to
+stop you losing your display when the daemon is not running.
+
+Omitting the rule means Hyprland applies its own default and the panel
+comes up. If the profile really does want it off, the daemon turns it off
+a second later. The cost is a panel briefly on when it should be off; the
+cost of the alternative is a black screen and a TTY.
+
 ## The confirm/revert window on display changes
 
 Applying a layout from the Settings GUI is **provisional for 12 seconds**. A

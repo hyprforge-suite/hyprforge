@@ -69,22 +69,48 @@ pub fn entries_from_heads(heads: &[Head], descriptions: &HashMap<String, String>
 }
 
 /// Renders `entries` to a complete `monitors.lua` body.
+///
+/// **Disabled outputs are described in a comment, never as a rule.** This
+/// is the one place the fallback deliberately does not mirror the live
+/// layout, and it is the difference between a cosmetic wrong and an
+/// unusable machine:
+///
+/// A rule is matched by whatever is plugged in when Hyprland *reads* this
+/// file, not by what was plugged in when the daemon wrote it. Dock with
+/// the lid closed and the internal panel is legitimately disabled, so
+/// `disabled = true` for it and a normal rule for the external is an
+/// accurate description of that moment. Undock, then boot before the
+/// daemon starts: the external's rule matches nothing, the internal's
+/// still matches — and the only display present is switched off, by the
+/// very file whose job is to stop you losing your display when the daemon
+/// is not running.
+///
+/// Omitting the rule instead means Hyprland applies its own default and
+/// the panel comes up. If the daemon then starts and the profile really
+/// does want it off, it turns it off a second later over
+/// `wlr-output-management-v1`. So the cost is a panel that is briefly on
+/// when it should be off; the cost of the alternative is a black screen
+/// with no way back that does not involve a TTY.
 pub fn generate(entries: &[MonitorEntry]) -> String {
     let mut out = String::from(HEADER);
     out.push('\n');
-    for entry in entries {
+    for entry in entries.iter().filter(|e| !e.enabled) {
+        // Recorded, not silently dropped: someone reading this file needs
+        // to be able to tell "displayd has never seen that output" from
+        // "displayd knows about it and is leaving it to Hyprland".
+        out.push_str(&format!(
+            "-- {} is disabled in the live layout. Deliberately left to Hyprland's\n             -- default here: a `disabled` rule would also match when it is the only\n             -- display present, and switch off the screen this file exists to save.\n",
+            entry.selector,
+        ));
+    }
+    for entry in entries.iter().filter(|e| e.enabled) {
         out.push_str(&render(entry));
     }
     out
 }
 
 fn render(entry: &MonitorEntry) -> String {
-    if !entry.enabled {
-        return format!(
-            "hl.monitor({{ output = {}, disabled = true }})\n",
-            lua_string(&entry.selector),
-        );
-    }
+    debug_assert!(entry.enabled, "generate filters disabled entries out");
     let mode = match entry.mode {
         Some((width, height, refresh_mhz)) => {
             format!("{width}x{height}@{:.2}", refresh_mhz as f64 / 1000.0)
@@ -214,13 +240,44 @@ mod tests {
     }
 
     #[test]
-    fn a_disabled_entry_omits_mode_position_and_scale() {
+    fn a_disabled_output_never_becomes_a_disabling_rule() {
+        // The property, not the formatting: a rule that switches an
+        // output off is matched by whatever is plugged in when Hyprland
+        // reads the file. Written while docked with the lid shut, then
+        // read after undocking, it is the only display present — and
+        // this file would be the thing that blanked it.
         let mut entry = enabled_entry();
         entry.enabled = false;
         let lua = generate(&[entry]);
-        assert!(lua.contains("hl.monitor({ output = [[desc:BOE 0x0BC9]], disabled = true })"));
-        assert!(!lua.contains("mode"));
-        assert!(!lua.contains("scale"));
+        assert!(!lua.contains("hl.monitor("), "no rule at all may be emitted: {lua}");
+        assert!(!lua.contains("disabled = true"), "got: {lua}");
+    }
+
+    #[test]
+    fn a_disabled_output_is_still_named_so_the_file_explains_itself() {
+        let mut entry = enabled_entry();
+        entry.enabled = false;
+        let lua = generate(&[entry]);
+        // Every line it contributes must be a comment, or the point above
+        // is lost the moment someone adds a field to the renderer.
+        assert!(lua.contains("desc:BOE 0x0BC9"), "got: {lua}");
+        for line in lua.lines().filter(|l| l.contains("desc:BOE 0x0BC9")) {
+            assert!(line.trim_start().starts_with("--"), "not a comment: {line}");
+        }
+    }
+
+    #[test]
+    fn a_disabled_output_does_not_suppress_the_ones_that_are_on() {
+        // The docked case end to end: the internal panel off, the
+        // external carrying the session. The external's rule has to
+        // survive the filtering.
+        let mut internal = enabled_entry();
+        internal.enabled = false;
+        let mut external = enabled_entry();
+        external.selector = "desc:GWD ARZOPA".to_string();
+        let lua = generate(&[internal, external]);
+        assert!(lua.contains("hl.monitor({ output = [[desc:GWD ARZOPA]]"), "got: {lua}");
+        assert_eq!(lua.matches("hl.monitor(").count(), 1, "got: {lua}");
     }
 
     #[test]
