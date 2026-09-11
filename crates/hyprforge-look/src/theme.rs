@@ -31,6 +31,33 @@ use std::path::{Path, PathBuf};
 /// this is generated state, not configuration a sysadmin edits.
 pub const EXPORT_DIR: &str = "/var/lib/hyprforge/greet";
 
+/// The environment variable that redirects [`export_dir`].
+///
+/// Exists so the export can be isolated the same way the config home
+/// can. Without it the two writes in `appearance::look::publish` obey
+/// different rules: `lock.toml` follows `XDG_CONFIG_HOME` and the export
+/// does not, so anything that sandboxes one still writes the real
+/// login screen's theme.
+///
+/// That is not hypothetical — the Settings module tests drive a save
+/// through `publish`, and on a machine where the greeter is installed
+/// they overwrote the user's exported theme with one derived from an
+/// empty temp config. Harmless before installing, destructive after,
+/// which is the worst time to find out.
+pub const EXPORT_DIR_ENV: &str = "HYPRFORGE_GREET_DIR";
+
+/// Where an exported theme is written and read.
+///
+/// [`EXPORT_DIR`] unless [`EXPORT_DIR_ENV`] overrides it. Read every
+/// time rather than cached, because a test sets it after this library is
+/// already loaded.
+pub fn export_dir() -> PathBuf {
+    std::env::var_os(EXPORT_DIR_ENV)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(EXPORT_DIR))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ThemeError {
     #[error("couldn't read {path}: {source}")]
@@ -191,7 +218,7 @@ impl Theme {
     /// nothing better to do than draw something usable — so a corrupt or
     /// unreadable export degrades to plain rather than to a blank screen.
     pub fn load_exported() -> Theme {
-        Theme::load_exported_from(Path::new(EXPORT_DIR))
+        Theme::load_exported_from(&export_dir())
     }
 
     /// [`load_exported`](Self::load_exported) against a named directory.

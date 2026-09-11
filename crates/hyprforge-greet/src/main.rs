@@ -233,7 +233,7 @@ fn main() -> iced::Result {
 
     let dir = args
         .theme_dir
-        .unwrap_or_else(|| std::path::PathBuf::from(hyprforge_look::theme::EXPORT_DIR));
+        .unwrap_or_else(hyprforge_look::theme::export_dir);
     // A greeter that refused to draw because a theme file was missing
     // would be a machine nobody can log into, so every failure here ends
     // at the default look.

@@ -96,7 +96,8 @@ pub fn resolve() -> Theme {
 pub fn publish(theme: &Theme) -> Result<(), hyprforge_look::ThemeError> {
     theme.save(&hyprforge_paths::lock_toml_path())?;
 
-    if let Err(e) = theme.export(std::path::Path::new(hyprforge_look::theme::EXPORT_DIR)) {
+    let dir = hyprforge_look::theme::export_dir();
+    if let Err(e) = theme.export(&dir) {
         // Warn, not debug. This failing is invisible from the outside:
         // the save succeeds, the lock screen restyles, and only the
         // greeter — seen once per boot, before this process exists —
@@ -106,7 +107,7 @@ pub fn publish(theme: &Theme) -> Result<(), hyprforge_look::ThemeError> {
         // bitten by once. The remedy is an install step, so name it.
         tracing::warn!(
             error = %e,
-            dir = hyprforge_look::theme::EXPORT_DIR,
+            dir = %dir.display(),
             "couldn't export the look for the greeter, so the login screen keeps its \
              previous appearance; the lock screen's copy is written. If the greeter is \
              installed, this directory needs to exist and be writable by this user - see \
@@ -201,6 +202,10 @@ mod tests {
 mod publishing {
     use super::*;
 
+    /// `set_var` is process-global and cargo runs tests on threads, so
+    /// every test here that touches the environment takes this first.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// The lock screen reads a file nothing used to write, which is why
     /// it could only ever show its own defaults. Publishing has to
     /// produce something it can actually load.
@@ -217,6 +222,40 @@ mod publishing {
         let read_back = Theme::load(&path).expect("the lock screen must be able to read it");
         assert_eq!(read_back.accent, theme.accent);
         assert_eq!(read_back, theme, "publishing must not lose a field");
+    }
+
+    /// The export must be redirectable, because otherwise it is the one
+    /// write in `publish` that no sandbox can contain. A test that
+    /// isolates `XDG_CONFIG_HOME` and drives a settings save would
+    /// otherwise overwrite the real login screen's theme on any machine
+    /// where the greeter is installed — which is exactly what happened.
+    #[test]
+    fn publishing_writes_the_export_where_it_is_pointed() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let previous = std::env::var(hyprforge_look::theme::EXPORT_DIR_ENV).ok();
+        // SAFETY: ENV_LOCK serialises every env mutation in this module.
+        unsafe {
+            std::env::set_var(hyprforge_look::theme::EXPORT_DIR_ENV, dir.path().join("greet"))
+        };
+
+        let resolved = hyprforge_look::theme::export_dir();
+        assert!(
+            resolved.starts_with(dir.path()),
+            "the override must win over the compiled-in path; got {resolved:?}"
+        );
+        assert_ne!(
+            resolved,
+            std::path::Path::new(hyprforge_look::theme::EXPORT_DIR),
+            "an isolated run must never resolve to the real greeter export"
+        );
+
+        match previous {
+            Some(p) => unsafe {
+                std::env::set_var(hyprforge_look::theme::EXPORT_DIR_ENV, p)
+            },
+            None => unsafe { std::env::remove_var(hyprforge_look::theme::EXPORT_DIR_ENV) },
+        }
     }
 
     /// An export that fails — `/var/lib` unprivileged is the normal case
