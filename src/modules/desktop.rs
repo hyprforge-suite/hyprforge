@@ -484,7 +484,16 @@ impl SettingsModule for DesktopModule {
             }
             Message::GeneralCommandChanged(field, value) => {
                 self.idle.general.set_command(field, value);
-                Task::none()
+                // Saved here, like every sibling in this match. It used
+                // to return `Task::none()` and record no draft either —
+                // and `commit` builds its work list from `self.drafts`
+                // alone, so Enter and the Apply button were both no-ops
+                // and the text simply sat on screen looking saved.
+                //
+                // These are the idle daemon's `lock_cmd` and
+                // `before_sleep_cmd`. Silently not saving the second one
+                // is a machine that suspends unlocked.
+                self.save(Tab::Idle)
             }
             Message::InhibitToggled(field, on) => {
                 match field {
@@ -1075,6 +1084,29 @@ mod tests {
             assert!(m.wallpapers.is_empty());
             assert!(m.sunset.is_empty());
             assert!(m.idle.is_empty());
+        });
+    }
+
+    /// Typing a session command and pressing nothing else must still
+    /// reach the disk, because there is nothing else to press: the field
+    /// submits to `Commit`, and `Commit` only walks `self.drafts`, which
+    /// this message never populated. `before_sleep_cmd` is what locks
+    /// the screen before suspend.
+    #[test]
+    fn a_typed_session_command_reaches_the_disk() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::GeneralCommandChanged(
+                "before_sleep_cmd",
+                "hyprforge-lock".to_string(),
+            ));
+
+            let written: idle::Settings =
+                hyprforge_ecosystem::storage::load(&idle_toml())
+                    .expect("the idle settings must have been written");
+            assert_eq!(
+                written.general.before_sleep_cmd, "hyprforge-lock",
+                "the command was accepted on screen but never saved"
+            );
         });
     }
 

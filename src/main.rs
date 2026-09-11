@@ -21,8 +21,18 @@ const SIDEBAR_WIDTH: f32 = 240.0;
 const CONTENT_MAX_WIDTH: f32 = 880.0;
 
 fn main() -> iced::Result {
+    // `from_default_env()` alone defaults to ERROR, and these crates emit
+    // no `error!` at all — so with RUST_LOG unset, which is how a GUI
+    // launched from a menu always runs, every `warn!` in the app went
+    // nowhere. That included the one saying the greeter's theme could
+    // not be exported, which was itself the fix for a bug whose whole
+    // symptom was silence. `hyprforge-displayd` already got this right;
+    // this makes the GUI agree. RUST_LOG still overrides.
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
         .init();
 
     // Resolve the shared look before the first frame. This is the one
