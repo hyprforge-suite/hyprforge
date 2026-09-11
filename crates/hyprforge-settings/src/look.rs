@@ -100,13 +100,64 @@ fn scale_into(original: &Path, scaled: &Path) -> Option<PathBuf> {
     if let Some(parent) = scaled.parent() {
         std::fs::create_dir_all(parent).ok()?;
     }
-    resized.save(scaled).ok()?;
+
+    // Encoded to a sibling and renamed, never written in place. A save
+    // interrupted halfway leaves a truncated PNG whose mtime is *newer*
+    // than its source — so `up_to_date` above reports it current, and
+    // the broken file is returned forever. Re-saving settings never
+    // regenerates it; the auth screens drop an undecodable wallpaper and
+    // show a flat background with no error, so the only recovery is
+    // knowing to delete this file by hand.
+    //
+    // The temp name carries the pid for the same reason
+    // `hyprforge_paths::write_atomic` does: two Settings instances would
+    // otherwise truncate each other's half-encoded image. This cannot
+    // use `write_atomic` itself — that takes a `&str`, and this is a
+    // PNG encoder writing bytes.
+    let tmp = scaled.with_extension(format!("{}.tmp.png", std::process::id()));
+    if resized.save(&tmp).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return None;
+    }
+    if std::fs::rename(&tmp, scaled).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return None;
+    }
     tracing::debug!(
         from = %format!("{width}x{height}"),
         to = %format!("{}x{}", resized.width(), resized.height()),
         "scaled the wallpaper for the auth screens"
     );
     Some(scaled.to_path_buf())
+}
+
+/// Whether `original` is too large for the auth screens to decode
+/// safely.
+///
+/// Separate from [`scale_into`] because the two answers it used to
+/// conflate mean opposite things. `scale_into` returns `None` both for
+/// "already small enough" and "scaling failed", and the caller then
+/// falls back to the original — which is right for the first and exactly
+/// wrong for the second. By the time a scale fails we have *already
+/// established* the image is oversized, and `MAX_WALLPAPER_EDGE`'s own
+/// doc says what that means: a 36-megapixel decode peaks near 300MB, an
+/// allocation failure poisons `iced_tiny_skia`'s image cache, and the
+/// next frame panics — on a lock screen, a machine needing another TTY.
+///
+/// There is no size guard downstream. `authui`'s check is
+/// `width > 0 && height > 0`, and `Theme::wallpaper_readable` is
+/// `File::open(..).is_ok()`. This is the only place the cap exists.
+fn is_oversized(original: &Path) -> bool {
+    let Ok(reader) = image::ImageReader::open(original).and_then(|r| r.with_guessed_format())
+    else {
+        // Unreadable here is unreadable in the renderer too, which drops
+        // it. Not this function's problem to report.
+        return false;
+    };
+    match reader.into_dimensions() {
+        Ok((width, height)) => width.max(height) > MAX_WALLPAPER_EDGE,
+        Err(_) => false,
+    }
 }
 
 /// The wallpaper the auth screens should show, if there is one.
@@ -116,9 +167,27 @@ fn wallpaper() -> Option<PathBuf> {
     ) {
         Ok(settings) => {
             let chosen = hyprforge_ecosystem::wallpaper::for_auth_screen(&settings)?;
-            // Falls back to the original if scaling fails, since that is
-            // what would have been used anyway.
-            Some(scaled_wallpaper(&chosen).unwrap_or(chosen))
+            match scaled_wallpaper(&chosen) {
+                Some(scaled) => Some(scaled),
+                // Falling back to the original is right only when the
+                // image never needed scaling. When it did and the
+                // scaling failed, handing the original to the auth
+                // screens hands them the exact file the cap exists to
+                // keep out — so the wallpaper is dropped instead. A
+                // plain background is a visible, recoverable
+                // disappointment; a lock screen that panics on its next
+                // frame is not.
+                None if is_oversized(&chosen) => {
+                    tracing::warn!(
+                        path = %chosen.display(),
+                        "couldn't scale the wallpaper for the auth screens, and it is too \
+                         large to use as it is; the lock screen and greeter will show a \
+                         plain background"
+                    );
+                    None
+                }
+                None => Some(chosen),
+            }
         }
         Err(e) => {
             // A missing file is first-run and loads as empty. Anything
@@ -209,5 +278,87 @@ mod tests {
             first,
             "the copy was rewritten even though the original had not changed"
         );
+    }
+}
+
+#[cfg(test)]
+mod scaling_failures {
+    use super::*;
+
+    fn oversized_png(path: &Path) {
+        let edge = MAX_WALLPAPER_EDGE + 10;
+        image::RgbImage::new(edge, 8).save(path).unwrap();
+    }
+
+    /// The failure that repairs itself never — a truncated copy has a
+    /// newer mtime than its source, so the freshness check calls it
+    /// current and hands it back forever.
+    #[test]
+    fn a_half_written_copy_is_never_left_where_the_freshness_check_will_trust_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("wall.png");
+        oversized_png(&original);
+
+        // A read-only destination directory: `create_dir_all` on an
+        // existing directory still succeeds, the size check has already
+        // passed, and the encoder is what fails — which is the shape of
+        // a full disk or a quota, the realistic cases here.
+        let out = dir.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        let scaled = out.join("scaled.png");
+        let mut perms = std::fs::metadata(&out).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o555);
+        std::fs::set_permissions(&out, perms.clone()).unwrap();
+
+        assert_eq!(scale_into(&original, &scaled), None);
+
+        let leftovers: Vec<_> = std::fs::read_dir(&out)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
+
+        // Let the tempdir clean itself up.
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&out, perms).unwrap();
+    }
+
+    #[test]
+    fn a_successful_scale_lands_at_the_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("wall.png");
+        oversized_png(&original);
+        let scaled = dir.path().join("scaled.png");
+
+        assert_eq!(scale_into(&original, &scaled), Some(scaled.clone()));
+        let (w, h) = image::ImageReader::open(&scaled)
+            .unwrap()
+            .with_guessed_format()
+            .unwrap()
+            .into_dimensions()
+            .unwrap();
+        assert!(w.max(h) <= MAX_WALLPAPER_EDGE, "got {w}x{h}");
+    }
+
+    /// The guard must fail closed. Before this, a failed scale returned
+    /// `None` and the caller fell back to the original — handing the
+    /// renderer the oversized image the cap exists to keep out.
+    #[test]
+    fn an_image_that_needs_scaling_is_recognised_as_oversized() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("big.png");
+        oversized_png(&big);
+        assert!(is_oversized(&big));
+
+        let small = dir.path().join("small.png");
+        image::RgbImage::new(64, 64).save(&small).unwrap();
+        assert!(!is_oversized(&small), "a small image must still be usable as it is");
+
+        // Not an image at all: the renderer drops it on its own terms,
+        // and claiming it is oversized would be inventing a reason.
+        let junk = dir.path().join("junk.png");
+        std::fs::write(&junk, b"not a png").unwrap();
+        assert!(!is_oversized(&junk));
     }
 }
