@@ -53,13 +53,26 @@ hl.config({
 -- starting the real session — a compositor that outlived its greeter
 -- would leave the machine at a blank screen.
 --
--- **It waits for the compositor's socket first**, and that is not
--- belt-and-braces. `hl.exec_cmd` runs while the config is being parsed,
--- which is before Hyprland accepts clients — so without the wait the
--- greeter loses a race it did not know it was in, fails to open a
--- window, and exits. greetd then reports `conversation failed` for a
--- password nobody was ever asked for, which is a thoroughly misleading
--- place to start debugging. Reproduced and fixed by exactly this loop.
+-- **It waits for the compositor, and works out its own display.** Both
+-- halves are necessary and both were learned the hard way.
+--
+-- `hl.exec_cmd` runs while the config is being parsed, before Hyprland
+-- accepts clients, so without the wait the greeter loses a race it did
+-- not know it was in and exits. greetd then reports
+-- `conversation failed` for a password nobody was asked for.
+--
+-- And at that moment `WAYLAND_DISPLAY` is **empty** — measured, not
+-- assumed — while `HYPRLAND_INSTANCE_SIGNATURE` is already set. So the
+-- wait is on `hyprctl` answering, which needs only the signature, and
+-- the display is then found by looking. A first attempt waited on
+-- `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`, which with an empty variable is
+-- just the directory: it never matched, spun for ten seconds, and
+-- launched the greeter with nothing to connect to. That produced the
+-- worst symptom of the lot — no error and no login screen.
+--
+-- Taking the last `wayland-N` socket is safe here specifically: the
+-- greeter user gets a fresh runtime directory with exactly one
+-- compositor in it.
 --
 -- `--user` must name the account to log in. There is no user picker
 -- yet, so this is where the choice is made.
@@ -70,9 +83,9 @@ hl.config({
 -- fails at the point where there is nothing left to look at.
 hl.exec_cmd([[sh -c '
     n=0
-    until [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ] || [ $n -ge 100 ]; do
-        n=$((n+1)); sleep 0.1
-    done
-    hyprforge-greet --user apost --command "uwsm start hyprland.desktop"
+    until hyprctl monitors >/dev/null 2>&1 || [ $n -ge 100 ]; do n=$((n+1)); sleep 0.1; done
+    WAYLAND_DISPLAY=$(cd "$XDG_RUNTIME_DIR" && ls -1 wayland-[0-9]* 2>/dev/null | grep -v "\\.lock$" | tail -1)
+    export WAYLAND_DISPLAY
+    hyprforge-greet --user CHANGE_ME --command "uwsm start hyprland.desktop"
     hyprctl dispatch exit
 ']])

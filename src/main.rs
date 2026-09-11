@@ -58,7 +58,15 @@ struct Args {
 
 #[derive(Debug, Clone)]
 enum Message {
-    Key(Key),
+    /// A key, and the text it actually produced.
+    ///
+    /// Both, because they answer different questions. `Key` says which
+    /// key it was — Enter, Backspace — while the text is what typing it
+    /// means with the modifiers applied. Using the key alone loses the
+    /// shift: `SHIFT + j` reports `j`, so every capital and symbol in a
+    /// password is silently wrong, and PAM rejects a password the user
+    /// typed correctly.
+    Key(Key, Option<String>),
     /// Both the clock and the authenticator are driven from here: one
     /// needs the time, the other needs somebody to collect its answers.
     Tick,
@@ -88,7 +96,7 @@ struct Greeter {
 impl Greeter {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Key(key) => self.key(key),
+            Message::Key(key, text) => self.key(key, text),
             // Collect anything greetd has said. Polling rather than
             // waking on the socket because the clock needs a tick
             // regardless, so there is already something arriving
@@ -120,35 +128,8 @@ impl Greeter {
         Task::none()
     }
 
-    /// One key, in the same terms the lock screen uses.
-    fn key(&mut self, key: Key) {
-        match key {
-            Key::Named(Named::Enter) => match self.conversation.state() {
-                State::Telling { .. } => self.conversation.acknowledge(),
-                State::Failed { .. } => self.conversation.retry(),
-                _ => self.conversation.submit(),
-            },
-            Key::Named(Named::Escape) => self.conversation.clear(),
-            Key::Named(Named::Backspace) => {
-                let mut entered = self.conversation.entered().to_string();
-                entered.pop();
-                self.conversation.type_into(entered);
-            }
-            Key::Character(text) => {
-                // Any key at all leaves the failed state, so someone can
-                // simply start typing again rather than work out which
-                // key dismisses the error.
-                if matches!(self.conversation.state(), State::Failed { .. }) {
-                    self.conversation.retry();
-                }
-                if !text.chars().any(char::is_control) {
-                    let mut entered = self.conversation.entered().to_string();
-                    entered.push_str(&text);
-                    self.conversation.type_into(entered);
-                }
-            }
-            Key::Named(_) | Key::Unidentified => {}
-        }
+    fn key(&mut self, key: Key, text: Option<String>) {
+        apply_key(&mut self.conversation, key, text);
     }
 
     fn view(&self) -> Element<'_, Message, iced_widget::Theme, iced::Renderer> {
@@ -169,7 +150,9 @@ impl Greeter {
     fn subscription(&self) -> Subscription<Message> {
         Subscription::batch([
             iced::keyboard::listen().filter_map(|event| match event {
-                iced::keyboard::Event::KeyPressed { key, .. } => Some(Message::Key(key)),
+                iced::keyboard::Event::KeyPressed { key, text, .. } => {
+                    Some(Message::Key(key, text.map(|t| t.to_string())))
+                }
                 _ => None,
             }),
             // Fast while the authenticator is working so the screen stays
@@ -184,6 +167,52 @@ impl Greeter {
         ])
     }
 }
+
+/// One key, in the same terms the lock screen uses.
+///
+/// Free-standing and generic over the backend so it can be tested
+/// without a greetd socket. What reaches a password is the part worth
+/// testing: getting it wrong rejects a correctly typed password and
+/// spends a faillock attempt doing it.
+fn apply_key<B: hyprforge_authui::conversation::Backend>(
+    conversation: &mut Conversation<B>,
+    key: Key,
+    text: Option<String>,
+) {
+        match key {
+            Key::Named(Named::Enter) => match conversation.state() {
+                State::Telling { .. } => conversation.acknowledge(),
+                State::Failed { .. } => conversation.retry(),
+                _ => conversation.submit(),
+            },
+            Key::Named(Named::Escape) => conversation.clear(),
+            Key::Named(Named::Backspace) => {
+                let mut entered = conversation.entered().to_string();
+                entered.pop();
+                conversation.type_into(entered);
+            }
+            _ => {
+                let Some(text) = text else {
+                    return;
+                };
+                // Any key at all leaves the failed state, so someone can
+                // simply start typing again rather than work out which
+                // key dismisses the error.
+                if matches!(conversation.state(), State::Failed { .. }) {
+                    conversation.retry();
+                }
+                // Control characters would otherwise count as typed
+                // characters and show a dot for nothing — Enter and
+                // Backspace both produce text as well as being keys.
+                if !text.is_empty() && !text.chars().any(char::is_control) {
+                    let mut entered = conversation.entered().to_string();
+                    entered.push_str(&text);
+                    conversation.type_into(entered);
+                }
+            }
+        }
+    }
+
 
 fn main() -> iced::Result {
     tracing_subscriber::fmt()
@@ -265,4 +294,63 @@ fn main() -> iced::Result {
         std::process::exit(1);
     }
     Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyprforge_authui::conversation::{Backend, Prompt, Response};
+
+    /// A backend that just asks for a password, so key handling can be
+    /// exercised without a socket.
+    struct Asking(Option<Response>);
+    impl Backend for Asking {
+        fn start(&mut self, _username: &str) {
+            self.0 = Some(Response::Ask(Prompt::secret("Password:")));
+        }
+        fn answer(&mut self, _answer: &str) {}
+        fn proceed(&mut self) {}
+        fn poll(&mut self) -> Option<Response> {
+            self.0.take()
+        }
+    }
+
+    fn typing() -> Conversation<Asking> {
+        Conversation::new(Asking(None), "apost")
+    }
+
+    /// Shifted characters must survive.
+    ///
+    /// iced reports three things for a key press: the unmodified key,
+    /// the modified key, and the text produced. Reading the first one
+    /// turns `SHIFT + j` into `j`, so every capital and symbol in a
+    /// password is silently wrong and PAM rejects a password that was
+    /// typed correctly — while each attempt spends a faillock slot.
+    #[test]
+    fn what_reaches_the_password_is_the_text_that_was_typed() {
+        let mut c = typing();
+        // What iced sends for SHIFT+j: the key is still lowercase and
+        // the text carries the capital.
+        apply_key(&mut c, Key::Character("j".into()), Some("J".into()));
+        apply_key(&mut c, Key::Character("1".into()), Some("!".into()));
+        apply_key(&mut c, Key::Character("a".into()), Some("a".into()));
+        assert_eq!(c.entered(), "J!a", "the shift was lost somewhere");
+    }
+
+    /// Enter and Backspace also produce text — "\r" and "\u{8}" — and
+    /// appending those would put invisible characters in the password.
+    #[test]
+    fn keys_that_are_not_characters_never_reach_the_password() {
+        let mut c = typing();
+        apply_key(&mut c, Key::Character("a".into()), Some("a".into()));
+        apply_key(&mut c, Key::Named(Named::Backspace), Some("\u{8}".into()));
+        apply_key(&mut c, Key::Character("b".into()), Some("b".into()));
+        assert_eq!(c.entered(), "b", "backspace should delete, not type");
+
+        // Escape clears rather than typing an escape character.
+        apply_key(&mut c, Key::Character("x".into()), Some("x".into()));
+        apply_key(&mut c, Key::Named(Named::Escape), Some("\u{1b}".into()));
+        assert_eq!(c.entered(), "");
+    }
 }
