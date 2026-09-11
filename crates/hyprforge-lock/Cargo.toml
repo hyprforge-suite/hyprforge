@@ -28,6 +28,10 @@ wayland-client = "0.31"
 calloop = "0.14"
 calloop-wayland-source = "0.4"
 pam-client2 = "0.5"
+# For the logind LockedHint only. A current-thread runtime on a detached
+# thread, never the event loop: see src/logind.rs.
+zbus.workspace = true
+tokio = { workspace = true, features = ["rt", "time"] }
 thiserror.workspace = true
 clap.workspace = true
 

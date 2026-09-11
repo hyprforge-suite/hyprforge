@@ -3,6 +3,7 @@
 //! Runs as you, so it reads your own theme directly. The greeter reads
 //! an exported copy — see `hyprforge_authui::theme`.
 
+mod logind;
 mod pam;
 mod surface;
 

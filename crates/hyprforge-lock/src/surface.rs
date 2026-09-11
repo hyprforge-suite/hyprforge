@@ -364,6 +364,12 @@ impl<B: Backend + 'static> LockScreen<B> {
                 screen.lock.is_some(),
             ) {
                 if let Some(lock) = screen.lock.take() {
+                    // Before `unlock`, because after it the session is
+                    // open and this process is on its way out. Ordering
+                    // it this way means the window in which the hint
+                    // disagrees with reality contains a locked screen,
+                    // never an unlocked one.
+                    crate::logind::set_locked_hint(false);
                     lock.unlock();
                     // The unlock request has to reach the compositor
                     // before this process exits, or the session stays
@@ -582,6 +588,11 @@ impl<B: Backend + 'static> SessionLockHandler for LockScreen<B> {
         // session is now genuinely locked, and stays locked whatever
         // happens to this process.
         self.granted = true;
+        // Only now, not when the lock was requested. Between the two the
+        // compositor may still refuse, and a hint saying "locked" for a
+        // session that never locked is worse than no hint: it is the one
+        // reading that would make a caller stop checking.
+        crate::logind::set_locked_hint(true);
         eprintln!(
             "locked: session secured with {} surface(s) (+{}ms)",
             self.surfaces.len(),
