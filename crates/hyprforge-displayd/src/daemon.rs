@@ -83,6 +83,7 @@ pub struct Daemon {
     /// looked up at write time so a mock run can be pointed somewhere
     /// harmless — see [`DaemonPaths`].
     monitors_lua_path: PathBuf,
+    greet_monitors_path: PathBuf,
     profiles: Mutex<Vec<Profile>>,
     competing_monitor_rules: Mutex<Vec<String>>,
     suppress_learn_until: Mutex<Option<tokio::time::Instant>>,
@@ -109,12 +110,13 @@ impl Daemon {
     /// every time they settled a topology. Making the caller say where
     /// everything goes is what stops that being possible.
     pub fn with_paths(backend: Arc<dyn OutputBackend>, paths: DaemonPaths) -> anyhow::Result<Self> {
-        let DaemonPaths { storage_path, monitors_lua_path } = paths;
+        let DaemonPaths { storage_path, monitors_lua_path, greet_monitors_path } = paths;
         let profiles = crate::storage::load(&storage_path)?;
         Ok(Daemon {
             backend,
             storage_path,
             monitors_lua_path,
+            greet_monitors_path,
             profiles: Mutex::new(profiles),
             competing_monitor_rules: Mutex::new(Vec::new()),
             suppress_learn_until: Mutex::new(None),
@@ -601,7 +603,11 @@ impl Daemon {
             // Spawned rather than awaited: it shells out to `hyprctl`, and
             // this settle's own signal emission below must never wait on
             // that round-trip.
-            tokio::spawn(write_monitors_fallback(heads.clone(), self.monitors_lua_path.clone()));
+            tokio::spawn(write_monitors_fallback(
+                heads.clone(),
+                self.monitors_lua_path.clone(),
+                self.greet_monitors_path.clone(),
+            ));
         } else {
             // A commit that doesn't take is the other way to loop forever.
             // `apply_configuration` reports success once the request is sent,
@@ -823,12 +829,31 @@ impl Daemon {
 /// spawned as a detached background task (it shells out to `hyprctl`, and
 /// the settle path that triggers it must never wait on that round-trip),
 /// so its future has to be `'static` and touches no daemon state.
-async fn write_monitors_fallback(heads: Vec<Head>, path: PathBuf) {
+async fn write_monitors_fallback(heads: Vec<Head>, path: PathBuf, greet_path: PathBuf) {
     let descriptions = crate::hyprctl_monitors::connector_descriptions().await;
     let entries = crate::monitors_codegen::entries_from_heads(&heads, &descriptions);
     let lua = crate::monitors_codegen::generate(&entries);
     if let Err(e) = hyprforge_core::paths::write_atomic(&path, &lua) {
         tracing::warn!(error = %e, "failed to write the monitors.lua fallback");
+    }
+
+    // The same layout again, where the greeter can read it. Not a
+    // convenience: the greeter runs as another user and cannot traverse
+    // into a home directory, so without this copy it falls back to
+    // scale 1 and a login screen on a 1.6-scaled display looks like it
+    // picked the wrong resolution.
+    //
+    // Best-effort and separately reported. The export directory is an
+    // install step (see crates/hyprforge-greet/config), so its absence
+    // is the normal state on a machine with no greeter and must never
+    // colour the write above, which is the load-bearing one.
+    if let Err(e) = hyprforge_core::paths::write_atomic(&greet_path, &lua) {
+        tracing::warn!(
+            error = %e,
+            path = %greet_path.display(),
+            "couldn't export the display layout for the greeter, so the login screen \
+             will use its fallback scale; the session's own monitors.lua is written"
+        );
     }
 }
 
@@ -844,6 +869,10 @@ async fn write_monitors_fallback(heads: Vec<Head>, path: PathBuf) {
 pub struct DaemonPaths {
     pub storage_path: PathBuf,
     pub monitors_lua_path: PathBuf,
+    /// The copy the greeter reads. Outside `$HOME` by necessity, and in
+    /// `DaemonPaths` rather than a constant for exactly the reason the
+    /// doc comment above gives: a mock run must not reach it either.
+    pub greet_monitors_path: PathBuf,
 }
 
 impl DaemonPaths {
@@ -852,6 +881,8 @@ impl DaemonPaths {
         DaemonPaths {
             storage_path: hyprforge_core::paths::display_profiles_path(),
             monitors_lua_path: hyprforge_core::paths::monitors_lua_path(),
+            greet_monitors_path: std::path::Path::new(hyprforge_look::theme::EXPORT_DIR)
+                .join("monitors.lua"),
         }
     }
 
@@ -861,6 +892,7 @@ impl DaemonPaths {
         DaemonPaths {
             storage_path: dir.join("display-profiles.toml"),
             monitors_lua_path: dir.join("monitors.lua"),
+            greet_monitors_path: dir.join("greet-monitors.lua"),
         }
     }
 }

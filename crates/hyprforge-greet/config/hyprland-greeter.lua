@@ -18,9 +18,38 @@
 --
 -- No `exec_cmd` either, beyond the greeter itself.
 
--- Let Hyprland pick the mode; a greeter has no opinion about
--- resolutions, and a wrong one here is a login screen nobody can read.
-hl.monitor({ output = [[]], mode = [[preferred]], position = [[auto]], scale = 1 })
+-- Displays, in the layout the session uses.
+--
+-- "Let Hyprland pick" is not enough, because the mode is not the part
+-- that goes wrong. A preferred mode is almost always the right mode;
+-- the *scale* is a choice, it lives in the user's own config, and a
+-- greeter that hardcodes 1 on a display the session runs at 1.6 looks
+-- like the wrong resolution even though the pixels are identical.
+--
+-- So the real layout is exported alongside the theme, for the same
+-- reason the theme is: the greeter runs as another user and cannot
+-- traverse into a home directory to read the original. This is a plain
+-- `dofile` rather than a `require` because the export is not on the
+-- greeter's Lua path and should not be added to it.
+--
+-- The fallback is not styling, it is a guarantee: a greeter must come
+-- up on a display that has never been configured, on a machine where
+-- nothing has been exported yet, and on the first boot after a new
+-- monitor is plugged in.
+local exported = "/var/lib/hyprforge/greet/monitors.lua"
+local loaded = loadfile(exported)
+if loaded then
+    local ok, err = pcall(loaded)
+    if not ok then
+        -- Never fatal. A malformed export must not cost someone the
+        -- ability to log in and fix it.
+        print("hyprforge-greet: ignoring " .. exported .. ": " .. tostring(err))
+        loaded = nil
+    end
+end
+if not loaded then
+    hl.monitor({ output = [[]], mode = [[preferred]], position = [[auto]], scale = 1 })
+end
 
 hl.config({
     misc = {

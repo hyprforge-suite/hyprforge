@@ -1450,6 +1450,7 @@ dependencies = [
  "clap",
  "futures-util",
  "hyprforge-core",
+ "hyprforge-look",
  "serde",
  "serde_json",
  "tempfile",
@@ -1525,7 +1526,9 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tiny-skia",
+ "tokio",
  "wayland-client",
+ "zbus",
 ]
 
 [[package]]
