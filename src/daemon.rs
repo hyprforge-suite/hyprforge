@@ -952,8 +952,7 @@ impl DaemonPaths {
         DaemonPaths {
             storage_path: hyprforge_core::paths::display_profiles_path(),
             monitors_lua_path: hyprforge_core::paths::monitors_lua_path(),
-            greet_monitors_path: std::path::Path::new(hyprforge_look::theme::EXPORT_DIR)
-                .join("monitors.lua"),
+            greet_monitors_path: hyprforge_look::theme::export_dir().join("monitors.lua"),
         }
     }
 
