@@ -1,0 +1,18 @@
+[Desktop Entry]
+Type=Application
+Name=Hyprforge Settings
+GenericName=Desktop Settings
+Comment=Configure displays, input, appearance, shortcuts and window rules
+# No absolute path: the installer puts the binary on PATH, and hardcoding
+# a prefix here is what makes a .desktop file break when someone installs
+# somewhere else.
+Exec=hyprforge-settings
+# The name of an icon theme entry, not a file. There is no icon shipped
+# yet, so launchers fall back to a generic one — which is the correct
+# behaviour for a missing icon and better than pointing at a path that
+# does not exist.
+Icon=preferences-desktop
+Terminal=false
+Categories=Settings;DesktopSettings;
+Keywords=hyprland;display;monitor;keyboard;shortcut;appearance;wallpaper;
+StartupNotify=true
