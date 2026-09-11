@@ -291,6 +291,18 @@ impl<B: Backend + 'static> LockScreen<B> {
                         GRANT_WARNING.as_secs()
                     );
                 }
+                // Pump here too, not only on the backend's ping. The ping
+                // is the fast path and it is the *only* other caller — so
+                // a backend that stops pinging is a backend nobody ever
+                // asks again. `PamBackend::poll` reports a dead PAM
+                // thread exactly once, and that report was unreachable
+                // from the lock screen: the machinery built to say "the
+                // authentication service stopped responding" could never
+                // run. The greeter has pumped from its own tick all
+                // along, for this reason.
+                if let Some(conversation) = screen.conversation.as_mut() {
+                    conversation.pump();
+                }
                 screen.dirty = true;
                 // Fast while the authenticator is busy so the screen is
                 // visibly alive through pam_unix's deliberate pause;
@@ -369,7 +381,7 @@ impl<B: Backend + 'static> LockScreen<B> {
                     // it this way means the window in which the hint
                     // disagrees with reality contains a locked screen,
                     // never an unlocked one.
-                    crate::logind::set_locked_hint(false);
+                    crate::logind::clear_locked_hint();
                     lock.unlock();
                     // The unlock request has to reach the compositor
                     // before this process exits, or the session stays

@@ -33,11 +33,12 @@ const TIMEOUT: Duration = Duration::from_secs(2);
 /// acquire a tokio runtime — and because the *point* is that the screen
 /// never waits for this.
 ///
-/// Not waiting has a consequence worth naming: on the unlock path this
-/// process is about to exit, and a detached thread does not hold it
-/// open. The hint is therefore written on a best-effort basis there
-/// too — logind clears it when the session ends anyway, so the window
-/// where it could be stale is one this cannot make worse.
+/// Use [`clear_locked_hint`] on the way out instead. A detached thread
+/// does not hold the process open, and the session outlives this
+/// process — so a fire-and-forget clear loses the race with exit and
+/// leaves `LockedHint=yes` on an unlocked session, which is worse than
+/// never having set it. Measured, not reasoned about: the first version
+/// cleared it this way and the hint stayed `yes`.
 pub fn set_locked_hint(locked: bool) {
     std::thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -64,10 +65,6 @@ pub fn set_locked_hint(locked: bool) {
 async fn write_hint(locked: bool) -> Result<(), String> {
     let connection = zbus::Connection::system().await.map_err(|e| e.to_string())?;
 
-    // By our own PID rather than `auto`. `GetSession("auto")` resolves
-    // through `XDG_SESSION_ID`, which a lock screen cannot rely on: it
-    // may have been started by an idle daemon or a keybind whose
-    // environment is not the session's.
     let manager = zbus::Proxy::new(
         &connection,
         "org.freedesktop.login1",
@@ -77,10 +74,28 @@ async fn write_hint(locked: bool) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
-    let session: zbus::zvariant::OwnedObjectPath = manager
-        .call("GetSessionByPID", &(std::process::id()))
-        .await
-        .map_err(|e| e.to_string())?;
+    // Two ways to name our own session, tried in the order that
+    // actually works rather than the order that sounds safest.
+    //
+    // `GetSessionByPID` was the first choice here, on the reasoning that
+    // a lock screen launched by an idle daemon or a keybind cannot trust
+    // its environment. Measured, that is exactly backwards: under uwsm
+    // every app lands in `app.slice`, not the session scope, so logind
+    // answers `NoSessionForPID` for anything the compositor started —
+    // which is every way a lock screen is ever launched here. The PID
+    // path is kept as the fallback for a session that does use scopes.
+    //
+    // `auto` resolves through `XDG_SESSION_ID`, and if that is unset it
+    // resolves to the caller's session anyway, so it degrades to the
+    // same answer rather than to a wrong one.
+    let session: zbus::zvariant::OwnedObjectPath = match manager.call("GetSession", &("auto")).await
+    {
+        Ok(session) => session,
+        Err(by_name) => manager
+            .call("GetSessionByPID", &(std::process::id()))
+            .await
+            .map_err(|by_pid| format!("no session for this process ({by_name}; {by_pid})"))?,
+    };
 
     let proxy = zbus::Proxy::new(
         &connection,
@@ -92,4 +107,34 @@ async fn write_hint(locked: bool) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
 
     proxy.call::<_, _, ()>("SetLockedHint", &(locked)).await.map_err(|e| e.to_string())
+}
+
+/// Clears the hint and waits for it, for the unlock path.
+///
+/// Blocking, unlike [`set_locked_hint`], because this is the last thing
+/// the process does and there is nothing left to keep responsive. The
+/// same bound applies: a bus that will not answer must not stop a lock
+/// screen exiting, and the session is already unlocked by the time this
+/// matters.
+pub fn clear_locked_hint() {
+    let done = std::thread::spawn(|| {
+        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(runtime) => runtime,
+            Err(e) => {
+                eprintln!("couldn't tell logind the session is unlocked: {e}");
+                return;
+            }
+        };
+        if let Err(e) = runtime.block_on(async {
+            tokio::time::timeout(TIMEOUT, write_hint(false))
+                .await
+                .unwrap_or_else(|_| Err("timed out".into()))
+        }) {
+            eprintln!("couldn't tell logind the session is unlocked: {e}");
+        }
+    });
+    // Joining is the point. If the thread is wedged past its own bound
+    // the join still returns once it finishes; a panic there is nothing
+    // to act on at this stage.
+    let _ = done.join();
 }
