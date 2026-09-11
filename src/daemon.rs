@@ -626,6 +626,22 @@ impl Daemon {
                 fingerprint: fp.clone(),
                 summary: format!("{name} (learned)"),
             });
+            // Write the fallback here too, not only where a matched
+            // layout is confirmed. A newly learned topology is precisely
+            // the case with no fallback for it yet, so returning without
+            // one leaves `monitors.lua` describing some *other* set of
+            // monitors until the next settle happens to take the matched
+            // path — and that file is what Hyprland applies when this
+            // daemon is not running.
+            //
+            // These heads are as safe to record as the ones on that
+            // path: nothing was applied to reach them, so they are the
+            // layout already on screen.
+            tokio::spawn(write_monitors_fallback(
+                heads.clone(),
+                self.monitors_lua_path.clone(),
+                self.greet_monitors_path.clone(),
+            ));
             return;
         };
 
