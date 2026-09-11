@@ -157,6 +157,29 @@ Binaries land in `target/release/`: `hyprforge-displayd`,
 
 `$XDG_CONFIG_HOME` falls back to `~/.config` if unset, per the XDG spec.
 
+## Installing
+
+Everything that lives outside this repository — binaries in
+`/usr/local/bin`, the greeter's compositor config, the PAM stack, the
+exported-look directory — is handled by `./hyprforge`:
+
+```sh
+./hyprforge --status                   # what is installed, and is it stale
+./hyprforge --install --greeter        # install, or update in place
+./hyprforge --install --all --dry-run  # show what that would do
+./hyprforge --uninstall --lock --force-cleanup
+```
+
+Install and update are the same command: it builds, compares each file
+against what is installed, copies only what differs, and then verifies
+the copy landed. That last check is not ceremony — a stale binary in
+`/usr/local/bin` looks exactly like a code change that did not work, and
+`--status` is the fastest way to rule it out.
+
+It deliberately does **not** install `/etc/greetd/config.toml` or enable
+`greetd`. That file decides which VT the machine logs in on, so it is the
+one step that stays manual; see `crates/hyprforge-greet/INSTALL.md`.
+
 ## Installing the systemd unit
 
 ```

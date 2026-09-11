@@ -1,0 +1,555 @@
+#!/usr/bin/env bash
+# Installs, updates and removes the parts of Hyprforge that live outside
+# this repository.
+#
+#     ./hyprforge --install   --greeter
+#     ./hyprforge --uninstall --greeter --force-cleanup
+#     ./hyprforge --status
+#
+# Install and update are the same operation. Everything here is
+# idempotent: it builds, compares what is installed against what was
+# built, and copies only what differs. Running it twice changes nothing
+# the second time, which is what makes it safe to run whenever you are
+# not sure.
+#
+# Why a script rather than instructions in a README: testing the greeter
+# means reinstalling it repeatedly, and the failure that wastes the most
+# time is testing a binary that was never replaced. This verifies the
+# copy landed instead of assuming it, because assuming it cost two full
+# debugging rounds.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")"
+
+readonly PREFIX=/usr/local/bin
+readonly EXPORT_DIR=/var/lib/hyprforge/greet
+readonly GREETD_DIR=/etc/greetd
+
+DRY_RUN=false
+FORCE_CLEANUP=false
+ASSUME_YES=false
+ACTION=
+COMPONENTS=()
+
+# ---------------------------------------------------------------- output
+
+if [[ -t 1 ]]; then
+    B=$'\033[1m'; G=$'\033[32m'; Y=$'\033[33m'; R=$'\033[31m'; D=$'\033[2m'; N=$'\033[0m'
+else
+    B=; G=; Y=; R=; D=; N=
+fi
+
+step() { printf '%s==> %s%s\n' "$B" "$*" "$N"; }
+ok()   { printf '  %s✓%s %s\n' "$G" "$N" "$*"; }
+skip() { printf '  %s·%s %s%s%s\n' "$D" "$N" "$D" "$*" "$N"; }
+warn() { printf '  %s!%s %s\n' "$Y" "$N" "$*"; }
+die()  { printf '%serror:%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
+
+# Every privileged action goes through here, so --dry-run is honest and
+# there is exactly one place that can touch the system.
+run_root() {
+    if $DRY_RUN; then
+        printf '  %s· would run: sudo %s%s\n' "$D" "$*" "$N"
+        return 0
+    fi
+    sudo "$@"
+}
+
+confirm() {
+    $ASSUME_YES && return 0
+    $DRY_RUN && return 0
+    local reply
+    read -rp "  $1 [y/N] " reply
+    [[ $reply == [yY] ]]
+}
+
+# ----------------------------------------------------------------- usage
+
+usage() {
+    cat <<EOF
+${B}Usage:${N} ./hyprforge <action> [components] [options]
+
+${B}Actions${N}
+  --install        Build and install. Re-running updates in place.
+  --uninstall      Remove what --install put on the system.
+  --status         Show what is installed and whether it is current.
+
+${B}Components${N}
+  --greeter        The login screen: hyprforge-greet, its compositor
+                   config, and the exported-look directory.
+                   Does NOT enable greetd — see --install --greeter output.
+  --lock           The lock screen: hyprforge-lock and its PAM stack.
+  --displayd       The display daemon, as a systemd user service.
+  --settings       The Settings app and its launcher entry.
+  --all            Every component above.
+
+${B}Options${N}
+  --force-cleanup  On uninstall, also remove things shared with other
+                   components or holding user data: the exported look,
+                   the hyprforge group, /etc/greetd config. Off by
+                   default because these are not yours alone.
+  --dry-run        Print what would happen. Touches nothing.
+  --yes            Do not ask for confirmation.
+  -h, --help       This.
+
+${B}Examples${N}
+  ./hyprforge --install --greeter         # install or update the greeter
+  ./hyprforge --status                    # what is installed, is it stale
+  ./hyprforge --uninstall --greeter --force-cleanup
+EOF
+}
+
+# ------------------------------------------------------------- arguments
+
+[[ $# -eq 0 ]] && { usage; exit 1; }
+
+set_action() {
+    [[ -n $ACTION ]] && die "--install, --uninstall and --status are mutually exclusive"
+    ACTION=$1
+}
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --install)       set_action install ;;
+        --uninstall)     set_action uninstall ;;
+        --status)        set_action status ;;
+        --greeter)       COMPONENTS+=(greeter) ;;
+        --lock)          COMPONENTS+=(lock) ;;
+        --displayd)      COMPONENTS+=(displayd) ;;
+        --settings)      COMPONENTS+=(settings) ;;
+        --all)           COMPONENTS+=(greeter lock displayd settings) ;;
+        --force-cleanup) FORCE_CLEANUP=true ;;
+        --dry-run)       DRY_RUN=true ;;
+        --yes|-y)        ASSUME_YES=true ;;
+        -h|--help)       usage; exit 0 ;;
+        *)               die "unknown option: $1 (try --help)" ;;
+    esac
+    shift
+done
+
+[[ -n $ACTION ]] || die "pick one of --install, --uninstall or --status"
+if [[ $ACTION != status && ${#COMPONENTS[@]} -eq 0 ]]; then
+    die "--$ACTION needs at least one component (--greeter, --lock, --displayd, --settings, --all)"
+fi
+
+has_component() {
+    local want=$1 c
+    for c in ${COMPONENTS[@]+"${COMPONENTS[@]}"}; do [[ $c == "$want" ]] && return 0; done
+    return 1
+}
+
+# -------------------------------------------------------------- building
+
+build() {
+    local package=$1
+    step "Building $package"
+    if $DRY_RUN; then
+        skip "would run: cargo build --release -p $package"
+        return 0
+    fi
+    cargo build --release -p "$package" 2>&1 | grep -vE "^\s*(Compiling|Finished)" || true
+    [[ -x target/release/${package} ]] || die "cargo did not produce target/release/$package"
+    ok "built target/release/$package"
+}
+
+# Installs a file only if it differs, then proves it landed.
+#
+# The proof is the point. `install` reports success for a copy that a
+# later step overwrote, and a stale binary in $PREFIX looks exactly like
+# a code change that did not work — which is a failure mode that has
+# already eaten two debugging sessions here.
+install_file() {
+    local src=$1 dst=$2 mode=$3
+    if [[ -e $dst ]] && cmp -s "$src" "$dst"; then
+        skip "$dst is current"
+        return 0
+    fi
+    local verb="installed"
+    [[ -e $dst ]] && verb="updated"
+    run_root install -Dm"$mode" "$src" "$dst"
+    # A dry run has already printed its "would run" line, and claiming
+    # something was installed when nothing was is the one thing a
+    # dry run must never do.
+    $DRY_RUN && return 0
+    cmp -s "$src" "$dst" || die "$dst does not match $src after installing it"
+    ok "$verb $dst"
+}
+
+remove_file() {
+    local path=$1
+    if [[ ! -e $path ]]; then
+        skip "$path is already gone"
+        return 0
+    fi
+    run_root rm -f "$path"
+    ok "removed $path"
+}
+
+# --------------------------------------------------------------- greeter
+
+install_greeter() {
+    build hyprforge-greet
+
+    step "Greeter: the exported-look directory"
+    # First, because without it the greeter runs but is stuck with
+    # default colours and a fallback display scale, and both failures are
+    # silent from the Settings app's side.
+    install_file crates/hyprforge-greet/config/hyprforge-greet.sysusers \
+        /usr/lib/sysusers.d/hyprforge-greet.conf 644
+    install_file crates/hyprforge-greet/config/hyprforge-greet.tmpfiles \
+        /usr/lib/tmpfiles.d/hyprforge-greet.conf 644
+    run_root systemd-sysusers
+    run_root systemd-tmpfiles --create
+    if [[ -d $EXPORT_DIR ]] || $DRY_RUN; then
+        ok "$EXPORT_DIR exists"
+    else
+        die "$EXPORT_DIR was not created; check systemd-tmpfiles output above"
+    fi
+
+    if id -nG "$USER" | tr ' ' '\n' | grep -qx hyprforge; then
+        ok "$USER is in the hyprforge group"
+    else
+        run_root usermod -aG hyprforge "$USER"
+        # Not a warning about something broken — a warning about
+        # something that is true and will confuse you in ten minutes.
+        warn "added $USER to the hyprforge group; this only takes effect at your next"
+        warn "login, so 'id -nG' will not show it until then"
+    fi
+
+    step "Greeter: binary and compositor config"
+    install_file target/release/hyprforge-greet "$PREFIX/hyprforge-greet" 755
+    install_file crates/hyprforge-greet/config/hyprland-greeter.lua \
+        "$GREETD_DIR/hyprland-greeter.lua" 644
+
+    # A template with a placeholder in it is not a config, and the way
+    # this fails is a login screen that tries to authenticate a user
+    # named CHANGE_ME.
+    if ! $DRY_RUN && sudo grep -q CHANGE_ME "$GREETD_DIR/hyprland-greeter.lua" 2>/dev/null; then
+        step "Greeter: filling in the username"
+        run_root sed -i "s/CHANGE_ME/$USER/" "$GREETD_DIR/hyprland-greeter.lua"
+        ok "set the greeter's user to $USER in $GREETD_DIR/hyprland-greeter.lua"
+    fi
+
+    step "Greeter: next steps"
+    cat <<EOF
+  ${D}greetd's own config is deliberately NOT installed. It decides which VT
+  the machine logs in on, so installing it from a script is how you end up
+  booting to something that cannot take a password.${N}
+
+  To test on a spare VT, without committing to anything:
+
+    sudo cp crates/hyprforge-greet/config/greetd.toml /etc/greetd/config.toml
+    sudo sed -i 's/^vt = 1/vt = 2/; s/^switch = true/switch = false/' /etc/greetd/config.toml
+    sudo systemctl start greetd        ${D}# note: start, not enable${N}
+
+  Then ctrl+alt+F2 to look at it. ctrl+alt+F3 is a console if it goes wrong,
+  and 'sudo systemctl stop greetd' undoes it completely.
+
+  See crates/hyprforge-greet/INSTALL.md for committing to it properly.
+EOF
+}
+
+uninstall_greeter() {
+    step "Greeter: removing"
+    if systemctl is-enabled greetd >/dev/null 2>&1; then
+        # Refusing rather than disabling it: greetd being enabled means
+        # it is how this machine logs in, and taking that away as a side
+        # effect of removing a binary is how you get an unbootable
+        # machine out of a cleanup command.
+        die "greetd is still enabled — this machine logs in through it.
+       Run 'sudo systemctl disable greetd' and set up another way to log
+       in first, then remove the greeter."
+    fi
+    remove_file "$PREFIX/hyprforge-greet"
+
+    if $FORCE_CLEANUP; then
+        step "Greeter: forced cleanup"
+        remove_file "$GREETD_DIR/hyprland-greeter.lua"
+        remove_file /usr/lib/sysusers.d/hyprforge-greet.conf
+        remove_file /usr/lib/tmpfiles.d/hyprforge-greet.conf
+        if [[ -d $EXPORT_DIR ]]; then
+            if confirm "remove $EXPORT_DIR and the exported look inside it?"; then
+                run_root rm -rf /var/lib/hyprforge
+                ok "removed /var/lib/hyprforge"
+            else
+                skip "kept $EXPORT_DIR"
+            fi
+        fi
+        # The group is left alone on purpose. Removing a group that
+        # still owns files elsewhere turns them into orphaned GIDs, and
+        # an unused group costs nothing.
+        skip "left the hyprforge group in place (an unused group is harmless)"
+    else
+        skip "kept $GREETD_DIR/hyprland-greeter.lua and $EXPORT_DIR (--force-cleanup removes them)"
+    fi
+}
+
+# ------------------------------------------------------------------ lock
+
+install_lock() {
+    build hyprforge-lock
+    step "Lock: binary and PAM stack"
+    install_file target/release/hyprforge-lock "$PREFIX/hyprforge-lock" 755
+    # Our own PAM file rather than borrowing hyprlock's, which has no
+    # `account` stack and so rejects correct passwords.
+    install_file crates/hyprforge-lock/pam/hyprforge-lock /etc/pam.d/hyprforge-lock 644
+
+    step "Lock: next steps"
+    cat <<EOF
+  ${D}Nothing calls the lock screen on its own. Point your existing config at it:${N}
+
+    ~/.config/hypr/hypridle.conf   lock_cmd = pidof hyprforge-lock || hyprforge-lock
+    your keybind                   hyprforge-lock
+
+  hypridle handles logind's Lock signal, so suspend and 'loginctl lock-session'
+  both work once lock_cmd points here.
+EOF
+}
+
+uninstall_lock() {
+    step "Lock: removing"
+    # Named explicitly, never pkill -f: the pattern would match the shell
+    # running it, kill that shell, and exit 144.
+    if pgrep -x hyprforge-lock >/dev/null; then
+        die "hyprforge-lock is running — it may be holding the session locked.
+       Unlock first; removing the binary now would not unlock anything."
+    fi
+    remove_file "$PREFIX/hyprforge-lock"
+    if $FORCE_CLEANUP; then
+        remove_file /etc/pam.d/hyprforge-lock
+    else
+        skip "kept /etc/pam.d/hyprforge-lock (--force-cleanup removes it)"
+    fi
+    warn "check that nothing still calls hyprforge-lock:"
+    warn "  grep -rn hyprforge-lock ~/.config/hypr/"
+}
+
+# -------------------------------------------------------------- displayd
+
+install_displayd() {
+    build hyprforge-displayd
+    step "Display daemon"
+    install_file target/release/hyprforge-displayd "$PREFIX/hyprforge-displayd" 755
+    if [[ -x target/release/hyprforge-displayctl ]]; then
+        install_file target/release/hyprforge-displayctl "$PREFIX/hyprforge-displayctl" 755
+    fi
+
+    # A user unit, so no sudo and no run_root.
+    #
+    # The packaged unit's ExecStart points at ~/.cargo/bin, which is
+    # where `cargo install` puts things and is what the README's manual
+    # route uses. This script installs to $PREFIX instead, so the path
+    # is rewritten on the way in. Installing it verbatim would produce a
+    # unit that fails with a status=203/EXEC nobody would connect to an
+    # install script — the binary is there, just not where the unit
+    # looks.
+    local unit_dir="$HOME/.config/systemd/user"
+    local unit=crates/hyprforge-displayd/packaging/hyprforge-displayd.service
+    local generated
+    generated=$(mktemp)
+    # Trap rather than a plain rm: an early `die` between here and the
+    # end would otherwise leave it behind.
+    trap 'rm -f "$generated"' RETURN
+    sed "s|^ExecStart=.*|ExecStart=$PREFIX/hyprforge-displayd run|" "$unit" > "$generated"
+
+    if $DRY_RUN; then
+        skip "would install $unit_dir/hyprforge-displayd.service (ExecStart=$PREFIX/hyprforge-displayd run)"
+    elif [[ -e $unit_dir/hyprforge-displayd.service ]] && cmp -s "$generated" "$unit_dir/hyprforge-displayd.service"; then
+        skip "$unit_dir/hyprforge-displayd.service is current"
+    else
+        install -Dm644 "$generated" "$unit_dir/hyprforge-displayd.service"
+        systemctl --user daemon-reload
+        ok "installed $unit_dir/hyprforge-displayd.service"
+    fi
+
+    step "Display daemon: next steps"
+    cat <<EOF
+    systemctl --user enable --now hyprforge-displayd
+EOF
+}
+
+uninstall_displayd() {
+    step "Display daemon: removing"
+    if ! $DRY_RUN && systemctl --user is-enabled hyprforge-displayd >/dev/null 2>&1; then
+        systemctl --user disable --now hyprforge-displayd || true
+        ok "disabled the user service"
+    fi
+    remove_file "$PREFIX/hyprforge-displayd"
+    remove_file "$PREFIX/hyprforge-displayctl"
+    if [[ -e "$HOME/.config/systemd/user/hyprforge-displayd.service" ]]; then
+        rm -f "$HOME/.config/systemd/user/hyprforge-displayd.service"
+        $DRY_RUN || systemctl --user daemon-reload
+        ok "removed the user service unit"
+    fi
+    if $FORCE_CLEANUP; then
+        # Display profiles are user data: what monitors you have and how
+        # you arranged them. Never removed without being asked.
+        local profiles="${XDG_CONFIG_HOME:-$HOME/.config}/hyprforge/display-profiles.toml"
+        if [[ -e $profiles ]] && confirm "remove your saved display profiles ($profiles)?"; then
+            rm -f "$profiles"
+            ok "removed $profiles"
+        fi
+    fi
+}
+
+# -------------------------------------------------------------- settings
+
+# The launcher entry, in the user's own data dir rather than
+# /usr/share/applications. It names no absolute path and needs no root,
+# and a per-user install is the honest description of what this is.
+readonly DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+
+install_settings() {
+    build hyprforge-settings
+    step "Settings app"
+    install_file target/release/hyprforge-settings "$PREFIX/hyprforge-settings" 755
+
+    local entry=crates/hyprforge-settings/packaging/hyprforge-settings.desktop
+    local dst="$DESKTOP_DIR/hyprforge-settings.desktop"
+    if $DRY_RUN; then
+        skip "would install $dst"
+    elif [[ -e $dst ]] && cmp -s "$entry" "$dst"; then
+        skip "$dst is current"
+    else
+        install -Dm644 "$entry" "$dst"
+        # Not every launcher needs this and it is absent on some systems,
+        # so its failure is not the install failing.
+        command -v update-desktop-database >/dev/null &&
+            update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
+        ok "installed $dst"
+    fi
+
+    step "Settings app: next steps"
+    cat <<EOF
+  ${D}It should now appear in rofi as "Hyprforge Settings". If it does not,
+  your launcher may cache entries — log out and back in.
+
+  The Settings app is also what fills in the greeter's look: one save in
+  Appearance writes the theme and exports a copy the login screen reads.${N}
+EOF
+}
+
+uninstall_settings() {
+    step "Settings app: removing"
+    remove_file "$PREFIX/hyprforge-settings"
+    local dst="$DESKTOP_DIR/hyprforge-settings.desktop"
+    if [[ -e $dst ]]; then
+        rm -f "$dst"
+        command -v update-desktop-database >/dev/null &&
+            update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
+        ok "removed $dst"
+    else
+        skip "$dst is already gone"
+    fi
+    if $FORCE_CLEANUP; then
+        # Everything the app has ever configured lives here. It is the
+        # most valuable thing this script can touch, so it is the only
+        # removal that asks twice: --force-cleanup AND a prompt.
+        local config="${XDG_CONFIG_HOME:-$HOME/.config}/hyprforge"
+        if [[ -d $config ]] && confirm "remove ALL Hyprforge settings in $config?"; then
+            rm -rf "$config"
+            ok "removed $config"
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------- status
+
+# Reports installed / missing / stale. "Stale" is the one that matters:
+# it is the difference between "my change did nothing" and "I am running
+# last week's binary", and it is not visible any other way.
+status_binary() {
+    local name=$1 built=target/release/$1 installed=$PREFIX/$1
+    if [[ ! -e $installed ]]; then
+        printf '  %s·%s %-24s %snot installed%s\n' "$D" "$N" "$name" "$D" "$N"
+    elif [[ ! -e $built ]]; then
+        printf '  %s✓%s %-24s installed %s(nothing built to compare against)%s\n' \
+            "$G" "$N" "$name" "$D" "$N"
+    elif cmp -s "$built" "$installed"; then
+        printf '  %s✓%s %-24s installed, matches the current build\n' "$G" "$N" "$name"
+    else
+        printf '  %s!%s %-24s %sSTALE%s — differs from target/release/%s\n' \
+            "$Y" "$N" "$name" "$Y" "$N" "$name"
+    fi
+}
+
+status_path() {
+    local label=$1 path=$2
+    if [[ -e $path ]]; then
+        printf '  %s✓%s %-24s %s\n' "$G" "$N" "$label" "$path"
+    else
+        printf '  %s·%s %-24s %smissing: %s%s\n' "$D" "$N" "$label" "$D" "$path" "$N"
+    fi
+}
+
+show_status() {
+    step "Binaries in $PREFIX"
+    status_binary hyprforge-greet
+    status_binary hyprforge-lock
+    status_binary hyprforge-displayd
+    status_binary hyprforge-settings
+
+    step "Supporting files"
+    status_path "greeter compositor" "$GREETD_DIR/hyprland-greeter.lua"
+    status_path "greetd config"      "$GREETD_DIR/config.toml"
+    status_path "lock PAM stack"     /etc/pam.d/hyprforge-lock
+    status_path "exported look"      "$EXPORT_DIR/theme.toml"
+    status_path "exported layout"    "$EXPORT_DIR/monitors.lua"
+    status_path "launcher entry"     "$DESKTOP_DIR/hyprforge-settings.desktop"
+
+    step "Services"
+    local state
+    # `is-enabled` prints "not-found" *and* exits non-zero for a unit
+    # that does not exist, so a bare `|| echo` prints twice. Take the
+    # output when there is any, and only substitute when there is none.
+    state=$(systemctl is-enabled greetd 2>/dev/null) || true
+    [[ -n $state ]] || state="not installed"
+    printf '  %sgreetd%s                   %s\n' "$B" "$N" "$state"
+    if [[ $state == enabled ]]; then
+        printf '    %sthis machine logs in through the greeter%s\n' "$D" "$N"
+    fi
+    state=$(systemctl --user is-enabled hyprforge-displayd 2>/dev/null) || true
+    [[ -n $state ]] || state="not installed"
+    printf '  %shyprforge-displayd%s       %s\n' "$B" "$N" "$state"
+
+    step "Session"
+    if command -v loginctl >/dev/null && [[ -n ${XDG_SESSION_ID:-} ]]; then
+        loginctl show-session "$XDG_SESSION_ID" \
+            -p Service -p Type -p TTY -p LockedHint 2>/dev/null |
+            sed 's/^/  /'
+    else
+        skip "no session to report on"
+    fi
+}
+
+# ------------------------------------------------------------------ main
+
+if [[ $ACTION != status ]] && ! $DRY_RUN; then
+    # Asked for once, up front, rather than surprising you halfway
+    # through a build. Also fails early on a machine where sudo will not
+    # authenticate, which is better than failing after a five-minute
+    # compile.
+    step "Asking for sudo up front"
+    sudo -v || die "this needs sudo for $PREFIX, /etc and /usr/lib"
+fi
+
+case $ACTION in
+    status)
+        show_status
+        ;;
+    install)
+        has_component greeter  && install_greeter
+        has_component lock     && install_lock
+        has_component displayd && install_displayd
+        has_component settings && install_settings
+        step "Done"
+        $DRY_RUN && warn "this was a dry run; nothing changed"
+        ;;
+    uninstall)
+        has_component greeter  && uninstall_greeter
+        has_component lock     && uninstall_lock
+        has_component displayd && uninstall_displayd
+        has_component settings && uninstall_settings
+        step "Done"
+        $DRY_RUN && warn "this was a dry run; nothing changed"
+        ;;
+esac
