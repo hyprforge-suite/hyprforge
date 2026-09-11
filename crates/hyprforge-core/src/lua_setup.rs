@@ -706,7 +706,22 @@ pub fn bootstrap(hypr_dir: &Path, hyprland_lua: &Path, setup: ModuleSetup<'_>) -
     if matches!(config, HyprConfig::Lua(_)) {
         let (path, contents) = &setup.generated;
         if !path.exists() {
-            let _ = crate::paths::write_atomic(path, contents);
+            // Reported, not `let _ =`. The field's own doc says writing
+            // this eagerly is "not optional": the require line can be
+            // installed before the module has ever saved anything, and
+            // `require()` of a missing file is an error on the user's
+            // very next `hyprctl reload`. Discarding the failure
+            // produced exactly that — a require line pointing at
+            // nothing, an error on a line the user never wrote, and no
+            // message anywhere. `SetupState::error` is rendered in the
+            // app, so the channel was there all along.
+            if let Err(e) = crate::paths::write_atomic(path, contents) {
+                // An earlier failure came first and explains more; this
+                // one is its consequence, not a separate problem.
+                error.get_or_insert_with(|| {
+                    format!("couldn't write {}: {e}", path.display())
+                });
+            }
         }
     }
 

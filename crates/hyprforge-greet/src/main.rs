@@ -215,8 +215,15 @@ fn apply_key<B: hyprforge_authui::conversation::Backend>(
 
 
 fn main() -> iced::Result {
+    // Defaulting to ERROR would silence every `warn!` here, and a greeter
+    // is started by greetd with no RUST_LOG and no terminal — the journal
+    // is the only place anyone can see what it did. See the same note in
+    // hyprforge-settings.
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
         .init();
     let args = Args::parse();
 
