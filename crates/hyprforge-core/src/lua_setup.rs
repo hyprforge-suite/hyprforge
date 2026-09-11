@@ -220,11 +220,17 @@ pub fn install(path: &Path, line: &str, placement: Placement) -> Result<SetupPla
     // actually being made — so installing a second module doesn't overwrite
     // the record of what the file looked like before Hyprforge touched it
     // with a copy that already includes the first module's line.
+    // `write_atomic`, not `fs::copy`: the overwrite below is atomic and
+    // fsynced, so a copy that is neither leaves the backup as the half of
+    // this pair that a power loss can lose. `contents` is already the
+    // file's bytes, so there is nothing to re-read.
     let backup_path = path.with_extension("lua.hyprforge.bak");
     if !backup_path.exists() {
-        std::fs::copy(path, &backup_path).map_err(|source| SetupError::Backup {
-            path: backup_path.display().to_string(),
-            source,
+        crate::paths::write_atomic(&backup_path, &contents).map_err(|source| {
+            SetupError::Backup {
+                path: backup_path.display().to_string(),
+                source,
+            }
         })?;
     }
 
@@ -326,12 +332,23 @@ pub fn remove_matched_lines(targets: &[(PathBuf, usize)]) -> std::io::Result<usi
         if removed_here == 0 {
             continue;
         }
+        // The backup goes through `write_atomic`, like the one in
+        // `hyprlang::install`, and not `fs::copy`. This is a
+        // read-modify-write that *destroys* lines: the overwrite below is
+        // atomic and fsynced, so on a power loss it is the write that
+        // survives. A backup made with a plain copy is not fsynced, so it
+        // is the half that does not — leaving the removed `hl.*` lines in
+        // neither file. That is the shape of the failure that once cost a
+        // user 37 hand-written binds, and this is the path that removes
+        // imported lines from their config.
         let backup = path.with_extension("lua.hyprforge-import.bak");
-        std::fs::copy(path, &backup)?;
+        crate::paths::write_atomic(&backup, &contents)?;
+
         let mut out = kept.join("\n");
         if contents.ends_with('\n') {
             out.push('\n');
         }
+        // Only after the backup is durably on disk.
         crate::paths::write_atomic(path, &out)?;
         total_removed += removed_here;
     }

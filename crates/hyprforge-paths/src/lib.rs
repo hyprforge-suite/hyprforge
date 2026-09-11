@@ -64,10 +64,36 @@ pub fn write_atomic(path: &std::path::Path, contents: &str) -> std::io::Result<(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension(format!(
-        "{}.tmp",
-        path.extension().and_then(|e| e.to_str()).unwrap_or("")
-    ));
+
+    // Unique per call, not a fixed `<name>.tmp`. Two processes write some
+    // of these files — `monitors.lua` has both the display daemon and the
+    // Settings app as writers — and with one shared temp name the second
+    // `create` truncates the first writer's half-written file, so the
+    // bytes that get renamed into place can be an interleaving of both.
+    // The fsync below then commits that corruption to disk.
+    //
+    // Process id and a counter rather than randomness: no dependency, and
+    // the only collision that matters is between concurrent writers,
+    // which these distinguish. A leftover from a previous boot with a
+    // recycled pid is cleaned up below rather than reused.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("hyprforge");
+    let tmp = path.with_file_name(format!(".{stem}.{}.{unique}.tmp", std::process::id()));
+
+    // Removes the temp file unless the rename claimed it. Without this a
+    // full disk leaves one behind on every failed save, accumulating in
+    // the user's config directory — and a leftover is not inert, because
+    // it is exactly what the next writer would have reused.
+    struct Cleanup<'a>(Option<&'a std::path::Path>);
+    impl Drop for Cleanup<'_> {
+        fn drop(&mut self) {
+            if let Some(path) = self.0 {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    let mut cleanup = Cleanup(Some(&tmp));
 
     {
         let file = std::fs::File::create(&tmp)?;
@@ -81,6 +107,9 @@ pub fn write_atomic(path: &std::path::Path, contents: &str) -> std::io::Result<(
     }
 
     std::fs::rename(&tmp, path)?;
+    // The rename consumed it; there is nothing left to remove, and the
+    // name now belongs to whatever a later writer creates.
+    cleanup.0 = None;
 
     // Flushing the directory is what makes the rename itself durable.
     // Best-effort: some filesystems refuse to open a directory for this,
@@ -184,6 +213,69 @@ mod tests {
         let path = dir.path().join("a").join("b").join("file.toml");
         write_atomic(&path, "hello").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+    }
+
+    /// The failure path, which the success-only test above never
+    /// reaches. A full disk or a quota'd home leaves the error to the
+    /// caller — and must not also leave debris in the user's config
+    /// directory, one file per failed save.
+    #[test]
+    fn a_failed_write_leaves_no_temp_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the file should go: `File::create` fails, so
+        // the error arrives after the temp path has been chosen.
+        let target = dir.path().join("occupied.toml");
+        std::fs::create_dir(&target).unwrap();
+
+        assert!(write_atomic(&target, "anything").is_err());
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
+    }
+
+    /// Two writers to one path must not share a temp file. `monitors.lua`
+    /// really does have two: the display daemon and the Settings app.
+    /// With one fixed `<name>.tmp` the second `create` truncates the
+    /// first's in-progress file, and what gets renamed into place can be
+    /// an interleaving of both.
+    #[test]
+    fn concurrent_writers_to_one_path_never_share_a_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("monitors.lua");
+
+        let a = std::thread::spawn({
+            let target = target.clone();
+            move || {
+                for _ in 0..50 {
+                    write_atomic(&target, &"a".repeat(4096)).unwrap();
+                }
+            }
+        });
+        let b = std::thread::spawn({
+            let target = target.clone();
+            move || {
+                for _ in 0..50 {
+                    write_atomic(&target, &"b".repeat(4096)).unwrap();
+                }
+            }
+        });
+        a.join().unwrap();
+        b.join().unwrap();
+
+        // Whichever writer landed last, the file must be entirely one of
+        // them — never a mixture, and never short.
+        let got = std::fs::read_to_string(&target).unwrap();
+        assert!(
+            got == "a".repeat(4096) || got == "b".repeat(4096),
+            "torn write: {} bytes, starts {:?}",
+            got.len(),
+            &got[..got.len().min(8)]
+        );
     }
 
     #[test]
