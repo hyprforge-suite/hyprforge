@@ -25,7 +25,13 @@ switch = true
 # Hyprland, configured to have no keybinds, running the greeter and
 # exiting with it. See hyprland-greeter.lua for why the config matters
 # more than the greeter does.
-command = "Hyprland --config /etc/greetd/hyprland-greeter.lua"
+#
+# Through start-hyprland, not the bare binary. Launching Hyprland
+# directly earns a red "started without start-hyprland" banner across
+# the screen — which on a login screen is the first thing anyone sees,
+# and looks like something is broken. start-hyprland blocks until the
+# compositor exits, which is what greetd needs from a session command.
+command = "start-hyprland -- --config /etc/greetd/hyprland-greeter.lua"
 
 # The greeter runs as its own unprivileged user — greetd's packaging
 # creates it. This is why the theme is an export: `greeter` cannot
