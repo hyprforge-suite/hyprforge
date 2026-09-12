@@ -8,8 +8,8 @@
 //! well-behaved, and CLAUDE.md is explicit that nothing here may wait on
 //! another process without a bound.
 
-use std::io::Read;
-use std::os::fd::BorrowedFd;
+use std::io::{Read, Write};
+use std::os::fd::{BorrowedFd, OwnedFd};
 use std::time::Duration;
 use wayland_client::Connection;
 
@@ -126,6 +126,49 @@ pub fn receive(
     }
 }
 
+/// How long a write side (this crate acting as a clipboard *source*)
+/// waits for the paste target to drain what is written to it.
+///
+/// The mirror image of [`READ_TIMEOUT`], for the same reason: the reader
+/// on the other end of a `send` event's fd is some other, possibly
+/// misbehaving, application, and CLAUDE.md is just as explicit here —
+/// "never wait on another process without a bound" applies to writing as
+/// much as reading.
+pub const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Writes `bytes` to `fd` (as handed to us by a `send` event on a data
+/// source we own) and closes it, bounded by [`WRITE_TIMEOUT`].
+///
+/// Like [`receive`], the actual write runs on a spawned thread so this
+/// call can never block longer than the timeout even against a reader
+/// that opened its end and then never reads — that thread is left
+/// writing into a pipe nobody drains, the same leaked-thread trade
+/// `receive` documents. Failures (a reader that closed early, a stuck
+/// reader that times out) are logged and otherwise swallowed: one
+/// uncooperative paste target must not bring down the source that is
+/// still serving the clipboard to everyone else.
+pub fn send(fd: OwnedFd, bytes: Vec<u8>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("hyprforge-clip-write".to_string())
+        .spawn(move || {
+            let mut file = std::fs::File::from(fd);
+            let result = file.write_all(&bytes);
+            let _ = tx.send(result);
+        });
+    if spawned.is_err() {
+        tracing::warn!("could not spawn a thread to write a clipboard offer");
+        return;
+    }
+    match rx.recv_timeout(WRITE_TIMEOUT) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!(error = %e, "writing a clipboard offer failed"),
+        Err(_) => {
+            tracing::warn!("timed out writing a clipboard offer; the reader may be stuck")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,6 +193,50 @@ mod tests {
                 None
             }
         }
+    }
+
+    /// `send()` needs no compositor at all — the fd it writes to is
+    /// already ours, handed over by whatever bound object received the
+    /// `send` event — so this runs under tier 1 unconditionally, unlike
+    /// the `receive()` tests above.
+    #[test]
+    fn a_reader_that_drains_the_pipe_gets_everything_written() {
+        use std::os::fd::OwnedFd;
+
+        let (mut reader, writer) = std::io::pipe().unwrap();
+        let owned: OwnedFd = writer.into();
+        let handle = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            reader.read_to_end(&mut buf).unwrap();
+            buf
+        });
+        send(owned, b"hello paste target".to_vec());
+        assert_eq!(handle.join().unwrap(), b"hello paste target");
+    }
+
+    /// A reader that never drains the pipe must not hang `send()`
+    /// forever — the exact resource CLAUDE.md's "never wait on another
+    /// process without a bound" is about, mirrored from the read side.
+    #[test]
+    fn a_reader_that_never_drains_does_not_hang_the_write() {
+        use std::os::fd::OwnedFd;
+
+        let (reader, writer) = std::io::pipe().unwrap();
+        let owned: OwnedFd = writer.into();
+        // Keep the read end open (without reading) on a background
+        // thread, standing in for a stuck paste target. A pipe's default
+        // buffer is a handful of pages, so a write larger than that
+        // blocks until timeout rather than completing instantly.
+        let _keep_open = std::thread::spawn(move || {
+            let _reader = reader;
+            std::thread::sleep(Duration::from_secs(30));
+        });
+        let started = std::time::Instant::now();
+        send(owned, vec![0u8; 8 * 1024 * 1024]);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "send() must return around WRITE_TIMEOUT, not wait out a stuck reader"
+        );
     }
 
     /// Exercises the real pipe/thread/timeout plumbing end to end,

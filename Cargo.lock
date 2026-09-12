@@ -1454,9 +1454,37 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "tracing-subscriber",
  "wayland-client",
  "wayland-protocols",
+ "wayland-protocols-misc",
  "wayland-protocols-wlr",
+ "xkbcommon",
+]
+
+[[package]]
+name = "hyprforge-clipmenu"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "calloop 0.14.4",
+ "calloop-wayland-source 0.4.1",
+ "clap",
+ "hyprforge-appearance",
+ "hyprforge-clipboard",
+ "hyprforge-core",
+ "hyprforge-look",
+ "iced_renderer",
+ "iced_runtime",
+ "iced_tiny_skia",
+ "iced_widget",
+ "image",
+ "serde_json",
+ "smithay-client-toolkit 0.20.0",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tiny-skia",
+ "wayland-client",
 ]
 
 [[package]]

@@ -16,12 +16,16 @@
 //! content, for the same reason `hyprforge-authui` hand-writes its own.
 
 pub mod backend;
+pub mod paste;
 pub mod resolve;
 pub mod store;
 pub mod types;
 pub mod wayland;
+pub mod write;
 
 pub use backend::ClipboardWatcher;
+pub use paste::{PasteOutcome, PasteSynthesizer};
 pub use store::{History, HistoryError, Recordable};
 pub use types::{Content, Entry, EntryId, Mime, Sensitivity};
-pub use wayland::WaylandWatcher;
+pub use wayland::{WaylandPaster, WaylandWatcher, WaylandWriter};
+pub use write::ClipboardWriter;

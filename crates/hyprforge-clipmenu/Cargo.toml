@@ -1,0 +1,68 @@
+[package]
+name = "hyprforge-clipmenu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hyprforge-clipmenu"
+path = "src/main.rs"
+
+[dependencies]
+hyprforge-clipboard.workspace = true
+# `look::resolve` is the one place a Theme is built from the user's own
+# settings (Hyprland's active border colour, gsettings fonts, …) — see
+# CLAUDE.md: "Never add a colour constant to an app."
+hyprforge-appearance.workspace = true
+# default-features off: this reads `hyprctl` output and needs nothing
+# from the `dbus` feature (that's only displayd/settings talking to the
+# display daemon).
+hyprforge-core = { workspace = true, default-features = false }
+hyprforge-look.workspace = true
+# default-features off drops iced_tiny_skia's own "x11"/"wayland"
+# defaults, which pick a *windowing* backend for `softbuffer` — no use
+# here, since the popup paints straight into the buffer the compositor
+# hands over, same as the lock screen. `softbuffer` is a hard dependency
+# of iced_tiny_skia regardless, and with *zero* backend features enabled
+# at all it fails to compile (unused type parameters in its dispatch
+# enum, once every `#[cfg]`-gated variant is compiled out) — so
+# "wayland" is added back explicitly, the one this popup actually runs
+# under. hyprforge-lock's Cargo.toml gets away with the same
+# default-features=false with no explicit backend feature only because
+# `hyprforge-authui` also depends on the full `iced` crate, which enables
+# `wayland`/`x11` on this same `iced_tiny_skia` for the whole build
+# (Cargo unifies features per dependency); this crate has no such
+# incidental other consumer; wanted this to not be a silent workspace
+# accident.
+iced_tiny_skia = { workspace = true, default-features = false, features = ["image", "wayland"] }
+iced_runtime.workspace = true
+iced_widget = { workspace = true, features = ["image"] }
+# `iced_widget`'s "image" feature always pulls in `iced_renderer` (a
+# hard, non-optional dependency of `iced_widget`), and `iced_renderer`
+# refuses to *link* in release mode unless one of its own "wgpu" or
+# "tiny-skia" features is on — a `compile_error!` that debug builds skip
+# but release builds hit. Nothing else in this crate's graph turns
+# either on (unlike `hyprforge-lock`, which gets "tiny-skia" for free
+# because `hyprforge-authui` also depends on the full `iced` umbrella
+# crate for the greeter's windowed rendering, and Cargo unifies features
+# per dependency across a build). So it is requested directly, even
+# though nothing here calls into `iced_renderer` itself — this crate
+# paints through `iced_tiny_skia::Renderer` on its own, exactly as the
+# lock screen does.
+iced_renderer = { version = "0.14", default-features = false, features = ["tiny-skia"] }
+tiny-skia = "0.11"
+image.workspace = true
+smithay-client-toolkit = "0.20"
+wayland-client = "0.31"
+# Pinned to whatever smithay-client-toolkit 0.20 already pulls in, same
+# as hyprforge-lock: the Wayland source and calloop have to come from
+# the same calloop the toolkit uses.
+calloop = "0.14"
+calloop-wayland-source = "0.4"
+clap.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

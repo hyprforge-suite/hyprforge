@@ -4,6 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# The library is read side, write side and paste synthesis over the
+# compositor's clipboard protocols — it knows nothing about a popup or a
+# history's own consumers. `hyprforge-clipd` below is the daemon that
+# owns writing the history file; the popup that reads it lives in its
+# own crate, the same "binary joins the library to a policy" split
+# `hyprforge-tray` uses for `hyprforge-trayd`.
+[[bin]]
+name = "hyprforge-clipd"
+path = "src/bin/clipd.rs"
+
 [dependencies]
 # The compositor is the only source of clipboard content, over
 # wlr-data-control / ext-data-control. No daemon of our own owns it.
@@ -16,22 +26,41 @@ wayland-protocols-wlr.workspace = true
 # feature that gates ext-data-control-v1 in this crate — it has not
 # graduated to stable — and "client" is the client-side bindings.
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+# `zwp_virtual_keyboard_manager_v1`, for synthesising a paste. Already in
+# the lock file (a transitive dependency of nothing here before now, the
+# same situation `wayland-protocols` was in above).
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+# Compiles the ordinary "us" keyboard layout used to build the keymap a
+# virtual keyboard must upload before it can send anything — see
+# `wayland::keyboard`'s module doc for why a hand-written keymap naming
+# only Control and V is the wrong call. Already in the lock file
+# (transitively, via the wayland stack); taken directly here because
+# nothing else in the workspace speaks to libxkbcommon yet.
+xkbcommon = "0.8"
 hyprforge-paths.workspace = true
 serde.workspace = true
 toml.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 blake3.workspace = true
 anyhow.workspace = true
-# `sync` for the `UnboundedReceiver` the watcher trait hands back.
-tokio = { workspace = true, features = ["sync"] }
+# An anonymous, already-unlinked file to hand the compositor a keymap
+# it can `mmap` — see `wayland::keyboard::upload_keymap`. A real
+# (non-dev) dependency because the paste-synthesis code path needs it
+# outside tests, not only the test suite that also uses it.
+tempfile = "3"
+# `sync` for the `UnboundedReceiver` the watcher trait hands back;
+# `rt-multi-thread` and `macros` for the daemon's `#[tokio::main]`;
+# `time` for its bounded reconnect backoff.
+tokio = { workspace = true, features = ["sync", "rt-multi-thread", "macros", "time"] }
 
 [dev-dependencies]
-tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 
 [features]
-# Exposes `backend::mock::MockBackend` outside `#[cfg(test)]`, so the
-# daemon's and the popup's own tests can drive a clipboard with no
-# compositor attached.
+# Exposes `backend::mock::MockBackend` (and `write::mock::MockWriter`,
+# `paste::mock::MockPaster`) outside `#[cfg(test)]`, so the daemon's and
+# the popup's own tests can drive a clipboard with no compositor
+# attached.
 mock = []
