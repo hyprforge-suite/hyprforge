@@ -1,0 +1,26 @@
+[package]
+name = "hyprforge-clipboard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The compositor is the only source of clipboard content, over
+# wlr-data-control / ext-data-control. No daemon of our own owns it.
+wayland-client.workspace = true
+wayland-protocols-wlr.workspace = true
+hyprforge-paths.workspace = true
+serde.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+blake3.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+# Exposes `backend::mock::MockBackend` outside `#[cfg(test)]`, so the
+# daemon's and the popup's own tests can drive a clipboard with no
+# compositor attached.
+mock = []
