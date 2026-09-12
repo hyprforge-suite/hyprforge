@@ -178,9 +178,12 @@ pub fn temperature(
 /// around midnight. Getting that wrap wrong leaves the morning showing
 /// the daytime profile when the user only configured an evening one.
 pub fn active_profile(settings: &sunset::Settings, now_minutes: u32) -> Option<&sunset::Profile> {
+    // `written` and not `profiles`: a profile the generator refused is not
+    // part of the schedule hyprsunset was given, so pushing it live would
+    // apply something no file describes and nothing can explain.
     let mut timed: Vec<(u32, &sunset::Profile)> = settings
-        .profiles
-        .iter()
+        .written()
+        .into_iter()
         .filter_map(|p| Some((sunset::parse_time(&p.time)?, p)))
         .collect();
     timed.sort_by_key(|(minutes, _)| *minutes);
@@ -279,6 +282,39 @@ mod tests {
     fn an_unparseable_time_is_left_out_of_the_schedule() {
         let s = schedule(&[("9:5", 3000), ("00:00", 6500)]);
         assert_eq!(active_profile(&s, 12 * 60).unwrap().temperature, 6500);
+    }
+
+    /// `gamma = 0` is rejected by `invalid()` because it blacks the screen
+    /// out. It therefore never reaches the config file — but `temperature`
+    /// also pushes the active profile to hyprsunset over IPC, and that path
+    /// used to read `profiles` directly. So a profile too broken to write
+    /// still turned the screen off, and stayed off until hyprsunset was
+    /// restarted, with nothing on disk to explain it.
+    #[test]
+    fn a_profile_too_invalid_to_write_is_never_pushed_live() {
+        let mut s = schedule(&[("00:00", 6500)]);
+        s.profiles[0].gamma = 0.0;
+        assert!(!s.invalid().is_empty(), "gamma 0 must be rejected to begin with");
+        assert!(
+            active_profile(&s, 12 * 60).is_none(),
+            "a profile the generator refused must not be pushed over IPC"
+        );
+    }
+
+    /// Dropping the invalid profile is not enough on its own: whichever
+    /// valid profile it was shadowing has to take over, including across
+    /// the midnight wrap. Otherwise fixing the black screen would leave the
+    /// schedule showing the wrong profile instead.
+    #[test]
+    fn an_invalid_profile_does_not_shadow_the_valid_one_before_it() {
+        let mut s = schedule(&[("06:00", 6500), ("20:00", 4000)]);
+        s.profiles[1].temperature = 500; // below MIN_TEMPERATURE
+
+        // 21:00 would be the evening profile, but it cannot be written.
+        assert_eq!(active_profile(&s, 21 * 60).unwrap().temperature, 6500);
+        // And before the first valid profile the day still wraps to the
+        // last one that *is* valid, not to the rejected one.
+        assert_eq!(active_profile(&s, 2 * 60).unwrap().temperature, 6500);
     }
 
     #[test]

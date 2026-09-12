@@ -90,6 +90,25 @@ impl Settings {
         out
     }
 
+    /// The profiles that actually reach the config file: everything
+    /// [`invalid`](Self::invalid) does not reject.
+    ///
+    /// Anything that reads "what is the schedule" has to go through here,
+    /// because the alternative is two readings of the same settings that
+    /// disagree. They did disagree: `generate` skipped the invalid ones
+    /// and `apply::active_profile` did not, so a profile too broken to
+    /// write could still be pushed to hyprsunset over IPC — and `gamma 0`
+    /// is invalid precisely because it blacks the screen out.
+    pub fn written(&self) -> Vec<&Profile> {
+        let bad: Vec<usize> = self.invalid().into_iter().map(|(i, _)| i).collect();
+        self.profiles
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !bad.contains(i))
+            .map(|(_, p)| p)
+            .collect()
+    }
+
     /// Whether the schedule leaves part of the day uncovered by an
     /// explicit profile.
     ///
@@ -124,15 +143,11 @@ pub fn parse_time(time: &str) -> Option<u32> {
 
 /// Renders the generated `sunset.conf`.
 pub fn generate(settings: &Settings) -> String {
-    let bad: Vec<usize> = settings.invalid().into_iter().map(|(i, _)| i).collect();
     let mut out = hyprlang::header("colour temperature settings");
     if let Some(max_gamma) = settings.max_gamma {
         out.push_str(&hyprlang::keyword("max-gamma", max_gamma));
     }
-    for (i, profile) in settings.profiles.iter().enumerate() {
-        if bad.contains(&i) {
-            continue;
-        }
+    for profile in settings.written() {
         out.push('\n');
         out.push_str(&render_one(profile));
     }
