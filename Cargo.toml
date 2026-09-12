@@ -19,6 +19,7 @@ hyprforge-system.workspace = true
 hyprforge-shortcuts.workspace = true
 hyprforge-lua-import.workspace = true
 hyprforge-network.workspace = true
+hyprforge-bluetooth.workspace = true
 async-trait.workspace = true
 # "tokio" selects iced's tokio executor backend, which is what provides
 # `iced::time::every` (used for the revert countdown) — the app already runs
@@ -40,6 +41,9 @@ tempfile = "3"
 # "mock" for `hyprforge_network::backend::mock::MockBackend`, which the
 # Network screen's tests drive instead of a real D-Bus connection.
 hyprforge-network = { workspace = true, features = ["mock"] }
+# "mock" for `hyprforge_bluetooth::backend::mock::MockBackend`, which the
+# Bluetooth screen's tests drive instead of a real D-Bus connection.
+hyprforge-bluetooth = { workspace = true, features = ["mock"] }
 # `test-util` for `#[tokio::test(start_paused = true)]`: the displayd call
 # bounds are 5s and 25s, and a test suite must not spend half a minute
 # actually waiting them out to prove they fire.
