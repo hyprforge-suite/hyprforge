@@ -1,4 +1,5 @@
 pub mod appearance;
+pub mod bluetooth;
 pub mod catalog_screen;
 pub mod desktop;
 pub mod displays;

@@ -9,6 +9,7 @@ use iced::keyboard::{self, key, Key};
 use iced::widget::{column, container, operation, row, text_input, Id};
 use iced::{window, Background, Element, Length, Size, Subscription, Task, Theme};
 use modules::appearance::AppearanceModule;
+use modules::bluetooth::{BluetoothModule, LazyBlueZBackend};
 use modules::desktop::DesktopModule;
 use modules::session::SessionModule;
 use modules::system::SystemModule;
@@ -37,6 +38,7 @@ fn screen_from_cli(name: &str) -> Option<Screen> {
         "shortcuts" | "keybinds" => Screen::Shortcuts,
         "input" | "keyboard" => Screen::Input,
         "network" | "wifi" | "wi-fi" => Screen::Network,
+        "bluetooth" | "bt" => Screen::Bluetooth,
         "appearance" | "theme" => Screen::Appearance,
         "desktop" | "wallpaper" => Screen::Desktop,
         "session" | "autostart" => Screen::Session,
@@ -54,6 +56,7 @@ const SCREEN_NAMES: &[&str] = &[
     "shortcuts",
     "input",
     "network",
+    "bluetooth",
     "appearance",
     "desktop",
     "session",
@@ -221,6 +224,7 @@ enum Screen {
     Shortcuts,
     Input,
     Network,
+    Bluetooth,
     Appearance,
     Desktop,
     Session,
@@ -235,6 +239,7 @@ impl Screen {
             Screen::Shortcuts => "Shortcuts",
             Screen::Input => "Input",
             Screen::Network => "Network",
+            Screen::Bluetooth => "Bluetooth",
             Screen::Appearance => "Appearance",
             Screen::Desktop => "Desktop",
             Screen::Session => "Session",
@@ -272,6 +277,10 @@ const NAV: &[NavCategory] = &[
         screens: &[Screen::Network],
     },
     NavCategory {
+        label: "Bluetooth",
+        screens: &[Screen::Bluetooth],
+    },
+    NavCategory {
         label: "Appearance",
         screens: &[Screen::Appearance, Screen::Desktop],
     },
@@ -293,6 +302,7 @@ enum Message {
     Shortcuts(modules::shortcuts::Message),
     Input(modules::input::Message),
     Network(modules::network::Message),
+    Bluetooth(modules::bluetooth::Message),
     Appearance(modules::appearance::Message),
     Desktop(modules::desktop::Message),
     Session(modules::session::Message),
@@ -310,6 +320,7 @@ struct App {
     shortcuts: ShortcutsModule,
     input: InputModule,
     network: NetworkModule<LazyNetworkManagerBackend>,
+    bluetooth: BluetoothModule<LazyBlueZBackend>,
     appearance: AppearanceModule,
     desktop: DesktopModule,
     session: SessionModule,
@@ -330,6 +341,8 @@ impl App {
         let (input, input_task) = InputModule::new();
         let (network, network_task) =
             NetworkModule::new(std::sync::Arc::new(LazyNetworkManagerBackend::new()));
+        let (bluetooth, bluetooth_task) =
+            BluetoothModule::new(std::sync::Arc::new(LazyBlueZBackend::new()));
         let (appearance, appearance_task) = AppearanceModule::new();
         let (desktop, desktop_task) = DesktopModule::new();
         let (session, session_task) = SessionModule::new();
@@ -342,6 +355,7 @@ impl App {
                 shortcuts,
                 input,
                 network,
+                bluetooth,
                 appearance,
                 desktop,
                 session,
@@ -359,6 +373,7 @@ impl App {
                 shortcuts_task.map(Message::Shortcuts),
                 input_task.map(Message::Input),
                 network_task.map(Message::Network),
+                bluetooth_task.map(Message::Bluetooth),
                 appearance_task.map(Message::Appearance),
                 desktop_task.map(Message::Desktop),
                 session_task.map(Message::Session),
@@ -471,6 +486,10 @@ impl App {
                     .network
                     .update(modules::network::Message::Refresh)
                     .map(Message::Network),
+                Screen::Bluetooth => self
+                    .bluetooth
+                    .update(modules::bluetooth::Message::Refresh)
+                    .map(Message::Bluetooth),
                 Screen::Appearance => Task::none(),
                 Screen::Desktop => Task::none(),
                 Screen::Session => Task::none(),
@@ -482,6 +501,7 @@ impl App {
             }
             Message::Input(msg) => self.input.update(msg).map(Message::Input),
             Message::Network(msg) => self.network.update(msg).map(Message::Network),
+            Message::Bluetooth(msg) => self.bluetooth.update(msg).map(Message::Bluetooth),
             Message::Appearance(msg) => self.appearance.update(msg).map(Message::Appearance),
             Message::Desktop(msg) => self.desktop.update(msg).map(Message::Desktop),
             Message::Session(msg) => self.session.update(msg).map(Message::Session),
@@ -585,6 +605,7 @@ impl App {
             Screen::Shortcuts => self.shortcuts.icon(),
             Screen::Input => self.input.icon(),
             Screen::Network => self.network.icon(),
+            Screen::Bluetooth => self.bluetooth.icon(),
             Screen::Appearance => self.appearance.icon(),
             Screen::Desktop => self.desktop.icon(),
             Screen::Session => self.session.icon(),
@@ -662,6 +683,7 @@ impl App {
             Screen::Shortcuts => self.shortcuts.view(scale).map(Message::Shortcuts),
             Screen::Input => self.input.view(scale).map(Message::Input),
             Screen::Network => self.network.view(scale).map(Message::Network),
+            Screen::Bluetooth => self.bluetooth.view(scale).map(Message::Bluetooth),
             Screen::Appearance => self.appearance.view(scale).map(Message::Appearance),
             Screen::Desktop => self.desktop.view(scale).map(Message::Desktop),
             Screen::Session => self.session.view(scale).map(Message::Session),
@@ -715,6 +737,7 @@ impl App {
                 self.displays.subscription().map(Message::Displays),
                 self.shortcuts.subscription().map(Message::Shortcuts),
                 self.network.subscription().map(Message::Network),
+                self.bluetooth.subscription().map(Message::Bluetooth),
                 window::close_events().map(Message::WindowClosed),
             ]);
         }
@@ -743,6 +766,7 @@ impl App {
             self.displays.subscription().map(Message::Displays),
             self.shortcuts.subscription().map(Message::Shortcuts),
             self.network.subscription().map(Message::Network),
+            self.bluetooth.subscription().map(Message::Bluetooth),
             shortcuts,
             window::close_events().map(Message::WindowClosed),
         ])

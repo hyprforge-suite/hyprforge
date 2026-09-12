@@ -14,10 +14,13 @@
 #   3b. NetworkManager      — does NetworkManager agree? Read-only checks
 #                             that its interface is the shape
 #                             hyprforge-network claims. Needs it running.
+#   3c. BlueZ               — does BlueZ agree? Read-only checks that its
+#                             interface is the shape hyprforge-bluetooth
+#                             claims. Needs bluetooth.service running.
 #
-# Tiers 2, 3 and 3b each gate on the thing they actually ask, rather than
-# sharing one --ignored run: a check that silently never runs is worse
-# than one that fails.
+# Tiers 2, 3, 3b and 3c each gate on the thing they actually ask, rather
+# than sharing one --ignored run: a check that silently never runs is
+# worse than one that fails.
 #
 # Tier 1 catches a mistake in the code. Tiers 2 and 3 catch the far nastier
 # kind: code that is internally consistent and wrong about the system it is
@@ -91,12 +94,14 @@ else
         # probe values and reloads to drop them, so two at once would undo
         # each other mid-assertion.
         #
-        # Two invocations rather than one --workspace run, because two
+        # Two invocations rather than one --workspace run, because three
         # crates hold live tests that answer to something other than the
         # compositor: the ecosystem crate's parse tests need the daemons
-        # installed and *not* running, and the network crate's need
-        # NetworkManager. Both get their own step below. Running them here as well
-        # would report a daemon rejecting a generated file under the
+        # installed and *not* running, and the network and bluetooth
+        # crates' need NetworkManager and BlueZ respectively. Each gets
+        # its own step below. Running them here as well would report a
+        # daemon rejecting a generated file, or disagreeing about an
+        # interface that has nothing to do with Hyprland, under the
         # heading "the code disagrees with the running system", which is
         # a different thing to go and look at.
         #
@@ -104,7 +109,7 @@ else
         # are named. That also survives a test being renamed, which
         # `--skip` on the test names would not.
         output=$(
-            cargo test --workspace --exclude hyprforge-ecosystem --exclude hyprforge-network -- --ignored --test-threads=1 2>&1
+            cargo test --workspace --exclude hyprforge-ecosystem --exclude hyprforge-network --exclude hyprforge-bluetooth -- --ignored --test-threads=1 2>&1
             cargo test -p hyprforge-ecosystem --lib --test live_ecosystem -- --ignored --test-threads=1 2>&1
         )
         if grep -q "test result: FAILED" <<<"$output"; then
@@ -171,6 +176,33 @@ else
             grep -E '^test .* FAILED' <<<"$output" | head -20
         else
             ok "$(count_tests <<<"$output") NetworkManager tests passed"
+            while IFS= read -r reason; do
+                [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
+            done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^(]*\).*/\1/p' <<<"$output" | sort -u)
+        fi
+    fi
+
+    # Answers to BlueZ, not to Hyprland, so it gets its own gate for the
+    # same reason the NetworkManager step did: folded into the tier 2 run
+    # this would need a compositor to check a service that has nothing to
+    # do with one.
+    #
+    # Every test behind this step is read-only. They run on a machine
+    # somebody is using — starting discovery from an unattended test
+    # would cost battery on every device in range, not just this one.
+    step "Live tests against BlueZ"
+    if ! command -v systemctl >/dev/null; then
+        skip "BlueZ tests" "systemctl not available to ask"
+    elif ! systemctl is-active --quiet bluetooth; then
+        skip "BlueZ tests" "bluetooth isn't running"
+    else
+        output=$(cargo test -p hyprforge-bluetooth --test live_bluez \
+            -- --ignored --test-threads=1 --nocapture 2>&1)
+        if grep -q "test result: FAILED" <<<"$output"; then
+            bad "BlueZ tests failed — the code disagrees with the running service"
+            grep -E '^test .* FAILED' <<<"$output" | head -20
+        else
+            ok "$(count_tests <<<"$output") BlueZ tests passed"
             while IFS= read -r reason; do
                 [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
             done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^(]*\).*/\1/p' <<<"$output" | sort -u)

@@ -1428,6 +1428,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyprforge-bluetooth"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "hyprforge-core",
+ "serde",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "zbus",
+]
+
+[[package]]
 name = "hyprforge-core"
 version = "0.1.0"
 dependencies = [
@@ -1593,6 +1607,7 @@ dependencies = [
  "async-trait",
  "futures-util",
  "hyprforge-appearance",
+ "hyprforge-bluetooth",
  "hyprforge-core",
  "hyprforge-ecosystem",
  "hyprforge-input",
