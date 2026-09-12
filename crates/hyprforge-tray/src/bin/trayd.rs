@@ -1185,7 +1185,20 @@ fn keep_awake_item(held: Option<bool>, others: &[InhibitorInfo], unavailable: bo
         TrayItem {
             id,
             category: Category::SystemServices,
-            status: TrayStatus::Passive,
+            // Active, not Passive, even though nothing is being held.
+            //
+            // `Passive` asks the host to hide the item, and hosts obey —
+            // so switching this icon on in Settings made it appear and
+            // then immediately vanish, because "not currently keeping
+            // the machine awake" is the state it starts in. An icon you
+            // can only see once it is already on is a toggle you cannot
+            // reach.
+            //
+            // The radios are the case Passive is right for: they hide
+            // when the *hardware* is off, which is a state the user chose
+            // elsewhere and cannot act on from the bar anyway. This is a
+            // switch, and a switch has to be visible in both positions.
+            status: TrayStatus::Active,
             title,
             icon_name: "changes-allow-symbolic".to_string(),
             tooltip_title: "Not keeping this machine awake".to_string(),
@@ -2330,16 +2343,37 @@ mod tests {
         }
     }
 
-    /// The property the task calls out by name: unlike a radio, keep
-    /// awake has nothing worth monitoring while it's off, so it is
-    /// genuinely passive rather than merely unconnected.
+    /// A switch has to be visible in both positions.
+    ///
+    /// This asserted `Passive` while off, on the reasoning that there is
+    /// nothing to monitor when nothing is being held. `Passive` asks the
+    /// host to *hide* the item and hosts obey, so switching the icon on
+    /// in Settings made it appear and then vanish — "not currently
+    /// keeping the machine awake" being the state it starts in. The
+    /// toggle was unreachable from the bar it lived in.
+    ///
+    /// The radios are what `Passive` is genuinely for: they hide when the
+    /// hardware is off, which is a state chosen elsewhere and not
+    /// actionable from a tray icon anyway.
     #[test]
-    fn keep_awake_is_passive_when_not_inhibiting_and_active_when_inhibiting() {
+    fn keep_awake_stays_visible_whether_or_not_it_is_holding_the_machine_awake() {
         let off = keep_awake_item(Some(false), &[], false);
-        assert_eq!(off.status, TrayStatus::Passive);
+        assert_eq!(
+            off.status,
+            TrayStatus::Active,
+            "a switch the user cannot see is a switch they cannot flip"
+        );
+        assert_eq!(on_icon(&off), "changes-allow-symbolic");
 
         let on = keep_awake_item(Some(true), &[], false);
         assert_eq!(on.status, TrayStatus::Active);
+        assert_eq!(on_icon(&on), "changes-prevent-symbolic");
+    }
+
+    /// The two states still look different, which is the whole reason
+    /// the icon is worth having when it is always visible.
+    fn on_icon(item: &TrayItem) -> &str {
+        &item.icon_name
     }
 
     #[test]

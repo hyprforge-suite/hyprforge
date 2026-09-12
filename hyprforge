@@ -79,6 +79,8 @@ ${B}Components${N}
                    Does NOT enable greetd — see --install --greeter output.
   --lock           The lock screen: hyprforge-lock and its PAM stack.
   --displayd       The display daemon, as a systemd user service.
+  --tray           The tray icons (Wi-Fi, Bluetooth, keep awake, night
+                   light), as a systemd user service.
   --settings       The Settings app and its launcher entry.
   --all            Every component above.
 
@@ -115,8 +117,9 @@ while [[ $# -gt 0 ]]; do
         --greeter)       COMPONENTS+=(greeter) ;;
         --lock)          COMPONENTS+=(lock) ;;
         --displayd)      COMPONENTS+=(displayd) ;;
+        --tray)          COMPONENTS+=(tray) ;;
         --settings)      COMPONENTS+=(settings) ;;
-        --all)           COMPONENTS+=(greeter lock displayd settings) ;;
+        --all)           COMPONENTS+=(greeter lock displayd tray settings) ;;
         --force-cleanup) FORCE_CLEANUP=true ;;
         --dry-run)       DRY_RUN=true ;;
         --yes|-y)        ASSUME_YES=true ;;
@@ -128,7 +131,7 @@ done
 
 [[ -n $ACTION ]] || die "pick one of --install, --uninstall or --status"
 if [[ $ACTION != status && ${#COMPONENTS[@]} -eq 0 ]]; then
-    die "--$ACTION needs at least one component (--greeter, --lock, --displayd, --settings, --all)"
+    die "--$ACTION needs at least one component (--greeter, --lock, --displayd, --tray, --settings, --all)"
 fi
 
 has_component() {
@@ -367,6 +370,63 @@ install_displayd() {
 EOF
 }
 
+install_tray() {
+    build hyprforge-tray
+    step "Tray icons"
+    install_file target/release/hyprforge-trayd "$PREFIX/hyprforge-trayd" 755
+
+    # Same rewrite as the display daemon's unit, for the same reason: the
+    # packaged ExecStart points at ~/.cargo/bin and this script installs
+    # to $PREFIX, so installing it verbatim yields a unit that fails with
+    # status=203/EXEC and a binary sitting somewhere else entirely.
+    local unit_dir="$HOME/.config/systemd/user"
+    local unit=crates/hyprforge-tray/packaging/hyprforge-trayd.service
+    local generated
+    generated=$(mktemp)
+    trap 'rm -f "$generated"' RETURN
+    sed "s|^ExecStart=.*|ExecStart=$PREFIX/hyprforge-trayd|" "$unit" > "$generated"
+
+    if $DRY_RUN; then
+        skip "would install $unit_dir/hyprforge-trayd.service (ExecStart=$PREFIX/hyprforge-trayd)"
+    elif [[ -e $unit_dir/hyprforge-trayd.service ]] && cmp -s "$generated" "$unit_dir/hyprforge-trayd.service"; then
+        skip "$unit_dir/hyprforge-trayd.service is current"
+    else
+        install -Dm644 "$generated" "$unit_dir/hyprforge-trayd.service"
+        systemctl --user daemon-reload
+        ok "installed $unit_dir/hyprforge-trayd.service"
+    fi
+
+    step "Tray icons: next steps"
+    cat <<EOF
+    systemctl --user enable --now hyprforge-trayd
+
+    Which icons appear is Settings' business, not this script's:
+    Network and Bluetooth are on by default, keep awake and night light
+    are off until switched on in Settings.
+
+    A restart is how a rebuilt daemon reaches the bar. Running it by hand
+    means a stale binary keeps running long after it was replaced, which
+    is how two icons went missing after being switched on:
+        systemctl --user restart hyprforge-trayd
+EOF
+}
+
+uninstall_tray() {
+    step "Tray icons: removing"
+    if ! $DRY_RUN && systemctl --user is-enabled hyprforge-trayd >/dev/null 2>&1; then
+        systemctl --user disable --now hyprforge-trayd || true
+        ok "disabled the user service"
+    fi
+    if [[ -e "$HOME/.config/systemd/user/hyprforge-trayd.service" ]]; then
+        $DRY_RUN && skip "would remove the user unit" || {
+            rm -f "$HOME/.config/systemd/user/hyprforge-trayd.service"
+            systemctl --user daemon-reload
+            ok "removed the user unit"
+        }
+    fi
+    remove_file "$PREFIX/hyprforge-trayd"
+}
+
 uninstall_displayd() {
     step "Display daemon: removing"
     if ! $DRY_RUN && systemctl --user is-enabled hyprforge-displayd >/dev/null 2>&1; then
@@ -486,6 +546,7 @@ show_status() {
     status_binary hyprforge-greet
     status_binary hyprforge-lock
     status_binary hyprforge-displayd
+    status_binary hyprforge-trayd
     status_binary hyprforge-settings
 
     step "Supporting files"
@@ -540,6 +601,7 @@ case $ACTION in
         has_component greeter  && install_greeter
         has_component lock     && install_lock
         has_component displayd && install_displayd
+        has_component tray && install_tray
         has_component settings && install_settings
         step "Done"
         $DRY_RUN && warn "this was a dry run; nothing changed"
@@ -547,6 +609,7 @@ case $ACTION in
     uninstall)
         has_component greeter  && uninstall_greeter
         has_component lock     && uninstall_lock
+        has_component tray && uninstall_tray
         has_component displayd && uninstall_displayd
         has_component settings && uninstall_settings
         step "Done"
