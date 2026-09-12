@@ -1,6 +1,7 @@
 use crate::modules::layout_canvas::{CanvasHead, LayoutCanvas};
 use hyprforge_core::geometry::{logical_size, nearest_valid_scale};
 use hyprforge_core::displayd_proxy::DisplaydProxy;
+use std::time::Duration;
 use hyprforge_core::lua_setup::{self, HyprConfig, Placement, SetupPlan};
 use hyprforge_ui::theme::{spacing, FontScale};
 use hyprforge_ui::widgets::{
@@ -2222,17 +2223,68 @@ impl DisplaysModule {
     }
 }
 
+/// How long any displayd query may take before the app gives up on it.
+///
+/// zbus has no reply timeout on a `#[proxy]`-generated method, and no
+/// attribute to ask for one, so the bound has to be applied at the call
+/// site — which is what the `command::TIMEOUT` rule already says for
+/// anything that waits on another process. Without it a wedged daemon
+/// leaves the screen showing "Applying…" with no way out, which is the
+/// dead end pillar #3 rules out.
+const CALL_TIMEOUT: Duration = hyprforge_core::command::TIMEOUT;
+
+/// Applying is not a query and must not share a query's bound.
+///
+/// displayd commits to the compositor and waits for it to settle: three
+/// attempts at up to 3s to test plus 3s to apply, so 18s of legitimate
+/// work before it gives up on its own. A shorter bound here would abandon
+/// applies that were about to succeed — and abandon them *after* the
+/// compositor had already changed mode, which is the worst moment to stop
+/// listening. This sits above the daemon's own ceiling, so reaching it
+/// means displayd is genuinely wedged rather than merely busy.
+const APPLY_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// Bounds one displayd call and turns whatever happened into a sentence.
+///
+/// `what` names the call in the user's terms, since it is what they will
+/// read when the daemon doesn't answer.
+async fn bounded<T>(
+    what: &str,
+    within: Duration,
+    call: impl std::future::Future<Output = zbus::Result<T>>,
+) -> Result<T, String> {
+    match tokio::time::timeout(within, call).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err(format!(
+            "{what} timed out after {}s — the display daemon isn't answering. \
+             Check `systemctl --user status hyprforge-displayd`.",
+            within.as_secs()
+        )),
+    }
+}
+
+/// The session bus and a proxy on it, both bounded.
+///
+/// Connecting can hang for the same reason a call can — a bus that
+/// accepts the socket and never replies — so the connection is no safer
+/// unbounded than the calls that follow it.
 async fn connect() -> Result<zbus::Connection, String> {
-    zbus::Connection::session().await.map_err(|e| e.to_string())
+    match tokio::time::timeout(CALL_TIMEOUT, zbus::Connection::session()).await {
+        Ok(result) => result.map_err(|e| e.to_string()),
+        Err(_) => Err("the session bus isn't answering".to_string()),
+    }
+}
+
+async fn displayd(conn: &zbus::Connection) -> Result<DisplaydProxy<'_>, String> {
+    bounded("connecting to the display daemon", CALL_TIMEOUT, DisplaydProxy::new(conn)).await
 }
 
 async fn load() -> Result<LoadedState, String> {
     let conn = connect().await?;
-    let proxy = DisplaydProxy::new(&conn).await.map_err(|e| e.to_string())?;
-    let profiles = proxy
-        .list_profiles()
-        .await
-        .map_err(|e| e.to_string())?
+    let proxy = displayd(&conn).await?;
+    let profiles = bounded("listing display profiles", CALL_TIMEOUT, proxy.list_profiles())
+        .await?
         .into_iter()
         .map(|(id, name, head_count, last_used)| ProfileInfo {
             id,
@@ -2241,18 +2293,17 @@ async fn load() -> Result<LoadedState, String> {
             last_used,
         })
         .collect();
-    let current_fingerprint = proxy
-        .get_current_fingerprint()
-        .await
-        .map_err(|e| e.to_string())?;
-    let competing_monitor_rules = proxy
-        .competing_monitor_rules()
-        .await
-        .map_err(|e| e.to_string())?;
-    let current_profile = proxy
-        .get_current_profile()
-        .await
-        .map_err(|e| e.to_string())?;
+    let current_fingerprint =
+        bounded("reading the current displays", CALL_TIMEOUT, proxy.get_current_fingerprint())
+            .await?;
+    let competing_monitor_rules = bounded(
+        "checking for competing monitor rules",
+        CALL_TIMEOUT,
+        proxy.competing_monitor_rules(),
+    )
+    .await?;
+    let current_profile =
+        bounded("reading the active profile", CALL_TIMEOUT, proxy.get_current_profile()).await?;
     Ok(LoadedState {
         profiles,
         current_fingerprint,
@@ -2271,33 +2322,28 @@ async fn apply(id: String) -> (String, Result<(), String>) {
 /// scripted `displayctl` use, which has no banner to click.
 async fn apply_inner(id: &str) -> Result<(), String> {
     let conn = connect().await?;
-    let proxy = DisplaydProxy::new(&conn).await.map_err(|e| e.to_string())?;
-    proxy
-        .apply_profile_reversible(id)
+    let proxy = displayd(&conn).await?;
+    bounded("applying the layout", APPLY_TIMEOUT, proxy.apply_profile_reversible(id))
         .await
         .map(|_seconds| ())
-        .map_err(|e| e.to_string())
 }
 
 async fn confirm_layout() -> Result<(), String> {
     let conn = connect().await?;
-    let proxy = DisplaydProxy::new(&conn).await.map_err(|e| e.to_string())?;
-    proxy.confirm_layout().await.map_err(|e| e.to_string())
+    let proxy = displayd(&conn).await?;
+    bounded("confirming the layout", CALL_TIMEOUT, proxy.confirm_layout()).await
 }
 
 async fn revert_layout() -> Result<(), String> {
     let conn = connect().await?;
-    let proxy = DisplaydProxy::new(&conn).await.map_err(|e| e.to_string())?;
-    proxy.revert_layout().await.map_err(|e| e.to_string())
+    let proxy = displayd(&conn).await?;
+    bounded("reverting the layout", APPLY_TIMEOUT, proxy.revert_layout()).await
 }
 
 async fn rename(id: String, new_name: String) -> Result<(), String> {
     let conn = connect().await?;
-    let proxy = DisplaydProxy::new(&conn).await.map_err(|e| e.to_string())?;
-    proxy
-        .rename_profile(&id, &new_name)
-        .await
-        .map_err(|e| e.to_string())
+    let proxy = displayd(&conn).await?;
+    bounded("renaming the profile", CALL_TIMEOUT, proxy.rename_profile(&id, &new_name)).await
 }
 
 /// Writes imported geometry into the profile for the currently-connected
@@ -2319,9 +2365,9 @@ async fn apply_imported_geometry(
     edits: Vec<(String, ImportGeometry)>,
 ) -> Result<(), String> {
     let conn = connect().await?;
-    let proxy = DisplaydProxy::new(&conn).await.map_err(|e| e.to_string())?;
+    let proxy = displayd(&conn).await?;
     let detail: ProfileDetail = serde_json::from_str(
-        &proxy.get_profile(&profile_id).await.map_err(|e| e.to_string())?,
+        &bounded("reading the profile", CALL_TIMEOUT, proxy.get_profile(&profile_id)).await?,
     )
     .map_err(|e| e.to_string())?;
 
@@ -2334,8 +2380,10 @@ async fn apply_imported_geometry(
         let Some(head) = detail.heads.iter().find(|h| h.connector_hint == connector) else {
             continue;
         };
-        proxy
-            .set_head_geometry(
+        bounded(
+            "saving the display position",
+            CALL_TIMEOUT,
+            proxy.set_head_geometry(
                 &profile_id,
                 &head.connector_hint,
                 geometry.x,
@@ -2345,43 +2393,42 @@ async fn apply_imported_geometry(
                 geometry.refresh_mhz,
                 geometry.scale,
                 &head.transform,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+            ),
+        )
+        .await?;
     }
     Ok(())
 }
 
 async fn delete(id: String) -> Result<(), String> {
     let conn = connect().await?;
-    let proxy = DisplaydProxy::new(&conn).await.map_err(|e| e.to_string())?;
-    proxy.delete_profile(&id).await.map_err(|e| e.to_string())
+    let proxy = displayd(&conn).await?;
+    bounded("deleting the profile", CALL_TIMEOUT, proxy.delete_profile(&id)).await
 }
 
 async fn load_profile(id: String) -> Result<ProfileDetail, String> {
     let conn = connect().await?;
-    let proxy = DisplaydProxy::new(&conn).await.map_err(|e| e.to_string())?;
-    let json = proxy.get_profile(&id).await.map_err(|e| e.to_string())?;
+    let proxy = displayd(&conn).await?;
+    let json = bounded("reading the profile", CALL_TIMEOUT, proxy.get_profile(&id)).await?;
     serde_json::from_str(&json).map_err(|e| e.to_string())
 }
 
 async fn toggle_swap(profile_id: String, a: String, b: String) -> Result<ProfileDetail, String> {
     let conn = connect().await?;
-    let proxy = DisplaydProxy::new(&conn).await.map_err(|e| e.to_string())?;
-    proxy
-        .swap_heads(&profile_id, &a, &b)
-        .await
-        .map_err(|e| e.to_string())?;
+    let proxy = displayd(&conn).await?;
+    bounded("swapping the displays", CALL_TIMEOUT, proxy.swap_heads(&profile_id, &a, &b)).await?;
     load_profile(profile_id).await
 }
 
 async fn set_policy(profile_id: String, policy: String) -> Result<ProfileDetail, String> {
     let conn = connect().await?;
-    let proxy = DisplaydProxy::new(&conn).await.map_err(|e| e.to_string())?;
-    proxy
-        .set_extra_output_policy(&profile_id, &policy)
-        .await
-        .map_err(|e| e.to_string())?;
+    let proxy = displayd(&conn).await?;
+    bounded(
+        "saving the extra-display policy",
+        CALL_TIMEOUT,
+        proxy.set_extra_output_policy(&profile_id, &policy),
+    )
+    .await?;
     load_profile(profile_id).await
 }
 
@@ -2399,10 +2446,12 @@ async fn save_geometry(
     apply: bool,
 ) -> Result<(), String> {
     let conn = connect().await?;
-    let proxy = DisplaydProxy::new(&conn).await.map_err(|e| e.to_string())?;
+    let proxy = displayd(&conn).await?;
     for (connector_hint, x, y, width, height, refresh_mhz, scale, transform) in heads {
-        proxy
-            .set_head_geometry(
+        bounded(
+            "saving the display position",
+            CALL_TIMEOUT,
+            proxy.set_head_geometry(
                 &profile_id,
                 &connector_hint,
                 x,
@@ -2412,28 +2461,28 @@ async fn save_geometry(
                 refresh_mhz,
                 scale,
                 &transform,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+            ),
+        )
+        .await?;
     }
     if !apply {
         return Ok(());
     }
-    proxy
-        .apply_profile_reversible(&profile_id)
+    bounded("applying the layout", APPLY_TIMEOUT, proxy.apply_profile_reversible(&profile_id))
         .await
         .map(|_seconds| ())
-        .map_err(|e| e.to_string())
 }
 
 async fn fetch_modes(connector_hint: String) -> Vec<(i32, i32, i32, bool)> {
     let Ok(conn) = connect().await else {
         return Vec::new();
     };
-    let Ok(proxy) = DisplaydProxy::new(&conn).await else {
+    let Ok(proxy) = displayd(&conn).await else {
         return Vec::new();
     };
-    proxy.get_available_modes(&connector_hint).await.unwrap_or_default()
+    bounded("listing display modes", CALL_TIMEOUT, proxy.get_available_modes(&connector_hint))
+        .await
+        .unwrap_or_default()
 }
 
 
@@ -2481,10 +2530,12 @@ async fn current_layout() -> Vec<LiveHead> {
     let Ok(conn) = connect().await else {
         return Vec::new();
     };
-    let Ok(proxy) = DisplaydProxy::new(&conn).await else {
+    let Ok(proxy) = displayd(&conn).await else {
         return Vec::new();
     };
-    let Ok(json) = proxy.get_current_layout().await else {
+    let Ok(json) =
+        bounded("reading the current layout", CALL_TIMEOUT, proxy.get_current_layout()).await
+    else {
         return Vec::new();
     };
     serde_json::from_str(&json).unwrap_or_default()
@@ -2514,6 +2565,12 @@ async fn forward_signals(
     use iced::futures::SinkExt;
     use iced::futures::StreamExt;
 
+    // Deliberately *not* bounded by `CALL_TIMEOUT`, unlike every method
+    // call above it. These are subscriptions: waiting is what they do, and
+    // a signal stream that gave up after five seconds would simply stop
+    // reporting that the displays had changed. The bound belongs on calls
+    // that owe an answer, not on a stream that owes one only when
+    // something happens.
     let conn = zbus::Connection::session().await?;
     let proxy = DisplaydProxy::new(&conn).await?;
     let mut applied = proxy.receive_profile_applied().await?;
@@ -2564,6 +2621,46 @@ async fn forward_signals(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod call_bounds {
+    use super::*;
+
+    /// zbus has no reply timeout on a generated proxy method, so a daemon
+    /// that accepts the call and never answers used to leave the screen on
+    /// "Applying…" with nothing to click. The bound is what turns that into
+    /// an error the user can read.
+    #[tokio::test(start_paused = true)]
+    async fn a_daemon_that_never_answers_becomes_an_error_not_a_wait() {
+        let never = std::future::pending::<zbus::Result<()>>();
+        let result = bounded("applying the layout", APPLY_TIMEOUT, never).await;
+        let message = result.expect_err("a call that never returns must not resolve to Ok");
+        assert!(message.contains("applying the layout"), "{message}");
+        assert!(message.contains("isn't answering"), "{message}");
+    }
+
+    /// The bound must not truncate work that was going to succeed. displayd
+    /// gives the compositor three attempts at 3s to test plus 3s to apply,
+    /// so 18s is legitimate; anything at or under that has to survive.
+    #[tokio::test(start_paused = true)]
+    async fn an_apply_that_takes_the_daemons_full_18_seconds_still_succeeds() {
+        let slow = async {
+            tokio::time::sleep(Duration::from_secs(18)).await;
+            Ok(7u32)
+        };
+        assert_eq!(bounded("applying the layout", APPLY_TIMEOUT, slow).await, Ok(7));
+    }
+
+    /// A query is not an apply and must not inherit its patience: a wedged
+    /// read should report back quickly rather than making the screen look
+    /// frozen for half a minute.
+    #[tokio::test(start_paused = true)]
+    async fn a_query_gives_up_far_sooner_than_an_apply() {
+        assert!(CALL_TIMEOUT < APPLY_TIMEOUT);
+        let never = std::future::pending::<zbus::Result<()>>();
+        assert!(bounded("listing display profiles", CALL_TIMEOUT, never).await.is_err());
+    }
 }
 
 #[cfg(test)]
