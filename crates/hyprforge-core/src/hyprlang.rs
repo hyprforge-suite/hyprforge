@@ -356,6 +356,62 @@ pub fn parse(contents: &str) -> Document {
     document
 }
 
+/// Comments out the given 1-based, inclusive line ranges.
+///
+/// Used after a setting has been adopted into the app, so the daemon
+/// stops seeing two of it. Blocks are categories and accumulate — a
+/// hand-written `listener` is not replaced by a generated one, both run —
+/// so on a config with five listeners, importing without this leaves ten.
+///
+/// **Comments out, never deletes.** The user's original stays legible in
+/// their own file, which is the difference between a change they can
+/// read and undo and one that looks like the app ate their config. The
+/// caller is separately required to have made a `.hyprforge.bak` first;
+/// this function cannot check that and does not pretend to.
+///
+/// Lines outside `ranges` are returned byte-for-byte, blank lines and
+/// hand-written comments between blocks included. A line already starting
+/// with `#` is left alone rather than prefixed twice, so retiring the
+/// same range twice is a no-op.
+///
+/// **Pass every range in one call.** Ranges are 1-based into `contents`
+/// as given, and each retired range gains a note line — so the output's
+/// numbering no longer matches the input's. Retiring, re-parsing and
+/// retiring again against the first set of numbers would comment out the
+/// wrong lines.
+pub fn retire(contents: &str, ranges: &[(usize, usize)], note: &str) -> String {
+    let retired: Vec<usize> = ranges
+        .iter()
+        .flat_map(|(start, end)| *start..=*end)
+        .collect();
+    let starts: Vec<usize> = ranges.iter().map(|(start, _)| *start).collect();
+
+    let mut out = String::new();
+    for (index, line) in contents.lines().enumerate() {
+        let number = index + 1;
+        if starts.contains(&number) {
+            // The indentation of what follows, so the note doesn't sit at
+            // column 0 in the middle of an indented block.
+            let indent: String =
+                line.chars().take_while(|c| c.is_whitespace()).collect();
+            out.push_str(&format!("{indent}# {note}\n"));
+        }
+        if retired.contains(&number) && !line.trim_start().starts_with('#') {
+            let indent: String =
+                line.chars().take_while(|c| c.is_whitespace()).collect();
+            out.push_str(&format!("{indent}# {}\n", &line[indent.len()..]));
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    // A file that didn't end in a newline still shouldn't gain one.
+    if !contents.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
 /// The "don't edit this" banner, naming the screen that owns the file.
 pub fn header(subject: &str) -> String {
     format!(
@@ -594,6 +650,77 @@ mod tests {
         let nonsense = parse("this is not a setting\n");
         assert_eq!(nonsense.problems.len(), 1);
         assert!(nonsense.items.is_empty());
+    }
+
+    /// The user's own file is theirs. Everything outside the retired
+    /// range comes back byte-for-byte — blank lines, hand-written
+    /// comments and all.
+    #[test]
+    fn retiring_a_block_leaves_everything_around_it_untouched() {
+        let original = "# my notes\n\nlistener {\n    timeout = 5\n}\n\n# trailing note\n";
+        let out = retire(original, &[(3, 5)], "moved into Settings");
+        assert!(out.starts_with("# my notes\n\n"), "{out}");
+        assert!(out.ends_with("\n# trailing note\n"), "{out}");
+        assert!(out.contains("# listener {\n"), "{out}");
+        assert!(out.contains("    # timeout = 5\n"), "{out}");
+        assert!(out.contains("# }\n"), "{out}");
+    }
+
+    /// Commented out, never deleted. The difference between a change the
+    /// user can read and undo, and one that looks like the app ate their
+    /// config.
+    #[test]
+    fn retiring_keeps_every_line_the_user_wrote() {
+        let original = "listener {\n    timeout = 5\n}\n";
+        let out = retire(original, &[(1, 3)], "note");
+        for fragment in ["listener {", "timeout = 5", "}"] {
+            assert!(out.contains(fragment), "{fragment} was lost: {out}");
+        }
+        assert_eq!(parse(&out).items, Vec::new(), "the daemon must no longer see it");
+    }
+
+    #[test]
+    fn a_note_says_where_the_setting_went() {
+        let out = retire("listener {\n}\n", &[(1, 2)], "now in Settings → Desktop → Idle");
+        assert!(out.starts_with("# now in Settings → Desktop → Idle\n"), "{out}");
+    }
+
+    /// Retiring the same range twice must not double-prefix, or repeated
+    /// imports turn a config into a wall of `# # # #`.
+    #[test]
+    fn retiring_twice_changes_nothing_the_second_time() {
+        let original = "listener {\n    timeout = 5\n}\n";
+        let once = retire(original, &[(1, 3)], "note");
+        // The note is re-emitted, so compare the retired lines rather than
+        // the whole file.
+        let twice = retire(&once, &[(2, 4)], "note");
+        assert!(!twice.contains("# # "), "{twice}");
+    }
+
+    /// Only the ranges given. A second listener the user did not adopt
+    /// has to keep working.
+    #[test]
+    fn a_range_that_was_not_given_is_left_live() {
+        let original = "listener {\n    timeout = 1\n}\nlistener {\n    timeout = 2\n}\n";
+        let out = retire(original, &[(1, 3)], "note");
+        let doc = parse(&out);
+        assert_eq!(doc.blocks("listener").count(), 1, "{out}");
+        let Item::Block { items, .. } = doc.blocks("listener").next().unwrap() else {
+            panic!("expected a block")
+        };
+        // Line 6, not 5: the note inserted above shifted it. Hence the
+        // rule in `retire`'s docs — every range in one call, computed
+        // against the original.
+        assert_eq!(items[0], Item::Assignment {
+            key: "timeout".to_string(),
+            value: "2".to_string(),
+            line: 6,
+        });
+    }
+
+    #[test]
+    fn a_file_without_a_trailing_newline_does_not_gain_one() {
+        assert_eq!(retire("a = 1", &[], "note"), "a = 1");
     }
 
     /// Sourced paths are reported, never followed: following them walks
