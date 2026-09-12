@@ -7,6 +7,14 @@
 //! or a radio, the same split `crate::item` documents. Everything else
 //! here is plumbing: polling the two backends, keeping two `TrayIcon`s in
 //! sync, and forwarding clicks to `hyprforge-settings`.
+//!
+//! Whether an icon is shown at all is `hyprforge_tray::prefs`, re-read
+//! every poll tick (`refresh_prefs`) so a toggle in Settings takes effect
+//! within one tick without restarting this daemon. Switching an icon off
+//! **drops its `TrayIcon`** — see `sync_icon` and [`IconAction`] — rather
+//! than setting it `Status::Passive`, because not every tray host hides a
+//! Passive item, and dropping is the only thing that reliably releases
+//! the bus name a host is showing.
 
 use hyprforge_bluetooth::backend::BluetoothBackend;
 use hyprforge_bluetooth::{AdapterState, BlueZBackend, Device};
@@ -14,10 +22,18 @@ use hyprforge_bluetooth::Status as BtStatus;
 use hyprforge_network::backend::NetworkBackend;
 use hyprforge_network::{NetworkManagerBackend, RadioState, Ssid};
 use hyprforge_network::Status as NetStatus;
+use hyprforge_tray::prefs::{self, Prefs};
 use hyprforge_tray::{watcher_present, Category, TrayIcon, TrayItem};
 use hyprforge_tray::Status as TrayStatus;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
+
+/// Where one icon's registration lives between ticks: `None` when the
+/// icon is switched off (or not yet registered), `Some` while it's up.
+/// Shared between `poll_loop`, which is the only writer, and
+/// `reannounce_loop`, which only ever reads it to call `announce` again.
+type IconSlot = Arc<Mutex<Option<Arc<TrayIcon>>>>;
 
 /// How often both backends are re-polled. Ten seconds is what the
 /// Settings app's Network and Bluetooth screens already poll at while
@@ -77,16 +93,26 @@ async fn main() -> anyhow::Result<()> {
 
     // Registered unavailable-looking to start: the first real poll is at
     // most one `POLL_INTERVAL` away, and an icon that starts blank until
-    // then would look identical to a daemon that never started.
+    // then would look identical to a daemon that never started. Both
+    // start registered regardless of `tray.toml` — `poll_loop`'s first
+    // tick (which fires immediately) reads preferences and drops
+    // whichever one the user has already switched off, so there is only
+    // one place that ever decides "is this icon supposed to be up".
     let network_icon =
         register_with_retry(network_item(None, None, None, true), 0, clicks_tx.clone()).await;
     let bluetooth_icon =
         register_with_retry(bluetooth_item(None, None, true), 1, clicks_tx.clone()).await;
 
-    let poll_task = tokio::spawn(poll_loop(network_icon.clone(), bluetooth_icon.clone()));
+    let network_slot: IconSlot = Arc::new(Mutex::new(Some(network_icon)));
+    let bluetooth_slot: IconSlot = Arc::new(Mutex::new(Some(bluetooth_icon)));
+
+    let poll_task = tokio::spawn(poll_loop(
+        network_slot.clone(),
+        bluetooth_slot.clone(),
+        clicks_tx.clone(),
+    ));
     let click_task = tokio::spawn(handle_clicks(clicks_rx));
-    let reannounce_task =
-        tokio::spawn(reannounce_loop(probe, network_icon, bluetooth_icon));
+    let reannounce_task = tokio::spawn(reannounce_loop(probe, network_slot, bluetooth_slot));
 
     // None of these three loops return under normal operation. If one
     // panics, that is worth knowing about rather than leaving the other
@@ -240,25 +266,129 @@ async fn sample_bluetooth(state: &mut Reconnecting<BlueZBackend>) -> TrayItem {
     }
 }
 
-async fn poll_loop(network_icon: Arc<TrayIcon>, bluetooth_icon: Arc<TrayIcon>) {
+/// What to do with one icon's registration, given whether the user wants
+/// it shown and whether it is currently up.
+///
+/// Pure — no D-Bus, no I/O — so the on/off transition is unit-tested
+/// directly, the same split `network_item`/`bluetooth_item` already use
+/// for "what should this icon say". `currently_up` is passed in rather
+/// than read from the `IconSlot` itself, so a test needs no `Mutex`, no
+/// `TrayIcon`, and no async runtime to exercise every case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IconAction {
+    /// Already in the state the preference wants; nothing to do besides
+    /// (if it's up) pushing this tick's new content to it.
+    Keep,
+    /// Wanted, and not currently registered.
+    Register,
+    /// Currently registered, and no longer wanted. The `TrayIcon` itself
+    /// must be dropped — see the module doc for why `Status::Passive`
+    /// alone does not reliably hide an item.
+    Drop,
+}
+
+fn icon_action(wanted: bool, currently_up: bool) -> IconAction {
+    match (wanted, currently_up) {
+        (true, false) => IconAction::Register,
+        (false, true) => IconAction::Drop,
+        (true, true) | (false, false) => IconAction::Keep,
+    }
+}
+
+/// Re-reads `tray.toml`, updating `current` only on success.
+///
+/// A failure here — the file exists and will not parse — must never
+/// change what is currently shown: that is the "typo hides the whole
+/// tray" failure mode the task exists to rule out. `warned` suppresses
+/// repeat warnings for as long as the same failure persists, so a broken
+/// file logs once rather than once every `POLL_INTERVAL` forever; it
+/// resets as soon as a read succeeds, so a *later* failure warns again.
+fn refresh_prefs(current: &mut Prefs, warned: &mut bool) {
+    match prefs::load() {
+        Ok(loaded) => {
+            *current = loaded;
+            *warned = false;
+        }
+        Err(e) => {
+            if !*warned {
+                tracing::warn!(
+                    error = %e,
+                    "could not read tray.toml; leaving tray icons as they are"
+                );
+                *warned = true;
+            }
+        }
+    }
+}
+
+/// Brings one icon's `IconSlot` in line with `wanted` and pushes this
+/// tick's content to it if it ends up (or stays) registered.
+async fn sync_icon(
+    slot: &IconSlot,
+    wanted: bool,
+    item: TrayItem,
+    index: u32,
+    clicks: &tokio::sync::mpsc::UnboundedSender<String>,
+) {
+    let id = item.id.clone();
+    let mut guard = slot.lock().await;
+    match icon_action(wanted, guard.is_some()) {
+        IconAction::Keep => {
+            if let Some(icon) = guard.as_ref() {
+                if let Err(e) = icon.update(item).await {
+                    tracing::warn!(error = %e, icon = %id, "failed to update tray icon");
+                }
+            }
+        }
+        IconAction::Drop => {
+            tracing::info!(icon = %id, "tray icon switched off; releasing its bus name");
+            // Dropping the `Arc<TrayIcon>` (assuming this is the last
+            // reference, which it is — nothing else holds one) drops its
+            // `zbus::Connection`, which is what actually releases the bus
+            // name. Setting `Status::Passive` instead would leave the
+            // name — and the item — registered, which is the mistake
+            // this whole feature exists to avoid; see the module doc.
+            *guard = None;
+        }
+        IconAction::Register => {
+            match TrayIcon::register(item, index, clicks.clone()).await {
+                Ok(icon) => *guard = Some(Arc::new(icon)),
+                Err(e) => {
+                    tracing::warn!(error = %e, icon = %id, "failed to register tray icon; will retry next tick");
+                }
+            }
+        }
+    }
+}
+
+async fn poll_loop(
+    network_slot: IconSlot,
+    bluetooth_slot: IconSlot,
+    clicks: tokio::sync::mpsc::UnboundedSender<String>,
+) {
     let mut net_state = Reconnecting::new();
     let mut bt_state = Reconnecting::new();
+    // Both icons start registered (see `main`), so the preferences this
+    // loop starts from must match that — otherwise an icon the user
+    // already switched off would flash on screen for up to one
+    // `POLL_INTERVAL` before this loop notices.
+    let mut prefs = Prefs::default();
+    let mut prefs_load_failed = false;
     // `interval` fires its first tick immediately, which is wanted here:
     // both icons started out saying "unavailable" in `main`, and the
-    // first real read should not wait a further `POLL_INTERVAL`.
+    // first real read (of both the backends and `tray.toml`) should not
+    // wait a further `POLL_INTERVAL`.
     let mut ticker = tokio::time::interval(POLL_INTERVAL);
     loop {
         ticker.tick().await;
 
+        refresh_prefs(&mut prefs, &mut prefs_load_failed);
+
         let net_item = sample_network(&mut net_state).await;
-        if let Err(e) = network_icon.update(net_item).await {
-            tracing::warn!(error = %e, "failed to update the network tray icon");
-        }
+        sync_icon(&network_slot, prefs.network, net_item, 0, &clicks).await;
 
         let bt_item = sample_bluetooth(&mut bt_state).await;
-        if let Err(e) = bluetooth_icon.update(bt_item).await {
-            tracing::warn!(error = %e, "failed to update the bluetooth tray icon");
-        }
+        sync_icon(&bluetooth_slot, prefs.bluetooth, bt_item, 1, &clicks).await;
     }
 }
 
@@ -303,11 +433,7 @@ async fn handle_clicks(mut clicks: tokio::sync::mpsc::UnboundedReceiver<String>)
 /// only way back. This only fires on the *transition* into "present" —
 /// re-announcing every poll while a host is already there would ask it to
 /// re-add an icon it already has for no reason.
-async fn reannounce_loop(
-    probe: zbus::Connection,
-    network_icon: Arc<TrayIcon>,
-    bluetooth_icon: Arc<TrayIcon>,
-) {
+async fn reannounce_loop(probe: zbus::Connection, network_slot: IconSlot, bluetooth_slot: IconSlot) {
     // `main` only reaches this point after `watcher_present` returned
     // true, so the host is presumed present until proven otherwise.
     let mut present = true;
@@ -317,11 +443,16 @@ async fn reannounce_loop(
         let now_present = watcher_present(&probe).await;
         if now_present && !present {
             tracing::info!("tray host reappeared; re-announcing icons");
-            if let Err(e) = network_icon.announce().await {
-                tracing::warn!(error = %e, "failed to re-announce the network icon");
-            }
-            if let Err(e) = bluetooth_icon.announce().await {
-                tracing::warn!(error = %e, "failed to re-announce the bluetooth icon");
+            // An icon currently switched off has no `TrayIcon` to
+            // re-announce — `poll_loop` will register it fresh (which
+            // announces on its own) if and when the user turns it back
+            // on, so there is nothing missing here to re-announce.
+            for slot in [&network_slot, &bluetooth_slot] {
+                if let Some(icon) = slot.lock().await.as_ref() {
+                    if let Err(e) = icon.announce().await {
+                        tracing::warn!(error = %e, "failed to re-announce a tray icon");
+                    }
+                }
             }
         }
         present = now_present;
@@ -748,5 +879,110 @@ mod tests {
             calls_before_third,
             "a cached success must not reconnect"
         );
+    }
+
+    // --- icon_action: the pure on/off decision ---------------------------
+
+    #[test]
+    fn a_wanted_icon_that_is_not_up_yet_should_be_registered() {
+        assert_eq!(icon_action(true, false), IconAction::Register);
+    }
+
+    #[test]
+    fn an_unwanted_icon_that_is_currently_up_should_be_dropped_not_left_registered() {
+        assert_eq!(icon_action(false, true), IconAction::Drop);
+    }
+
+    #[test]
+    fn an_icon_already_matching_the_preference_is_left_alone_either_way() {
+        assert_eq!(icon_action(true, true), IconAction::Keep);
+        assert_eq!(icon_action(false, false), IconAction::Keep);
+    }
+
+    // --- refresh_prefs: a bad file never changes what's already shown ----
+
+    /// Serialises every test in this module that repoints
+    /// `$XDG_CONFIG_HOME` — it's process-global, so two such tests running
+    /// concurrently could read each other's temp directory. Same reasoning
+    /// as `hyprforge-settings::modules::CONFIG_ENV_LOCK`.
+    static CONFIG_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_temp_config_home<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
+        let _lock = CONFIG_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", dir.path());
+        }
+        let out = f(dir.path());
+        match previous {
+            Some(p) => unsafe { std::env::set_var("XDG_CONFIG_HOME", p) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+        out
+    }
+
+    #[test]
+    fn a_missing_tray_toml_refreshes_to_the_defaults() {
+        with_temp_config_home(|_dir| {
+            let mut current = Prefs { network: false, bluetooth: false };
+            let mut warned = false;
+            refresh_prefs(&mut current, &mut warned);
+            assert!(current.network, "a missing file is first run: both icons shown");
+            assert!(current.bluetooth);
+            assert!(!warned);
+        });
+    }
+
+    /// The property this whole feature is built around: a `tray.toml` a
+    /// typo has broken must not be treated as "hide everything" (or
+    /// "show everything") — whatever was already showing keeps showing.
+    #[test]
+    fn an_unreadable_tray_toml_leaves_the_current_preferences_untouched() {
+        with_temp_config_home(|dir| {
+            let tray_toml = dir.join("hyprforge").join("tray.toml");
+            std::fs::create_dir_all(tray_toml.parent().unwrap()).unwrap();
+            std::fs::write(&tray_toml, "network = yes please\n").unwrap();
+
+            let mut current = Prefs { network: true, bluetooth: false };
+            let mut warned = false;
+            refresh_prefs(&mut current, &mut warned);
+            assert_eq!(
+                current,
+                Prefs { network: true, bluetooth: false },
+                "a failed read must not change what is currently shown"
+            );
+            assert!(warned, "the failure is reported");
+        });
+    }
+
+    /// A persistent parse error must warn once, not once per tick — a
+    /// daemon that logs the same line every ten seconds forever makes the
+    /// one thing worth noticing (a *new* failure) impossible to spot.
+    #[test]
+    fn a_persistent_parse_failure_warns_only_once() {
+        with_temp_config_home(|dir| {
+            let tray_toml = dir.join("hyprforge").join("tray.toml");
+            std::fs::create_dir_all(tray_toml.parent().unwrap()).unwrap();
+            std::fs::write(&tray_toml, "network = yes please\n").unwrap();
+
+            let mut current = Prefs::default();
+            let mut warned = false;
+            refresh_prefs(&mut current, &mut warned);
+            assert!(warned);
+
+            // A second tick against the same broken file must not flip
+            // `warned` back to logging again.
+            let warned_before = warned;
+            refresh_prefs(&mut current, &mut warned);
+            assert_eq!(warned, warned_before, "still warned, but not re-logged");
+
+            // Once the file is fixed, a later failure must be able to
+            // warn again — `warned` is reset on success, not stuck `true`
+            // forever.
+            std::fs::write(&tray_toml, "network = false\n").unwrap();
+            refresh_prefs(&mut current, &mut warned);
+            assert!(!warned, "a successful read clears the suppression");
+        });
     }
 }
