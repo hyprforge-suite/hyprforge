@@ -28,6 +28,16 @@ struct HyprctlMonitor {
 
 /// Connector name → Hyprland's own description string for it, as
 /// `hyprctl monitors -j` reports right now. Empty on any failure.
+///
+/// The empty map stays an ordinary return rather than becoming an error,
+/// and that is a considered choice: callers fall back to bare connector
+/// names, which *work* — they are merely less stable across docks. There
+/// is no branch a caller could usefully take, so there is nothing to give
+/// them. What they were owed is a record of which failure happened, since
+/// "hyprctl isn't installed", "it timed out" and "its JSON changed shape"
+/// call for completely different responses and all three used to look
+/// identical from the outside: a `monitors.lua` quietly written with
+/// connector selectors and no explanation anywhere.
 pub async fn connector_descriptions() -> HashMap<String, String> {
     // Bounded, like every other subprocess in this project: a wedged
     // compositor must not hold up the daemon that is trying to describe
@@ -37,14 +47,37 @@ pub async fn connector_descriptions() -> HashMap<String, String> {
         tokio::process::Command::new("hyprctl").arg("monitors").arg("-j").output(),
     )
     .await;
-    let Ok(Ok(output)) = queried else {
-        return HashMap::new();
+    let output = match queried {
+        Ok(Ok(output)) => output,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "could not run `hyprctl monitors`; using connector names");
+            return HashMap::new();
+        }
+        Err(_) => {
+            tracing::warn!("`hyprctl monitors` timed out; using connector names");
+            return HashMap::new();
+        }
     };
     if !output.status.success() {
+        tracing::warn!(
+            status = ?output.status.code(),
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "`hyprctl monitors` failed; using connector names"
+        );
         return HashMap::new();
     }
-    let Ok(monitors) = serde_json::from_slice::<Vec<HyprctlMonitor>>(&output.stdout) else {
-        return HashMap::new();
+    let monitors = match serde_json::from_slice::<Vec<HyprctlMonitor>>(&output.stdout) {
+        Ok(monitors) => monitors,
+        Err(e) => {
+            // The one of the three worth noticing: hyprctl answered, so
+            // this is its output having changed shape under us, and every
+            // `desc:` selector this daemon writes is downstream of it.
+            tracing::warn!(
+                error = %e,
+                "could not read `hyprctl monitors` output; using connector names"
+            );
+            return HashMap::new();
+        }
     };
     monitors.into_iter().map(|m| (m.name, m.description)).collect()
 }
