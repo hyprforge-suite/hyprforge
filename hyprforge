@@ -142,16 +142,27 @@ has_component() {
 
 # -------------------------------------------------------------- building
 
+# build <package> [binary]
+#
+# `binary` defaults to the package name, which is true of every crate
+# here except `hyprforge-tray`, whose binary is `hyprforge-trayd`. That
+# assumption was baked in until the tray component was added, and it
+# failed the way an assumption should: loudly, at the check below, rather
+# than by installing nothing and reporting success.
+#
+# Note that `--dry-run` cannot catch this — it skips the build, so the
+# proof never runs. The dry run for the tray component looked perfect.
 build() {
     local package=$1
+    local binary=${2:-$1}
     step "Building $package"
     if $DRY_RUN; then
         skip "would run: cargo build --release -p $package"
         return 0
     fi
     cargo build --release -p "$package" 2>&1 | grep -vE "^\s*(Compiling|Finished)" || true
-    [[ -x target/release/${package} ]] || die "cargo did not produce target/release/$package"
-    ok "built target/release/$package"
+    [[ -x target/release/${binary} ]] || die "cargo did not produce target/release/$binary"
+    ok "built target/release/$binary"
 }
 
 # Installs a file only if it differs, then proves it landed.
@@ -371,7 +382,7 @@ EOF
 }
 
 install_tray() {
-    build hyprforge-tray
+    build hyprforge-tray hyprforge-trayd
     step "Tray icons"
     install_file target/release/hyprforge-trayd "$PREFIX/hyprforge-trayd" 755
 
