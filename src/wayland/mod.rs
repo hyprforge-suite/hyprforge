@@ -21,13 +21,19 @@
 //! everything outside those is unavoidably protocol-specific glue.
 
 mod ext;
+mod keyboard;
 mod pipe;
 mod wlr;
+mod write_ext;
+mod write_wlr;
 
 use crate::backend::ClipboardWatcher;
-use crate::types::Entry;
+use crate::types::{Content, Entry};
+use crate::write::ClipboardWriter;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+
+pub use keyboard::WaylandPaster;
 
 /// The real clipboard watcher: a compositor connection running on its
 /// own thread, publishing every recordable copy to whoever subscribed.
@@ -72,5 +78,51 @@ impl ClipboardWatcher for WaylandWatcher {
             .unwrap_or_else(|e| e.into_inner())
             .push(tx);
         rx
+    }
+}
+
+/// The real clipboard writer: puts content on the selection, preferring
+/// `ext-data-control-v1` and falling back to `zwlr-data-control-v1`,
+/// exactly like [`WaylandWatcher::connect`].
+///
+/// Unlike the watcher, there is no persistent connection to hold here:
+/// each [`ClipboardWriter::set_selection`] call opens its own short-lived
+/// connection and hands its dispatch loop to a background thread that
+/// keeps the new data source alive for as long as it remains the
+/// selection — see `write_ext`'s module doc for why. This mirrors
+/// `hyprforge-tray`'s `TrayIcon::register`, which opens its own
+/// connection per registration for the same reason: the alternative is
+/// routing every write back through the read side's single dispatch
+/// thread, which knows nothing about sources or `send` events today.
+pub struct WaylandWriter;
+
+impl WaylandWriter {
+    pub fn new() -> Self {
+        WaylandWriter
+    }
+}
+
+impl Default for WaylandWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ClipboardWriter for WaylandWriter {
+    fn set_selection(&self, content: Content) -> anyhow::Result<()> {
+        match write_ext::set_selection(content.clone()) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                tracing::info!(
+                    error = %e,
+                    "ext-data-control-v1 unavailable for writing; falling back to zwlr-data-control-v1"
+                );
+                write_wlr::set_selection(content).map_err(|e| {
+                    anyhow::anyhow!(
+                        "no clipboard protocol available to write to (tried ext-data-control-v1, then zwlr-data-control-v1): {e}"
+                    )
+                })
+            }
+        }
     }
 }
