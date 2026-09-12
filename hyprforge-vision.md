@@ -48,17 +48,23 @@ with zero GTK/Qt dependency anywhere in the stack.
 - **iced**, exclusively, for every GUI in the suite. No GTK, no Qt,
   anywhere, even transitively where avoidable.
 - **Rust**, throughout, including daemons.
-- Shared look/theme/widget code lives in `hyprforge-core` and every app
-  depends on it rather than reinventing its own styling.
+- Shared look/theme/widget code lives in `hyprforge-look` (the `Color` type
+  and the runtime `Theme`; no iced, because the lock screen and greeter
+  paint into a raw Wayland buffer) and `hyprforge-ui` (the iced widgets and
+  palette built on top of it), and every app depends on those rather than
+  reinventing its own styling. `hyprforge-core` is Hyprland config
+  machinery — hlconfig, hyprlang, Lua codegen — not the look; see "The
+  shared look" below.
 
 ## Component inventory
 
 | Component | Crate(s) | Replaces | Daemon? | Status |
 |---|---|---|---|---|
-| **Settings app** (shell) | `hyprforge-settings` | GNOME/KDE Settings | no (hosts modules that may talk to daemons) | scaffolding started |
+| **Settings app** (shell) | `hyprforge-settings` | GNOME/KDE Settings | no (hosts modules that may talk to daemons) | eight working screens (Monitors, Window Rules, Shortcuts, Input, Appearance, Desktop, Session, System), ~17.5k lines |
 | — Displays module | `hyprforge-displayd` (daemon) | manual `wlr-randr`/GUI fiddling | **yes**, systemd user service, D-Bus API | in progress |
 | — Window Rules module | `hyprforge-windowrules` (lib) | hand-written Lua rules | no | in progress |
-| — Network module | *(planned)* | nm-applet/nmtui | probably talks to NetworkManager D-Bus directly, no new daemon | not started |
+| — Shortcuts module | `hyprforge-shortcuts` (lib) | hand-edited keybinds | no | in progress; TOML storage, Lua codegen, live conflict detection against `hyprctl binds` |
+| — Network module | `hyprforge-network` (lib) | nm-applet/nmtui | no new daemon, talks to NetworkManager D-Bus directly | in progress; model, backend seam, NetworkManager client and the Settings screen (Wi-Fi list, join, forget, radio toggle) are done. Deferred: VPN, 802.1X enterprise, hotspot |
 | — Bluetooth module | *(planned)* | blueman | talks to BlueZ D-Bus directly | not started |
 | — Audio module | *(planned)* | pavucontrol | talks to PipeWire | not started |
 | — Power module | *(planned)* | — | talks to UPower/power-profiles-daemon | not started |
@@ -68,9 +74,10 @@ with zero GTK/Qt dependency anywhere in the stack.
 | — Session module (autostart, environment, gestures, permissions) | `hyprforge-session` (lib) | hand-edited hyprland.lua | no | in progress |
 | — System module (behaviour, shortcuts behaviour, X11, rendering) | `hyprforge-system` (lib) | hand-edited hyprland.lua | no | in progress |
 | — Users/time module | *(planned)* | — | accountsservice/timedated | not started |
-| **Lock screen** | `hyprforge-lock` (binary), `hyprforge-authui` (conversation model) | hyprlock | no (a client holding `ext-session-lock-v1`) | working; look and feel not started |
+| — Lua import (hand-written config) | `hyprforge-lua-import` (lib) | — | no (sandboxed `mlua` evaluator, the only crate depending on mlua) | in progress; imports hand-written `hl.bind()`/`hl.window_rule()`/`hl.monitor()` calls |
+| **Lock screen** | `hyprforge-lock` (binary), `hyprforge-authui` (conversation model) | hyprlock | no (a client holding `ext-session-lock-v1`) | locks, draws, authenticates against PAM and unlocks, with a look shared with the greeter via `hyprforge-look`; see "The lock screen" in the README for the genuine remaining gaps (no input-method support, password not zeroized, no attempt limiting of its own) |
 | *(shared foundation)* | `hyprforge-paths` (xdg + atomic writes), `hyprforge-look` (colour type + runtime Theme), `hyprforge-ui` (iced widgets and palette) | — | no | in place; every future app builds on these |
-| **Greeter / display manager** | `hyprforge-greet` (planned), on `hyprforge-authui` | greetd greeters (gtkgreet/tuigreet) | runs under greetd | not started |
+| **Greeter / display manager** | `hyprforge-greet`, on `hyprforge-authui` | greetd greeters (gtkgreet/tuigreet) | runs under greetd | ~885 lines; has an installer (`./hyprforge --install --greeter`) and its own `INSTALL.md` |
 | **File Manager** | `hyprforge-files-core` (shared logic), `hyprforge-files` (standalone), `hyprforge-files-portal` (xdg-desktop-portal FileChooser backend) | Nautilus/Dolphin/Thunar | portal backend runs as a D-Bus service | not started |
 | **Photo Viewer** | `hyprforge-photos` | eog/gwenview | no | not started |
 | **Video Viewer** | `hyprforge-videos` | — (likely thin mpv wrapper; revisit build-vs-wrap) | no | not started |
@@ -87,30 +94,40 @@ locked spec.
 
 ## Workspace structure
 
-Single Cargo workspace at the repo root. Every component above gets its own
-crate(s) under `crates/`, even before it's built — stub/empty crates are
-fine as placeholders so the workspace shape reflects the intended full
-suite, not just whatever's been built so far.
+Single Cargo workspace at the repo root. The original intent was for every
+component above to get its own crate(s) under `crates/`, even before it's
+built — stub/empty crates as placeholders so the workspace shape reflects
+the intended full suite. That convention was not followed in practice:
+`Cargo.toml`'s `members` lists only crates that actually have code in them,
+and planned components with no crate yet (Bluetooth, Audio, Power,
+Users/time, File Manager, Photo Viewer, Video Viewer, Process Manager,
+Service Manager, Disk Utility, Notepad, Calculator, Calendar) simply have
+none. Treat the table above, not the workspace listing, as the source of
+truth for what's planned.
 
 ```
 hyprforge/
   Cargo.toml
   crates/
-    hyprforge-core/            # shared trait(s), theme, widgets, D-Bus helpers
-    hyprforge-settings/        # the Settings app shell + its modules
+    hyprforge-paths/            # xdg + atomic writes, no dependencies
+    hyprforge-look/             # Color type + runtime Theme, no iced
+    hyprforge-ui/                # the iced layer: widgets, palette, spacing
+    hyprforge-core/              # Hyprland config machinery: hlconfig, hyprlang,
+                                  # Lua codegen, D-Bus proxy for displayd
     hyprforge-displayd/
     hyprforge-windowrules/
-    hyprforge-files-core/
-    hyprforge-files/
-    hyprforge-files-portal/
-    hyprforge-photos/
-    hyprforge-videos/
-    hyprforge-procman/
-    hyprforge-servicemgr/
-    hyprforge-disks/
-    hyprforge-notes/
-    hyprforge-calc/
-    hyprforge-calendar/
+    hyprforge-shortcuts/
+    hyprforge-input/
+    hyprforge-appearance/
+    hyprforge-ecosystem/
+    hyprforge-session/
+    hyprforge-system/
+    hyprforge-lua-import/
+    hyprforge-network/
+    hyprforge-settings/          # the Settings app shell + its modules
+    hyprforge-authui/            # shared auth conversation model
+    hyprforge-lock/
+    hyprforge-greet/
 ```
 
 ## Shared architectural patterns to reuse across components
@@ -157,19 +174,35 @@ occurring inside the suite. A new app should depend on `hyprforge-ui` and get
 the look for free; if it ever needs to define a colour of its own, that is a
 sign something belongs in `hyprforge-look` instead.
 
-### Where things stand (2026-08-16)
+### Where things stand (2026-09-12)
 
 The Settings modules above marked *in progress* are functional; their look
-and feel is deliberately unfinished, functionality first.
+and feel is deliberately unfinished, functionality first. The Settings app
+itself is eight working screens (Monitors, Window Rules, Shortcuts, Input,
+Appearance, Desktop, Session, System) at roughly 17.5k lines.
 
-`hyprforge-lock` locks, draws, authenticates against PAM and unlocks. What
-it does not have is any text on screen — no prompt, username, clock or
-error message — so the next piece of work on it is the look, and that is
-the one place worth designing rather than defaulting, because the greeter
-has to match it. That match is the whole reason `hyprforge-authui` exists:
-the problem being solved is that a greeter and a lock screen normally look
-like two different systems.
+`hyprforge-lock` locks, draws, authenticates against PAM and unlocks, and
+now has the look: it shares `hyprforge-look`'s runtime `Theme` with the rest
+of the suite, resolved from the user's own Hyprland/gsettings config rather
+than an invented palette. See "The lock screen" in the README for what it
+still genuinely lacks (no input-method support, the password isn't
+zeroized, no attempt limiting of its own).
 
-`hyprforge-greet` is the next component. It inherits a `Backend` trait that
-already handles an authenticator answering on its own schedule, which is
-exactly greetd's shape.
+`hyprforge-greet` exists: ~885 lines, on the same `hyprforge-authui`
+conversation model as the lock screen, with an installer
+(`./hyprforge --install --greeter`) and its own `INSTALL.md`. That match
+between greeter and lock screen is the whole reason `hyprforge-authui`
+exists: the problem being solved is that a greeter and a lock screen
+normally look like two different systems.
+
+`hyprforge-network` (Wi-Fi over NetworkManager) is new since the last time
+this section was written, and is the first module built on a backend trait
+from the start rather than after the fact — `NetworkBackend` has a mock, so
+everything above it is testable on a machine with no NetworkManager, no
+adapter and no access point. What can only be answered by the service gets
+a read-only live tier of its own in `check.sh`.
+
+It lists networks, joins them, forgets them and toggles the radio.
+Deliberately not done yet: VPN, 802.1X enterprise (listed, but says why it
+cannot be joined rather than offering a passphrase box that cannot work)
+and hotspot.

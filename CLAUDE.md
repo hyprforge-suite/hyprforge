@@ -91,6 +91,26 @@ Picking the newest directory under `/run/user/*/hypr/` can hand you the real
 session, because it writes its log continuously. Also: `hyprctl keyword` does
 not work against a Lua config — use `hyprctl eval`.
 
+**A test that cannot run must not report as one that passed.** libtest has no
+skipped state: a test that returns early prints `ok`, indistinguishable from
+one that asserted something. With hyprpaper running, a parse test passed
+having verified nothing at all. The fix is the `HYPRFORGE-SKIP:` marker
+convention — a skipped check `eprintln!`s `HYPRFORGE-SKIP: <reason>` before
+returning early, in `crates/hyprforge-ecosystem/tests/generated_configs_parse.rs`
+and `crates/hyprforge-network/tests/live_networkmanager.rs` — and `check.sh`
+greps `--nocapture` output for the marker and reports each one in yellow, so
+a green run still shows what it didn't actually check.
+
+The other half of the same mistake is gating a check on the wrong thing. The
+parse tests rode tier 2's one `--ignored` run, so they needed *Hyprland*
+running to ask *hyprpaper* a question, and on a machine with the daemons and
+no compositor they never ran at all. Splitting them out fixed it — and then
+the first live NetworkManager test went straight back into that same run,
+gating a check on the network service on whether a compositor was up. Every
+tier gates on the thing it actually asks. When you add a live test, the
+question to answer before writing it is *what has to be running for this to
+mean anything*, and that is rarely what the tier above it needed.
+
 ## Never do this to the machine you are working on
 
 **Never point the lock screen at the live session.** `--fake-password` is

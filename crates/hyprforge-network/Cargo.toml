@@ -22,3 +22,9 @@ async-trait.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+
+[features]
+# Exposes `backend::mock::MockBackend` outside `#[cfg(test)]`, so another
+# crate's own tests (hyprforge-settings' Network screen) can drive a
+# `NetworkBackend` without a real D-Bus connection.
+mock = []

@@ -14,6 +14,7 @@ use modules::session::SessionModule;
 use modules::system::SystemModule;
 use modules::displays::DisplaysModule;
 use modules::input::InputModule;
+use modules::network::{LazyNetworkManagerBackend, NetworkModule};
 use modules::shortcuts::ShortcutsModule;
 use modules::window_rules::WindowRulesModule;
 
@@ -148,6 +149,7 @@ enum Screen {
     WindowRules,
     Shortcuts,
     Input,
+    Network,
     Appearance,
     Desktop,
     Session,
@@ -161,6 +163,7 @@ impl Screen {
             Screen::WindowRules => "Window Rules",
             Screen::Shortcuts => "Shortcuts",
             Screen::Input => "Input",
+            Screen::Network => "Network",
             Screen::Appearance => "Appearance",
             Screen::Desktop => "Desktop",
             Screen::Session => "Session",
@@ -194,6 +197,10 @@ const NAV: &[NavCategory] = &[
         screens: &[Screen::Input],
     },
     NavCategory {
+        label: "Network",
+        screens: &[Screen::Network],
+    },
+    NavCategory {
         label: "Appearance",
         screens: &[Screen::Appearance, Screen::Desktop],
     },
@@ -214,6 +221,7 @@ enum Message {
     WindowRules(modules::window_rules::Message),
     Shortcuts(modules::shortcuts::Message),
     Input(modules::input::Message),
+    Network(modules::network::Message),
     Appearance(modules::appearance::Message),
     Desktop(modules::desktop::Message),
     Session(modules::session::Message),
@@ -230,6 +238,7 @@ struct App {
     window_rules: WindowRulesModule,
     shortcuts: ShortcutsModule,
     input: InputModule,
+    network: NetworkModule<LazyNetworkManagerBackend>,
     appearance: AppearanceModule,
     desktop: DesktopModule,
     session: SessionModule,
@@ -248,6 +257,8 @@ impl App {
         let (window_rules, window_rules_task) = WindowRulesModule::new();
         let (shortcuts, shortcuts_task) = ShortcutsModule::new();
         let (input, input_task) = InputModule::new();
+        let (network, network_task) =
+            NetworkModule::new(std::sync::Arc::new(LazyNetworkManagerBackend::new()));
         let (appearance, appearance_task) = AppearanceModule::new();
         let (desktop, desktop_task) = DesktopModule::new();
         let (session, session_task) = SessionModule::new();
@@ -259,6 +270,7 @@ impl App {
                 window_rules,
                 shortcuts,
                 input,
+                network,
                 appearance,
                 desktop,
                 session,
@@ -275,6 +287,7 @@ impl App {
                 window_rules_task.map(Message::WindowRules),
                 shortcuts_task.map(Message::Shortcuts),
                 input_task.map(Message::Input),
+                network_task.map(Message::Network),
                 appearance_task.map(Message::Appearance),
                 desktop_task.map(Message::Desktop),
                 session_task.map(Message::Session),
@@ -383,6 +396,10 @@ impl App {
                 Screen::WindowRules => Task::none(),
                 Screen::Shortcuts => Task::none(),
                 Screen::Input => Task::none(),
+                Screen::Network => self
+                    .network
+                    .update(modules::network::Message::Refresh)
+                    .map(Message::Network),
                 Screen::Appearance => Task::none(),
                 Screen::Desktop => Task::none(),
                 Screen::Session => Task::none(),
@@ -393,6 +410,7 @@ impl App {
                 Task::batch([task, self.sync_revert_popup()])
             }
             Message::Input(msg) => self.input.update(msg).map(Message::Input),
+            Message::Network(msg) => self.network.update(msg).map(Message::Network),
             Message::Appearance(msg) => self.appearance.update(msg).map(Message::Appearance),
             Message::Desktop(msg) => self.desktop.update(msg).map(Message::Desktop),
             Message::Session(msg) => self.session.update(msg).map(Message::Session),
@@ -495,6 +513,7 @@ impl App {
             Screen::WindowRules => self.window_rules.icon(),
             Screen::Shortcuts => self.shortcuts.icon(),
             Screen::Input => self.input.icon(),
+            Screen::Network => self.network.icon(),
             Screen::Appearance => self.appearance.icon(),
             Screen::Desktop => self.desktop.icon(),
             Screen::Session => self.session.icon(),
@@ -571,6 +590,7 @@ impl App {
             Screen::WindowRules => self.window_rules.view(scale).map(Message::WindowRules),
             Screen::Shortcuts => self.shortcuts.view(scale).map(Message::Shortcuts),
             Screen::Input => self.input.view(scale).map(Message::Input),
+            Screen::Network => self.network.view(scale).map(Message::Network),
             Screen::Appearance => self.appearance.view(scale).map(Message::Appearance),
             Screen::Desktop => self.desktop.view(scale).map(Message::Desktop),
             Screen::Session => self.session.view(scale).map(Message::Session),
@@ -623,6 +643,7 @@ impl App {
             return Subscription::batch([
                 self.displays.subscription().map(Message::Displays),
                 self.shortcuts.subscription().map(Message::Shortcuts),
+                self.network.subscription().map(Message::Network),
                 window::close_events().map(Message::WindowClosed),
             ]);
         }
@@ -650,6 +671,7 @@ impl App {
         Subscription::batch([
             self.displays.subscription().map(Message::Displays),
             self.shortcuts.subscription().map(Message::Shortcuts),
+            self.network.subscription().map(Message::Network),
             shortcuts,
             window::close_events().map(Message::WindowClosed),
         ])

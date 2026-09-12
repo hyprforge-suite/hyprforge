@@ -42,12 +42,18 @@ Hyprland-facing
   hyprforge-lua-import/    sandboxed mlua evaluator that imports hand-written
                             hl.bind()/hl.window_rule()/hl.monitor() calls —
                             the only crate depending on mlua
+  hyprforge-network/       Wi-Fi, wired status and the radio toggle, over
+                            NetworkManager. The only module whose backend
+                            trait came before its D-Bus client, so the
+                            screen is testable without an adapter.
 
 Apps
   hyprforge-settings/      the iced GUI, hosting the settings modules
   hyprforge-authui/        the authentication conversation model, shared by
                             the lock screen and the greeter
   hyprforge-lock/          the ext-session-lock-v1 lock screen
+  hyprforge-greet/         the greetd greeter, on the same hyprforge-authui
+                            conversation model
 ```
 
 ### Why the look is one crate
@@ -96,20 +102,23 @@ child waiting for the pipe to drain, the parent waiting for the child.
 ./check.sh --quick  # no compositor or daemons needed
 ```
 
-Three tiers, answering different questions:
+Four gated steps, each answering a different question and each gating on
+the thing it actually asks, rather than sharing one `--ignored` run:
 
-| Tier | Asks | Needs |
+| Step | Asks | Needs |
 |---|---|---|
 | clippy + unit tests | does the code do what *this project* thinks? | nothing |
 | live tests | does **Hyprland** agree? | Hyprland running |
 | parse tests | do the **ecosystem daemons** agree? | hyprpaper/hypridle installed |
+| NetworkManager tests | does **NetworkManager** agree? | NetworkManager running |
 
-The first tier catches a mistake in the code. The other two catch the far
+The first step catches a mistake in the code. The rest catch the far
 nastier kind: code that is internally consistent and wrong about the system
 it talks to. Every claim the option catalogues make — that an option exists,
 what type it is, what range it accepts — is checked against the running
-compositor, and the generated hyprlang files are handed to the daemons
-themselves.
+compositor, the generated hyprlang files are handed to the daemons
+themselves, and the network step is read-only checks that NetworkManager's
+interface is the shape `hyprforge-network` claims.
 
 That matters most where a mistake is *silent*. A misspelled key in a
 generated config isn't an error to hyprpaper or hypridle:
@@ -128,6 +137,15 @@ complains, because a validation test that cannot fail is worthless.
 **The hyprpaper parse check skips while hyprpaper is running.** A second
 instance takes over its IPC socket, and when it exits the socket is gone,
 leaving the original alive but unreachable until it's restarted.
+
+**A skipped check announces itself instead of counting as a pass.** libtest
+has no skipped state — a test that returns early because a daemon isn't
+installed, or NetworkManager has no Wi-Fi device to ask, prints `ok`
+exactly like one that verified something. The parse and NetworkManager
+tests `eprintln!` an `HYPRFORGE-SKIP: <reason>` line before returning
+early, `check.sh` runs them with `--nocapture` and greps for the marker,
+and each one found is reported separately in yellow even on an otherwise
+green run.
 
 ## Build
 

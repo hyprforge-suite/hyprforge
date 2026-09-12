@@ -1590,6 +1590,7 @@ name = "hyprforge-settings"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "futures-util",
  "hyprforge-appearance",
  "hyprforge-core",
@@ -1597,6 +1598,7 @@ dependencies = [
  "hyprforge-input",
  "hyprforge-look",
  "hyprforge-lua-import",
+ "hyprforge-network",
  "hyprforge-paths",
  "hyprforge-session",
  "hyprforge-shortcuts",

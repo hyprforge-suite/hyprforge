@@ -92,7 +92,12 @@ pub fn for_display(mut points: Vec<AccessPoint>) -> Vec<AccessPoint> {
     points
 }
 
-#[cfg(test)]
+// The settings app's Network screen is generic over `NetworkBackend` so its
+// tests can drive it with this mock instead of a real D-Bus connection —
+// see `hyprforge-settings/src/modules/network.rs`. That means the mock has
+// to compile as ordinary (non-test) code for that crate's `mock` feature,
+// not just under `#[cfg(test)]` inside this one.
+#[cfg(any(test, feature = "mock"))]
 pub mod mock {
     use super::*;
     use std::sync::Mutex;
