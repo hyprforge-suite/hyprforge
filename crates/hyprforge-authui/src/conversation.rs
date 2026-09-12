@@ -153,6 +153,37 @@ pub struct Conversation<B: Backend> {
     /// on. Counted here because both hosts need it and neither should
     /// invent its own rule.
     failures: u32,
+    /// The question last asked, kept so that what is typed during a retry
+    /// can be restored only if the same question comes back.
+    last_prompt: Option<Prompt>,
+    /// Typed while the backend is working, after a [`Conversation::retry`].
+    ///
+    /// Without this, the key that dismisses a failure is swallowed and so
+    /// is everything typed until PAM asks again — the state is `Working`
+    /// and `type_into` only writes in `Asking`. Someone who reacts to
+    /// "incorrect password" by typing it again loses the first characters,
+    /// submits a truncated password, and is told it was wrong a second
+    /// time. On a stack with `pam_faillock` at three attempts, that is how
+    /// a correct password locks an account.
+    ///
+    /// Never rendered: [`Conversation`] has a hand-written `Debug` below
+    /// for the same reason `State` does.
+    pending: String,
+}
+
+/// Renders no part of what was typed.
+///
+/// `State`'s own `Debug` is hand-written to hide `entered`; this type
+/// holds a second copy of the same characters in `pending`, and a derived
+/// `Debug` here would undo that work.
+impl<B: Backend> fmt::Debug for Conversation<B> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Conversation")
+            .field("state", &self.state)
+            .field("failures", &self.failures)
+            .field("pending", &format_args!("<{} chars>", self.pending.chars().count()))
+            .finish()
+    }
 }
 
 impl<B: Backend> Conversation<B> {
@@ -162,6 +193,8 @@ impl<B: Backend> Conversation<B> {
             backend,
             username: username.into(),
             state: State::Working,
+            last_prompt: None,
+            pending: String::new(),
             failures: 0,
         };
         conversation.backend.start(&conversation.username.clone());
@@ -232,8 +265,24 @@ impl<B: Backend> Conversation<B> {
     /// input arriving while the backend is working can't be lost into a
     /// buffer that is about to be replaced.
     pub fn type_into(&mut self, text: String) {
-        if let State::Asking { entered, .. } = &mut self.state {
-            *entered = text;
+        match &mut self.state {
+            State::Asking { entered, .. } => *entered = text,
+            // Held until the same question comes back — see `pending`.
+            // A backend answers on its own schedule, so there is a real
+            // window here, and dropping what is typed in it is what made
+            // a correct password look wrong.
+            State::Working => self.pending = text,
+            _ => {}
+        }
+    }
+
+    /// What has been typed, including anything buffered while the backend
+    /// is working.
+    pub fn typed(&self) -> &str {
+        match &self.state {
+            State::Asking { entered, .. } => entered,
+            State::Working => &self.pending,
+            _ => "",
         }
     }
 
@@ -280,8 +329,27 @@ impl<B: Backend> Conversation<B> {
 
     fn apply(&mut self, response: Response) {
         self.state = match response {
-            Response::Ask(prompt) => State::Asking { prompt, entered: String::new() },
-            Response::Tell { text, error } => State::Telling { text, error },
+            Response::Ask(prompt) => {
+                // Restore what was typed during the retry, but only when
+                // this is the same question. A different one — a
+                // verification code, say — must never be pre-filled with
+                // the characters of a password.
+                let entered = match self.last_prompt.as_ref() {
+                    Some(previous) if previous == &prompt && !self.pending.is_empty() => {
+                        std::mem::take(&mut self.pending)
+                    }
+                    _ => {
+                        self.pending.clear();
+                        String::new()
+                    }
+                };
+                self.last_prompt = Some(prompt.clone());
+                State::Asking { prompt, entered }
+            }
+            Response::Tell { text, error } => {
+                self.pending.clear();
+                State::Telling { text, error }
+            }
             Response::Success => {
                 self.failures = 0;
                 State::Authenticated
@@ -372,6 +440,162 @@ mod tests {
         fn poll(&mut self) -> Option<Response> {
             self.ready.pop_front()
         }
+    }
+
+    /// A backend that answers only when told to.
+    ///
+    /// [`Script`] answers the instant it is asked, which hides the bug
+    /// these tests are about: a real authenticator takes its own time,
+    /// and the window between asking it to start over and it asking again
+    /// is exactly where typed characters used to be dropped.
+    ///
+    /// The queue is shared with the test rather than reached through the
+    /// conversation, so the test can make the backend speak at a chosen
+    /// moment without the production type growing an accessor that exists
+    /// only for tests.
+    #[derive(Clone)]
+    struct Slow {
+        ready: std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<Response>>>,
+        answers: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    }
+
+    impl Slow {
+        fn new() -> Slow {
+            Slow {
+                ready: Default::default(),
+                answers: Default::default(),
+            }
+        }
+
+        /// Makes the next `poll` return `response`.
+        fn now_say(&self, response: Response) {
+            self.ready.borrow_mut().push_back(response);
+        }
+    }
+
+    impl Backend for Slow {
+        fn start(&mut self, _username: &str) {}
+        fn answer(&mut self, answer: &str) {
+            self.answers.borrow_mut().push(answer.to_string());
+        }
+        fn proceed(&mut self) {}
+        fn poll(&mut self) -> Option<Response> {
+            self.ready.borrow_mut().pop_front()
+        }
+    }
+
+    /// The bug that locked someone out of their own machine.
+    ///
+    /// After "incorrect password", any key dismisses the error — but
+    /// dismissing it puts the conversation into `Working` while the
+    /// backend starts over, and `type_into` only wrote in `Asking`. So
+    /// the character that did the dismissing was dropped, along with
+    /// every other one typed until PAM asked again. Retyping a correct
+    /// password submitted it short, which reads as a second wrong
+    /// password, and on a stack with `pam_faillock` at three attempts the
+    /// third strike locks the account.
+    #[test]
+    fn a_character_typed_while_the_backend_restarts_is_not_lost() {
+        let backend = Slow::new();
+        backend.now_say(Response::Ask(Prompt::secret("Password:")));
+        let mut c = Conversation::new(backend.clone(), "apost");
+        assert!(c.state().accepts_input(), "precondition: the password is being asked");
+
+        c.type_into("wrong".into());
+        c.pump();
+        // The backend rejects it, on its own schedule.
+        backend.now_say(Response::Failure { reason: "Incorrect password".into() });
+        c.submit();
+        c.pump();
+        assert!(matches!(c.state(), State::Failed { .. }), "precondition: it failed");
+
+        // The user reacts by typing the first character of the right
+        // password. That dismisses the error and the backend has not
+        // asked again yet.
+        c.retry();
+        assert!(matches!(c.state(), State::Working), "precondition: the backend is restarting");
+        c.type_into("h".into());
+
+        // Now it asks again — the same question.
+        backend.now_say(Response::Ask(Prompt::secret("Password:")));
+        c.pump();
+
+        assert_eq!(
+            c.typed(),
+            "h",
+            "the character that dismissed the error was dropped, so a retyped password \
+             would be submitted short and read as wrong a second time"
+        );
+    }
+
+    /// The reason the buffer is not simply restored into whatever comes
+    /// next. A verification code prompt pre-filled with the characters of
+    /// a password would submit the password as the code — to a different
+    /// system, which may well log it.
+    #[test]
+    fn a_different_question_is_never_prefilled_with_what_was_typed_for_the_last_one() {
+        let backend = Slow::new();
+        backend.now_say(Response::Ask(Prompt::secret("Password:")));
+        let mut c = Conversation::new(backend.clone(), "apost");
+
+        backend.now_say(Response::Failure { reason: "no".into() });
+        c.submit();
+        c.pump();
+        c.retry();
+        c.type_into("hunter2".into());
+
+        // PAM asks something else entirely this time.
+        backend.now_say(Response::Ask(Prompt::secret("Verification code:")));
+        c.pump();
+
+        assert_eq!(
+            c.typed(),
+            "",
+            "a different question must start empty, whatever was typed for the last one"
+        );
+    }
+
+    /// A message rather than a question also discards it — there is
+    /// nothing to answer, and holding the characters across a "your
+    /// account is locked" notice would restore them into whatever
+    /// followed.
+    #[test]
+    fn a_message_discards_what_was_buffered() {
+        let backend = Slow::new();
+        backend.now_say(Response::Ask(Prompt::secret("Password:")));
+        let mut c = Conversation::new(backend.clone(), "apost");
+
+        backend.now_say(Response::Failure { reason: "no".into() });
+        c.submit();
+        c.pump();
+        c.retry();
+        c.type_into("hunter2".into());
+
+        backend.now_say(Response::Tell { text: "Account locked".into(), error: true });
+        c.pump();
+        backend.now_say(Response::Ask(Prompt::secret("Password:")));
+        c.acknowledge();
+        c.pump();
+
+        assert_eq!(c.typed(), "", "the buffer must not survive a message");
+    }
+
+    /// The buffer is a second copy of the password. `State`'s `Debug` is
+    /// hand-written to hide `entered`; a derived one here would undo it.
+    #[test]
+    fn a_conversation_never_renders_what_is_buffered() {
+        let backend = Slow::new();
+        backend.now_say(Response::Ask(Prompt::secret("Password:")));
+        let mut c = Conversation::new(backend.clone(), "apost");
+        backend.now_say(Response::Failure { reason: "no".into() });
+        c.submit();
+        c.pump();
+        c.retry();
+        c.type_into("correct-horse".into());
+
+        let rendered = format!("{c:?}");
+        assert!(!rendered.contains("correct-horse"), "leaked: {rendered}");
+        assert!(rendered.contains("13 chars"), "expected a count, got {rendered}");
     }
 
     fn password_then(outcome: Response) -> Script {

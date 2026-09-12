@@ -798,7 +798,7 @@ fn dispatch_key<B: hyprforge_authui::conversation::Backend>(
             if matches!(conversation.state(), State::Failed { .. }) {
                 conversation.retry();
             } else {
-                let mut entered = conversation.entered().to_string();
+                let mut entered = conversation.typed().to_string();
                 entered.pop();
                 conversation.type_into(entered);
             }
@@ -807,6 +807,14 @@ fn dispatch_key<B: hyprforge_authui::conversation::Backend>(
             // Any key at all leaves the failed state, so the user can
             // simply start typing again rather than having to work
             // out which key dismisses the error.
+            //
+            // The character that does the dismissing is kept: `retry`
+            // puts the conversation into `Working` while the backend
+            // starts over, and `type_into` buffers there rather than
+            // dropping it. Losing it meant someone retyping a password
+            // after "incorrect password" submitted it short, was told it
+            // was wrong again, and spent a third `pam_faillock` attempt
+            // on a password that was right all along.
             if matches!(conversation.state(), State::Failed { .. }) {
                 conversation.retry();
             }
@@ -814,7 +822,7 @@ fn dispatch_key<B: hyprforge_authui::conversation::Backend>(
                 // Control characters would otherwise count as typed
                 // characters and show a dot for nothing.
                 if !text.is_empty() && !text.chars().any(char::is_control) {
-                    let mut entered = conversation.entered().to_string();
+                    let mut entered = conversation.typed().to_string();
                     entered.push_str(&text);
                     conversation.type_into(entered);
                 }
