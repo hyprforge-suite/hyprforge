@@ -17,6 +17,8 @@
 //! --screen <name>` exists.
 
 pub mod item;
+pub mod dbusmenu;
+pub mod menu;
 pub mod prefs;
 pub mod sni;
 
