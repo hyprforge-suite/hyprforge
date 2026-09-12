@@ -16,6 +16,7 @@
 //!   request") and has to be restarted for a change to take effect.
 
 pub mod apply;
+pub mod import;
 pub mod idle;
 pub mod storage;
 pub mod sunset;
