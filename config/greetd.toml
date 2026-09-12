@@ -19,6 +19,11 @@ vt = 1
 #
 # While testing on a spare VT, set this false and switch with ctrl+alt+F2
 # when you are ready to look.
+#
+# If you are switching VTs by hand at every boot, this is the line that
+# is wrong — `vt = 2, switch = false` is the *testing* pair, and leaving
+# it installed means the machine boots to a console and waits for
+# ctrl+alt+F2 before showing a login screen at all.
 switch = true
 
 [default_session]
