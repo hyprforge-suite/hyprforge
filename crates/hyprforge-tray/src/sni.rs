@@ -12,6 +12,10 @@ use zbus::Connection;
 pub const TIMEOUT: Duration = Duration::from_secs(5);
 
 pub const ITEM_PATH: &str = "/StatusNotifierItem";
+/// The menu hangs off the item's own path. Any path on the same
+/// connection would do; keeping it under the item's makes the pairing
+/// obvious in `busctl tree`.
+pub const MENU_PATH: &str = "/StatusNotifierItem/Menu";
 
 #[derive(Debug, thiserror::Error)]
 pub enum TrayError {
@@ -63,6 +67,10 @@ trait StatusNotifierWatcher {
 /// The object a host reads. One per icon.
 struct ItemInterface {
     state: Arc<Mutex<TrayItem>>,
+    /// `None` until this item has a menu. The property answers `/` then,
+    /// which is how the spec spells "no menu" — an object path is not
+    /// nullable, so there is no other way to say it.
+    menu_path: Option<String>,
     /// Left-clicks, as the Settings screen name to open. Unbounded
     /// because a click must never block the D-Bus handler it arrives on:
     /// the host is waiting for the method to return, and spawning the
@@ -125,6 +133,19 @@ impl ItemInterface {
         )
     }
 
+    /// Where the right-click menu lives, or `/` for none.
+    ///
+    /// A host reads this once when the item registers. Advertising a path
+    /// that serves nothing gives the user a menu that opens empty, so
+    /// this stays `None` unless a menu was actually served.
+    #[zbus(property)]
+    async fn menu(&self) -> zbus::zvariant::OwnedObjectPath {
+        let path = self.menu_path.as_deref().unwrap_or("/");
+        zbus::zvariant::ObjectPath::try_from(path.to_string())
+            .expect("both branches are valid object paths")
+            .into()
+    }
+
     /// Zero: these items have no window of their own. A host uses this
     /// only to associate an item with an X11 window, which is meaningless
     /// for a daemon that has none.
@@ -177,6 +198,9 @@ pub struct TrayIcon {
     bus_name: String,
     state: Arc<Mutex<TrayItem>>,
     last: Mutex<TrayItem>,
+    /// `None` for an item registered without one.
+    menu: Option<Arc<Mutex<crate::menu::Menu>>>,
+    menu_revision: Arc<Mutex<u32>>,
 }
 
 impl TrayIcon {
@@ -190,10 +214,38 @@ impl TrayIcon {
         index: u32,
         clicks: tokio::sync::mpsc::UnboundedSender<String>,
     ) -> Result<Self, TrayError> {
+        Self::build(item, None, index, clicks, None).await
+    }
+
+    /// Registers an item that also serves a right-click menu.
+    ///
+    /// `menu_clicks` carries the [`crate::menu::MenuItem`] actions, kept
+    /// separate from `clicks` because the two mean different things: a
+    /// click on the icon says which settings screen to open, a click in
+    /// the menu says which operation to perform.
+    pub async fn register_with_menu(
+        item: TrayItem,
+        menu: crate::menu::Menu,
+        index: u32,
+        clicks: tokio::sync::mpsc::UnboundedSender<String>,
+        menu_clicks: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Result<Self, TrayError> {
+        Self::build(item, Some(menu), index, clicks, Some(menu_clicks)).await
+    }
+
+    async fn build(
+        item: TrayItem,
+        menu: Option<crate::menu::Menu>,
+        index: u32,
+        clicks: tokio::sync::mpsc::UnboundedSender<String>,
+        menu_clicks: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    ) -> Result<Self, TrayError> {
         let bus_name = format!("org.kde.StatusNotifierItem-{}-{}", std::process::id(), index);
         let state = Arc::new(Mutex::new(item.clone()));
+        let revision = Arc::new(Mutex::new(1u32));
+        let menu_state = menu.map(|m| Arc::new(Mutex::new(m)));
 
-        let connection = zbus::connection::Builder::session()
+        let mut builder = zbus::connection::Builder::session()
             .map_err(classify)?
             .name(bus_name.as_str())
             .map_err(classify)?
@@ -201,22 +253,65 @@ impl TrayIcon {
                 ITEM_PATH,
                 ItemInterface {
                     state: state.clone(),
+                    menu_path: menu_state.as_ref().map(|_| MENU_PATH.to_string()),
                     clicks,
                 },
             )
-            .map_err(classify)?
-            .build()
-            .await
             .map_err(classify)?;
+
+        if let (Some(menu_state), Some(menu_clicks)) = (menu_state.clone(), menu_clicks) {
+            builder = builder
+                .serve_at(
+                    MENU_PATH,
+                    crate::dbusmenu::MenuInterface::new(
+                        menu_state,
+                        revision.clone(),
+                        menu_clicks,
+                    ),
+                )
+                .map_err(classify)?;
+        }
+
+        let connection = builder.build().await.map_err(classify)?;
 
         let icon = TrayIcon {
             connection,
             bus_name,
             state,
             last: Mutex::new(item),
+            menu: menu_state,
+            menu_revision: revision,
         };
         icon.announce().await?;
         Ok(icon)
+    }
+
+    /// Replaces the menu and tells the host its layout changed.
+    ///
+    /// The revision must go **up** every time. A host that sees the same
+    /// revision assumes nothing changed and keeps showing the menu it
+    /// cached, so a forgotten bump looks exactly like a menu that never
+    /// updates.
+    pub async fn update_menu(&self, next: crate::menu::Menu) -> Result<(), TrayError> {
+        let Some(menu) = &self.menu else {
+            return Ok(());
+        };
+        {
+            let mut current = menu.lock().await;
+            if *current == next {
+                return Ok(());
+            }
+            *current = next;
+        }
+        let revision = {
+            let mut revision = self.menu_revision.lock().await;
+            *revision += 1;
+            *revision
+        };
+        let emitter = SignalEmitter::new(&self.connection, MENU_PATH).map_err(classify)?;
+        crate::dbusmenu::MenuInterface::layout_updated(&emitter, revision, 0)
+            .await
+            .map_err(classify)
     }
 
     /// Tells the watcher this item exists.
