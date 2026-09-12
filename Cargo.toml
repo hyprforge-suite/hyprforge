@@ -34,6 +34,10 @@ anyhow.workspace = true
 # arrangement.
 hyprforge-network.workspace = true
 hyprforge-bluetooth.workspace = true
+# Keep awake (systemd-logind) and night light (hyprsunset via hyprctl) —
+# same "binary-only" arrangement as network/bluetooth above.
+hyprforge-power.workspace = true
+hyprforge-ecosystem.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

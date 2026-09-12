@@ -90,6 +90,15 @@ impl TrayItem {
         match self.id.as_str() {
             "hyprforge-network" => Some("network"),
             "hyprforge-bluetooth" => Some("bluetooth"),
+            // Night light lives on the Desktop screen's "Night light" tab
+            // today; there is no `--screen` argument for a specific tab,
+            // so this opens the screen and leaves picking the tab to
+            // whoever clicked.
+            "hyprforge-night-light" => Some("desktop"),
+            // Keep awake has no Settings screen of its own yet — see
+            // `hyprforge-trayd`'s module doc for why that is a follow-up
+            // rather than something this daemon invents a destination
+            // for. Falls through to `None`, same as any other unknown id.
             _ => None,
         }
     }
@@ -125,5 +134,23 @@ mod tests {
         assert_eq!(item("hyprforge-network").activate_screen(), Some("network"));
         assert_eq!(item("hyprforge-bluetooth").activate_screen(), Some("bluetooth"));
         assert_eq!(item("something-else").activate_screen(), None);
+    }
+
+    /// Night light opens the Desktop screen; keep awake has nowhere to
+    /// send a click yet, and must fall through to `None` rather than
+    /// invent a screen that does not exist.
+    #[test]
+    fn night_light_opens_desktop_and_keep_awake_opens_nothing_yet() {
+        let item = |id: &str| TrayItem {
+            id: id.to_string(),
+            category: Category::SystemServices,
+            status: Status::Active,
+            title: String::new(),
+            icon_name: String::new(),
+            tooltip_title: String::new(),
+            tooltip_body: String::new(),
+        };
+        assert_eq!(item("hyprforge-night-light").activate_screen(), Some("desktop"));
+        assert_eq!(item("hyprforge-keep-awake").activate_screen(), None);
     }
 }
