@@ -133,9 +133,48 @@ pub fn install(target: &Path, source_line: &str) -> Result<SourcePlan, SetupErro
     Ok(plan)
 }
 
+/// Renders a value so hyprlang reads back what was meant.
+///
+/// `#` starts a comment *anywhere* on a line — not only at the start —
+/// and `##` is the documented escape for a literal one. So a wallpaper at
+/// `~/Pictures/#1 favourite.png` written raw becomes `~/Pictures/` with
+/// the rest silently discarded: a path that still looks right in the
+/// settings screen and shows no wallpaper at all, with nothing logged
+/// anywhere because hyprlang saw a perfectly valid line.
+///
+/// Applied by [`keyword`] and [`block`], so no caller has to remember.
+pub fn escape_value(value: &str) -> String {
+    value.replace('#', "##")
+}
+
+/// Recovers the value hyprlang would see: everything before the first
+/// unescaped `#`, with `##` folded back to a literal `#`, trimmed.
+///
+/// The inverse of [`escape_value`], and the two are tested against each
+/// other — a reader and a writer that disagree about escaping is the
+/// same class of drift as a generator and a matcher disagreeing.
+pub fn strip_comment(line: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '#' {
+            if chars.get(i + 1) == Some(&'#') {
+                out.push('#');
+                i += 2;
+                continue;
+            }
+            break;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out.trim().to_string()
+}
+
 /// Renders `name = value`.
 pub fn keyword(name: &str, value: impl std::fmt::Display) -> String {
-    format!("{name} = {value}\n")
+    format!("{name} = {}\n", escape_value(&value.to_string()))
 }
 
 /// Renders a `name { … }` block from already-rendered `key = value`
@@ -147,10 +186,174 @@ pub fn block(name: &str, fields: &[(&str, String)]) -> String {
     }
     let mut out = format!("{name} {{\n");
     for (key, value) in fields {
-        out.push_str(&format!("    {key} = {value}\n"));
+        out.push_str(&format!("    {key} = {}\n", escape_value(value)));
     }
     out.push_str("}\n");
     out
+}
+
+/// One thing a hyprlang file says, with where it said it.
+///
+/// Line numbers are 1-based and kept because adopting a setting into the
+/// app has to be able to point back at the exact lines it came from —
+/// both to show the user where a value was found and to retire those
+/// lines afterwards without touching anything around them.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Item {
+    /// `key = value`, comment already stripped and `##` unescaped.
+    Assignment { key: String, value: String, line: usize },
+    /// `name { … }`. Nesting is not modelled: none of the four daemons
+    /// this reads for uses it, and inventing a shape nothing produces
+    /// would be untested code in the middle of a parser.
+    Block { name: String, items: Vec<Item>, line: usize, end_line: usize },
+}
+
+impl Item {
+    pub fn line(&self) -> usize {
+        match self {
+            Item::Assignment { line, .. } | Item::Block { line, .. } => *line,
+        }
+    }
+
+    /// The last line this item occupies — its own, or a block's `}`.
+    pub fn end_line(&self) -> usize {
+        match self {
+            Item::Assignment { line, .. } => *line,
+            Item::Block { end_line, .. } => *end_line,
+        }
+    }
+}
+
+/// A parsed hyprlang file.
+///
+/// `problems` is never folded into "nothing here". A file that exists and
+/// will not parse is a thing the user has to hear about, not a first run
+/// — the distinction `hlconfig::storage` documents and that collapsing
+/// once cost a user 37 hand-written binds.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Document {
+    pub items: Vec<Item>,
+    pub problems: Vec<(usize, String)>,
+}
+
+impl Document {
+    /// The value of the last assignment named `key` at the top level.
+    ///
+    /// The *last*, because hyprlang overwrites a repeated variable with
+    /// the one further down — reading the first would report a value the
+    /// daemon never uses.
+    pub fn value(&self, key: &str) -> Option<&str> {
+        self.items
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                Item::Assignment { key: k, value, .. } if k == key => Some(value.as_str()),
+                _ => None,
+            })
+    }
+
+    /// Every top-level block called `name`, in file order.
+    ///
+    /// All of them, not the last: blocks are categories, and a second
+    /// `listener` is an additional listener rather than a replacement for
+    /// the first. Getting that backwards is how an import loses four of a
+    /// user's five idle rules.
+    pub fn blocks<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Item> + 'a {
+        self.items.iter().filter(move |item| {
+            matches!(item, Item::Block { name: n, .. } if n == name)
+        })
+    }
+
+    /// The paths this file pulls in with `source =`.
+    ///
+    /// Reported rather than followed. Following them would walk straight
+    /// into Hyprforge's own generated file and re-import what it just
+    /// wrote; the caller knows which directory is its own and this does
+    /// not.
+    pub fn sourced(&self) -> Vec<&str> {
+        self.items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Assignment { key, value, .. } if key == "source" => Some(value.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// Reads a hyprlang file.
+///
+/// Deliberately lenient in the same places hyprlang is, and loud in the
+/// places it isn't: an unclosed block or a line that is neither an
+/// assignment nor a block lands in [`Document::problems`] rather than
+/// being dropped on the floor.
+pub fn parse(contents: &str) -> Document {
+    let mut document = Document::default();
+    // A stack even though nesting isn't modelled: it is what lets an
+    // unexpected `{` be reported at the line it appeared on instead of
+    // silently swallowing everything after it.
+    let mut open: Vec<(String, usize, Vec<Item>)> = Vec::new();
+
+    for (index, raw) in contents.lines().enumerate() {
+        let line = index + 1;
+        let text = strip_comment(raw);
+        if text.is_empty() {
+            continue;
+        }
+
+        if text == "}" {
+            match open.pop() {
+                Some((name, start, items)) => {
+                    let block = Item::Block { name, items, line: start, end_line: line };
+                    match open.last_mut() {
+                        Some((_, _, parent)) => parent.push(block),
+                        None => document.items.push(block),
+                    }
+                }
+                None => document
+                    .problems
+                    .push((line, "a closing `}` with no block open".to_string())),
+            }
+            continue;
+        }
+
+        if let Some(name) = text.strip_suffix('{') {
+            let name = name.trim().to_string();
+            if name.is_empty() {
+                document.problems.push((line, "a block with no name".to_string()));
+                continue;
+            }
+            open.push((name, line, Vec::new()));
+            continue;
+        }
+
+        let Some((key, value)) = text.split_once('=') else {
+            document.problems.push((
+                line,
+                format!("`{text}` is neither `key = value` nor a block"),
+            ));
+            continue;
+        };
+        // An empty value is meaningful, not missing: `monitor =` is
+        // exactly how hyprpaper declares the fallback that applies to
+        // every output, so it must survive a round trip.
+        let item = Item::Assignment {
+            key: key.trim().to_string(),
+            value: value.trim().to_string(),
+            line,
+        };
+        match open.last_mut() {
+            Some((_, _, items)) => items.push(item),
+            None => document.items.push(item),
+        }
+    }
+
+    for (name, line, _) in open {
+        document
+            .problems
+            .push((line, format!("`{name}` block is never closed")));
+    }
+    document
 }
 
 /// The "don't edit this" banner, naming the screen that owns the file.
@@ -283,5 +486,121 @@ mod tests {
     #[test]
     fn a_keyword_renders_on_its_own_line() {
         assert_eq!(keyword("temperature", 6500), "temperature = 6500\n");
+    }
+
+    /// `#` starts a comment anywhere on the line, so a path containing one
+    /// written raw is truncated by hyprlang into a shorter path that still
+    /// exists on screen and points at nothing. `##` is the documented
+    /// escape.
+    #[test]
+    fn a_value_containing_a_hash_survives_being_written() {
+        let line = keyword("path", "/home/me/Pictures/#1 favourite.png");
+        let (_, value) = line.trim_end().split_once(" = ").unwrap();
+        assert_eq!(strip_comment(value), "/home/me/Pictures/#1 favourite.png");
+    }
+
+    #[test]
+    fn a_block_field_containing_a_hash_survives_too() {
+        let out = block("wallpaper", &[("path", "/a/#b.png".to_string())]);
+        let value = out.lines().nth(1).unwrap().split_once(" = ").unwrap().1;
+        assert_eq!(strip_comment(value), "/a/#b.png");
+    }
+
+    #[test]
+    fn a_trailing_comment_is_not_part_of_the_value() {
+        assert_eq!(strip_comment("150   # 2.5min."), "150");
+        assert_eq!(strip_comment("# whole line"), "");
+        assert_eq!(strip_comment("no comment here"), "no comment here");
+    }
+
+    /// Every value the writer produces must read back as itself. A reader
+    /// and a writer that disagree about escaping is the same class of
+    /// drift as a generator and a matcher disagreeing about what is valid.
+    #[test]
+    fn escaping_round_trips_for_every_shape_of_value() {
+        for value in [
+            "plain",
+            "/a/#b.png",
+            "##already escaped",
+            "trailing #",
+            "#leading",
+            "a # b # c",
+            "",
+        ] {
+            assert_eq!(strip_comment(&escape_value(value)), value.trim(), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn a_keyword_and_a_block_are_both_recovered() {
+        let doc = parse("temperature = 6500\n\nprofile {\n    time = 21:00\n}\n");
+        assert_eq!(doc.value("temperature"), Some("6500"));
+        assert_eq!(doc.problems, Vec::new());
+        let blocks: Vec<_> = doc.blocks("profile").collect();
+        assert_eq!(blocks.len(), 1);
+        let Item::Block { items, line, end_line, .. } = blocks[0] else {
+            panic!("expected a block")
+        };
+        assert_eq!((*line, *end_line), (3, 5));
+        assert_eq!(items[0], Item::Assignment {
+            key: "time".to_string(),
+            value: "21:00".to_string(),
+            line: 4,
+        });
+    }
+
+    /// Variables overwrite; the daemon uses the last one. Reading the
+    /// first would report a value it never sees.
+    #[test]
+    fn a_repeated_variable_reads_as_the_one_that_wins() {
+        assert_eq!(parse("temperature = 6500\ntemperature = 4000\n").value("temperature"), Some("4000"));
+    }
+
+    /// Blocks are categories, not variables: a second `listener` is an
+    /// additional listener. Treating them as last-wins would lose four of
+    /// this machine's five idle rules on import.
+    #[test]
+    fn every_block_of_a_name_is_kept_not_just_the_last() {
+        let doc = parse("listener {\n  timeout = 1\n}\nlistener {\n  timeout = 2\n}\n");
+        assert_eq!(doc.blocks("listener").count(), 2);
+    }
+
+    /// `monitor =` is how hyprpaper declares the fallback that covers
+    /// every output. An empty value is a value.
+    #[test]
+    fn an_empty_value_is_kept_rather_than_treated_as_absent() {
+        let doc = parse("wallpaper {\n    monitor =\n}\n");
+        let Item::Block { items, .. } = doc.blocks("wallpaper").next().unwrap() else {
+            panic!("expected a block")
+        };
+        assert_eq!(items[0], Item::Assignment {
+            key: "monitor".to_string(),
+            value: String::new(),
+            line: 2,
+        });
+    }
+
+    /// A file that exists and will not parse is not a file with nothing
+    /// in it. Collapsing the two once cost a user 37 hand-written binds.
+    #[test]
+    fn a_malformed_file_reports_the_problem_rather_than_reading_as_empty() {
+        let unclosed = parse("listener {\n    timeout = 1\n");
+        assert_eq!(unclosed.problems.len(), 1, "{:?}", unclosed.problems);
+        assert!(unclosed.problems[0].1.contains("never closed"));
+
+        let stray = parse("}\n");
+        assert_eq!(stray.problems.len(), 1);
+
+        let nonsense = parse("this is not a setting\n");
+        assert_eq!(nonsense.problems.len(), 1);
+        assert!(nonsense.items.is_empty());
+    }
+
+    /// Sourced paths are reported, never followed: following them walks
+    /// into Hyprforge's own generated file and re-imports what it wrote.
+    #[test]
+    fn a_sourced_path_is_reported_and_not_followed() {
+        let doc = parse("source = /home/me/.config/hypr/hyprforge/idle.conf\n");
+        assert_eq!(doc.sourced(), vec!["/home/me/.config/hypr/hyprforge/idle.conf"]);
     }
 }
