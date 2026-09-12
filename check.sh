@@ -218,6 +218,27 @@ else
     # answering on `org.freedesktop.login1` — which is the thing they
     # actually ask, and is true on a system where logind is socket
     # -activated and not yet started as a unit.
+    # Gated on hyprsunset actually running, which is what these ask.
+    # They are read-only: hyprsunset sets the colour of the screen
+    # somebody is looking at, and a test may not change that unless it
+    # can restore it.
+    step "Live tests against hyprsunset"
+    if ! pgrep -x hyprsunset >/dev/null 2>&1; then
+        skip "hyprsunset tests" "hyprsunset isn't running"
+    else
+        output=$(cargo test -p hyprforge-ecosystem --test live_hyprsunset \
+            -- --ignored --test-threads=1 --nocapture 2>&1)
+        if grep -q "test result: FAILED" <<<"$output"; then
+            bad "hyprsunset tests failed — the code disagrees with the running daemon"
+            grep -E '^test .* FAILED' <<<"$output" | head -20
+        else
+            ok "$(count_tests <<<"$output") hyprsunset tests passed"
+            while IFS= read -r reason; do
+                [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
+            done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^(]*\).*/\1/p' <<<"$output" | sort -u)
+        fi
+    fi
+
     step "Live tests against systemd-logind"
     if ! command -v busctl >/dev/null; then
         skip "logind tests" "busctl not available to ask"

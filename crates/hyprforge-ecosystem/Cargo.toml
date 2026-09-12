@@ -14,3 +14,10 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+
+[features]
+# Exposes `sunset_control::mock::MockBackend` outside `#[cfg(test)]`, so
+# another crate's own tests (the tray item that will drive night light)
+# can exercise a `SunsetBackend` without a running hyprsunset. Same
+# convention as `hyprforge-network`'s `mock` feature.
+mock = []

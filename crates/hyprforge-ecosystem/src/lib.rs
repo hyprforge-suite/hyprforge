@@ -21,4 +21,5 @@ pub mod idle;
 pub mod portal;
 pub mod storage;
 pub mod sunset;
+pub mod sunset_control;
 pub mod wallpaper;
