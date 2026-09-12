@@ -546,6 +546,18 @@ impl SettingsModule for DesktopModule {
                                 .into(),
                         )
                     }
+                    // An error rather than a status, and worded as the
+                    // uncertainty it is. "The daemon isn't running" would be
+                    // a claim this code cannot make — the check itself is
+                    // what failed — and if a daemon *is* running it is now
+                    // ignoring settings the user was told were saved.
+                    Applied::DaemonUnknown => {
+                        self.status = None;
+                        self.error = Some(
+                            "Saved, but we couldn't tell whether the daemon is running,                              so it may not have picked the change up. Try again, or                              restart it below."
+                                .into(),
+                        )
+                    }
                 }
                 Task::none()
             }
