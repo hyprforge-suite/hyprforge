@@ -48,6 +48,15 @@ pub enum Applied {
     NeedsRestart,
     /// Saved; the daemon isn't running, so there was nothing to tell.
     DaemonNotRunning,
+    /// Saved, but whether the daemon is running could not be established —
+    /// `pgrep` didn't start, or didn't answer inside the timeout.
+    ///
+    /// Deliberately not folded into [`Applied::DaemonNotRunning`]. "There
+    /// was nothing to tell" and "we couldn't find out whether there was"
+    /// are different facts, and reporting the second as the first tells the
+    /// user their change had nothing to reach when it may have had a daemon
+    /// sitting right there, ignoring the settings they just saved.
+    DaemonUnknown,
 }
 
 /// Writes `contents` to `generated` and makes sure `target` sources it.
@@ -68,13 +77,20 @@ fn write_and_source(generated: &Path, target: &Path, contents: &str) -> Result<(
     Ok(())
 }
 
-fn running(name: &str) -> bool {
+/// Whether `name` is running: `Some(false)` for "checked, it isn't",
+/// `None` for "couldn't check".
+///
+/// `pgrep -x` exits 1 when it finds nothing, which is an answer. An `Err`
+/// from `command::output` is not — it means the check itself failed to
+/// start or timed out, and collapsing that into `false` is the same
+/// mistake as reading an unparseable config file as an empty one.
+fn running(name: &str) -> Option<bool> {
     hyprforge_core::command::output(
         Command::new("pgrep").args(["-x", name]),
         hyprforge_core::command::TIMEOUT,
     )
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    .map(|o| o.status.success())
+    .ok()
 }
 
 fn hyprctl(args: &[&str]) -> bool {
@@ -100,8 +116,10 @@ pub fn wallpapers(
     settings: &wallpaper::Settings,
 ) -> Result<Applied, ApplyError> {
     write_and_source(generated, target, &wallpaper::generate(settings))?;
-    if !running("hyprpaper") {
-        return Ok(Applied::DaemonNotRunning);
+    match running("hyprpaper") {
+        Some(true) => {}
+        Some(false) => return Ok(Applied::DaemonNotRunning),
+        None => return Ok(Applied::DaemonUnknown),
     }
     let skip: Vec<usize> = settings.invalid().into_iter().map(|(i, _)| i).collect();
     let mut refused = Vec::new();
@@ -146,8 +164,10 @@ pub fn temperature(
     now_minutes: u32,
 ) -> Result<Applied, ApplyError> {
     write_and_source(generated, target, &sunset::generate(settings))?;
-    if !running("hyprsunset") {
-        return Ok(Applied::DaemonNotRunning);
+    match running("hyprsunset") {
+        Some(true) => {}
+        Some(false) => return Ok(Applied::DaemonNotRunning),
+        None => return Ok(Applied::DaemonUnknown),
     }
     let mut refused = Vec::new();
     if let Some(profile) = active_profile(settings, now_minutes) {
@@ -208,8 +228,10 @@ pub fn idle(
     settings: &idle::Settings,
 ) -> Result<Applied, ApplyError> {
     write_and_source(generated, target, &idle::generate(settings))?;
-    if !running("hypridle") {
-        return Ok(Applied::DaemonNotRunning);
+    match running("hypridle") {
+        Some(true) => {}
+        Some(false) => return Ok(Applied::DaemonNotRunning),
+        None => return Ok(Applied::DaemonUnknown),
     }
     Ok(Applied::NeedsRestart)
 }
@@ -315,6 +337,23 @@ mod tests {
         // And before the first valid profile the day still wraps to the
         // last one that *is* valid, not to the rejected one.
         assert_eq!(active_profile(&s, 2 * 60).unwrap().temperature, 6500);
+    }
+
+    /// `pgrep -x` exiting 1 is an answer: nothing is running. `pgrep`
+    /// failing to start, or timing out, is not — and reporting it as
+    /// "the daemon isn't running" tells the user their change had nothing
+    /// to reach when a daemon may have been sitting right there ignoring
+    /// it. The two must stay distinguishable all the way to the screen.
+    #[test]
+    fn not_running_and_could_not_tell_are_different_answers() {
+        assert_ne!(Applied::DaemonNotRunning, Applied::DaemonUnknown);
+    }
+
+    /// A process certain not to exist answers `Some(false)`, not `None`:
+    /// the check ran and found nothing, which is knowledge.
+    #[test]
+    fn a_daemon_that_is_definitely_absent_reads_as_absent_not_unknown() {
+        assert_eq!(running("hyprforge-no-such-daemon-xyz"), Some(false));
     }
 
     #[test]

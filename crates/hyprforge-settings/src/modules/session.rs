@@ -316,7 +316,48 @@ impl SettingsModule for SessionModule {
                     // with itself.
                     .filter(|c| !c.source_path.starts_with(&hyprforge_dir))
                     .filter_map(|c| gesture_from_call(&c.kind, &c.args))
+                    .filter_map(|g| g.ok())
                     .collect();
+
+                // A gesture call that couldn't be read is not one that
+                // isn't there. Reported alongside the file-level failures
+                // below, because from the user's side they are the same
+                // problem: something in their config is in effect and this
+                // screen isn't counting it.
+                let unreadable: Vec<String> = result
+                    .calls
+                    .iter()
+                    .filter(|c| !c.source_path.starts_with(&hyprforge_dir))
+                    .filter_map(|c| match gesture_from_call(&c.kind, &c.args) {
+                        Some(Err(why)) => {
+                            Some(format!("{} ({why})", c.source_path.display()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if !unreadable.is_empty() {
+                    self.error = Some(format!(
+                        "Some gestures in your config couldn't be read, so they aren't                          counted as taken: {}",
+                        unreadable.join("; ")
+                    ));
+                }
+                // A file that wouldn't evaluate is not a file with no
+                // gestures in it. Without this, an unreadable config made
+                // every gesture in it look free, and the next one the user
+                // added silently clashed with one already there.
+                // `appearance` and `shortcuts` both report this already;
+                // session was the one screen that stayed quiet.
+                if !result.failures.is_empty() {
+                    self.error = Some(format!(
+                        "Some config files couldn't be read, so gestures they set                          aren't counted as taken: {}",
+                        result
+                            .failures
+                            .iter()
+                            .map(|(p, why)| format!("{} ({why})", p.display()))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ));
+                }
                 Task::none()
             }
             Message::Added(tab) => {
@@ -785,14 +826,32 @@ fn labelled<'a>(
 }
 
 /// Recovers a gesture from a recorded `hl.gesture({...})` call.
-fn gesture_from_call(kind: &str, args: &[serde_json::Value]) -> Option<gestures::Gesture> {
+/// `None` when this isn't a gesture call at all; `Some(Err)` when it is
+/// one and could not be read.
+///
+/// The distinction is what stops an unreadable gesture counting as an
+/// absent one. `existing_gestures` is the clash check, so a gesture that
+/// silently failed to parse left its three-finger swipe looking free, and
+/// the next one the user added quietly fought with it.
+fn gesture_from_call(
+    kind: &str,
+    args: &[serde_json::Value],
+) -> Option<Result<gestures::Gesture, String>> {
     if kind != "gesture" {
         return None;
     }
-    let table = args.first()?.as_object()?;
-    Some(gestures::Gesture {
-        fingers: table.get("fingers")?.as_u64()? as u32,
-        direction: table.get("direction")?.as_str()?.to_string(),
+    let Some(table) = args.first().and_then(|v| v.as_object()) else {
+        return Some(Err("its argument isn't a table".to_string()));
+    };
+    let Some(fingers) = table.get("fingers").and_then(|v| v.as_u64()) else {
+        return Some(Err("it has no readable finger count".to_string()));
+    };
+    let Some(direction) = table.get("direction").and_then(|v| v.as_str()) else {
+        return Some(Err(format!("the {fingers}-finger gesture has no readable direction")));
+    };
+    Some(Ok(gestures::Gesture {
+        fingers: fingers as u32,
+        direction: direction.to_string(),
         action: table
             .get("action")
             .and_then(|v| v.as_str())
@@ -802,7 +861,7 @@ fn gesture_from_call(kind: &str, args: &[serde_json::Value]) -> Option<gestures:
         argument: String::new(),
         scale: table.get("scale").and_then(|v| v.as_f64()),
         enabled: true,
-    })
+    }))
 }
 
 async fn regenerate_and_reload(
@@ -823,6 +882,48 @@ fn session_toml() -> PathBuf {
 
 fn session_lua() -> PathBuf {
     hyprforge_core::paths::hypr_hyprforge_dir().join("session.lua")
+}
+
+#[cfg(test)]
+mod gesture_reading {
+    use super::*;
+    use serde_json::json;
+
+    fn read(args: serde_json::Value) -> Option<Result<gestures::Gesture, String>> {
+        gesture_from_call("gesture", args.as_array().unwrap())
+    }
+
+    #[test]
+    fn a_call_that_is_not_a_gesture_is_not_an_unreadable_gesture() {
+        assert!(gesture_from_call("bind", &[json!("SUPER + Q")]).is_none());
+    }
+
+    /// `existing_gestures` is the clash check. A gesture that silently
+    /// failed to parse left its swipe looking unclaimed, so the next one
+    /// the user added quietly fought with a gesture already in effect.
+    #[test]
+    fn a_gesture_missing_its_direction_is_reported_not_dropped() {
+        let out = read(json!([{ "fingers": 3 }]));
+        let why = out
+            .expect("still a gesture call")
+            .expect_err("a gesture with no direction must not read as absent");
+        assert!(why.contains("direction"), "{why}");
+    }
+
+    #[test]
+    fn a_gesture_with_no_readable_finger_count_is_reported() {
+        let out = read(json!([{ "direction": "left" }]));
+        assert!(out.expect("still a gesture call").is_err());
+    }
+
+    #[test]
+    fn an_ordinary_gesture_still_reads_cleanly() {
+        let g = read(json!([{ "fingers": 3, "direction": "left" }]))
+            .expect("a gesture call")
+            .expect("should read");
+        assert_eq!(g.fingers, 3);
+        assert_eq!(g.direction, "left");
+    }
 }
 
 #[cfg(test)]

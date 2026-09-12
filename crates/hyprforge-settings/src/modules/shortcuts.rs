@@ -1017,6 +1017,7 @@ impl SettingsModule for ShortcutsModule {
             Message::ImportEvaluated(result) => {
                 let hyprforge_dir = hyprforge_core::paths::hypr_hyprforge_dir();
                 let mut shortcuts = Vec::new();
+                let mut unreadable = Vec::new();
                 for call in &result.calls {
                     // Hyprforge's own generated file is `require()`d from
                     // hyprland.lua too, so it gets evaluated right along
@@ -1025,8 +1026,24 @@ impl SettingsModule for ShortcutsModule {
                     if call.source_path.starts_with(&hyprforge_dir) {
                         continue;
                     }
-                    if let Some(imported) =
-                        hyprforge_shortcuts::import::shortcut_from_call(&call.kind, &call.args)
+                    let imported = match hyprforge_shortcuts::import::shortcut_from_call(
+                        &call.kind,
+                        &call.args,
+                    ) {
+                        // A bind that couldn't be read joins the same list
+                        // as a file that couldn't be evaluated, because
+                        // from the user's side it is the same problem:
+                        // something in their config is in effect and this
+                        // list isn't showing it. Dropping it silently made
+                        // a misread config look like a config with nothing
+                        // in it.
+                        Some(Err(why)) => {
+                            unreadable.push((call.source_path.clone(), why));
+                            continue;
+                        }
+                        Some(Ok(imported)) => imported,
+                        None => continue,
+                    };
                     {
                         let already_imported =
                             self.shortcuts.iter().any(|s| s.combo == imported.combo);
@@ -1047,8 +1064,10 @@ impl SettingsModule for ShortcutsModule {
                         });
                     }
                 }
+                let mut failures = result.failures;
+                failures.extend(unreadable);
                 self.import_review =
-                    Some(ImportState::Ready(ImportReview { shortcuts, failures: result.failures }));
+                    Some(ImportState::Ready(ImportReview { shortcuts, failures }));
                 Task::none()
             }
             Message::ImportToggle(i, checked) => {
