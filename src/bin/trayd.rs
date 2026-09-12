@@ -57,6 +57,21 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(3);
 /// and a tray host is not a hot path, so polling it is not a real cost.
 const WATCHER_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
+/// How often `tray.toml` is *stat*ed — not how often it is parsed.
+///
+/// Toggling "Show in tray" used to take ten or twelve seconds to show on
+/// screen, because the preference file was only re-read on the ordinary
+/// poll tick. A setting that takes that long reads as broken, and the
+/// user tries again.
+///
+/// A stat is one syscall on a file that is always in the page cache;
+/// twice a second costs nothing measurable, and only a changed stamp
+/// causes an actual read. An inotify watch would be tidier still, but it
+/// is a dependency and a set of edge cases (the file is replaced by
+/// rename, so the watch has to follow the directory) for a saving that
+/// does not exist at this size.
+const PREFS_WATCH_INTERVAL: Duration = Duration::from_millis(500);
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Default to `info` rather than whatever `from_default_env` alone
@@ -135,17 +150,20 @@ async fn main() -> anyhow::Result<()> {
         refresh_rx,
     ));
     let click_task = tokio::spawn(handle_clicks(clicks_rx));
-    let menu_click_task = tokio::spawn(handle_menu_clicks(menu_clicks_rx, refresh_tx));
+    let menu_click_task = tokio::spawn(handle_menu_clicks(menu_clicks_rx, refresh_tx.clone()));
+    let prefs_watch_task = tokio::spawn(prefs_watch_loop(refresh_tx));
     let reannounce_task = tokio::spawn(reannounce_loop(probe, network_slot, bluetooth_slot));
 
-    // None of these four loops return under normal operation. If one
-    // panics, that is worth knowing about rather than leaving the others
-    // running silently short-handed.
+    // None of these loops return under normal operation. If one panics,
+    // that is worth knowing about rather than leaving the others running
+    // silently short-handed — a dead prefs watcher, in particular, looks
+    // exactly like the ten-second lag it was written to remove.
     tokio::select! {
         r = poll_task => log_task_exit("poll", r),
         r = click_task => log_task_exit("clicks", r),
         r = menu_click_task => log_task_exit("menu-clicks", r),
         r = reannounce_task => log_task_exit("reannounce", r),
+        r = prefs_watch_task => log_task_exit("prefs-watch", r),
     }
 
     Ok(())
@@ -412,6 +430,38 @@ async fn sync_icon(
                     tracing::warn!(error = %e, icon = %id, "failed to register tray icon; will retry next tick");
                 }
             }
+        }
+    }
+}
+
+/// Something that changes whenever the file does.
+///
+/// `None` for a file that is not there, which is a state rather than an
+/// error: deleting `tray.toml` is a reset to the defaults, and has to
+/// take effect like any other edit. Length is included alongside the
+/// modification time so an edit inside one timestamp's resolution is
+/// still seen.
+fn prefs_stamp(path: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+/// Pulls the next poll forward the moment the preference file changes.
+async fn prefs_watch_loop(refresh: tokio::sync::mpsc::UnboundedSender<()>) {
+    let path = hyprforge_tray::prefs::path();
+    let mut seen = prefs_stamp(&path);
+    let mut ticker = tokio::time::interval(PREFS_WATCH_INTERVAL);
+    loop {
+        ticker.tick().await;
+        let now = prefs_stamp(&path);
+        if now == seen {
+            continue;
+        }
+        seen = now;
+        // A closed channel means the poll loop is gone, so there is
+        // nothing left to tell.
+        if refresh.send(()).is_err() {
+            return;
         }
     }
 }
@@ -1626,6 +1676,29 @@ mod tests {
     /// through to the parser it would be logged as an unknown action on
     /// every single open — noise that would bury the warnings that
     /// matter.
+    /// The watcher only reads the file when this changes, so anything it
+    /// cannot see is a change that never takes effect.
+    ///
+    /// Absence counts: deleting `tray.toml` is a reset to the defaults
+    /// and has to act like any other edit.
+    #[test]
+    fn the_prefs_stamp_sees_a_file_appear_change_and_vanish() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tray.toml");
+
+        assert_eq!(prefs_stamp(&path), None, "a file that is not there");
+
+        std::fs::write(&path, "network = true\n").unwrap();
+        let created = prefs_stamp(&path);
+        assert!(created.is_some(), "a file that appeared");
+
+        std::fs::write(&path, "network = false\nbluetooth = false\n").unwrap();
+        assert_ne!(prefs_stamp(&path), created, "a file whose contents changed");
+
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(prefs_stamp(&path), None, "a file that was deleted");
+    }
+
     #[test]
     fn a_menu_open_is_not_mistaken_for_a_click() {
         let opened = format!(
