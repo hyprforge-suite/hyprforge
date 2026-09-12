@@ -44,6 +44,13 @@ pub fn appearance_toml_path() -> PathBuf {
     hyprforge_config_dir().join("appearance.toml")
 }
 
+/// Which tray icons the user wants, written by Settings and re-read by
+/// `hyprforge-trayd` on every poll so a toggle takes effect without
+/// restarting anything.
+pub fn tray_toml_path() -> PathBuf {
+    hyprforge_config_dir().join("tray.toml")
+}
+
 /// Write `contents` to `path` atomically and durably: write a sibling temp
 /// file, flush it to disk, rename over the target, then flush the
 /// directory.

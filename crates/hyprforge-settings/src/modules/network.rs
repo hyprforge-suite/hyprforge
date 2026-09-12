@@ -18,6 +18,7 @@
 
 use hyprforge_network::backend::{for_display, NetworkBackend, SavedNetwork, Status};
 use hyprforge_network::{AccessPoint, NetworkError, Psk, RadioState, Security};
+use hyprforge_tray::Prefs as TrayPrefs;
 use hyprforge_ui::theme::{self, spacing, FontScale};
 use hyprforge_ui::widgets::{meta_text, primary_button, scaled_text, secondary_button, section};
 use iced::widget::{checkbox, column, row, text_input};
@@ -133,6 +134,13 @@ pub enum Message {
     Connected(Result<(), LoadError>),
     ForgetPressed(String),
     Forgotten(String, Result<(), LoadError>),
+    /// Whether `hyprforge-trayd` should show the Wi-Fi icon.
+    ///
+    /// Only reachable from a loaded [`TrayPrefs`] — see `tray_row` — so
+    /// this never has to guess a value for the field it does not own
+    /// (`bluetooth`). Guarded again in `update` anyway, same pattern as
+    /// [`Message::RadioToggled`] against a hardware-off radio.
+    TrayToggled(bool),
 }
 
 pub struct NetworkModule<B: NetworkBackend + 'static> {
@@ -157,6 +165,18 @@ pub struct NetworkModule<B: NetworkBackend + 'static> {
     saved: Vec<SavedNetwork>,
     scanning: bool,
     joining: Option<JoinDraft>,
+    /// The on-disk `tray.toml`, loaded once at construction.
+    ///
+    /// `Err` means the file exists and would not parse — the rule in
+    /// CLAUDE.md about never collapsing "could not read" into "nothing
+    /// configured". Kept as the *whole* [`TrayPrefs`], not just this
+    /// screen's `network` bit, so toggling here can write back
+    /// `bluetooth` unchanged instead of a default that would silently
+    /// switch the other icon off. While this is `Err`, `tray_row` shows
+    /// no checkbox at all, and [`Message::TrayToggled`] has nothing to
+    /// flip — there is no last-known-good value to start from, and
+    /// guessing one is exactly the write this field exists to prevent.
+    tray_prefs: Result<TrayPrefs, String>,
 }
 
 impl<B: NetworkBackend + 'static> NetworkModule<B> {
@@ -168,16 +188,25 @@ impl<B: NetworkBackend + 'static> NetworkModule<B> {
     /// calling here, or hands over a backend that resolves it lazily on
     /// first call, so this constructor never has to be fallible itself.
     pub fn new(backend: Arc<B>) -> (Self, Task<Message>) {
+        // A missing file is first run and loads as defaults; a file that
+        // exists and will not parse is reported here, in the same banner
+        // every other load failure on this screen uses, rather than
+        // silently treated as "both icons shown".
+        let (tray_prefs, tray_error) = match hyprforge_tray::prefs::load() {
+            Ok(prefs) => (Ok(prefs), None),
+            Err(e) => (Err(e.to_string()), Some(e.to_string())),
+        };
         let module = NetworkModule {
             backend,
             loading: true,
             unavailable: None,
-            error: None,
+            error: tray_error,
             status: None,
             access_points: Vec::new(),
             saved: Vec::new(),
             scanning: false,
             joining: None,
+            tray_prefs,
         };
         let task = Task::perform(load(Arc::clone(&module.backend)), Message::Loaded);
         (module, task)
@@ -381,6 +410,22 @@ impl<B: NetworkBackend + 'static> SettingsModule for NetworkModule<B> {
                 self.error = Some(e.message);
                 Task::none()
             }
+            Message::TrayToggled(shown) => {
+                let Ok(prefs) = &self.tray_prefs else {
+                    // `tray_row` renders no checkbox while `tray_prefs` is
+                    // `Err`, so a stray message here still must not turn
+                    // an unreadable file into a freshly-written default —
+                    // the exact overwrite this field exists to prevent.
+                    return Task::none();
+                };
+                let mut updated = *prefs;
+                updated.network = shown;
+                match hyprforge_tray::prefs::save(&updated) {
+                    Ok(()) => self.tray_prefs = Ok(updated),
+                    Err(e) => self.error = Some(e.to_string()),
+                }
+                Task::none()
+            }
         }
     }
 
@@ -403,10 +448,17 @@ impl<B: NetworkBackend + 'static> SettingsModule for NetworkModule<B> {
         // nothing else useful to show underneath "NetworkManager isn't
         // running", so the rest of the screen doesn't render at all.
         if let Some(msg) = &self.unavailable {
+            // The tray toggle stays reachable here. It is the one control
+            // on this screen that does not depend on the daemon being up
+            // — and it is wanted most when the daemon is down, because
+            // that is exactly when the tray icon is sitting there showing
+            // an error nobody can currently do anything about. Hiding the
+            // switch that turns it off is its own small dead end.
             content = content.push(section(
                 "Wi-Fi",
                 scale,
-                column![scaled_text(msg.clone(), 14.0, scale)].spacing(spacing::SM),
+                column![scaled_text(msg.clone(), 14.0, scale), self.tray_row(scale)]
+                    .spacing(spacing::SM),
             ));
             return content.into();
         }
@@ -480,7 +532,32 @@ impl<B: NetworkBackend + 'static> NetworkModule<B> {
             }
             None => meta_text("Wi-Fi status unknown.", 14.0, scale).into(),
         };
-        section("Wi-Fi", scale, body)
+        section("Wi-Fi", scale, column![body, self.tray_row(scale)].spacing(spacing::SM))
+    }
+
+    /// The "show in tray" row, appended to the Wi-Fi section.
+    ///
+    /// Unlike `radio_row`, this doesn't depend on live NetworkManager
+    /// status — the preference lives entirely in `tray_prefs`, loaded
+    /// once in `new`. While that load failed, there is no known value to
+    /// show a checkbox for, so this renders text pointing at the error
+    /// banner instead of guessing a state.
+    fn tray_row(&self, scale: FontScale) -> Element<'_, Message> {
+        match &self.tray_prefs {
+            Ok(prefs) => row![
+                checkbox(prefs.network).on_toggle(Message::TrayToggled),
+                scaled_text("Show in tray", 15.0, scale),
+            ]
+            .spacing(spacing::SM)
+            .align_y(Alignment::Center)
+            .into(),
+            Err(_) => meta_text(
+                "Tray setting unavailable — see the error above.",
+                13.0,
+                scale,
+            )
+            .into(),
+        }
     }
 
     fn networks_section(&self, scale: FontScale) -> Element<'_, Message> {
@@ -724,6 +801,126 @@ mod tests {
         let backend = Arc::new(MockBackend::new());
         let (module, _task) = NetworkModule::new(Arc::clone(&backend));
         (module, backend)
+    }
+
+    /// Runs `f` with `$XDG_CONFIG_HOME` repointed at a throwaway
+    /// directory, holding `CONFIG_ENV_LOCK` for the duration — the
+    /// variable is process-global, so a `bluetooth` test retargeting it
+    /// concurrently would be indistinguishable from this one's own writes
+    /// landing in the wrong place. `f` gets the directory so a test can
+    /// write a `tray.toml` into `<dir>/hyprforge/tray.toml` before
+    /// constructing a module.
+    fn with_temp_config<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
+        let _lock = crate::modules::CONFIG_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", dir.path());
+        }
+        let out = f(dir.path());
+        match previous {
+            Some(p) => unsafe { std::env::set_var("XDG_CONFIG_HOME", p) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+        out
+    }
+
+    // --- tray preferences -------------------------------------------------
+
+    /// A missing `tray.toml` is first run: both icons read as shown, and
+    /// nothing about it is reported as an error — the same distinction
+    /// `hyprforge_tray::prefs::load` documents, one layer up.
+    #[test]
+    fn a_missing_tray_toml_is_first_run_and_reads_as_shown() {
+        with_temp_config(|_dir| {
+            let (m, _backend) = module();
+            let prefs = m.tray_prefs.as_ref().expect("a missing file is defaults, not an error");
+            assert!(prefs.network);
+            assert!(prefs.bluetooth);
+            assert!(m.error.is_none(), "a first run is not a load failure");
+        });
+    }
+
+    /// The rule this feature is most likely to break: a `tray.toml` that
+    /// exists and will not parse must be reported in the screen's error
+    /// banner, and a subsequent toggle must not then overwrite it with a
+    /// freshly-guessed default — that would destroy whatever the user (or
+    /// a hand edit) actually wrote.
+    #[test]
+    fn an_unreadable_tray_toml_is_reported_and_not_overwritten_by_a_toggle() {
+        with_temp_config(|dir| {
+            let tray_toml = dir.join("hyprforge").join("tray.toml");
+            std::fs::create_dir_all(tray_toml.parent().unwrap()).unwrap();
+            std::fs::write(&tray_toml, "network = yes please\n").unwrap();
+
+            let (mut m, _backend) = module();
+            assert!(m.tray_prefs.is_err(), "a malformed file must not be treated as defaults");
+            assert!(
+                m.error.as_ref().is_some_and(|e| e.contains("tray.toml")),
+                "the failure must reach the screen's own error banner, got {:?}",
+                m.error
+            );
+
+            let before = std::fs::read_to_string(&tray_toml).unwrap();
+            let _ = m.update(Message::TrayToggled(false));
+            let after = std::fs::read_to_string(&tray_toml).unwrap();
+            assert_eq!(before, after, "a toggle must never overwrite a file it could not read");
+        });
+    }
+
+    /// Toggling the icon this screen owns must leave the other icon's
+    /// setting exactly as it was — never re-derived as a default, or
+    /// switching Wi-Fi off would silently also turn Bluetooth back on (or
+    /// off) depending on which way the default falls.
+    #[test]
+    fn toggling_the_tray_setting_on_one_screen_preserves_the_others_setting() {
+        use crate::modules::bluetooth::{BluetoothModule, Message as BtMessage};
+        use hyprforge_bluetooth::backend::mock::MockBackend as BtMockBackend;
+
+        with_temp_config(|_dir| {
+            // Bluetooth switches its own icon off first.
+            let bt_backend = Arc::new(BtMockBackend::new());
+            let (mut bt, _bt_backend) = BluetoothModule::new(Arc::clone(&bt_backend));
+            let _ = bt.update(BtMessage::TrayToggled(false));
+
+            // Network, built afterwards, must see that write and then
+            // leave it alone when it toggles its own icon.
+            let (mut net, _backend) = module();
+            assert!(
+                net.tray_prefs.as_ref().is_ok_and(|p| !p.bluetooth),
+                "network's own load must see bluetooth's write"
+            );
+            let _ = net.update(Message::TrayToggled(false));
+
+            let prefs = hyprforge_tray::prefs::load().unwrap();
+            assert!(!prefs.network, "the icon this screen owns was switched off");
+            assert!(!prefs.bluetooth, "the other icon's setting must survive untouched");
+        });
+    }
+
+    /// The tray toggle does not depend on NetworkManager, and is wanted
+    /// most when NetworkManager is down — that is when the icon is
+    /// sitting in the bar showing an error. The unavailable branch
+    /// returns early, so it is easy to lose; this is what notices.
+    #[test]
+    fn the_tray_toggle_is_still_reachable_when_networkmanager_is_down() {
+        let _guard = crate::modules::CONFIG_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut m, _backend) = module();
+        let _ = m.update(Message::Loaded(Loaded {
+            status: Err(LoadError::from(NetworkError::Unavailable)),
+            access_points: Err(LoadError::from(NetworkError::Unavailable)),
+            saved: Err(LoadError::from(NetworkError::Unavailable)),
+        }));
+        assert!(m.unavailable.is_some(), "precondition: the screen is on its dead-end path");
+        // `view` is what renders the row; it must not panic and must be
+        // built from the unavailable branch rather than the normal one.
+        let _ = m.view(FontScale::default());
+        assert!(
+            m.tray_prefs.is_ok(),
+            "the toggle's own state is readable regardless of the daemon"
+        );
     }
 
     /// The distinction `hyprforge-network` exists to keep, one layer up:

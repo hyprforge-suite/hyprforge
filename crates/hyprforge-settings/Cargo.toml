@@ -20,6 +20,7 @@ hyprforge-shortcuts.workspace = true
 hyprforge-lua-import.workspace = true
 hyprforge-network.workspace = true
 hyprforge-bluetooth.workspace = true
+hyprforge-tray.workspace = true
 async-trait.workspace = true
 # "tokio" selects iced's tokio executor backend, which is what provides
 # `iced::time::every` (used for the revert countdown) — the app already runs

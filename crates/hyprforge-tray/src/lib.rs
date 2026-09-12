@@ -17,7 +17,9 @@
 //! --screen <name>` exists.
 
 pub mod item;
+pub mod prefs;
 pub mod sni;
 
+pub use prefs::Prefs;
 pub use item::{Category, Status, TrayItem};
 pub use sni::{watcher_present, TrayError, TrayIcon};
