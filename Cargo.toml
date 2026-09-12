@@ -17,6 +17,7 @@ members = [
     "crates/hyprforge-greet",
     "crates/hyprforge-shortcuts",
     "crates/hyprforge-lua-import",
+    "crates/hyprforge-network",
     "crates/hyprforge-settings",
 ]
 
@@ -42,6 +43,7 @@ hyprforge-ui = { path = "crates/hyprforge-ui" }
 hyprforge-lock = { path = "crates/hyprforge-lock" }
 hyprforge-shortcuts = { path = "crates/hyprforge-shortcuts" }
 hyprforge-lua-import = { path = "crates/hyprforge-lua-import" }
+hyprforge-network = { path = "crates/hyprforge-network" }
 
 # Only hyprforge-lua-import depends on this — evaluating a user's own
 # hyprland.lua (with hl.* stubbed to record calls) to import hand-written
@@ -104,3 +106,7 @@ thiserror = "2"
 anyhow = "1"
 blake3 = "1.8"
 futures-util = "0.3"
+# Already in the tree via zbus. Taken as a direct dependency so
+# `NetworkBackend` can be used behind `Arc<dyn _>`, the same shape
+# displayd's `OutputBackend` uses to make its daemon testable.
+async-trait = "0.1"

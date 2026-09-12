@@ -1,0 +1,24 @@
+[package]
+name = "hyprforge-network"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# NetworkManager is already a daemon, so this crate is a client and not a
+# second one. `tokio` feature for the same reason displayd needs it: zbus
+# otherwise polls on its own thread and anything a handler spawns panics
+# with "there is no reactor running".
+zbus.workspace = true
+tokio.workspace = true
+# `command::output`'s bounded wait, and nothing else from core. This crate
+# writes no Hyprland config.
+hyprforge-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

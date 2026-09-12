@@ -1553,6 +1553,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyprforge-network"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "hyprforge-core",
+ "serde",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "zbus",
+]
+
+[[package]]
 name = "hyprforge-paths"
 version = "0.1.0"
 dependencies = [
