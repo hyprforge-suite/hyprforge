@@ -11,13 +11,14 @@
 //! restarts. Every save reports which of those happened rather than
 //! saying "Saved." at all three.
 
+use std::path::Path;
 use hyprforge_ui::theme::{spacing, FontScale};
 use hyprforge_ui::widgets::{
     danger_button, divider, meta_text, primary_button, scaled_text, secondary_button, section,
 };
 use crate::module::SettingsModule;
 use hyprforge_ecosystem::apply::{self, Applied};
-use hyprforge_ecosystem::{idle, sunset, wallpaper};
+use hyprforge_ecosystem::{idle, import, sunset, wallpaper};
 use iced::widget::{checkbox, column, container, pick_list, row, scrollable, text_input};
 use iced::{Element, Length, Task};
 use std::collections::BTreeMap;
@@ -86,6 +87,85 @@ pub enum Field {
     IgnoreInhibit,
 }
 
+/// One thing found in a daemon's own config file, offered for adoption.
+///
+/// The three tabs hold different shapes, so the item is an enum rather
+/// than three parallel review types — the review screen, the checkbox
+/// handling and the retire bookkeeping are identical for all three and
+/// only the label differs.
+#[derive(Debug, Clone)]
+pub enum AdoptItem {
+    Wallpaper(wallpaper::Entry),
+    Profile(sunset::Profile),
+    Listener(idle::Listener),
+    IdleGeneral(idle::General),
+}
+
+impl AdoptItem {
+    /// What the user reads in the review list. Says what the setting
+    /// *does*, not which struct it is: "after 30 min: systemctl suspend"
+    /// is checkable against their own file, `Listener { .. }` is not.
+    fn label(&self) -> String {
+        match self {
+            AdoptItem::Wallpaper(e) => {
+                let where_ = if e.monitor.trim().is_empty() {
+                    "every display".to_string()
+                } else {
+                    e.monitor.trim().to_string()
+                };
+                format!("{where_}: {}", e.path)
+            }
+            AdoptItem::Profile(p) => {
+                format!("from {}: {}K", p.time, p.temperature)
+            }
+            AdoptItem::Listener(l) => {
+                let minutes = l.timeout / 60;
+                let when = if minutes >= 1 {
+                    format!("after {minutes} min")
+                } else {
+                    format!("after {}s", l.timeout)
+                };
+                match (l.on_timeout.trim(), l.on_resume.trim()) {
+                    ("", "") => when,
+                    (t, "") => format!("{when}: {t}"),
+                    (t, r) => format!("{when}: {t} — on wake: {r}"),
+                }
+            }
+            AdoptItem::IdleGeneral(_) => "Session commands (lock, sleep, wake)".to_string(),
+        }
+    }
+}
+
+/// One row of the review list.
+#[derive(Debug, Clone)]
+pub struct AdoptCandidate {
+    pub item: AdoptItem,
+    pub checked: bool,
+    /// Keys the importer does not model. A candidate with any is offered
+    /// but never pre-checked, and its original lines are never retired —
+    /// adopting it would narrow the setting and then delete the evidence.
+    pub dropped: Vec<String>,
+    pub line: usize,
+    pub end_line: usize,
+}
+
+impl AdoptCandidate {
+    fn is_faithful(&self) -> bool {
+        self.dropped.is_empty()
+    }
+}
+
+/// What one "import from the daemon's own config" run found.
+#[derive(Debug, Clone)]
+pub struct AdoptReview {
+    pub tab: Tab,
+    pub path: PathBuf,
+    pub candidates: Vec<AdoptCandidate>,
+    /// Lines the parser could not read. Shown, never swallowed: a file
+    /// that will not parse is not a file with nothing in it.
+    pub problems: Vec<(usize, String)>,
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     TabSelected(Tab),
@@ -110,6 +190,10 @@ pub enum Message {
     Commit,
     RestartIdle,
     Applied(Tab, Result<Applied, String>),
+    AdoptOpen,
+    AdoptToggle(usize, bool),
+    AdoptConfirm,
+    AdoptCancel,
 }
 
 /// Everything read from the system when the screen opens.
@@ -135,6 +219,19 @@ pub struct DesktopModule {
     /// Set while the idle config on disk is ahead of the running daemon.
     idle_needs_restart: bool,
     store_unreadable: Option<String>,
+    /// The review shown after "Import from …", before anything is
+    /// written. `None` when no import is in progress.
+    adopt: Option<AdoptReview>,
+    /// Lines to comment out once the adopted settings have actually
+    /// reached the daemon.
+    ///
+    /// Held rather than done at confirm time, and consumed only on a
+    /// successful `Applied`. The ordering is the whole safety argument:
+    /// the app's own store is written, the generated file produced and
+    /// the `source =` line installed *first*, so a crash anywhere in
+    /// between leaves the user with a config that is duplicated but
+    /// working, rather than one that is retired and missing.
+    pending_retire: Option<(PathBuf, Vec<(usize, usize)>)>,
 }
 
 impl DesktopModule {
@@ -158,6 +255,8 @@ impl DesktopModule {
                 error: None,
                 status: None,
                 idle_needs_restart: false,
+                adopt: None,
+                pending_retire: None,
                 store_unreadable: (!unreadable.is_empty()).then(|| unreadable.join("; ")),
             },
             Task::perform(load_system(), Message::Loaded),
@@ -224,6 +323,161 @@ impl DesktopModule {
                     move |r| Message::Applied(tab, r),
                 )
             }
+        }
+    }
+
+    /// Which of the daemons' own config files this tab adopts from.
+    fn daemon_config_path(tab: Tab) -> PathBuf {
+        let hypr = hyprforge_core::paths::hypr_config_dir();
+        match tab {
+            Tab::Wallpaper => hypr.join("hyprpaper.conf"),
+            Tab::NightLight => hypr.join("hyprsunset.conf"),
+            Tab::Idle => hypr.join("hypridle.conf"),
+        }
+    }
+
+    /// Reads the current tab's daemon config and builds the review.
+    ///
+    /// Everything Hyprforge itself generated is excluded, by ignoring the
+    /// `source =` line's contents entirely — the parser reports sourced
+    /// paths rather than following them, so what comes back is only what
+    /// the user wrote. Following them would re-import the app's own
+    /// output, the same self-import trap the Lua flows avoid by skipping
+    /// `hypr_hyprforge_dir()`.
+    fn read_daemon_config(&self) -> AdoptReview {
+        let tab = self.tab;
+        let path = Self::daemon_config_path(tab);
+        let contents = std::fs::read_to_string(&path).unwrap_or_default();
+        let document = hyprforge_core::hyprlang::parse(&contents);
+
+        let mut candidates = Vec::new();
+        let mut problems;
+        match tab {
+            Tab::Wallpaper => {
+                let review = import::wallpaper(&document);
+                problems = review.problems;
+                for found in review.items {
+                    candidates.push(AdoptCandidate {
+                        checked: found.is_faithful(),
+                        item: AdoptItem::Wallpaper(found.value),
+                        dropped: found.dropped,
+                        line: found.line,
+                        end_line: found.end_line,
+                    });
+                }
+            }
+            Tab::NightLight => {
+                let (_, review) = import::sunset(&document);
+                problems = review.problems;
+                for found in review.items {
+                    candidates.push(AdoptCandidate {
+                        checked: found.is_faithful(),
+                        item: AdoptItem::Profile(found.value),
+                        dropped: found.dropped,
+                        line: found.line,
+                        end_line: found.end_line,
+                    });
+                }
+            }
+            Tab::Idle => {
+                let (general, review) = import::idle(&document);
+                problems = review.problems;
+                if let Some(found) = general {
+                    candidates.push(AdoptCandidate {
+                        checked: found.is_faithful(),
+                        item: AdoptItem::IdleGeneral(found.value),
+                        dropped: found.dropped,
+                        line: found.line,
+                        end_line: found.end_line,
+                    });
+                }
+                for found in review.items {
+                    candidates.push(AdoptCandidate {
+                        checked: found.is_faithful(),
+                        item: AdoptItem::Listener(found.value),
+                        dropped: found.dropped,
+                        line: found.line,
+                        end_line: found.end_line,
+                    });
+                }
+            }
+        }
+        problems.sort_by_key(|(line, _)| *line);
+        AdoptReview { tab, path, candidates, problems }
+    }
+
+    /// Merges the ticked candidates into the store and saves.
+    ///
+    /// Appends rather than replaces. The user may already have set
+    /// something up in the app before importing, and discarding it
+    /// because they pressed Import would be the app deciding their work
+    /// was not worth keeping. The exception is the idle `general` block,
+    /// which is a single record rather than a list.
+    fn adopt_confirmed(&mut self) -> Task<Message> {
+        let Some(review) = self.adopt.take() else {
+            return Task::none();
+        };
+        let tab = review.tab;
+        let mut ranges = Vec::new();
+        let mut adopted = 0;
+
+        for candidate in review.candidates.iter().filter(|c| c.checked) {
+            adopted += 1;
+            // Only a candidate that round-trips exactly may have its
+            // original lines stood down. One with a key this app cannot
+            // model is still adoptable — narrower, but the user asked —
+            // and its original stays live so nothing is lost.
+            if candidate.is_faithful() {
+                ranges.push((candidate.line, candidate.end_line));
+            }
+            match candidate.item.clone() {
+                AdoptItem::Wallpaper(entry) => self.wallpapers.entries.push(entry),
+                AdoptItem::Profile(profile) => self.sunset.profiles.push(profile),
+                AdoptItem::Listener(listener) => self.idle.listeners.push(listener),
+                AdoptItem::IdleGeneral(general) => self.idle.general = general,
+            }
+        }
+
+        if adopted == 0 {
+            self.status = Some("Nothing was ticked, so nothing changed.".into());
+            return Task::none();
+        }
+        self.pending_retire = (!ranges.is_empty()).then_some((review.path, ranges));
+        self.save(tab)
+    }
+
+    /// Comments out the lines of everything just adopted.
+    ///
+    /// Refuses unless the `.hyprforge.bak` copy of the file exists and
+    /// reads back — the backup is the user's way out, and standing their
+    /// settings down without one is not a trade this app gets to make on
+    /// their behalf. A failure here is reported and leaves the config
+    /// duplicated, which is noisy but working.
+    fn retire_adopted(&mut self, path: &Path, ranges: &[(usize, usize)]) {
+        let backup = path.with_extension(format!(
+            "{}.hyprforge.bak",
+            path.extension().and_then(|e| e.to_str()).unwrap_or("conf")
+        ));
+        if std::fs::read_to_string(&backup).is_err() {
+            self.error = Some(format!(
+                "Imported, but {} still has the original settings in it —                  there's no backup at {}, and this won't comment them out                  without one. hypridle and friends will see both copies                  until you remove them by hand.",
+                path.display(),
+                backup.display()
+            ));
+            return;
+        }
+        let Ok(contents) = std::fs::read_to_string(path) else {
+            self.error = Some(format!("Imported, but couldn't re-read {}.", path.display()));
+            return;
+        };
+        let note = format!(
+            "now in Hyprforge Settings → Desktop → {} (original in {})",
+            self.tab.label(),
+            backup.file_name().and_then(|n| n.to_str()).unwrap_or("the .hyprforge.bak file")
+        );
+        let retired = hyprforge_core::hyprlang::retire(&contents, ranges, &note);
+        if let Err(e) = hyprforge_paths::write_atomic(path, &retired) {
+            self.error = Some(format!("Imported, but couldn't update {}: {e}", path.display()));
         }
     }
 
@@ -516,8 +770,34 @@ impl SettingsModule for DesktopModule {
                 }
                 Task::none()
             }
+            Message::AdoptOpen => {
+                self.adopt = Some(self.read_daemon_config());
+                self.error = None;
+                self.status = None;
+                Task::none()
+            }
+            Message::AdoptToggle(index, checked) => {
+                if let Some(review) = &mut self.adopt {
+                    if let Some(candidate) = review.candidates.get_mut(index) {
+                        candidate.checked = checked;
+                    }
+                }
+                Task::none()
+            }
+            Message::AdoptCancel => {
+                self.adopt = None;
+                Task::none()
+            }
+            Message::AdoptConfirm => self.adopt_confirmed(),
             Message::Applied(tab, Ok(applied)) => {
                 self.error = None;
+                // Only now, once the store is written, the generated file
+                // produced and the `source =` line installed. Retiring
+                // before this point would stand the user's own settings
+                // down in favour of a file that might not exist.
+                if let Some((path, ranges)) = self.pending_retire.take() {
+                    self.retire_adopted(&path, &ranges);
+                }
                 self.idle_needs_restart =
                     tab == Tab::Idle && applied == Applied::NeedsRestart;
                 match applied {
@@ -623,6 +903,34 @@ impl SettingsModule for DesktopModule {
                 .spacing(spacing::MD)
                 .align_y(iced::Alignment::Center),
             );
+        }
+
+        // Offered only while no review is open, so the screen never shows
+        // an Import button above a list the user is already reviewing.
+        if let Some(review) = &self.adopt {
+            content = content.push(self.adopt_view(review, scale));
+        } else {
+            let path = Self::daemon_config_path(self.tab);
+            // Only when there is a file to read. Offering to import from
+            // a config that doesn't exist is a button whose only outcome
+            // is "nothing found".
+            if path.is_file() {
+                let name =
+                    path.file_name().and_then(|n| n.to_str()).unwrap_or("config").to_string();
+                content = content.push(
+                    row![
+                        secondary_button("Import from this daemon's own config")
+                            .on_press(Message::AdoptOpen),
+                        meta_text(
+                            format!("Reads what you wrote by hand in {name}"),
+                            12.0,
+                            scale,
+                        ),
+                    ]
+                    .spacing(spacing::MD)
+                    .align_y(iced::Alignment::Center),
+                );
+            }
         }
 
         content = match self.tab {
@@ -738,6 +1046,94 @@ impl DesktopModule {
             .align_y(iced::Alignment::Center),
         );
         section("Wallpaper", scale, body)
+    }
+
+    /// The review shown between pressing Import and anything being
+    /// written.
+    ///
+    /// Nothing here has touched the disk yet. That matters enough to say
+    /// on screen: the user is about to have their own config file edited,
+    /// and a review they can't tell is provisional isn't a review.
+    fn adopt_view<'a>(&'a self, review: &'a AdoptReview, scale: FontScale) -> Element<'a, Message> {
+        let name = review
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("the config file")
+            .to_string();
+
+        let mut body = column![].spacing(spacing::SM);
+
+        if review.candidates.is_empty() && review.problems.is_empty() {
+            body = body.push(scaled_text(
+                format!("Nothing to import — {name} has no settings this screen owns."),
+                13.0,
+                scale,
+            ));
+            body = body.push(secondary_button("Close").on_press(Message::AdoptCancel));
+            return section("Import", scale, body);
+        }
+
+        body = body.push(meta_text(
+            format!(
+                "Found in {name}. Nothing has been changed yet. What you tick is                  copied in here, and the lines it came from are commented out in                  {name} so the daemon doesn't act on both copies."
+            ),
+            12.0,
+            scale,
+        ));
+
+        for (index, candidate) in review.candidates.iter().enumerate() {
+            let mut entry = column![row![
+                checkbox(candidate.checked)
+                    .on_toggle(move |v| Message::AdoptToggle(index, v)),
+                scaled_text(candidate.item.label(), 13.0, scale),
+            ]
+            .spacing(spacing::SM)
+            .align_y(iced::Alignment::Center)]
+            .spacing(spacing::XS);
+
+            // Said plainly, because the consequence is specific: this one
+            // is adoptable but would come in narrower than it is now, so
+            // its original stays live and the user will have two.
+            if !candidate.is_faithful() {
+                entry = entry.push(meta_text(
+                    format!(
+                        "line {}: this screen can't represent {} — import it and the                          original stays in {name} as well, so you'd have both.",
+                        candidate.line,
+                        candidate.dropped.join(", ")
+                    ),
+                    12.0,
+                    scale,
+                ));
+            }
+            body = body.push(entry);
+        }
+
+        if !review.problems.is_empty() {
+            body = body.push(divider());
+            body = body.push(scaled_text(
+                format!("Some of {name} couldn't be read, so it isn't listed above:"),
+                13.0,
+                scale,
+            ));
+            for (line, why) in &review.problems {
+                body = body.push(meta_text(format!("line {line}: {why}"), 12.0, scale));
+            }
+        }
+
+        let ticked = review.candidates.iter().filter(|c| c.checked).count();
+        body = body.push(divider());
+        body = body.push(
+            row![
+                primary_button("Import what's ticked").on_press(Message::AdoptConfirm),
+                secondary_button("Cancel").on_press(Message::AdoptCancel),
+                meta_text(format!("{ticked} of {} ticked", review.candidates.len()), 12.0, scale),
+            ]
+            .spacing(spacing::MD)
+            .align_y(iced::Alignment::Center),
+        );
+
+        section("Import", scale, body)
     }
 
     fn sunset_view(&self, scale: FontScale) -> Element<'_, Message> {
@@ -1088,6 +1484,187 @@ mod tests {
             None => unsafe { std::env::remove_var(hyprforge_look::theme::EXPORT_DIR_ENV) },
         }
         out
+    }
+
+    /// Writes a `hypridle.conf` into the isolated config home the way the
+    /// user's own would be, so the adopt flow has something real to read.
+    fn write_hypridle(body: &str) -> PathBuf {
+        let path = DesktopModule::daemon_config_path(Tab::Idle);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    const FIVE_LISTENERS: &str = "\
+general {
+    lock_cmd = hyprforge-lock
+}
+
+listener {
+    timeout = 150
+    on-timeout = brightnessctl -s set 10
+    on-resume = brightnessctl -r
+}
+
+listener {
+    timeout = 1800
+    on-timeout = systemctl suspend
+}
+";
+
+    #[test]
+    fn importing_finds_what_the_user_wrote_by_hand() {
+        with_temp_config(|m| {
+            write_hypridle(FIVE_LISTENERS);
+            m.tab = Tab::Idle;
+            let _ = m.update(Message::AdoptOpen);
+            let review = m.adopt.as_ref().expect("a review");
+            assert_eq!(review.candidates.len(), 3, "general plus two listeners");
+            assert!(
+                review.candidates.iter().all(|c| c.checked),
+                "everything readable should be pre-ticked"
+            );
+        });
+    }
+
+    /// Nothing may reach the disk before the user confirms. A review the
+    /// user can't back out of isn't a review.
+    #[test]
+    fn opening_the_review_changes_nothing() {
+        with_temp_config(|m| {
+            let path = write_hypridle(FIVE_LISTENERS);
+            m.tab = Tab::Idle;
+            let _ = m.update(Message::AdoptOpen);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), FIVE_LISTENERS);
+            assert!(m.idle.listeners.is_empty(), "nothing adopted yet");
+            let _ = m.update(Message::AdoptCancel);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), FIVE_LISTENERS);
+            assert!(m.adopt.is_none());
+        });
+    }
+
+    /// The whole reason retiring exists. Blocks accumulate, so adopting
+    /// without standing the originals down leaves hypridle running both
+    /// sets — on this machine's real config, ten listeners, two of which
+    /// lock the screen.
+    #[test]
+    fn adopting_stands_the_originals_down_so_the_daemon_sees_one_of_each() {
+        with_temp_config(|m| {
+            let path = write_hypridle(FIVE_LISTENERS);
+            // `install` makes this during the save; the retire step
+            // refuses without it, and here it has not happened yet.
+            std::fs::write(
+                path.with_extension("conf.hyprforge.bak"),
+                FIVE_LISTENERS,
+            )
+            .unwrap();
+
+            m.tab = Tab::Idle;
+            let _ = m.update(Message::AdoptOpen);
+            let _ = m.update(Message::AdoptConfirm);
+            assert_eq!(m.idle.listeners.len(), 2, "adopted into the app");
+
+            // The retire is deferred until the settings actually reached
+            // the daemon, which is what `Applied` reports.
+            assert!(m.pending_retire.is_some(), "a retire should be pending");
+            let _ = m.update(Message::Applied(Tab::Idle, Ok(Applied::NeedsRestart)));
+
+            let after = hyprforge_core::hyprlang::parse(&std::fs::read_to_string(&path).unwrap());
+            assert_eq!(after.blocks("listener").count(), 0, "the originals must be stood down");
+            assert_eq!(after.blocks("general").count(), 0);
+        });
+    }
+
+    /// Commented out, never deleted — the difference between a change the
+    /// user can read and undo and one that looks like the app ate their
+    /// config.
+    #[test]
+    fn retiring_keeps_every_line_the_user_wrote() {
+        with_temp_config(|m| {
+            let path = write_hypridle(FIVE_LISTENERS);
+            std::fs::write(path.with_extension("conf.hyprforge.bak"), FIVE_LISTENERS).unwrap();
+            m.tab = Tab::Idle;
+            let _ = m.update(Message::AdoptOpen);
+            let _ = m.update(Message::AdoptConfirm);
+            let _ = m.update(Message::Applied(Tab::Idle, Ok(Applied::NeedsRestart)));
+
+            let after = std::fs::read_to_string(&path).unwrap();
+            for fragment in ["systemctl suspend", "brightnessctl -r", "hyprforge-lock"] {
+                assert!(after.contains(fragment), "{fragment} was lost:\n{after}");
+            }
+        });
+    }
+
+    /// The backup is the user's way out. Standing their settings down
+    /// without one is not a trade this app gets to make for them.
+    #[test]
+    fn nothing_is_retired_without_a_backup_to_go_back_to() {
+        with_temp_config(|m| {
+            let path = write_hypridle(FIVE_LISTENERS);
+            m.tab = Tab::Idle;
+            let _ = m.update(Message::AdoptOpen);
+            let _ = m.update(Message::AdoptConfirm);
+            let _ = m.update(Message::Applied(Tab::Idle, Ok(Applied::NeedsRestart)));
+
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                FIVE_LISTENERS,
+                "the original must be untouched when there is no backup"
+            );
+            let error = m.error.as_ref().expect("the user must be told");
+            assert!(error.contains("both copies"), "{error}");
+        });
+    }
+
+    /// A candidate this screen cannot represent may still be adopted —
+    /// the user asked — but its original stays live, because retiring it
+    /// would narrow the setting and then delete the evidence.
+    #[test]
+    fn a_setting_this_app_cannot_fully_model_keeps_its_original() {
+        with_temp_config(|m| {
+            let body = "listener {\n    timeout = 5\n    on-timeout = x\n    brand_new_key = 1\n}\n";
+            let path = write_hypridle(body);
+            std::fs::write(path.with_extension("conf.hyprforge.bak"), body).unwrap();
+            m.tab = Tab::Idle;
+            let _ = m.update(Message::AdoptOpen);
+
+            let review = m.adopt.as_ref().unwrap();
+            assert!(!review.candidates[0].checked, "must not be pre-ticked");
+            assert_eq!(review.candidates[0].dropped, vec!["brand_new_key"]);
+
+            // The user ticks it anyway.
+            let _ = m.update(Message::AdoptToggle(0, true));
+            let _ = m.update(Message::AdoptConfirm);
+            let _ = m.update(Message::Applied(Tab::Idle, Ok(Applied::NeedsRestart)));
+
+            assert_eq!(m.idle.listeners.len(), 1, "adopted as asked");
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                body,
+                "but its original must stay live, since the import narrowed it"
+            );
+        });
+    }
+
+    /// Importing must not discard what the user already set up in the
+    /// app. Appending is the only safe reading of "import".
+    #[test]
+    fn importing_adds_to_what_is_already_there() {
+        with_temp_config(|m| {
+            let path = write_hypridle(FIVE_LISTENERS);
+            std::fs::write(path.with_extension("conf.hyprforge.bak"), FIVE_LISTENERS).unwrap();
+            m.idle.listeners.push(idle::Listener {
+                timeout: 42,
+                on_timeout: "mine".to_string(),
+                ..idle::Listener::default()
+            });
+            m.tab = Tab::Idle;
+            let _ = m.update(Message::AdoptOpen);
+            let _ = m.update(Message::AdoptConfirm);
+
+            assert_eq!(m.idle.listeners.len(), 3);
+            assert_eq!(m.idle.listeners[0].on_timeout, "mine", "the user's own must survive");
+        });
     }
 
     #[test]
