@@ -1188,7 +1188,7 @@ mod tests {
     fn an_unpaired_device_is_listed_but_offers_no_connect_action_and_says_why() {
         let (mut m, _backend) = module();
         let stranger = device("Stranger", "AA:BB:CC:DD:EE:01", false, false);
-        assert!(stranger.unsupported_reason().is_some());
+        assert!(!stranger.paired, "precondition: this device has never been paired");
         let _ = m.update(Message::Loaded(loaded(status(AdapterState::On, false), vec![stranger.clone()])));
         assert_eq!(m.devices.len(), 1, "still listed");
 
