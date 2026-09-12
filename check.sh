@@ -109,7 +109,7 @@ else
         # are named. That also survives a test being renamed, which
         # `--skip` on the test names would not.
         output=$(
-            cargo test --workspace --exclude hyprforge-ecosystem --exclude hyprforge-network --exclude hyprforge-bluetooth -- --ignored --test-threads=1 2>&1
+            cargo test --workspace --exclude hyprforge-ecosystem --exclude hyprforge-network --exclude hyprforge-bluetooth --exclude hyprforge-tray -- --ignored --test-threads=1 2>&1
             cargo test -p hyprforge-ecosystem --lib --test live_ecosystem -- --ignored --test-threads=1 2>&1
         )
         if grep -q "test result: FAILED" <<<"$output"; then
@@ -203,6 +203,28 @@ else
             grep -E '^test .* FAILED' <<<"$output" | head -20
         else
             ok "$(count_tests <<<"$output") BlueZ tests passed"
+            while IFS= read -r reason; do
+                [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
+            done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^(]*\).*/\1/p' <<<"$output" | sort -u)
+        fi
+    fi
+    # Answers to whichever bar is offering a tray, which is neither the
+    # compositor nor a system service. Registering really does put an icon
+    # in the user's bar for a fraction of a second — that is the smallest
+    # observable form of "a host accepted it", and no unit test can reach it.
+    step "Live tests against a tray host"
+    if ! command -v busctl >/dev/null; then
+        skip "tray tests" "busctl not available to ask"
+    elif ! busctl --user list --no-legend 2>/dev/null | grep -q '^org.kde.StatusNotifierWatcher'; then
+        skip "tray tests" "no StatusNotifierWatcher is running (no bar with a tray)"
+    else
+        output=$(cargo test -p hyprforge-tray --test live_tray \
+            -- --ignored --test-threads=1 --nocapture 2>&1)
+        if grep -q "test result: FAILED" <<<"$output"; then
+            bad "tray tests failed — a real tray host would not show these icons"
+            grep -E '^test .* FAILED' <<<"$output" | head -20
+        else
+            ok "$(count_tests <<<"$output") tray tests passed"
             while IFS= read -r reason; do
                 [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
             done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^(]*\).*/\1/p' <<<"$output" | sort -u)
