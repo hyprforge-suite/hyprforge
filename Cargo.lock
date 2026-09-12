@@ -1442,6 +1442,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyprforge-clipboard"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "hyprforge-paths",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.19",
+ "toml",
+ "tracing",
+ "wayland-client",
+ "wayland-protocols-wlr",
+]
+
+[[package]]
 name = "hyprforge-core"
 version = "0.1.0"
 dependencies = [
