@@ -1659,6 +1659,7 @@ dependencies = [
 name = "hyprforge-tray"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "hyprforge-bluetooth",
  "hyprforge-network",
  "thiserror 2.0.19",

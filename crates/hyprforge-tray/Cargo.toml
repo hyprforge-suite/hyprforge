@@ -16,10 +16,13 @@ path = "src/bin/trayd.rs"
 # reason this is possible at all: the suite forbids GTK and Qt, and every
 # other way to put an icon in a bar drags one of them in.
 zbus.workspace = true
-tokio.workspace = true
+# "process" for spawning `hyprforge-settings --screen <name>` on a click,
+# never waited on — see the comment on `handle_clicks` in trayd.rs.
+tokio = { workspace = true, features = ["process"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true
+anyhow.workspace = true
 
 # Used only by the binary. Cargo has no way to say that for a crate with
 # both, and splitting into two crates to express it would be more
