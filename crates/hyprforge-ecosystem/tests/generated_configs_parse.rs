@@ -53,6 +53,20 @@ fn is_running(daemon: &str) -> bool {
 /// listener nobody asked for.
 const ERROR_MARKERS: &[&str] = &["does not exist", "config error in file"];
 
+/// Printed whenever a check could not be made, so `check.sh` can tell a
+/// check that *passed* from one that never *ran*.
+///
+/// libtest has no notion of a skipped test. Returning early from one is
+/// indistinguishable from asserting successfully — the runner prints
+/// `test result: ok. 4 passed` either way — so with hyprpaper running,
+/// three of the four checks here reported success having verified
+/// nothing, and one of those verified nothing at all.
+///
+/// That is exactly the "couldn't tell, reported as nothing wrong"
+/// mistake the rest of this suite exists to catch, occurring inside the
+/// suite. Making the skip greppable is what lets the script say so.
+const SKIP_MARKER: &str = "HYPRFORGE-SKIP:";
+
 struct Parsed {
     output: String,
 }
@@ -66,8 +80,10 @@ impl Parsed {
 
 /// Runs `daemon --config <path>` briefly and captures what it said.
 ///
-/// `None` when the daemon isn't installed **or is already running**, so
-/// the suite skips rather than fails.
+/// `None` when the check could not be made — the daemon isn't installed,
+/// or is already running. Every such path prints [`SKIP_MARKER`] first,
+/// because a silent `None` here is a test that passes without checking
+/// anything.
 ///
 /// The running check is not caution, it is required. A second hyprpaper
 /// takes over the IPC socket, and when it exits the socket is gone —
@@ -75,32 +91,53 @@ impl Parsed {
 /// `hyprctl hyprpaper` afterwards answers "failed to connect". That
 /// happened once here and needed a manual restart to undo.
 fn parse_with(daemon: &str, contents: &str) -> Option<Parsed> {
-    if !Command::new("which").arg(daemon).output().ok()?.status.success() {
+    let installed = Command::new("which")
+        .arg(daemon)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !installed {
+        eprintln!("{SKIP_MARKER} {daemon} is not installed");
         return None;
     }
     // Only hyprpaper. A second hypridle just tracks idle on its own for
     // the two seconds it lives, with a timeout far too long to fire.
     if daemon == "hyprpaper" && is_running(daemon) {
         eprintln!(
-            "hyprpaper is running — skipping. A second instance takes over its IPC \
+            "{SKIP_MARKER} hyprpaper is running. A second instance takes over its IPC \
              socket, and when it exits the socket is gone, leaving the original \
              alive but unreachable."
         );
         return None;
     }
-    let dir = tempfile::tempdir().ok()?;
+    let dir = match tempfile::tempdir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            eprintln!("{SKIP_MARKER} could not create a temp dir for {daemon}: {e}");
+            return None;
+        }
+    };
     let path = dir.path().join("generated.conf");
-    std::fs::write(&path, contents).ok()?;
+    if let Err(e) = std::fs::write(&path, contents) {
+        eprintln!("{SKIP_MARKER} could not write the config for {daemon}: {e}");
+        return None;
+    }
 
     // `timeout` rather than a manual kill: these are daemons and will
     // otherwise sit there. One second is far longer than parsing takes.
-    let out = Command::new("timeout")
+    let out = match Command::new("timeout")
         .arg("2")
         .arg(daemon)
         .arg("--config")
         .arg(&path)
         .output()
-        .ok()?;
+    {
+        Ok(out) => out,
+        Err(e) => {
+            eprintln!("{SKIP_MARKER} could not run {daemon}: {e}");
+            return None;
+        }
+    };
     Some(Parsed {
         output: format!(
             "{}{}",

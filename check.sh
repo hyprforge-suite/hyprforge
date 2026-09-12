@@ -83,12 +83,63 @@ else
         # --test-threads=1 because these share one compositor: each loads
         # probe values and reloads to drop them, so two at once would undo
         # each other mid-assertion.
-        output=$(cargo test --workspace -- --ignored --test-threads=1 2>&1)
+        #
+        # Two invocations rather than one --workspace run, because the
+        # ecosystem crate also holds tier 3's parse tests and those have a
+        # different requirement — the daemons installed, *not* running —
+        # so they get their own step below. Running them here as well
+        # would report a daemon rejecting a generated file under the
+        # heading "the code disagrees with the running system", which is
+        # a different thing to go and look at.
+        #
+        # cargo cannot exclude a single test target, so the live targets
+        # are named. That also survives a test being renamed, which
+        # `--skip` on the test names would not.
+        output=$(
+            cargo test --workspace --exclude hyprforge-ecosystem -- --ignored --test-threads=1 2>&1
+            cargo test -p hyprforge-ecosystem --lib --test live_ecosystem -- --ignored --test-threads=1 2>&1
+        )
         if grep -q "test result: FAILED" <<<"$output"; then
             bad "live tests failed — the code disagrees with the running system"
             grep -E '^test .* FAILED' <<<"$output" | head -20
         else
             ok "$(count_tests <<<"$output") live tests passed against $(hyprctl version | head -1)"
+        fi
+    fi
+
+    # Tier 3, and deliberately not gated on Hyprland: `--config` is read
+    # before a daemon does anything else, so these need hyprpaper and
+    # hypridle *installed*, not running — and not a compositor at all.
+    # Folded into the tier 2 run they inherited its `hyprctl version`
+    # gate, so on a machine with the daemons installed and no compositor
+    # they silently never ran, which is the one arrangement where they
+    # are the only check left.
+    step "Parse tests against the ecosystem daemons"
+    installed=()
+    for daemon in hyprpaper hypridle; do
+        command -v "$daemon" >/dev/null && installed+=("$daemon")
+    done
+    if [[ ${#installed[@]} -eq 0 ]]; then
+        skip "parse tests" "neither hyprpaper nor hypridle is installed"
+    else
+        # --nocapture so the skip markers reach this script. libtest has no
+        # skipped state: a check that could not run returns early and
+        # prints `ok`, exactly like one that passed. With hyprpaper
+        # running that made three of these four report success having
+        # verified nothing — so the tests announce a skip and this reads
+        # it. See SKIP_MARKER in the test file.
+        output=$(cargo test -p hyprforge-ecosystem --test generated_configs_parse \
+            -- --ignored --test-threads=1 --nocapture 2>&1)
+        if grep -q "test result: FAILED" <<<"$output"; then
+            bad "parse tests failed — a daemon rejected a file this project generates"
+            grep -E '^test .* FAILED' <<<"$output" | head -20
+        else
+            ok "$(count_tests <<<"$output") parse tests passed"
+            # Shown even though nothing failed: a skipped check is not a
+            # passing one, and the count above cannot tell them apart.
+            while IFS= read -r reason; do
+                [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
+            done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^.]*\).*/\1/p' <<<"$output" | sort -u)
         fi
     fi
 fi
