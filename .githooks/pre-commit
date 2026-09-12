@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Runs tier 1 before every commit: clippy, the unit tests, and the
+# renderer colour-space check.
+#
+# Enabled by `git config core.hooksPath .githooks`, which `./hyprforge
+# --install` also sets. Nothing here needs a compositor or a daemon, so
+# it is safe on any machine and adds no requirement a contributor has to
+# know about.
+#
+# Tier 1 is not the valuable tier — tiers 2 and 3 catch the code that is
+# internally consistent and wrong about the system it talks to. It is the
+# tier that can run unattended, and the `web-colors` check inside it is
+# the one assertion in this project whose regression is invisible to
+# every test *and* to reading the diff: both renderers report the same
+# `Color` and only the pixels differ.
+#
+# To commit anyway — a work-in-progress commit on a branch, say:
+#   git commit --no-verify
+set -uo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+cd "$root" || exit 1
+
+if [[ ! -x ./check.sh ]]; then
+    echo "pre-commit: ./check.sh is missing or not executable; skipping." >&2
+    exit 0
+fi
+
+./check.sh --quick || {
+    printf '\n\033[31mpre-commit: tier 1 failed, so nothing was committed.\033[0m\n' >&2
+    printf 'Fix the above, or use `git commit --no-verify` to commit regardless.\n\n' >&2
+    exit 1
+}

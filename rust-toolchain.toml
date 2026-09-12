@@ -1,0 +1,9 @@
+# Pinned because `check.sh` demands clippy be *silent*, and clippy's lint
+# set changes between releases: a `rustup update` can turn a clean tree
+# into a failing one without a line of this project's code changing, and
+# the failure then looks like a regression in whatever was last edited.
+#
+# Raise this deliberately, and run ./check.sh when you do.
+[toolchain]
+channel = "1.97.1"
+components = ["clippy", "rustfmt"]

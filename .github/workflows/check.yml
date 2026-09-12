@@ -1,0 +1,53 @@
+# Tier 1 only, and that is not an oversight.
+#
+# check.sh has three tiers. Tier 1 — clippy, the unit tests, and the
+# renderer colour-space assertion — needs nothing but a compiler, so it
+# runs here. Tiers 2 and 3 cannot: tier 2 checks every claim the option
+# catalogues make against a *running Hyprland*, and tier 3 hands the
+# generated files to hyprpaper and hypridle themselves. Neither exists on
+# a hosted runner, and a green tick here must not be read as either of
+# them having passed. They stay a thing you run on a real machine.
+#
+# What this does buy is the `web-colors` check, whose regression is
+# invisible to every test and to reading the diff — both renderers report
+# the same `Color` and only the pixels differ.
+#
+# Dormant until this repository has a remote; delete it if it never will.
+name: check
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  tier1:
+    name: clippy + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The native dependencies behind the -sys crates in Cargo.lock:
+      #   pam-sys2  -> libpam0g-dev   (hyprforge-lock authenticates)
+      #   xkbcommon -> libxkbcommon-dev
+      #   wayland-sys -> libwayland-dev
+      # mlua is vendored, so it needs a C compiler but no system Lua.
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            pkg-config libpam0g-dev libxkbcommon-dev libwayland-dev
+
+      # No toolchain action: rust-toolchain.toml pins the version, and
+      # rustup on the runner honours it. One place to raise it.
+      - name: Show toolchain
+        run: rustc --version && cargo --version && cargo clippy --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: check.sh --quick
+        run: ./check.sh --quick
