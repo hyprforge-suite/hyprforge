@@ -11,6 +11,13 @@
 #   3. parse tests          — do the ecosystem daemons agree? The generated
 #                             config files are handed to hyprpaper/hypridle
 #                             themselves. Needs those installed, not running.
+#   3b. NetworkManager      — does NetworkManager agree? Read-only checks
+#                             that its interface is the shape
+#                             hyprforge-network claims. Needs it running.
+#
+# Tiers 2, 3 and 3b each gate on the thing they actually ask, rather than
+# sharing one --ignored run: a check that silently never runs is worse
+# than one that fails.
 #
 # Tier 1 catches a mistake in the code. Tiers 2 and 3 catch the far nastier
 # kind: code that is internally consistent and wrong about the system it is
@@ -84,10 +91,11 @@ else
         # probe values and reloads to drop them, so two at once would undo
         # each other mid-assertion.
         #
-        # Two invocations rather than one --workspace run, because the
-        # ecosystem crate also holds tier 3's parse tests and those have a
-        # different requirement — the daemons installed, *not* running —
-        # so they get their own step below. Running them here as well
+        # Two invocations rather than one --workspace run, because two
+        # crates hold live tests that answer to something other than the
+        # compositor: the ecosystem crate's parse tests need the daemons
+        # installed and *not* running, and the network crate's need
+        # NetworkManager. Both get their own step below. Running them here as well
         # would report a daemon rejecting a generated file under the
         # heading "the code disagrees with the running system", which is
         # a different thing to go and look at.
@@ -96,7 +104,7 @@ else
         # are named. That also survives a test being renamed, which
         # `--skip` on the test names would not.
         output=$(
-            cargo test --workspace --exclude hyprforge-ecosystem -- --ignored --test-threads=1 2>&1
+            cargo test --workspace --exclude hyprforge-ecosystem --exclude hyprforge-network -- --ignored --test-threads=1 2>&1
             cargo test -p hyprforge-ecosystem --lib --test live_ecosystem -- --ignored --test-threads=1 2>&1
         )
         if grep -q "test result: FAILED" <<<"$output"; then
@@ -140,6 +148,32 @@ else
             while IFS= read -r reason; do
                 [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
             done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^.]*\).*/\1/p' <<<"$output" | sort -u)
+        fi
+    fi
+
+    # Answers to NetworkManager, not to Hyprland, so it gets its own gate
+    # for the same reason the parse tests did: folded into the tier 2 run
+    # these would need a compositor to check a service that has nothing to
+    # do with one.
+    #
+    # Every test behind this step is read-only. They run on a machine
+    # somebody is using, quite possibly over the connection they inspect.
+    step "Live tests against NetworkManager"
+    if ! command -v systemctl >/dev/null; then
+        skip "NetworkManager tests" "systemctl not available to ask"
+    elif ! systemctl is-active --quiet NetworkManager; then
+        skip "NetworkManager tests" "NetworkManager isn't running"
+    else
+        output=$(cargo test -p hyprforge-network --test live_networkmanager \
+            -- --ignored --test-threads=1 --nocapture 2>&1)
+        if grep -q "test result: FAILED" <<<"$output"; then
+            bad "NetworkManager tests failed — the code disagrees with the running service"
+            grep -E '^test .* FAILED' <<<"$output" | head -20
+        else
+            ok "$(count_tests <<<"$output") NetworkManager tests passed"
+            while IFS= read -r reason; do
+                [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
+            done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^(]*\).*/\1/p' <<<"$output" | sort -u)
         fi
     fi
 fi

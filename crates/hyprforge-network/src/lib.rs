@@ -17,9 +17,11 @@
 //! also refuses to print itself.
 
 pub mod backend;
+pub mod nm;
 pub mod secret;
 pub mod types;
 
+pub use nm::NetworkManagerBackend;
 pub use backend::{NetworkBackend, SavedNetwork, Status};
 pub use secret::Psk;
 pub use types::{AccessPoint, NetworkError, RadioState, Security, Ssid};
