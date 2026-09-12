@@ -57,6 +57,17 @@ pub trait NetworkBackend: Send + Sync {
         psk: Option<&Psk>,
     ) -> Result<(), NetworkError>;
 
+    /// Brings up a connection NetworkManager has already saved, using
+    /// the secret it already holds.
+    ///
+    /// Separate from [`NetworkBackend::connect`] because that one *adds*
+    /// a connection and needs a passphrase to build it with. Without this
+    /// there is no way to rejoin a known network at all: the only path
+    /// was to type the password again, which a tray menu cannot do and a
+    /// settings screen should not ask for. `id` is the handle
+    /// [`SavedNetwork`] carries.
+    async fn connect_saved(&self, id: &str) -> Result<(), NetworkError>;
+
     async fn disconnect(&self) -> Result<(), NetworkError>;
 
     /// Deletes a saved network, so it stops reconnecting.
@@ -186,6 +197,27 @@ pub mod mock {
             Ok(())
         }
 
+        async fn connect_saved(&self, id: &str) -> Result<(), NetworkError> {
+            self.guard()?;
+            let saved = self.saved.lock().unwrap();
+            let Some(network) = saved.iter().find(|s| s.id == id) else {
+                return Err(NetworkError::Refused(
+                    "That network is no longer saved.".to_string(),
+                ));
+            };
+            let ssid = network.ssid.clone();
+            drop(saved);
+            self.connect_calls.lock().unwrap().push((ssid.clone(), None));
+            if *self.reject_psk.lock().unwrap() {
+                return Err(NetworkError::BadPassphrase);
+            }
+            *self.status.lock().unwrap() = Some(Status {
+                radio: RadioState::On,
+                connected_to: Some(ssid),
+            });
+            Ok(())
+        }
+
         async fn disconnect(&self) -> Result<(), NetworkError> {
             self.guard()?;
             *self.status.lock().unwrap() = Some(Status {
@@ -299,6 +331,31 @@ mod tests {
         assert_eq!(saved.len(), 1);
         assert!(saved[0].autoconnect);
         assert_eq!(backend.status().await.unwrap().connected_to, Some(Ssid::new("home")));
+    }
+
+    /// Rejoining a known network must not require the password again.
+    /// NetworkManager already holds the secret; asking for it is
+    /// something a tray menu cannot do at all and a settings screen
+    /// should not do.
+    #[tokio::test]
+    async fn a_saved_network_is_rejoined_without_being_asked_for_the_password() {
+        let backend = MockBackend::new();
+        let home = ap("home", "aa", 80);
+        backend.connect(&home, Some(&Psk::new("correcthorse"))).await.unwrap();
+        backend.disconnect().await.unwrap();
+        let id = backend.saved_networks().await.unwrap()[0].id.clone();
+
+        backend.connect_saved(&id).await.expect("a saved network rejoins");
+        assert_eq!(
+            backend.status().await.unwrap().connected_to,
+            Some(Ssid::new("home"))
+        );
+        let calls = backend.connect_calls.lock().unwrap();
+        assert_eq!(
+            calls.last().unwrap().1,
+            None,
+            "rejoining must not carry a passphrase — NetworkManager has it"
+        );
     }
 
     #[tokio::test]

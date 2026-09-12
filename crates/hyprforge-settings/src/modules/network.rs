@@ -317,6 +317,26 @@ impl<B: NetworkBackend + 'static> SettingsModule for NetworkModule<B> {
                     return Task::none();
                 }
                 self.error = None;
+
+                // A network NetworkManager has already saved rejoins with
+                // the secret it already holds. Asking for the password
+                // again to reconnect to your own home network is the
+                // commonest thing this screen does, and typing it every
+                // time is not a small annoyance — it is the difference
+                // between the screen being usable and being a form.
+                if let Some(saved) = self
+                    .saved
+                    .iter()
+                    .find(|s| s.ssid == ap.ssid)
+                    .map(|s| s.id.clone())
+                {
+                    let backend = self.backend.clone();
+                    return Task::perform(
+                        async move { backend.connect_saved(&saved).await.map_err(LoadError::from) },
+                        Message::Connected,
+                    );
+                }
+
                 if ap.security.needs_passphrase() {
                     self.joining = Some(JoinDraft {
                         ap,
@@ -756,6 +776,10 @@ impl NetworkBackend for LazyNetworkManagerBackend {
         self.get().await?.connect(ap, psk).await
     }
 
+    async fn connect_saved(&self, id: &str) -> Result<(), NetworkError> {
+        self.get().await?.connect_saved(id).await
+    }
+
     async fn disconnect(&self) -> Result<(), NetworkError> {
         self.get().await?.disconnect().await
     }
@@ -898,6 +922,32 @@ mod tests {
             assert!(!prefs.network, "the icon this screen owns was switched off");
             assert!(!prefs.bluetooth, "the other icon's setting must survive untouched");
         });
+    }
+
+    /// Reconnecting to your own network is the commonest thing this
+    /// screen does, and NetworkManager already holds the secret. Asking
+    /// for it again turns a click into a form — and it is the one thing
+    /// a tray menu cannot do at all, which is how this was noticed.
+    #[test]
+    fn clicking_a_saved_network_rejoins_it_without_asking_for_the_password() {
+        let (mut m, backend) = module();
+        let home = ap("home", Security::Wpa2Personal, 70);
+        let _ = m.update(Message::Loaded(loaded(
+            status(RadioState::On, None),
+            vec![home],
+            vec![SavedNetwork {
+                ssid: Ssid::new("home"),
+                id: "conn-1".to_string(),
+                autoconnect: true,
+            }],
+        )));
+
+        let _ = m.update(Message::RowClicked(0));
+        assert!(
+            m.joining.is_none(),
+            "a saved network must not open the passphrase dialog"
+        );
+        let _ = backend;
     }
 
     /// The tray toggle does not depend on NetworkManager, and is wanted
@@ -1149,6 +1199,10 @@ mod tests {
             ap("home", Security::Wpa2Personal, 70),
             ap("corp-wifi", Security::Enterprise, 55),
             ap("guest", Security::Owe, 65),
+            // Secured and *not* saved, which is the only case that still
+            // opens the passphrase dialog — a saved one rejoins with the
+            // secret NetworkManager already has.
+            ap("neighbour", Security::Wpa2Personal, 30),
         ];
         let saved = vec![SavedNetwork {
             ssid: Ssid::new("home"),
@@ -1165,14 +1219,15 @@ mod tests {
         m.error = Some("a scan failed".to_string());
         let _ = m.view(scale); // error banner over a populated list
 
-        // `for_display` reorders by strength, so find the WPA2 row rather
-        // than assuming an index.
-        let home_index = m
+        // `for_display` reorders by strength, so find the row rather than
+        // assuming an index — and it must be the *unsaved* secured one,
+        // since a saved network no longer prompts.
+        let unsaved_index = m
             .access_points
             .iter()
-            .position(|ap| ap.security == Security::Wpa2Personal)
+            .position(|ap| ap.ssid == Ssid::new("neighbour"))
             .unwrap();
-        let _ = m.update(Message::RowClicked(home_index));
+        let _ = m.update(Message::RowClicked(unsaved_index));
         assert!(m.joining.is_some());
         let _ = m.view(scale); // join dialog open
 

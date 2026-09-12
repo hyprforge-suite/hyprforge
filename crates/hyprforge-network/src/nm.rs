@@ -51,6 +51,17 @@ const ACTIVE_STATE_DEACTIVATED: u32 = 4;
 trait NetworkManagerDbus {
     fn get_devices(&self) -> zbus::Result<Vec<OwnedObjectPath>>;
 
+    /// Brings up a connection that already exists, with the secret
+    /// NetworkManager already stores. `specific_object` is `/` — let it
+    /// pick the access point itself, since a saved connection may be
+    /// reachable through several.
+    fn activate_connection(
+        &self,
+        connection: &ObjectPath<'_>,
+        device: &ObjectPath<'_>,
+        specific_object: &ObjectPath<'_>,
+    ) -> zbus::Result<OwnedObjectPath>;
+
     fn add_and_activate_connection(
         &self,
         connection: HashMap<&str, HashMap<&str, Value<'_>>>,
@@ -532,6 +543,26 @@ impl NetworkBackend for NetworkManagerBackend {
                 Err(e)
             }
         }
+    }
+
+    async fn connect_saved(&self, id: &str) -> Result<(), NetworkError> {
+        let device = self.wifi_device().await?;
+        let connection = ObjectPath::try_from(id.to_string())
+            .map_err(|_| NetworkError::Refused(format!("not a connection path: {id}")))?;
+        let any_access_point = ObjectPath::try_from("/").expect("/ is a valid object path");
+
+        let root = self.root().await?;
+        let active = bounded(
+            ACTIVATION_TIMEOUT,
+            root.activate_connection(&connection, &device.as_ref(), &any_access_point),
+        )
+        .await?;
+
+        // `had_passphrase` is false: nothing was typed, so a failure here
+        // is not the user's password being wrong. It is more likely the
+        // network being out of range, and saying "the password wasn't
+        // accepted" would send them to change a password that is fine.
+        self.await_activation(active, false).await
     }
 
     async fn disconnect(&self) -> Result<(), NetworkError> {

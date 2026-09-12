@@ -16,12 +16,13 @@
 //! Passive item, and dropping is the only thing that reliably releases
 //! the bus name a host is showing.
 
-use hyprforge_bluetooth::backend::BluetoothBackend;
-use hyprforge_bluetooth::{AdapterState, BlueZBackend, Device};
+use hyprforge_bluetooth::backend::{for_display as bt_for_display, BluetoothBackend};
+use hyprforge_bluetooth::{Address, AdapterState, BlueZBackend, Device};
 use hyprforge_bluetooth::Status as BtStatus;
-use hyprforge_network::backend::NetworkBackend;
-use hyprforge_network::{NetworkManagerBackend, RadioState, Ssid};
+use hyprforge_network::backend::{for_display as net_for_display, NetworkBackend, SavedNetwork};
+use hyprforge_network::{AccessPoint, NetworkManagerBackend, RadioState, Ssid};
 use hyprforge_network::Status as NetStatus;
+use hyprforge_tray::menu::{ItemKind, Menu, MenuItem};
 use hyprforge_tray::prefs::{self, Prefs};
 use hyprforge_tray::{watcher_present, Category, TrayIcon, TrayItem};
 use hyprforge_tray::Status as TrayStatus;
@@ -90,6 +91,11 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("tray host found; registering icons");
 
     let (clicks_tx, clicks_rx) = tokio::sync::mpsc::unbounded_channel();
+    // Separate from `clicks_tx`: a click on the icon itself says which
+    // settings screen to open, a click inside its menu says which
+    // operation to perform. `sni.rs` keeps the two apart for the same
+    // reason — see `TrayIcon::register_with_menu`'s doc comment.
+    let (menu_clicks_tx, menu_clicks_rx) = tokio::sync::mpsc::unbounded_channel();
 
     // Registered unavailable-looking to start: the first real poll is at
     // most one `POLL_INTERVAL` away, and an icon that starts blank until
@@ -98,10 +104,22 @@ async fn main() -> anyhow::Result<()> {
     // tick (which fires immediately) reads preferences and drops
     // whichever one the user has already switched off, so there is only
     // one place that ever decides "is this icon supposed to be up".
-    let network_icon =
-        register_with_retry(network_item(None, None, None, true), 0, clicks_tx.clone()).await;
-    let bluetooth_icon =
-        register_with_retry(bluetooth_item(None, None, true), 1, clicks_tx.clone()).await;
+    let network_icon = register_with_retry(
+        network_item(None, None, None, true),
+        network_menu(None, None, true, &[], &[]),
+        0,
+        clicks_tx.clone(),
+        menu_clicks_tx.clone(),
+    )
+    .await;
+    let bluetooth_icon = register_with_retry(
+        bluetooth_item(None, None, true),
+        bluetooth_menu(None, true, &[]),
+        1,
+        clicks_tx.clone(),
+        menu_clicks_tx.clone(),
+    )
+    .await;
 
     let network_slot: IconSlot = Arc::new(Mutex::new(Some(network_icon)));
     let bluetooth_slot: IconSlot = Arc::new(Mutex::new(Some(bluetooth_icon)));
@@ -110,16 +128,19 @@ async fn main() -> anyhow::Result<()> {
         network_slot.clone(),
         bluetooth_slot.clone(),
         clicks_tx.clone(),
+        menu_clicks_tx.clone(),
     ));
     let click_task = tokio::spawn(handle_clicks(clicks_rx));
+    let menu_click_task = tokio::spawn(handle_menu_clicks(menu_clicks_rx));
     let reannounce_task = tokio::spawn(reannounce_loop(probe, network_slot, bluetooth_slot));
 
-    // None of these three loops return under normal operation. If one
-    // panics, that is worth knowing about rather than leaving the other
-    // two running silently short-handed.
+    // None of these four loops return under normal operation. If one
+    // panics, that is worth knowing about rather than leaving the others
+    // running silently short-handed.
     tokio::select! {
         r = poll_task => log_task_exit("poll", r),
         r = click_task => log_task_exit("clicks", r),
+        r = menu_click_task => log_task_exit("menu-clicks", r),
         r = reannounce_task => log_task_exit("reannounce", r),
     }
 
@@ -143,11 +164,21 @@ fn log_task_exit(name: &str, result: Result<(), tokio::task::JoinError>) {
 /// icons in the first place.
 async fn register_with_retry(
     item: TrayItem,
+    menu: Menu,
     index: u32,
     clicks: tokio::sync::mpsc::UnboundedSender<String>,
+    menu_clicks: tokio::sync::mpsc::UnboundedSender<String>,
 ) -> Arc<TrayIcon> {
     loop {
-        match TrayIcon::register(item.clone(), index, clicks.clone()).await {
+        match TrayIcon::register_with_menu(
+            item.clone(),
+            menu.clone(),
+            index,
+            clicks.clone(),
+            menu_clicks.clone(),
+        )
+        .await
+        {
             Ok(icon) => return Arc::new(icon),
             Err(e) => {
                 tracing::warn!(error = %e, icon = %item.id, "failed to register tray icon; retrying");
@@ -222,46 +253,56 @@ async fn bluetooth_backend(state: &mut Reconnecting<BlueZBackend>) -> Option<Arc
 /// is reported as unavailable that tick. A dead bus connection (the
 /// exceedingly rare case) would fail `network_backend` itself and go
 /// through the retry path above rather than this one.
-async fn sample_network(state: &mut Reconnecting<NetworkManagerBackend>) -> TrayItem {
+/// One tick's worth of the network icon *and* its menu — fetched
+/// together because both need the same access-point scan and saved-
+/// network list, and asking for that twice would be a second round trip
+/// against NetworkManager for no new information.
+async fn sample_network(state: &mut Reconnecting<NetworkManagerBackend>) -> (TrayItem, Menu) {
     let Some(backend) = network_backend(state).await else {
-        return network_item(None, None, None, true);
+        return (network_item(None, None, None, true), network_menu(None, None, true, &[], &[]));
     };
     match backend.status().await {
         Ok(status) => {
-            let strength = match &status.connected_to {
-                Some(ssid) => match backend.access_points().await {
-                    Ok(points) => points.iter().find(|ap| &ap.ssid == ssid).map(|ap| ap.strength),
-                    // The connected network can briefly be missing from a
-                    // fresh scan; that is not "unavailable", just "signal
-                    // not known this tick".
-                    Err(_) => None,
-                },
-                None => None,
-            };
-            network_item(Some(&status), status.connected_to.as_ref(), strength, false)
+            // The connected network can briefly be missing from a fresh
+            // scan; that is not "unavailable", just "nothing read this
+            // tick" — an empty list here still lets the item and menu
+            // render, just without a signal reading or any other rows.
+            let points = backend.access_points().await.unwrap_or_default();
+            let strength = status
+                .connected_to
+                .as_ref()
+                .and_then(|ssid| points.iter().find(|ap| &ap.ssid == ssid).map(|ap| ap.strength));
+            // Likewise: a failed saved-list read must not make an
+            // otherwise-fine menu disappear, only omit the "already
+            // saved" distinction for this tick.
+            let saved = backend.saved_networks().await.unwrap_or_default();
+            let item = network_item(Some(&status), status.connected_to.as_ref(), strength, false);
+            let menu =
+                network_menu(Some(&status), status.connected_to.as_ref(), false, &points, &saved);
+            (item, menu)
         }
         Err(e) => {
             tracing::warn!(error = %e, "NetworkManager status call failed");
-            network_item(None, None, None, true)
+            (network_item(None, None, None, true), network_menu(None, None, true, &[], &[]))
         }
     }
 }
 
-async fn sample_bluetooth(state: &mut Reconnecting<BlueZBackend>) -> TrayItem {
+async fn sample_bluetooth(state: &mut Reconnecting<BlueZBackend>) -> (TrayItem, Menu) {
     let Some(backend) = bluetooth_backend(state).await else {
-        return bluetooth_item(None, None, true);
+        return (bluetooth_item(None, None, true), bluetooth_menu(None, true, &[]));
     };
     match backend.status().await {
         Ok(status) => {
-            let connected = match backend.devices().await {
-                Ok(devices) => devices.into_iter().find(|d| d.connected),
-                Err(_) => None,
-            };
-            bluetooth_item(Some(&status), connected.as_ref(), false)
+            let devices = backend.devices().await.unwrap_or_default();
+            let connected = devices.iter().find(|d| d.connected);
+            let item = bluetooth_item(Some(&status), connected, false);
+            let menu = bluetooth_menu(Some(&status), false, &devices);
+            (item, menu)
         }
         Err(e) => {
             tracing::warn!(error = %e, "BlueZ status call failed");
-            bluetooth_item(None, None, true)
+            (bluetooth_item(None, None, true), bluetooth_menu(None, true, &[]))
         }
     }
 }
@@ -327,8 +368,10 @@ async fn sync_icon(
     slot: &IconSlot,
     wanted: bool,
     item: TrayItem,
+    menu: Menu,
     index: u32,
     clicks: &tokio::sync::mpsc::UnboundedSender<String>,
+    menu_clicks: &tokio::sync::mpsc::UnboundedSender<String>,
 ) {
     let id = item.id.clone();
     let mut guard = slot.lock().await;
@@ -337,6 +380,12 @@ async fn sync_icon(
             if let Some(icon) = guard.as_ref() {
                 if let Err(e) = icon.update(item).await {
                     tracing::warn!(error = %e, icon = %id, "failed to update tray icon");
+                }
+                // `update_menu` already skips the work (and the revision
+                // bump) when the menu is unchanged, so calling it every
+                // tick costs nothing extra when nothing changed.
+                if let Err(e) = icon.update_menu(menu).await {
+                    tracing::warn!(error = %e, icon = %id, "failed to update tray menu");
                 }
             }
         }
@@ -351,7 +400,9 @@ async fn sync_icon(
             *guard = None;
         }
         IconAction::Register => {
-            match TrayIcon::register(item, index, clicks.clone()).await {
+            match TrayIcon::register_with_menu(item, menu, index, clicks.clone(), menu_clicks.clone())
+                .await
+            {
                 Ok(icon) => *guard = Some(Arc::new(icon)),
                 Err(e) => {
                     tracing::warn!(error = %e, icon = %id, "failed to register tray icon; will retry next tick");
@@ -365,6 +416,7 @@ async fn poll_loop(
     network_slot: IconSlot,
     bluetooth_slot: IconSlot,
     clicks: tokio::sync::mpsc::UnboundedSender<String>,
+    menu_clicks: tokio::sync::mpsc::UnboundedSender<String>,
 ) {
     let mut net_state = Reconnecting::new();
     let mut bt_state = Reconnecting::new();
@@ -384,11 +436,11 @@ async fn poll_loop(
 
         refresh_prefs(&mut prefs, &mut prefs_load_failed);
 
-        let net_item = sample_network(&mut net_state).await;
-        sync_icon(&network_slot, prefs.network, net_item, 0, &clicks).await;
+        let (net_item, net_menu) = sample_network(&mut net_state).await;
+        sync_icon(&network_slot, prefs.network, net_item, net_menu, 0, &clicks, &menu_clicks).await;
 
-        let bt_item = sample_bluetooth(&mut bt_state).await;
-        sync_icon(&bluetooth_slot, prefs.bluetooth, bt_item, 1, &clicks).await;
+        let (bt_item, bt_menu) = sample_bluetooth(&mut bt_state).await;
+        sync_icon(&bluetooth_slot, prefs.bluetooth, bt_item, bt_menu, 1, &clicks, &menu_clicks).await;
     }
 }
 
@@ -402,26 +454,36 @@ async fn poll_loop(
 /// to stop handling further clicks.
 async fn handle_clicks(mut clicks: tokio::sync::mpsc::UnboundedReceiver<String>) {
     while let Some(screen) = clicks.recv().await {
-        match tokio::process::Command::new("hyprforge-settings")
-            .arg("--screen")
-            .arg(&screen)
-            // The child's output goes nowhere rather than inheriting
-            // this daemon's. A GUI started from here prints its own
-            // renderer chatter — wgpu alone logs its adapter and surface
-            // formats at startup — and inheriting it puts all of that in
-            // the tray daemon's log, once per click, for as long as the
-            // session lasts. The daemon's log is then unreadable and
-            // unbounded, and the one thing it exists to record — a
-            // failed registration — is buried. The child keeps its own
-            // logging; it does not need ours.
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!(error = %e, screen = %screen, "failed to launch hyprforge-settings")
-            }
+        spawn_settings(&screen);
+    }
+}
+
+/// Launches `hyprforge-settings --screen <screen>`, never waited on.
+///
+/// Shared by an icon click (`handle_clicks`) and a menu row that opens
+/// Settings instead of acting directly — a network needing a passphrase
+/// with no saved connection, for instance, since a tray menu has nowhere
+/// to type one.
+fn spawn_settings(screen: &str) {
+    match tokio::process::Command::new("hyprforge-settings")
+        .arg("--screen")
+        .arg(screen)
+        // The child's output goes nowhere rather than inheriting this
+        // daemon's. A GUI started from here prints its own renderer
+        // chatter — wgpu alone logs its adapter and surface formats at
+        // startup — and inheriting it puts all of that in the tray
+        // daemon's log, once per click, for as long as the session
+        // lasts. The daemon's log is then unreadable and unbounded, and
+        // the one thing it exists to record — a failed registration — is
+        // buried. The child keeps its own logging; it does not need
+        // ours.
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, screen = %screen, "failed to launch hyprforge-settings")
         }
     }
 }
@@ -603,6 +665,351 @@ fn bluetooth_item(
                 tooltip_body: "Bluetooth is on".to_string(),
             },
         },
+    }
+}
+
+/// How many networks the Wi-Fi menu shows before it starts truncating.
+///
+/// A scan in a dense apartment building can return dozens of access
+/// points; a menu that lists all of them stops being a menu. Eight is
+/// enough to show a home network plus a handful of neighbours without the
+/// popup running off the bottom of the screen.
+const MAX_NETWORKS_SHOWN: usize = 8;
+
+/// Renders a byte slice as lowercase hex.
+///
+/// [`Ssid`] is arbitrary bytes, not necessarily UTF-8 (see its doc
+/// comment), so it cannot be embedded in an action string as text without
+/// either losing information or risking a `:` inside the name being
+/// mistaken for a field separator. Hex side-steps both: every byte
+/// round-trips, and the result contains none of the vocabulary's own
+/// delimiters.
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        let hi = (pair[0] as char).to_digit(16)?;
+        let lo = (pair[1] as char).to_digit(16)?;
+        out.push(((hi << 4) | lo) as u8);
+    }
+    Some(out)
+}
+
+/// Why [`Security::Enterprise`] is disabled, shortened for a menu row
+/// rather than the full sentence [`hyprforge_network::Security::unsupported_reason`]
+/// gives a whole screen to.
+const ENTERPRISE_ROW_REASON: &str = "enterprise sign-in not supported";
+
+/// What the Wi-Fi menu should contain, from plain data — no D-Bus, no I/O.
+///
+/// `access_points` is expected in scan order; this calls
+/// [`hyprforge_network::backend::for_display`] itself, the same
+/// dedup-and-sort the Network settings screen uses, so the two never
+/// disagree about which of several BSSIDs sharing an SSID is "the"
+/// network. `saved` decides whether a passphrase-protected network gets a
+/// connect action or a Settings one — see the module-level task doc: a
+/// tray menu has nowhere to type a passphrase, so a network this daemon
+/// has no stored credential for can only be joined from Settings.
+fn network_menu(
+    status: Option<&NetStatus>,
+    connected_ssid: Option<&Ssid>,
+    unavailable: bool,
+    access_points: &[AccessPoint],
+    saved: &[SavedNetwork],
+) -> Menu {
+    let settings_row = MenuItem::standard("Network settings…", "wifi:settings");
+
+    let Some(status) = status.filter(|_| !unavailable) else {
+        return Menu::new(vec![
+            MenuItem::disabled("Wi-Fi unavailable"),
+            MenuItem::separator(),
+            settings_row,
+        ]);
+    };
+
+    let mut items = Vec::new();
+    match status.radio {
+        RadioState::Off => {
+            items.push(MenuItem::checkmark("Wi-Fi", false, "wifi:radio:on"));
+            items.push(MenuItem::separator());
+            items.push(settings_row);
+            return Menu::new(items);
+        }
+        // rfkill: no amount of D-Bus flips this back on, so the row is
+        // shown but not offered as a toggle — the same call
+        // `network_item` makes for the icon itself.
+        RadioState::HardwareOff => {
+            items.push(MenuItem {
+                kind: ItemKind::Checkmark,
+                toggle: Some(false),
+                ..MenuItem::disabled("Wi-Fi (blocked by hardware switch)")
+            });
+            items.push(MenuItem::separator());
+            items.push(settings_row);
+            return Menu::new(items);
+        }
+        RadioState::On => {
+            items.push(MenuItem::checkmark("Wi-Fi", true, "wifi:radio:off"));
+        }
+    }
+
+    items.push(MenuItem::separator());
+
+    let displayed = net_for_display(access_points.to_vec());
+    let total = displayed.len();
+    for ap in displayed.into_iter().take(MAX_NETWORKS_SHOWN) {
+        let is_connected = connected_ssid == Some(&ap.ssid);
+        let label = ap.ssid.to_display_string();
+
+        if ap.security.unsupported_reason().is_some() {
+            items.push(MenuItem::disabled(format!("{label} ({ENTERPRISE_ROW_REASON})")));
+            continue;
+        }
+
+        let has_saved = saved.iter().any(|s| s.ssid == ap.ssid);
+        let action = if ap.security.needs_passphrase() && !has_saved {
+            // Nowhere to type a passphrase in a tray menu — see the
+            // module doc.
+            "wifi:settings".to_string()
+        } else {
+            format!("wifi:connect:{}", hex_encode(ap.ssid.as_bytes()))
+        };
+
+        if is_connected {
+            items.push(MenuItem::checkmark(label, true, action));
+        } else {
+            items.push(MenuItem::standard(label, action));
+        }
+    }
+    if total > MAX_NETWORKS_SHOWN {
+        items.push(MenuItem::disabled(format!(
+            "+{} more — see Settings",
+            total - MAX_NETWORKS_SHOWN
+        )));
+    }
+
+    items.push(MenuItem::separator());
+    items.push(settings_row);
+    Menu::new(items)
+}
+
+/// What the Bluetooth menu should contain, from plain data — no D-Bus, no
+/// I/O. Same shape and reasoning as [`network_menu`].
+fn bluetooth_menu(status: Option<&BtStatus>, unavailable: bool, devices: &[Device]) -> Menu {
+    let settings_row = MenuItem::standard("Bluetooth settings…", "bt:settings");
+
+    let Some(status) = status.filter(|_| !unavailable) else {
+        return Menu::new(vec![
+            MenuItem::disabled("Bluetooth unavailable"),
+            MenuItem::separator(),
+            settings_row,
+        ]);
+    };
+
+    let mut items = Vec::new();
+    match status.state {
+        AdapterState::Off => {
+            items.push(MenuItem::checkmark("Bluetooth", false, "bt:radio:on"));
+            items.push(MenuItem::separator());
+            items.push(settings_row);
+            return Menu::new(items);
+        }
+        AdapterState::HardwareBlocked => {
+            items.push(MenuItem {
+                kind: ItemKind::Checkmark,
+                toggle: Some(false),
+                ..MenuItem::disabled("Bluetooth (blocked by hardware switch)")
+            });
+            items.push(MenuItem::separator());
+            items.push(settings_row);
+            return Menu::new(items);
+        }
+        AdapterState::On | AdapterState::Changing => {
+            items.push(MenuItem::checkmark("Bluetooth", true, "bt:radio:off"));
+        }
+    }
+
+    items.push(MenuItem::separator());
+
+    for device in bt_for_display(devices.to_vec()) {
+        if device.unsupported_reason().is_some() {
+            // `unsupported_reason()` is the full-screen sentence; the row
+            // gets a shorter one so the menu stays a menu, not a
+            // paragraph.
+            items.push(MenuItem::disabled(format!(
+                "{} (pairing not supported yet)",
+                device.alias
+            )));
+            continue;
+        }
+
+        let action = if device.connected {
+            format!("bt:disconnect:{}", device.address)
+        } else {
+            format!("bt:connect:{}", device.address)
+        };
+
+        if device.connected {
+            items.push(MenuItem::checkmark(device.alias.clone(), true, action));
+        } else {
+            items.push(MenuItem::standard(device.alias.clone(), action));
+        }
+    }
+
+    items.push(MenuItem::separator());
+    items.push(settings_row);
+    Menu::new(items)
+}
+
+/// The typed operation behind an action string a menu click sends back.
+///
+/// Parsed in exactly one place ([`parse_menu_action`]) so every route a
+/// click can take is visible in one match, and an unknown string — a
+/// typo'd prefix, or a stale action from a menu revision that no longer
+/// exists — resolves to nothing rather than to whichever arm happens to
+/// match a prefix of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MenuAction {
+    /// Opens `hyprforge-settings --screen <screen>`.
+    OpenSettings(&'static str),
+    WifiRadio(bool),
+    /// The SSID's raw bytes, decoded from the hex in the action string.
+    WifiConnect(Vec<u8>),
+    BtRadio(bool),
+    BtConnect(Address),
+    BtDisconnect(Address),
+}
+
+fn parse_menu_action(action: &str) -> Option<MenuAction> {
+    match action {
+        "wifi:settings" => Some(MenuAction::OpenSettings("network")),
+        "wifi:radio:on" => Some(MenuAction::WifiRadio(true)),
+        "wifi:radio:off" => Some(MenuAction::WifiRadio(false)),
+        "bt:settings" => Some(MenuAction::OpenSettings("bluetooth")),
+        "bt:radio:on" => Some(MenuAction::BtRadio(true)),
+        "bt:radio:off" => Some(MenuAction::BtRadio(false)),
+        _ => {
+            if let Some(hex) = action.strip_prefix("wifi:connect:") {
+                hex_decode(hex).map(MenuAction::WifiConnect)
+            } else if let Some(addr) = action.strip_prefix("bt:connect:") {
+                Some(MenuAction::BtConnect(Address::new(addr)))
+            } else {
+                action
+                    .strip_prefix("bt:disconnect:")
+                    .map(|addr| MenuAction::BtDisconnect(Address::new(addr)))
+            }
+        }
+    }
+}
+
+/// Receives menu clicks and carries out the operation behind each one.
+///
+/// Runs on its own task, never on the D-Bus dispatch path — `dbusmenu.rs`
+/// already hands `event`/`event_group` an unbounded sender and returns,
+/// which is what makes that safe to do here: a slow or hanging backend
+/// call blocks this loop, not the host waiting on the D-Bus method call.
+/// Keeps its own [`Reconnecting`] state, independent of `poll_loop`'s —
+/// a second connection to NetworkManager or BlueZ is unremarkable, and
+/// sharing one would need a lock held across every backend call this loop
+/// makes, for no benefit worth that cost.
+async fn handle_menu_clicks(mut actions: tokio::sync::mpsc::UnboundedReceiver<String>) {
+    let mut net_state = Reconnecting::new();
+    let mut bt_state = Reconnecting::new();
+    while let Some(action) = actions.recv().await {
+        let Some(parsed) = parse_menu_action(&action) else {
+            tracing::warn!(action = %action, "unknown tray menu action; ignoring");
+            continue;
+        };
+        if let Err(e) = perform_menu_action(parsed, &mut net_state, &mut bt_state).await {
+            tracing::warn!(error = %e, "tray menu action failed");
+        }
+    }
+}
+
+async fn perform_menu_action(
+    action: MenuAction,
+    net_state: &mut Reconnecting<NetworkManagerBackend>,
+    bt_state: &mut Reconnecting<BlueZBackend>,
+) -> anyhow::Result<()> {
+    match action {
+        MenuAction::OpenSettings(screen) => {
+            spawn_settings(screen);
+            Ok(())
+        }
+        MenuAction::WifiRadio(on) => {
+            let backend = network_backend(net_state)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("NetworkManager unavailable"))?;
+            backend.set_radio(on).await?;
+            Ok(())
+        }
+        MenuAction::WifiConnect(ssid_bytes) => {
+            let backend = network_backend(net_state)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("NetworkManager unavailable"))?;
+            let ssid = Ssid::new(ssid_bytes);
+            let points = backend.access_points().await?;
+            let Some(ap) = points.into_iter().find(|ap| ap.ssid == ssid) else {
+                // Out of range since the menu was built, most likely.
+                anyhow::bail!("network no longer in range");
+            };
+            if ap.security.needs_passphrase() {
+                let saved = backend.saved_networks().await.unwrap_or_default();
+                let Some(saved) = saved.iter().find(|s| s.ssid == ap.ssid) else {
+                    // The menu does not offer a `wifi:connect:` for this
+                    // case, so reaching it means the network changed out
+                    // from under a click already in flight. A tray menu
+                    // has nowhere to type a passphrase, so hand it to the
+                    // screen that has.
+                    spawn_settings("network");
+                    return Ok(());
+                };
+                // `connect` *adds* a connection and needs a passphrase to
+                // build one with; it refuses without one. Rejoining a
+                // known network is a different operation, on the secret
+                // NetworkManager already stores — which is the only way
+                // this can work at all, since the daemon never sees a
+                // passphrase and must not.
+                backend.connect_saved(&saved.id).await?;
+                return Ok(());
+            }
+            // Open and OWE: nothing to type, nothing stored.
+            backend.connect(&ap, None).await?;
+            Ok(())
+        }
+        MenuAction::BtRadio(on) => {
+            let backend = bluetooth_backend(bt_state)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("BlueZ unavailable"))?;
+            backend.set_powered(on).await?;
+            Ok(())
+        }
+        MenuAction::BtConnect(address) => {
+            let backend = bluetooth_backend(bt_state)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("BlueZ unavailable"))?;
+            backend.connect(&address).await?;
+            Ok(())
+        }
+        MenuAction::BtDisconnect(address) => {
+            let backend = bluetooth_backend(bt_state)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("BlueZ unavailable"))?;
+            backend.disconnect(&address).await?;
+            Ok(())
+        }
     }
 }
 
@@ -984,5 +1391,247 @@ mod tests {
             refresh_prefs(&mut current, &mut warned);
             assert!(!warned, "a successful read clears the suppression");
         });
+    }
+
+    // --- menu content: network_menu / bluetooth_menu ---------------------
+
+    use hyprforge_network::Security;
+
+    fn access_point(ssid: &str, security: Security) -> AccessPoint {
+        AccessPoint {
+            ssid: Ssid::new(ssid),
+            bssid: "00:11:22:33:44:55".to_string(),
+            strength: 70,
+            frequency_mhz: 5180,
+            security,
+        }
+    }
+
+    fn saved(ssid: &str) -> SavedNetwork {
+        SavedNetwork { ssid: Ssid::new(ssid), id: format!("conn-{ssid}"), autoconnect: true }
+    }
+
+    fn bt_device(alias: &str, paired: bool, connected: bool) -> Device {
+        Device {
+            address: Address::new("AA:BB:CC:DD:EE:FF"),
+            alias: alias.to_string(),
+            name: Some(alias.to_string()),
+            kind: DeviceKind::Headset,
+            paired,
+            trusted: paired,
+            connected,
+            rssi: Some(-50),
+        }
+    }
+
+    #[test]
+    fn the_connected_network_appears_as_a_checked_row() {
+        let ssid = Ssid::new("home");
+        let menu = network_menu(
+            Some(&net_status(RadioState::On, Some("home"))),
+            Some(&ssid),
+            false,
+            &[access_point("home", Security::Wpa2Personal), access_point("cafe", Security::Open)],
+            &[saved("home")],
+        );
+        let row = menu.flatten().into_iter().find(|i| i.label == "home").unwrap();
+        assert_eq!(row.kind, ItemKind::Checkmark);
+        assert_eq!(row.toggle, Some(true));
+
+        let other = menu.flatten().into_iter().find(|i| i.label == "cafe").unwrap();
+        assert_ne!(other.toggle, Some(true));
+    }
+
+    #[test]
+    fn an_enterprise_network_is_listed_but_disabled_and_says_why() {
+        let menu = network_menu(
+            Some(&net_status(RadioState::On, None)),
+            None,
+            false,
+            &[access_point("corp-wifi", Security::Enterprise)],
+            &[],
+        );
+        let row = menu.flatten().into_iter().find(|i| i.label.contains("corp-wifi")).unwrap();
+        assert!(!row.enabled);
+        assert!(row.action.is_none());
+        assert!(
+            row.label.to_lowercase().contains("enterprise"),
+            "row must say why it can't be joined: {}",
+            row.label
+        );
+    }
+
+    #[test]
+    fn an_unpaired_bluetooth_device_is_listed_but_disabled() {
+        let menu = bluetooth_menu(
+            Some(&bt_status(AdapterState::On)),
+            false,
+            &[bt_device("New Headphones", false, false)],
+        );
+        let row = menu.flatten().into_iter().find(|i| i.label.contains("New Headphones")).unwrap();
+        assert!(!row.enabled);
+        assert!(row.action.is_none());
+    }
+
+    #[test]
+    fn a_radio_that_is_off_still_produces_a_usable_wifi_menu_with_a_settings_entry() {
+        let menu = network_menu(Some(&net_status(RadioState::Off, None)), None, false, &[], &[]);
+        assert!(!menu.items.is_empty(), "an empty popup reads as broken");
+        assert!(menu.flatten().iter().any(|i| i.label.contains("Network settings")));
+    }
+
+    #[test]
+    fn a_radio_that_is_off_still_produces_a_usable_bluetooth_menu_with_a_settings_entry() {
+        let menu = bluetooth_menu(Some(&bt_status(AdapterState::Off)), false, &[]);
+        assert!(!menu.items.is_empty());
+        assert!(menu.flatten().iter().any(|i| i.label.contains("Bluetooth settings")));
+    }
+
+    #[test]
+    fn an_unavailable_network_daemon_produces_a_menu_that_says_so_rather_than_an_empty_one() {
+        let menu = network_menu(None, None, true, &[], &[]);
+        assert!(!menu.items.is_empty());
+        assert!(menu.flatten().iter().any(|i| i.label.to_lowercase().contains("unavailable")));
+        assert!(menu.flatten().iter().any(|i| i.label.contains("Network settings")));
+    }
+
+    #[test]
+    fn an_unavailable_bluetooth_daemon_produces_a_menu_that_says_so_rather_than_an_empty_one() {
+        let menu = bluetooth_menu(None, true, &[]);
+        assert!(!menu.items.is_empty());
+        assert!(menu.flatten().iter().any(|i| i.label.to_lowercase().contains("unavailable")));
+        assert!(menu.flatten().iter().any(|i| i.label.contains("Bluetooth settings")));
+    }
+
+    /// The one case this whole feature exists to route away from a join
+    /// attempt: a network that needs a passphrase this daemon has never
+    /// been given anywhere to type.
+    #[test]
+    fn a_passphrase_network_with_no_saved_connection_routes_to_settings_not_a_join_attempt() {
+        let menu = network_menu(
+            Some(&net_status(RadioState::On, None)),
+            None,
+            false,
+            &[access_point("neighbour", Security::Wpa2Personal)],
+            &[], // nothing saved
+        );
+        let row = menu.flatten().into_iter().find(|i| i.label == "neighbour").unwrap();
+        assert_eq!(row.action.as_deref(), Some("wifi:settings"));
+        assert_eq!(parse_menu_action(row.action.as_deref().unwrap()), Some(MenuAction::OpenSettings("network")));
+    }
+
+    /// The mirror image of the test above: a saved passphrase network is
+    /// offered a real connect action rather than being bounced to
+    /// Settings every time.
+    #[test]
+    fn a_passphrase_network_with_a_saved_connection_gets_a_connect_action() {
+        let menu = network_menu(
+            Some(&net_status(RadioState::On, None)),
+            None,
+            false,
+            &[access_point("home", Security::Wpa2Personal)],
+            &[saved("home")],
+        );
+        let row = menu.flatten().into_iter().find(|i| i.label == "home").unwrap();
+        let action = row.action.as_deref().unwrap();
+        assert!(action.starts_with("wifi:connect:"), "expected a connect action, got {action:?}");
+    }
+
+    // --- the action vocabulary --------------------------------------------
+
+    #[test]
+    fn an_unknown_action_string_is_ignored_rather_than_misrouted() {
+        assert_eq!(parse_menu_action(""), None);
+        assert_eq!(parse_menu_action("wifi:teleport"), None);
+        assert_eq!(parse_menu_action("bt:levitate:AA:BB"), None);
+        assert_eq!(parse_menu_action("settings"), None, "the vocabulary is domain-prefixed");
+    }
+
+    #[test]
+    fn every_parseable_action_round_trips_to_a_distinct_operation() {
+        assert_eq!(parse_menu_action("wifi:settings"), Some(MenuAction::OpenSettings("network")));
+        assert_eq!(parse_menu_action("bt:settings"), Some(MenuAction::OpenSettings("bluetooth")));
+        assert_eq!(parse_menu_action("wifi:radio:on"), Some(MenuAction::WifiRadio(true)));
+        assert_eq!(parse_menu_action("wifi:radio:off"), Some(MenuAction::WifiRadio(false)));
+        assert_eq!(parse_menu_action("bt:radio:on"), Some(MenuAction::BtRadio(true)));
+        assert_eq!(parse_menu_action("bt:radio:off"), Some(MenuAction::BtRadio(false)));
+        assert_eq!(
+            parse_menu_action("wifi:connect:686f6d65"),
+            Some(MenuAction::WifiConnect(b"home".to_vec()))
+        );
+        assert_eq!(
+            parse_menu_action("bt:connect:AA:BB:CC:DD:EE:FF"),
+            Some(MenuAction::BtConnect(Address::new("AA:BB:CC:DD:EE:FF")))
+        );
+        assert_eq!(
+            parse_menu_action("bt:disconnect:AA:BB:CC:DD:EE:FF"),
+            Some(MenuAction::BtDisconnect(Address::new("AA:BB:CC:DD:EE:FF")))
+        );
+    }
+
+    #[test]
+    fn a_malformed_hex_ssid_in_a_connect_action_is_ignored_rather_than_panicking() {
+        assert_eq!(parse_menu_action("wifi:connect:zz"), None);
+        assert_eq!(parse_menu_action("wifi:connect:abc"), None, "odd length is not valid hex");
+    }
+
+    /// The property the task calls out by name: a menu built from real
+    /// (mocked) data must never contain an action string that fails to
+    /// parse back — that is exactly the failure mode of a typo'd prefix,
+    /// which otherwise does nothing when clicked and nothing tells you
+    /// why.
+    #[test]
+    fn every_action_a_built_menu_can_contain_parses_back_to_the_operation_that_built_it() {
+        let net_menus = [
+            network_menu(None, None, true, &[], &[]),
+            network_menu(Some(&net_status(RadioState::Off, None)), None, false, &[], &[]),
+            network_menu(Some(&net_status(RadioState::HardwareOff, None)), None, false, &[], &[]),
+            network_menu(
+                Some(&net_status(RadioState::On, Some("home"))),
+                Some(&Ssid::new("home")),
+                false,
+                &[
+                    access_point("home", Security::Wpa2Personal),
+                    access_point("open-cafe", Security::Open),
+                    access_point("corp", Security::Enterprise),
+                    access_point("neighbour", Security::Wpa3Personal),
+                ],
+                &[saved("home")],
+            ),
+        ];
+        let bt_menus = [
+            bluetooth_menu(None, true, &[]),
+            bluetooth_menu(Some(&bt_status(AdapterState::Off)), false, &[]),
+            bluetooth_menu(Some(&bt_status(AdapterState::HardwareBlocked)), false, &[]),
+            bluetooth_menu(
+                Some(&bt_status(AdapterState::On)),
+                false,
+                &[
+                    bt_device("Connected Buds", true, true),
+                    bt_device("Paired Keyboard", true, false),
+                    bt_device("Stranger Phone", false, false),
+                ],
+            ),
+        ];
+
+        for menu in net_menus.iter().chain(bt_menus.iter()) {
+            for item in menu.flatten() {
+                let Some(action) = item.action.as_deref() else { continue };
+                if action.is_empty() {
+                    continue;
+                }
+                assert!(
+                    parse_menu_action(action).is_some(),
+                    "action {action:?} on row {:?} does not parse back to an operation",
+                    item.label
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hex_round_trips_arbitrary_bytes_including_non_utf8_ones() {
+        let bytes = vec![0u8, 1, 254, 255, b'a'];
+        assert_eq!(hex_decode(&hex_encode(&bytes)), Some(bytes));
     }
 }
