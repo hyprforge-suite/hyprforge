@@ -12,6 +12,7 @@
 //! saying "Saved." at all three.
 
 use std::path::Path;
+use hyprforge_tray::Prefs as TrayPrefs;
 use hyprforge_ui::theme::{spacing, FontScale};
 use hyprforge_ui::widgets::{
     danger_button, divider, meta_text, primary_button, scaled_text, secondary_button, section,
@@ -236,6 +237,15 @@ pub enum Message {
     AdoptToggle(usize, bool),
     AdoptConfirm,
     AdoptCancel,
+    /// Whether `hyprforge-trayd` should show the night light icon. Same
+    /// shape as `network::Message::TrayToggled` — only reachable from a
+    /// loaded [`TrayPrefs`] (see `night_light_tray_row`), guarded again in
+    /// `update`. A separate variant from `KeepAwakeTrayToggled` because
+    /// this screen owns two of the four tray fields, not one.
+    NightLightTrayToggled(bool),
+    /// Whether `hyprforge-trayd` should show the keep-awake icon. See
+    /// `NightLightTrayToggled`.
+    KeepAwakeTrayToggled(bool),
 }
 
 /// Everything read from the system when the screen opens.
@@ -278,6 +288,13 @@ pub struct DesktopModule {
     /// between leaves the user with a config that is duplicated but
     /// working, rather than one that is retired and missing.
     pending_retire: Option<(PathBuf, Vec<(usize, usize)>)>,
+    /// The on-disk `tray.toml`, loaded once at construction. Same shape
+    /// and same reasoning as `network::NetworkModule::tray_prefs`: kept as
+    /// the whole [`TrayPrefs`] (not just `night_light`/`keep_awake`) so a
+    /// toggle here can write back `network` and `bluetooth` unchanged, and
+    /// `Err` (a file that exists and would not parse) renders no checkbox
+    /// at all rather than guessing a value.
+    tray_prefs: Result<TrayPrefs, String>,
 }
 
 impl DesktopModule {
@@ -290,6 +307,15 @@ impl DesktopModule {
         let sunset = load_or_note(&sunset_toml(), &mut unreadable);
         let idle = load_or_note(&idle_toml(), &mut unreadable);
         let portal = load_or_note(&portal_toml(), &mut unreadable);
+        // A missing tray.toml is first run and loads as defaults; a file
+        // that exists and will not parse is reported in this screen's own
+        // error banner, rather than silently treated as "no tray icons" —
+        // the rule in CLAUDE.md about never collapsing "could not read"
+        // into "nothing configured".
+        let (tray_prefs, tray_error) = match hyprforge_tray::prefs::load() {
+            Ok(prefs) => (Ok(prefs), None),
+            Err(e) => (Err(e.to_string()), Some(e.to_string())),
+        };
         (
             DesktopModule {
                 tab: Tab::Wallpaper,
@@ -300,13 +326,14 @@ impl DesktopModule {
                 drafts: BTreeMap::new(),
                 images: Vec::new(),
                 monitors: Vec::new(),
-                error: None,
+                error: tray_error,
                 status: None,
                 idle_needs_restart: false,
                 portal_needs_restart: false,
                 adopt: None,
                 pending_retire: None,
                 store_unreadable: (!unreadable.is_empty()).then(|| unreadable.join("; ")),
+                tray_prefs,
             },
             Task::perform(load_system(), Message::Loaded),
         )
@@ -914,6 +941,35 @@ impl SettingsModule for DesktopModule {
                 Task::none()
             }
             Message::AdoptConfirm => self.adopt_confirmed(),
+            Message::NightLightTrayToggled(shown) => {
+                let Ok(prefs) = &self.tray_prefs else {
+                    // `night_light_tray_row` renders no checkbox while
+                    // `tray_prefs` is `Err`, so a stray message here still
+                    // must not turn an unreadable file into a freshly
+                    // written default — the exact overwrite this field
+                    // exists to prevent.
+                    return Task::none();
+                };
+                let mut updated = *prefs;
+                updated.night_light = shown;
+                match hyprforge_tray::prefs::save(&updated) {
+                    Ok(()) => self.tray_prefs = Ok(updated),
+                    Err(e) => self.error = Some(e.to_string()),
+                }
+                Task::none()
+            }
+            Message::KeepAwakeTrayToggled(shown) => {
+                let Ok(prefs) = &self.tray_prefs else {
+                    return Task::none();
+                };
+                let mut updated = *prefs;
+                updated.keep_awake = shown;
+                match hyprforge_tray::prefs::save(&updated) {
+                    Ok(()) => self.tray_prefs = Ok(updated),
+                    Err(e) => self.error = Some(e.to_string()),
+                }
+                Task::none()
+            }
             Message::Applied(tab, Ok(applied)) => {
                 self.error = None;
                 // Only now, once the store is written, the generated file
@@ -1381,14 +1437,61 @@ impl DesktopModule {
         section("Screen sharing", scale, body)
     }
 
+    /// The "show in tray" row for the night light icon, appended to the
+    /// Night light tab — this is literally that feature's own screen, so
+    /// the toggle for its tray icon belongs here rather than anywhere else.
+    /// Same shape and reasoning as `network::NetworkModule::tray_row`.
+    fn night_light_tray_row(&self, scale: FontScale) -> Element<'_, Message> {
+        match &self.tray_prefs {
+            Ok(prefs) => row![
+                checkbox(prefs.night_light).on_toggle(Message::NightLightTrayToggled),
+                scaled_text("Show in tray", 15.0, scale),
+            ]
+            .spacing(spacing::SM)
+            .align_y(iced::Alignment::Center)
+            .into(),
+            Err(_) => meta_text(
+                "Tray setting unavailable — see the error above.",
+                13.0,
+                scale,
+            )
+            .into(),
+        }
+    }
+
+    /// The "show in tray" row for the keep-awake icon, appended to the
+    /// Idle tab: keeping the machine awake is the inverse of the timeouts
+    /// configured just below it, so it belongs beside them rather than on
+    /// a screen of its own.
+    fn keep_awake_tray_row(&self, scale: FontScale) -> Element<'_, Message> {
+        match &self.tray_prefs {
+            Ok(prefs) => row![
+                checkbox(prefs.keep_awake).on_toggle(Message::KeepAwakeTrayToggled),
+                scaled_text("Show in tray", 15.0, scale),
+            ]
+            .spacing(spacing::SM)
+            .align_y(iced::Alignment::Center)
+            .into(),
+            Err(_) => meta_text(
+                "Tray setting unavailable — see the error above.",
+                13.0,
+                scale,
+            )
+            .into(),
+        }
+    }
+
     fn sunset_view(&self, scale: FontScale) -> Element<'_, Message> {
         let problems = self.sunset.invalid();
-        let mut body = column![meta_text(
-            "Each entry holds from its time until the next one. Lower temperatures \
-             are warmer; 6500K is neutral daylight.",
-            12.0,
-            scale,
-        )]
+        let mut body = column![
+            meta_text(
+                "Each entry holds from its time until the next one. Lower temperatures \
+                 are warmer; 6500K is neutral daylight.",
+                12.0,
+                scale,
+            ),
+            self.night_light_tray_row(scale),
+        ]
         .spacing(spacing::SM);
 
         if self.sunset.has_midnight_gap() {
@@ -1459,6 +1562,25 @@ impl DesktopModule {
         mut content: iced::widget::Column<'a, Message>,
         scale: FontScale,
     ) -> iced::widget::Column<'a, Message> {
+        // Keeping the screen awake is the inverse of everything else on
+        // this tab, and doesn't depend on hypridle itself — the tray icon
+        // is a Hyprforge-side inhibitor, not a setting hypridle reads —
+        // so it's shown first, ahead of the restart notice below.
+        content = content.push(section(
+            "Keep awake",
+            scale,
+            column![
+                meta_text(
+                    "Adds a tray icon that suspends every timeout below while \
+                     it's switched on.",
+                    12.0,
+                    scale,
+                ),
+                self.keep_awake_tray_row(scale),
+            ]
+            .spacing(spacing::SM),
+        ));
+
         // The honest bit. hypridle has no IPC, so a save here genuinely
         // does nothing until it restarts.
         if self.idle_needs_restart {
@@ -2321,6 +2443,117 @@ listener {
                 let _ = m.update(Message::TabSelected(tab));
                 let _ = m.view(scale);
             }
+        });
+    }
+
+    // --- tray preferences: keep awake / night light ------------------------
+
+    /// Like `with_temp_config`, but `setup` runs against the temp directory
+    /// *before* `DesktopModule::new()` is called — needed for a test that
+    /// wants a `tray.toml` already on disk (or already corrupt) for the
+    /// constructor itself to read. `with_temp_config` can't do this: its
+    /// `f` only runs after the module is built.
+    fn with_temp_config_setup<T>(
+        setup: impl FnOnce(&std::path::Path),
+        f: impl FnOnce(&mut DesktopModule) -> T,
+    ) -> T {
+        let _lock = crate::modules::CONFIG_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let previous = std::env::var("XDG_CONFIG_HOME").ok();
+        let previous_greet = std::env::var(hyprforge_look::theme::EXPORT_DIR_ENV).ok();
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", dir.path());
+            std::env::set_var(hyprforge_look::theme::EXPORT_DIR_ENV, dir.path().join("greet"));
+        }
+        setup(dir.path());
+        let (mut module, _) = DesktopModule::new();
+        let out = f(&mut module);
+        match previous {
+            Some(p) => unsafe { std::env::set_var("XDG_CONFIG_HOME", p) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+        match previous_greet {
+            Some(p) => unsafe { std::env::set_var(hyprforge_look::theme::EXPORT_DIR_ENV, p) },
+            None => unsafe { std::env::remove_var(hyprforge_look::theme::EXPORT_DIR_ENV) },
+        }
+        out
+    }
+
+    /// A missing `tray.toml` is first run: the two icons this screen owns
+    /// default to *off* (unlike network/bluetooth), and nothing about a
+    /// missing file is reported as an error — the same distinction
+    /// `hyprforge_tray::prefs::load` documents, one layer up.
+    #[test]
+    fn a_missing_tray_toml_is_first_run_and_both_new_icons_read_as_off() {
+        with_temp_config(|m| {
+            let prefs = m.tray_prefs.as_ref().expect("a missing file is defaults, not an error");
+            assert!(!prefs.keep_awake, "keep_awake defaults to off");
+            assert!(!prefs.night_light, "night_light defaults to off");
+            assert!(m.error.is_none(), "a first run is not a load failure");
+        });
+    }
+
+    /// The rule this feature is most likely to break: a `tray.toml` that
+    /// exists and will not parse must be reported in the screen's own error
+    /// banner, and a subsequent toggle (of either icon this screen owns)
+    /// must not then overwrite it with a freshly-guessed default.
+    #[test]
+    fn an_unreadable_tray_toml_is_reported_and_not_overwritten_by_a_toggle() {
+        with_temp_config_setup(
+            |dir| {
+                let tray_toml = dir.join("hyprforge").join("tray.toml");
+                std::fs::create_dir_all(tray_toml.parent().unwrap()).unwrap();
+                std::fs::write(&tray_toml, "night_light = yes please\n").unwrap();
+            },
+            |m| {
+                assert!(m.tray_prefs.is_err(), "a malformed file must not be treated as defaults");
+                assert!(
+                    m.error.as_ref().is_some_and(|e| e.contains("tray.toml")),
+                    "the failure must reach the screen's own error banner, got {:?}",
+                    m.error
+                );
+
+                let tray_toml = hyprforge_tray::prefs::path();
+                let before = std::fs::read_to_string(&tray_toml).unwrap();
+                let _ = m.update(Message::NightLightTrayToggled(false));
+                let _ = m.update(Message::KeepAwakeTrayToggled(true));
+                let after = std::fs::read_to_string(&tray_toml).unwrap();
+                assert_eq!(
+                    before, after,
+                    "a toggle must never overwrite a file it could not read"
+                );
+            },
+        );
+    }
+
+    /// Toggling the icon this screen owns must leave the *other three*
+    /// icons' settings exactly as they were — never re-derived as a
+    /// default, or switching keep-awake on would silently also flip
+    /// network, bluetooth or night light.
+    #[test]
+    fn toggling_the_keep_awake_tray_setting_preserves_the_other_three() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::KeepAwakeTrayToggled(true));
+            let prefs = hyprforge_tray::prefs::load().unwrap();
+            assert!(prefs.keep_awake, "the icon this screen owns was switched on");
+            assert!(prefs.network, "network's setting must survive untouched");
+            assert!(prefs.bluetooth, "bluetooth's setting must survive untouched");
+            assert!(!prefs.night_light, "night_light's setting must survive untouched");
+        });
+    }
+
+    /// Same property as above, for the other icon this screen owns.
+    #[test]
+    fn toggling_the_night_light_tray_setting_preserves_the_other_three() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::NightLightTrayToggled(true));
+            let prefs = hyprforge_tray::prefs::load().unwrap();
+            assert!(prefs.night_light, "the icon this screen owns was switched on");
+            assert!(prefs.network, "network's setting must survive untouched");
+            assert!(prefs.bluetooth, "bluetooth's setting must survive untouched");
+            assert!(!prefs.keep_awake, "keep_awake's setting must survive untouched");
         });
     }
 }
