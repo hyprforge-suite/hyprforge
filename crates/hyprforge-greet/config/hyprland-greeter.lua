@@ -110,11 +110,33 @@ hl.config({
 -- machine that uses uwsm that is `uwsm start hyprland.desktop` — the
 -- `.desktop` matters, `uwsm start hyprland` is not the same thing and
 -- fails at the point where there is nothing left to look at.
+-- Everything this session says goes to /tmp/hyprforge-greet.log.
+--
+-- Not instrumentation for its own sake: greetd starts this compositor
+-- with the VT as its stdout, so Hyprland's log, the greeter's warnings
+-- and the monitor layout it resolved all scroll past on tty1 and are
+-- gone by the time anyone can read them. Nothing about a login screen
+-- that came up wrong is diagnosable afterwards, which is how a wrong
+-- display scale survived two reboots.
+--
+-- /tmp because the greeter runs as its own user and can write nowhere
+-- else; truncated each start so it describes this boot and not every
+-- boot. It holds no secrets — the greeter never writes anything derived
+-- from a keystroke.
 hl.exec_cmd([[sh -c '
+    exec >/tmp/hyprforge-greet.log 2>&1
+    echo "--- greeter starting $(date -Is) ---"
     n=0
     until hyprctl monitors >/dev/null 2>&1 || [ $n -ge 100 ]; do n=$((n+1)); sleep 0.1; done
+    echo "waited ${n} tenths for the compositor"
+    echo "--- monitors as the greeter sees them ---"
+    hyprctl monitors 2>&1
+    echo "--- exported layout ---"
+    cat /var/lib/hyprforge/greet/monitors.lua 2>&1 || echo "(no exported layout)"
     WAYLAND_DISPLAY=$(cd "$XDG_RUNTIME_DIR" && ls -1 wayland-[0-9]* 2>/dev/null | grep -v "\\.lock$" | tail -1)
     export WAYLAND_DISPLAY
+    echo "--- greeter output ---"
     hyprforge-greet --user CHANGE_ME --command "uwsm start hyprland.desktop"
+    echo "greeter exited $?"
     hyprctl dispatch exit
 ']])
