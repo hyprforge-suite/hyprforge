@@ -71,6 +71,15 @@ was flagged will not catch this, so assert the generated value too.
 appears in that shell's own command line. It kills the shell and exits 144. Use
 `pkill -x <name>` or a literal PID.
 
+And `pkill -x`/`pgrep -x` is not the safe fallback it looks like: a process name
+longer than **15 characters** is truncated in `/proc/<pid>/comm`, so
+`pgrep -x hyprforge-settings` matches *nothing at all* and reports success doing
+it. That left a stale window running beside the one under test. `hyprforge-lock`
+fits in fifteen; `hyprforge-settings` and `hyprforge-displayd` do not. When the
+name is too long, or when the real session is running a copy of the same binary,
+match on `/proc/<pid>/cmdline` and `/proc/<pid>/environ` instead — the nested
+instance is the one whose environ says `WAYLAND_DISPLAY=wayland-2`.
+
 **iced reports three things for a key press and only one of them is what was
 typed.** `key` is the *unmodified* logical key, `modified_key` has modifiers
 applied, `text` is what the press produced. Reading `key` turns `SHIFT + j` into

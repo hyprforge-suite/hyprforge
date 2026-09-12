@@ -517,13 +517,12 @@ impl<B: NetworkBackend + 'static> NetworkModule<B> {
             Security::Wpa3Personal => "WPA3",
             Security::Enterprise => "Enterprise (802.1X)",
         };
-        let mut label = ap.ssid.to_display_string();
-        if connected {
-            label = format!("{label} \u{2014} Connected");
-        }
-
+        // The connected state is shown once, in the action slot on the
+        // right where Join would otherwise be. It was also appended to
+        // the name here, so the row read "Pretty Fly for a WiFi —
+        // Connected ... Connected".
         let mut line = column![
-            scaled_text(label, 14.0, scale),
+            scaled_text(ap.ssid.to_display_string(), 14.0, scale),
             meta_text(format!("{} \u{b7} {} \u{b7} {}%", ap.band(), security_label, ap.strength), 12.0, scale),
         ]
         .spacing(2.0);
