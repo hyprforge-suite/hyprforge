@@ -264,6 +264,7 @@ impl TrayIcon {
                 .serve_at(
                     MENU_PATH,
                     crate::dbusmenu::MenuInterface::new(
+                        state.lock().await.id.clone(),
                         menu_state,
                         revision.clone(),
                         menu_clicks,
