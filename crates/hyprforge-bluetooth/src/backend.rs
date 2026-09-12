@@ -319,16 +319,13 @@ mod tests {
         let addr = Address::new("00:00:00:00:00:01");
         let backend =
             MockBackend::with_devices(vec![device("Headset", addr.as_str(), false, false)]);
-        assert!(backend.devices().await.unwrap()[0].unsupported_reason().is_some());
+        assert!(!backend.devices().await.unwrap()[0].paired);
 
         backend.pair(&addr).await.unwrap();
 
         let device = backend.devices().await.unwrap().remove(0);
         assert!(device.paired);
-        assert!(
-            device.unsupported_reason().is_none(),
-            "a paired device no longer says pairing is unsupported"
-        );
+        assert!(device.paired);
     }
 
     #[tokio::test]

@@ -856,14 +856,16 @@ fn bluetooth_menu(status: Option<&BtStatus>, unavailable: bool, devices: &[Devic
     items.push(MenuItem::separator());
 
     for device in bt_for_display(devices.to_vec()) {
-        if device.unsupported_reason().is_some() {
-            // `unsupported_reason()` is the full-screen sentence; the row
-            // gets a shorter one so the menu stays a menu, not a
-            // paragraph.
-            items.push(MenuItem::disabled(format!(
-                "{} (pairing not supported yet)",
-                device.alias
-            )));
+        if !device.paired {
+            // A menu has nowhere to show six digits and ask whether they
+            // match, so pairing is handed to the screen that does — the
+            // same call as a Wi-Fi network whose passphrase we do not
+            // have. It used to say "pairing not supported yet", which
+            // stopped being true the moment the agent landed.
+            items.push(MenuItem::standard(
+                format!("{} — pair in Settings", device.alias),
+                "bt:settings",
+            ));
             continue;
         }
 
@@ -1526,15 +1528,32 @@ mod tests {
     }
 
     #[test]
-    fn an_unpaired_bluetooth_device_is_listed_but_disabled() {
+    fn an_unpaired_device_is_listed_and_hands_pairing_to_the_screen_that_can_do_it() {
         let menu = bluetooth_menu(
             Some(&bt_status(AdapterState::On)),
             false,
             &[bt_device("New Headphones", false, false)],
         );
-        let row = menu.flatten().into_iter().find(|i| i.label.contains("New Headphones")).unwrap();
-        assert!(!row.enabled);
-        assert!(row.action.is_none());
+        let row = menu
+            .flatten()
+            .into_iter()
+            .find(|i| i.label.contains("New Headphones"))
+            .expect("an unpaired device is still listed");
+
+        // It was disabled once, when nothing could pair at all. Now
+        // something can — just not a menu, which has nowhere to show six
+        // digits and ask whether they match.
+        assert!(row.enabled, "a row that can do something must be clickable");
+        assert_eq!(
+            row.action.as_deref(),
+            Some("bt:settings"),
+            "pairing is handed to the screen, never attempted from the menu"
+        );
+        assert!(
+            row.label.contains("Settings"),
+            "the row says where it goes rather than looking like a connect: {}",
+            row.label
+        );
     }
 
     #[test]

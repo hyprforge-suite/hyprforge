@@ -123,20 +123,6 @@ impl Device {
         self.name.is_none()
     }
 
-    /// Why a device is listed but cannot be acted on from here yet.
-    ///
-    /// Pairing needs an `org.bluez.Agent1` — a passkey or yes/no
-    /// confirmation exchanged with the remote device — which is its own
-    /// piece of work. An unpaired device is still *listed*, because a
-    /// device missing from the list is a bug report and a device that
-    /// says "not yet" is an answer. Same call as enterprise Wi-Fi.
-    pub fn unsupported_reason(&self) -> Option<&'static str> {
-        (!self.paired).then_some(
-            "Pairing a new device isn't supported yet — it needs a passkey \
-             confirmation Hyprforge can't show. Pair it with `bluetoothctl`, \
-             and it will appear here ready to connect.",
-        )
-    }
 }
 
 /// Whether the adapter is on, and whether it is ours to turn on.
@@ -218,13 +204,19 @@ mod tests {
         assert_eq!(DeviceKind::Unknown.label(), "Device");
     }
 
-    /// An unpaired device is listed and told why it cannot be connected,
-    /// rather than being hidden or offered a button that fails.
+    /// `paired` is what every surface branches on — Pair here, Connect
+    /// there — so an unpaired device has to be distinguishable from a
+    /// paired one at the model, not by reading a sentence meant for a
+    /// screen.
+    ///
+    /// This replaces an `unsupported_reason()` that returned "pair it
+    /// with bluetoothctl". That was true until the pairing agent landed
+    /// and then quietly was not, which is the trouble with putting a
+    /// capability claim in a string.
     #[test]
-    fn an_unpaired_device_is_listed_but_says_why_it_cannot_be_used_yet() {
-        let d = device(false, Some("WH-1000XM4"));
-        assert!(d.unsupported_reason().is_some_and(|r| r.contains("bluetoothctl")));
-        assert!(device(true, Some("WH-1000XM4")).unsupported_reason().is_none());
+    fn an_unpaired_device_is_distinguishable_from_a_paired_one() {
+        assert!(!device(false, Some("WH-1000XM4")).paired);
+        assert!(device(true, Some("WH-1000XM4")).paired);
     }
 
     /// A device that has never resolved its name has no `Name`, only an
