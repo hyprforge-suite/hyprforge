@@ -258,6 +258,28 @@ else
         fi
     fi
 
+    # Gated on an icon theme being installed to resolve against, which
+    # is what this asks — not on a bar, a bus or a compositor. An icon
+    # name that no theme carries draws a blank gap and logs nothing
+    # anywhere, so a list of "standard" names cannot catch it and only a
+    # real theme can.
+    step "Icon names against the installed theme"
+    if ! command -v gsettings >/dev/null; then
+        skip "icon resolution" "gsettings not available to ask which theme is set"
+    else
+        output=$(cargo test -p hyprforge-tray --test live_icons \
+            -- --ignored --test-threads=1 --nocapture 2>&1)
+        if grep -q "test result: FAILED" <<<"$output"; then
+            bad "an icon name resolves to nothing — it would draw a blank gap in the bar"
+            grep -E 'do not resolve in' <<<"$output" | head -5
+        else
+            ok "$(count_tests <<<"$output") icon check passed"
+            while IFS= read -r reason; do
+                [[ -n "$reason" ]] && skip "  a check inside it was skipped" "$reason"
+            done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^(]*\).*/\1/p' <<<"$output" | sort -u)
+        fi
+    fi
+
     step "Live tests against a tray host"
     if ! command -v busctl >/dev/null; then
         skip "tray tests" "busctl not available to ask"

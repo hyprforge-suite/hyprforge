@@ -5,8 +5,16 @@
 //! re-reads it on every poll so a toggle takes effect without restarting
 //! anything.
 //!
-//! Defaults are "show both". A tray icon the user never asked to hide is
-//! the reason they installed a tray daemon.
+//! Defaults are "show both" for the original two icons — a tray icon the
+//! user never asked to hide is the reason they installed a tray daemon.
+//!
+//! `keep_awake` and `night_light` default to **off**, unlike `network`
+//! and `bluetooth`. Those two were the whole reason this daemon exists;
+//! a third and fourth icon appearing in someone's bar with no action of
+//! theirs is a surprise these were not, and `#[serde(default)]` per
+//! field is exactly what lets an old `tray.toml` that only ever named
+//! `network`/`bluetooth` keep meaning the same thing after this file
+//! grows two more fields.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -16,6 +24,8 @@ use std::path::{Path, PathBuf};
 pub struct Prefs {
     pub network: bool,
     pub bluetooth: bool,
+    pub keep_awake: bool,
+    pub night_light: bool,
 }
 
 impl Default for Prefs {
@@ -23,6 +33,8 @@ impl Default for Prefs {
         Prefs {
             network: true,
             bluetooth: true,
+            keep_awake: false,
+            night_light: false,
         }
     }
 }
@@ -150,11 +162,47 @@ mod tests {
     fn what_is_saved_is_what_comes_back() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tray.toml");
+        // `keep_awake`/`night_light` given explicitly (not `..Default::default()`)
+        // so this test still proves a round trip of a value that differs
+        // from the default in every field, not just the original two.
         let prefs = Prefs {
             network: false,
             bluetooth: true,
+            keep_awake: true,
+            night_light: true,
         };
         save_to(&path, &prefs).unwrap();
         assert_eq!(load_from(&path).unwrap(), prefs);
+    }
+
+    /// The two new icons are opt-in: unlike `network`/`bluetooth`, which
+    /// default to shown, `keep_awake` and `night_light` default to
+    /// hidden, so installing this daemon does not put an icon in the bar
+    /// nobody asked for.
+    #[test]
+    fn the_two_new_icons_default_to_off_unlike_the_original_two() {
+        let prefs = Prefs::default();
+        assert!(prefs.network);
+        assert!(prefs.bluetooth);
+        assert!(!prefs.keep_awake);
+        assert!(!prefs.night_light);
+    }
+
+    /// The property `#[serde(default)]` per field exists to guarantee:
+    /// a `tray.toml` written before `keep_awake`/`night_light` existed —
+    /// naming only the original two — must not be read as "hide
+    /// everything else" or fail to parse. It leaves the new icons at
+    /// their own default, off.
+    #[test]
+    fn a_tray_toml_naming_only_the_original_two_icons_leaves_the_new_ones_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tray.toml");
+        std::fs::write(&path, "network = true\nbluetooth = false\n").unwrap();
+
+        let prefs = load_from(&path).unwrap();
+        assert!(prefs.network);
+        assert!(!prefs.bluetooth);
+        assert!(!prefs.keep_awake, "an icon added later than this file defaults off");
+        assert!(!prefs.night_light, "an icon added later than this file defaults off");
     }
 }

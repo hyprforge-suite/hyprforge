@@ -1,12 +1,15 @@
-//! `hyprforge-trayd`: two `org.kde.StatusNotifierItem`s, Wi-Fi and
-//! Bluetooth, joined to `hyprforge-network` and `hyprforge-bluetooth`.
+//! `hyprforge-trayd`: four `org.kde.StatusNotifierItem`s — Wi-Fi and
+//! Bluetooth joined to `hyprforge-network` and `hyprforge-bluetooth`, plus
+//! keep-awake (`hyprforge-power`, over `systemd-logind`) and night light
+//! (`hyprforge-ecosystem::sunset_control`, over `hyprctl hyprsunset`).
 //!
 //! Everything that decides *which icon* a state deserves lives in the
-//! pure functions below (`network_item`, `bluetooth_item`) — no D-Bus, no
-//! I/O — so the interesting question is unit-tested without a bus, a bar,
-//! or a radio, the same split `crate::item` documents. Everything else
-//! here is plumbing: polling the two backends, keeping two `TrayIcon`s in
-//! sync, and forwarding clicks to `hyprforge-settings`.
+//! pure functions below (`network_item`, `bluetooth_item`, `keep_awake_item`,
+//! `night_light_item`) — no D-Bus, no I/O — so the interesting question is
+//! unit-tested without a bus, a bar, a radio, or hyprsunset, the same
+//! split `crate::item` documents. Everything else here is plumbing:
+//! polling the four backends, keeping four `TrayIcon`s in sync, and
+//! forwarding clicks to `hyprforge-settings`.
 //!
 //! Whether an icon is shown at all is `hyprforge_tray::prefs`, re-read
 //! every poll tick (`refresh_prefs`) so a toggle in Settings takes effect
@@ -15,13 +18,24 @@
 //! than setting it `Status::Passive`, because not every tray host hides a
 //! Passive item, and dropping is the only thing that reliably releases
 //! the bus name a host is showing.
+//!
+//! # What keep awake and night light cannot do yet
+//!
+//! Neither has a Settings screen of its own: keep awake has no home in
+//! `hyprforge-settings` at all today, and night light's is a tab on the
+//! Desktop screen with no way to deep-link straight to it. Both are
+//! follow-ups outside this daemon's scope — see the task this module was
+//! built against — and are named here rather than silently worked around,
+//! per the vision's rule against a dead end with nothing said about it.
 
 use hyprforge_bluetooth::backend::{for_display as bt_for_display, BluetoothBackend};
 use hyprforge_bluetooth::{Address, AdapterState, BlueZBackend, Device};
 use hyprforge_bluetooth::Status as BtStatus;
+use hyprforge_ecosystem::sunset_control::{Hyprsunset, SunsetBackend, SunsetControlError};
 use hyprforge_network::backend::{for_display as net_for_display, NetworkBackend, SavedNetwork};
 use hyprforge_network::{AccessPoint, NetworkManagerBackend, RadioState, Ssid};
 use hyprforge_network::Status as NetStatus;
+use hyprforge_power::{InhibitBackend, InhibitorInfo, LogindBackend, WhatSet};
 use hyprforge_tray::menu::{ItemKind, Menu, MenuItem};
 use hyprforge_tray::prefs::{self, Prefs};
 use hyprforge_tray::{watcher_present, Category, TrayIcon, TrayItem};
@@ -35,6 +49,32 @@ use tokio::sync::Mutex;
 /// Shared between `poll_loop`, which is the only writer, and
 /// `reannounce_loop`, which only ever reads it to call `announce` again.
 type IconSlot = Arc<Mutex<Option<Arc<TrayIcon>>>>;
+
+/// One managed icon's registration slot, together with the dbusmenu
+/// index it was registered under.
+///
+/// `poll_loop`, `reannounce_loop` and `main` used to thread
+/// `network_slot` and `bluetooth_slot` as separate named variables. Two
+/// was already about the limit of what reads cleanly that way; adding
+/// `keep_awake` and `night_light` on top as two more named parameters
+/// would have meant every one of those three functions growing a pair of
+/// arguments it just forwards along, and the `for slot in [&a, &b]` in
+/// `reannounce_loop` growing into a four-item literal that says nothing
+/// about *why* those four belong together. A `Vec` of these instead means
+/// "every icon" is a single collection everywhere that question is asked,
+/// and a fifth icon later is one more entry in the vec `main` builds, not
+/// one more parameter threaded through three functions.
+#[derive(Clone)]
+struct ManagedIcon {
+    slot: IconSlot,
+    index: u32,
+}
+
+impl ManagedIcon {
+    fn new(icon: Arc<TrayIcon>, index: u32) -> Self {
+        ManagedIcon { slot: Arc::new(Mutex::new(Some(icon))), index }
+    }
+}
 
 /// How often both backends are re-polled. Ten seconds is what the
 /// Settings app's Network and Bluetooth screens already poll at while
@@ -138,21 +178,48 @@ async fn main() -> anyhow::Result<()> {
         menu_clicks_tx.clone(),
     )
     .await;
+    let keep_awake_icon = register_with_retry(
+        keep_awake_item(None, &[], true),
+        keep_awake_menu(None, &[], true),
+        2,
+        clicks_tx.clone(),
+        menu_clicks_tx.clone(),
+    )
+    .await;
+    let night_light_icon = register_with_retry(
+        night_light_item(&NightLightState::CouldNotCheck),
+        night_light_menu(&NightLightState::CouldNotCheck),
+        3,
+        clicks_tx.clone(),
+        menu_clicks_tx.clone(),
+    )
+    .await;
 
-    let network_slot: IconSlot = Arc::new(Mutex::new(Some(network_icon)));
-    let bluetooth_slot: IconSlot = Arc::new(Mutex::new(Some(bluetooth_icon)));
+    let icons = vec![
+        ManagedIcon::new(network_icon, 0),
+        ManagedIcon::new(bluetooth_icon, 1),
+        ManagedIcon::new(keep_awake_icon, 2),
+        ManagedIcon::new(night_light_icon, 3),
+    ];
+
+    // This daemon's own memory of whether night light is on — see
+    // `NightLightBelief`'s doc comment for why hyprsunset itself cannot
+    // answer that question. Shared between `poll_loop`, which reads it to
+    // render the icon, and `handle_menu_clicks`, the only writer.
+    let night_light_belief: NightLightBelief = Arc::new(std::sync::Mutex::new(true));
 
     let poll_task = tokio::spawn(poll_loop(
-        network_slot.clone(),
-        bluetooth_slot.clone(),
+        icons.clone(),
+        night_light_belief.clone(),
         clicks_tx.clone(),
         menu_clicks_tx.clone(),
         refresh_rx,
     ));
     let click_task = tokio::spawn(handle_clicks(clicks_rx));
-    let menu_click_task = tokio::spawn(handle_menu_clicks(menu_clicks_rx, refresh_tx.clone()));
+    let menu_click_task =
+        tokio::spawn(handle_menu_clicks(menu_clicks_rx, refresh_tx.clone(), night_light_belief));
     let prefs_watch_task = tokio::spawn(prefs_watch_loop(refresh_tx));
-    let reannounce_task = tokio::spawn(reannounce_loop(probe, network_slot, bluetooth_slot));
+    let reannounce_task = tokio::spawn(reannounce_loop(probe, icons));
 
     // None of these loops return under normal operation. If one panics,
     // that is worth knowing about rather than leaving the others running
@@ -267,6 +334,31 @@ async fn bluetooth_backend(state: &mut Reconnecting<BlueZBackend>) -> Option<Arc
     }
 }
 
+async fn keep_awake_backend(state: &mut Reconnecting<LogindBackend>) -> Option<Arc<LogindBackend>> {
+    match state.get_or_connect(LogindBackend::connect).await {
+        Ok(backend) => Some(backend),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not connect to systemd-logind; will retry");
+            None
+        }
+    }
+}
+
+/// This daemon's own belief about whether night light is on, shared
+/// between the loop that samples it and the loop that acts on menu
+/// clicks.
+///
+/// hyprsunset has **no request that reports whether identity mode is
+/// active** — `hyprforge_ecosystem::sunset_control`'s module doc explains
+/// why in full — so unlike every other piece of state this daemon shows,
+/// "is night light on" is never read back from the thing it describes.
+/// It is only ever this daemon's memory of the last command *it* sent.
+/// Starts `true`: a restart forgets any earlier "off" and the least
+/// surprising default is to assume whatever a schedule or a previous
+/// session already had running is still running, rather than claim off
+/// with no basis for it either.
+type NightLightBelief = Arc<std::sync::Mutex<bool>>;
+
 /// One tick's worth of the network icon.
 ///
 /// The connection, once opened, is a handle to the *session bus name*
@@ -327,6 +419,79 @@ async fn sample_bluetooth(state: &mut Reconnecting<BlueZBackend>) -> (TrayItem, 
             (bluetooth_item(None, None, true), bluetooth_menu(None, true, &[]))
         }
     }
+}
+
+/// One tick's worth of the keep-awake icon and its menu.
+///
+/// `list_inhibitors` is asked every tick regardless of whether *we* are
+/// currently holding one — the whole point of showing other holders (see
+/// `keep_awake_menu`) is answering "why won't this machine sleep"
+/// independent of whether this daemon is the reason, so it would be
+/// wrong to skip that call just because our own inhibit is off.
+async fn sample_keep_awake(state: &mut Reconnecting<LogindBackend>) -> (TrayItem, Menu) {
+    let Some(backend) = keep_awake_backend(state).await else {
+        return (keep_awake_item(None, &[], true), keep_awake_menu(None, &[], true));
+    };
+    match backend.held().await {
+        Ok(held) => {
+            // A failed `list_inhibitors` must not blank an otherwise-fine
+            // icon — same reasoning as a failed saved-network read in
+            // `sample_network` — so it degrades to "no other holders
+            // known this tick" rather than "keep awake unavailable".
+            let others = backend.list_inhibitors().await.unwrap_or_default();
+            let others = other_inhibitors(others);
+            (
+                keep_awake_item(Some(held.is_some()), &others, false),
+                keep_awake_menu(Some(held.is_some()), &others, false),
+            )
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "logind held() call failed");
+            (keep_awake_item(None, &[], true), keep_awake_menu(None, &[], true))
+        }
+    }
+}
+
+/// Where night light stands, as far as this daemon can honestly claim to
+/// know — see [`NightLightBelief`] for why "on" is never a direct read.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum NightLightState {
+    /// Confirmed absent: `pgrep -x hyprsunset` found nothing.
+    NotRunning,
+    /// The check itself failed (`pgrep` didn't start or answer), or
+    /// `hyprctl` refused/timed out — not evidence of anything about
+    /// hyprsunset, so this is never rendered as "off".
+    CouldNotCheck,
+    /// hyprsunset answered. `temperature` is what it is currently holding
+    /// (meaningful only when `on`); `on` is this daemon's own belief, not
+    /// something hyprsunset reported.
+    Known { temperature: i64, on: bool },
+}
+
+/// One tick's worth of the night-light icon and its menu.
+///
+/// `Hyprsunset::current_temperature` shells out to `hyprctl` via
+/// `hyprforge_core::command::output`, which is bounded but still
+/// synchronous — run inside `spawn_blocking` so a slow `hyprctl` stalls
+/// only this one poll, not every other task on the runtime. The same
+/// pattern `hyprforge-settings::modules::desktop` already uses for
+/// `apply_sunset`.
+async fn sample_night_light(believed_on: &NightLightBelief) -> (TrayItem, Menu) {
+    let believed_on = *believed_on.lock().unwrap_or_else(|e| e.into_inner());
+    let state = tokio::task::spawn_blocking(move || match Hyprsunset.current_temperature() {
+        Ok(temperature) => NightLightState::Known { temperature, on: believed_on },
+        Err(SunsetControlError::NotRunning) => NightLightState::NotRunning,
+        Err(e) => {
+            tracing::warn!(error = %e, "hyprsunset temperature check failed");
+            NightLightState::CouldNotCheck
+        }
+    })
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "night light check panicked");
+        NightLightState::CouldNotCheck
+    });
+    (night_light_item(&state), night_light_menu(&state))
 }
 
 /// What to do with one icon's registration, given whether the user wants
@@ -467,24 +632,25 @@ async fn prefs_watch_loop(refresh: tokio::sync::mpsc::UnboundedSender<()>) {
 }
 
 async fn poll_loop(
-    network_slot: IconSlot,
-    bluetooth_slot: IconSlot,
+    icons: Vec<ManagedIcon>,
+    night_light_belief: NightLightBelief,
     clicks: tokio::sync::mpsc::UnboundedSender<String>,
     menu_clicks: tokio::sync::mpsc::UnboundedSender<String>,
     mut refresh_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
 ) {
     let mut net_state = Reconnecting::new();
     let mut bt_state = Reconnecting::new();
-    // Both icons start registered (see `main`), so the preferences this
+    let mut power_state = Reconnecting::new();
+    // Every icon starts registered (see `main`), so the preferences this
     // loop starts from must match that — otherwise an icon the user
     // already switched off would flash on screen for up to one
     // `POLL_INTERVAL` before this loop notices.
     let mut prefs = Prefs::default();
     let mut prefs_load_failed = false;
     // `interval` fires its first tick immediately, which is wanted here:
-    // both icons started out saying "unavailable" in `main`, and the
-    // first real read (of both the backends and `tray.toml`) should not
-    // wait a further `POLL_INTERVAL`.
+    // every icon started out saying "unavailable" in `main`, and the
+    // first real read (of every backend and `tray.toml`) should not wait
+    // a further `POLL_INTERVAL`.
     let mut ticker = tokio::time::interval(POLL_INTERVAL);
     loop {
         // Either the ordinary tick, or someone opening a menu asked for
@@ -499,10 +665,23 @@ async fn poll_loop(
         refresh_prefs(&mut prefs, &mut prefs_load_failed);
 
         let (net_item, net_menu) = sample_network(&mut net_state).await;
-        sync_icon(&network_slot, prefs.network, net_item, net_menu, 0, &clicks, &menu_clicks).await;
-
         let (bt_item, bt_menu) = sample_bluetooth(&mut bt_state).await;
-        sync_icon(&bluetooth_slot, prefs.bluetooth, bt_item, bt_menu, 1, &clicks, &menu_clicks).await;
+        let (ka_item, ka_menu) = sample_keep_awake(&mut power_state).await;
+        let (nl_item, nl_menu) = sample_night_light(&night_light_belief).await;
+
+        // One row per icon: `(wanted, item, menu)` lined up against
+        // `icons` in the same fixed order `main` registered them in — see
+        // `ManagedIcon`'s doc comment for why this is a loop rather than
+        // four repeated `sync_icon` calls.
+        let ticks: [(bool, TrayItem, Menu); 4] = [
+            (prefs.network, net_item, net_menu),
+            (prefs.bluetooth, bt_item, bt_menu),
+            (prefs.keep_awake, ka_item, ka_menu),
+            (prefs.night_light, nl_item, nl_menu),
+        ];
+        for (icon, (wanted, item, menu)) in icons.iter().zip(ticks) {
+            sync_icon(&icon.slot, wanted, item, menu, icon.index, &clicks, &menu_clicks).await;
+        }
     }
 }
 
@@ -557,7 +736,7 @@ fn spawn_settings(screen: &str) {
 /// only way back. This only fires on the *transition* into "present" —
 /// re-announcing every poll while a host is already there would ask it to
 /// re-add an icon it already has for no reason.
-async fn reannounce_loop(probe: zbus::Connection, network_slot: IconSlot, bluetooth_slot: IconSlot) {
+async fn reannounce_loop(probe: zbus::Connection, icons: Vec<ManagedIcon>) {
     // `main` only reaches this point after `watcher_present` returned
     // true, so the host is presumed present until proven otherwise.
     let mut present = true;
@@ -571,9 +750,9 @@ async fn reannounce_loop(probe: zbus::Connection, network_slot: IconSlot, blueto
             // re-announce — `poll_loop` will register it fresh (which
             // announces on its own) if and when the user turns it back
             // on, so there is nothing missing here to re-announce.
-            for slot in [&network_slot, &bluetooth_slot] {
-                if let Some(icon) = slot.lock().await.as_ref() {
-                    if let Err(e) = icon.announce().await {
+            for icon in &icons {
+                if let Some(tray_icon) = icon.slot.lock().await.as_ref() {
+                    if let Err(e) = tray_icon.announce().await {
                         tracing::warn!(error = %e, "failed to re-announce a tray icon");
                     }
                 }
@@ -622,7 +801,7 @@ fn network_item(
             // forbids.
             status: TrayStatus::Active,
             title,
-            icon_name: "network-wireless-offline".to_string(),
+            icon_name: "dialog-warning".to_string(),
             tooltip_title: "Wi-Fi unavailable".to_string(),
             tooltip_body: "NetworkManager isn't running.".to_string(),
         };
@@ -685,7 +864,7 @@ fn bluetooth_item(
             category: Category::Hardware,
             status: TrayStatus::Active,
             title,
-            icon_name: "bluetooth-offline".to_string(),
+            icon_name: "dialog-warning".to_string(),
             tooltip_title: "Bluetooth unavailable".to_string(),
             tooltip_body: "bluetoothd isn't running.".to_string(),
         };
@@ -699,7 +878,7 @@ fn bluetooth_item(
             category: Category::Hardware,
             status: TrayStatus::Passive,
             title,
-            icon_name: "bluetooth-disabled".to_string(),
+            icon_name: "network-bluetooth-inactive-symbolic".to_string(),
             tooltip_title: "Bluetooth is off".to_string(),
             tooltip_body: String::new(),
         },
@@ -709,7 +888,7 @@ fn bluetooth_item(
                 category: Category::Hardware,
                 status: TrayStatus::Active,
                 title,
-                icon_name: "bluetooth-active".to_string(),
+                icon_name: "network-bluetooth-activated-symbolic".to_string(),
                 // `alias` always exists (falls back to `Name`, then the
                 // address) — never the raw address alone, and never
                 // anything derived from pairing secrets, of which this
@@ -722,7 +901,7 @@ fn bluetooth_item(
                 category: Category::Hardware,
                 status: TrayStatus::Active,
                 title,
-                icon_name: "bluetooth-active".to_string(),
+                icon_name: "network-bluetooth-activated-symbolic".to_string(),
                 tooltip_title: "Not connected".to_string(),
                 tooltip_body: "Bluetooth is on".to_string(),
             },
@@ -937,6 +1116,224 @@ fn bluetooth_menu(status: Option<&BtStatus>, unavailable: bool, devices: &[Devic
     Menu::new(items)
 }
 
+/// The id `hyprctl`/logind knows this daemon's own inhibit by. Used both
+/// when taking one ([`perform_menu_action`]) and to recognise — and
+/// exclude — it in [`other_inhibitors`], so our own toggle never shows up
+/// a second time, disabled, in its own menu.
+const KEEP_AWAKE_WHO: &str = "hyprforge-trayd";
+const KEEP_AWAKE_WHY: &str = "user requested via the tray";
+const KEEP_AWAKE_ITEM_ID: &str = "hyprforge-keep-awake";
+const NIGHT_LIGHT_ITEM_ID: &str = "hyprforge-night-light";
+
+/// How many other inhibitors the keep-awake menu shows before truncating.
+/// A busy session can rack up several (a video call, a download manager,
+/// a game); a menu that lists all of them stops being a menu — same
+/// reasoning as [`MAX_NETWORKS_SHOWN`].
+const MAX_OTHER_INHIBITORS_SHOWN: usize = 5;
+
+/// Everyone else's inhibitor — [`InhibitBackend::list_inhibitors`]
+/// reports every one logind holds, ours included, and this is what keeps
+/// our own toggle from appearing a second time in the list of *other*
+/// holders right next to the checkmark that already represents it.
+fn other_inhibitors(all: Vec<InhibitorInfo>) -> Vec<InhibitorInfo> {
+    all.into_iter().filter(|i| i.who != KEEP_AWAKE_WHO).collect()
+}
+
+/// What the keep-awake icon should say, from plain data — no D-Bus, no
+/// I/O. `others` is expected already filtered by [`other_inhibitors`].
+///
+/// `Status::Active` only while this daemon is actually holding the
+/// inhibit, `Status::Passive` otherwise. This is *not* the network/
+/// Bluetooth split (radio off is passive, radio on-but-idle is still
+/// active because someone might come looking for it) — keep awake has no
+/// state of its own to monitor when it is off. "Not currently keeping
+/// this machine awake" is the ordinary condition for nearly every minute
+/// of a session, and showing it permanently would be exactly the noise a
+/// radio icon that never hides would be.
+fn keep_awake_item(held: Option<bool>, others: &[InhibitorInfo], unavailable: bool) -> TrayItem {
+    let id = KEEP_AWAKE_ITEM_ID.to_string();
+    let title = "Keep awake".to_string();
+
+    let Some(held) = held.filter(|_| !unavailable) else {
+        return TrayItem {
+            id,
+            category: Category::SystemServices,
+            status: TrayStatus::Active,
+            title,
+            icon_name: "dialog-warning".to_string(),
+            tooltip_title: "Keep awake unavailable".to_string(),
+            tooltip_body: "systemd-logind isn't answering.".to_string(),
+        };
+    };
+
+    let plural = if others.len() == 1 { "" } else { "es" };
+    if held {
+        TrayItem {
+            id,
+            category: Category::SystemServices,
+            status: TrayStatus::Active,
+            title,
+            icon_name: "changes-prevent-symbolic".to_string(),
+            tooltip_title: "Keeping this machine awake".to_string(),
+            tooltip_body: if others.is_empty() {
+                String::new()
+            } else {
+                format!("Also held by {} other process{plural}", others.len())
+            },
+        }
+    } else {
+        TrayItem {
+            id,
+            category: Category::SystemServices,
+            status: TrayStatus::Passive,
+            title,
+            icon_name: "changes-allow-symbolic".to_string(),
+            tooltip_title: "Not keeping this machine awake".to_string(),
+            tooltip_body: if others.is_empty() {
+                "Nothing is preventing sleep".to_string()
+            } else {
+                format!("{} other process{plural} preventing sleep", others.len())
+            },
+        }
+    }
+}
+
+/// What the keep-awake menu should contain, from plain data — no D-Bus,
+/// no I/O. Same expectation on `others` as [`keep_awake_item`].
+///
+/// The checkmark is the only actionable row. Every other holder listed
+/// beneath it is disabled: this daemon only ever manages its own
+/// inhibit, never someone else's — `InhibitBackend::list_inhibitors`'s
+/// doc comment says as much — so the value of listing them is answering
+/// "why won't this machine sleep" from the tray, not offering to end
+/// them.
+fn keep_awake_menu(held: Option<bool>, others: &[InhibitorInfo], unavailable: bool) -> Menu {
+    let Some(held) = held.filter(|_| !unavailable) else {
+        return Menu::new(vec![MenuItem::disabled("Keep awake unavailable")]);
+    };
+
+    let mut items = vec![MenuItem::checkmark(
+        "Keep this machine awake",
+        held,
+        if held { "keepawake:off" } else { "keepawake:on" },
+    )];
+
+    if !others.is_empty() {
+        items.push(MenuItem::separator());
+        items.push(MenuItem::disabled("Also preventing sleep:"));
+        for other in others.iter().take(MAX_OTHER_INHIBITORS_SHOWN) {
+            items.push(MenuItem::disabled(format!("{} — {}", other.who, other.why)));
+        }
+        if others.len() > MAX_OTHER_INHIBITORS_SHOWN {
+            items.push(MenuItem::disabled(format!(
+                "+{} more",
+                others.len() - MAX_OTHER_INHIBITORS_SHOWN
+            )));
+        }
+    }
+
+    Menu::new(items)
+}
+
+/// The warm presets offered as menu rows — the one thing a tray menu can
+/// do that a plain on/off toggle cannot. 4500K matches
+/// `sunset_control::DEFAULT_WARM_TEMPERATURE` deliberately, so turning
+/// night light on from the checkmark and picking the first preset are
+/// the same action.
+const NIGHT_LIGHT_PRESETS: &[i64] = &[4500, 3500, 2700];
+
+/// What the night-light icon should say, from plain data — no D-Bus, no
+/// I/O.
+///
+/// Three distinct rows for three distinct facts, none of them collapsed
+/// into another: [`NightLightState::NotRunning`] is hyprsunset confirmed
+/// absent, [`NightLightState::CouldNotCheck`] is the check itself
+/// failing (evidence about `pgrep`/`hyprctl`, not about hyprsunset), and
+/// [`NightLightState::Known`] is an actual reading. Rendering
+/// `NotRunning` with the same icon as "off" would be exactly the mistake
+/// the task this module was built against calls out by name: a daemon
+/// that isn't there must never look like a night light setting.
+fn night_light_item(state: &NightLightState) -> TrayItem {
+    let id = NIGHT_LIGHT_ITEM_ID.to_string();
+    let title = "Night light".to_string();
+    match *state {
+        NightLightState::NotRunning => TrayItem {
+            id,
+            category: Category::SystemServices,
+            status: TrayStatus::Active,
+            title,
+            icon_name: "dialog-warning".to_string(),
+            tooltip_title: "Night light unavailable".to_string(),
+            tooltip_body: "hyprsunset isn't running.".to_string(),
+        },
+        NightLightState::CouldNotCheck => TrayItem {
+            id,
+            category: Category::SystemServices,
+            status: TrayStatus::Active,
+            title,
+            icon_name: "dialog-information".to_string(),
+            tooltip_title: "Night light status unknown".to_string(),
+            tooltip_body: "Couldn't tell whether hyprsunset is running.".to_string(),
+        },
+        NightLightState::Known { temperature, on: true } => TrayItem {
+            id,
+            category: Category::SystemServices,
+            status: TrayStatus::Active,
+            title,
+            icon_name: "redshift-status-on-symbolic".to_string(),
+            tooltip_title: "Night light is on".to_string(),
+            tooltip_body: format!("{temperature}K"),
+        },
+        NightLightState::Known { on: false, .. } => TrayItem {
+            id,
+            category: Category::SystemServices,
+            status: TrayStatus::Passive,
+            title,
+            icon_name: "redshift-status-off-symbolic".to_string(),
+            tooltip_title: "Night light is off".to_string(),
+            tooltip_body: String::new(),
+        },
+    }
+}
+
+/// What the night-light menu should contain, from plain data — no D-Bus,
+/// no I/O. Same three-states rule as [`night_light_item`]: the
+/// unavailable rows say which of the two distinct reasons applies rather
+/// than sharing one "can't do anything" row.
+fn night_light_menu(state: &NightLightState) -> Menu {
+    let (temperature, on) = match *state {
+        NightLightState::NotRunning => {
+            return Menu::new(vec![MenuItem::disabled(
+                "hyprsunset isn't running — starts from exec-once",
+            )])
+        }
+        NightLightState::CouldNotCheck => {
+            return Menu::new(vec![MenuItem::disabled("Couldn't check hyprsunset")])
+        }
+        NightLightState::Known { temperature, on } => (temperature, on),
+    };
+
+    let toggle_action = if on {
+        "nightlight:off".to_string()
+    } else {
+        format!("nightlight:set:{}", NIGHT_LIGHT_PRESETS[0])
+    };
+    let mut items = vec![MenuItem::checkmark("Night light", on, toggle_action)];
+
+    items.push(MenuItem::separator());
+    for &kelvin in NIGHT_LIGHT_PRESETS {
+        let is_current = on && temperature == kelvin;
+        let action = format!("nightlight:set:{kelvin}");
+        if is_current {
+            items.push(MenuItem::checkmark(format!("{kelvin}K"), true, action));
+        } else {
+            items.push(MenuItem::standard(format!("{kelvin}K"), action));
+        }
+    }
+
+    Menu::new(items)
+}
+
 /// The typed operation behind an action string a menu click sends back.
 ///
 /// Parsed in exactly one place ([`parse_menu_action`]) so every route a
@@ -954,6 +1351,13 @@ enum MenuAction {
     BtRadio(bool),
     BtConnect(Address),
     BtDisconnect(Address),
+    /// `true` to take the inhibit, `false` to release it.
+    KeepAwake(bool),
+    /// Turns night light off (`hyprctl hyprsunset identity`).
+    NightLightOff,
+    /// Sets a specific colour temperature, turning night light on if it
+    /// was off.
+    NightLightSet(i64),
 }
 
 fn parse_menu_action(action: &str) -> Option<MenuAction> {
@@ -964,15 +1368,21 @@ fn parse_menu_action(action: &str) -> Option<MenuAction> {
         "bt:settings" => Some(MenuAction::OpenSettings("bluetooth")),
         "bt:radio:on" => Some(MenuAction::BtRadio(true)),
         "bt:radio:off" => Some(MenuAction::BtRadio(false)),
+        "keepawake:on" => Some(MenuAction::KeepAwake(true)),
+        "keepawake:off" => Some(MenuAction::KeepAwake(false)),
+        "nightlight:off" => Some(MenuAction::NightLightOff),
         _ => {
             if let Some(hex) = action.strip_prefix("wifi:connect:") {
                 hex_decode(hex).map(MenuAction::WifiConnect)
             } else if let Some(addr) = action.strip_prefix("bt:connect:") {
                 Some(MenuAction::BtConnect(Address::new(addr)))
+            } else if let Some(addr) = action.strip_prefix("bt:disconnect:") {
+                Some(MenuAction::BtDisconnect(Address::new(addr)))
             } else {
                 action
-                    .strip_prefix("bt:disconnect:")
-                    .map(|addr| MenuAction::BtDisconnect(Address::new(addr)))
+                    .strip_prefix("nightlight:set:")
+                    .and_then(|kelvin| kelvin.parse::<i64>().ok())
+                    .map(MenuAction::NightLightSet)
             }
         }
     }
@@ -1029,9 +1439,11 @@ const SCAN_SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
 async fn handle_menu_clicks(
     mut actions: tokio::sync::mpsc::UnboundedReceiver<String>,
     refresh: tokio::sync::mpsc::UnboundedSender<()>,
+    night_light_belief: NightLightBelief,
 ) {
     let mut net_state = Reconnecting::new();
     let mut bt_state = Reconnecting::new();
+    let mut power_state = Reconnecting::new();
     while let Some(action) = actions.recv().await {
         // A menu being opened is an event, not a click, and only the
         // Wi-Fi one wants anything done about it.
@@ -1041,14 +1453,18 @@ async fn handle_menu_clicks(
             }
             // Bluetooth deliberately does nothing: starting discovery
             // costs battery on every device in range, and a popup opening
-            // is not someone asking for that.
+            // is not someone asking for that. Keep awake and night light
+            // have nothing analogous to refresh on open either.
             continue;
         }
         let Some(parsed) = parse_menu_action(&action) else {
             tracing::warn!(action = %action, "unknown tray menu action; ignoring");
             continue;
         };
-        if let Err(e) = perform_menu_action(parsed, &mut net_state, &mut bt_state).await {
+        if let Err(e) =
+            perform_menu_action(parsed, &mut net_state, &mut bt_state, &mut power_state, &night_light_belief)
+                .await
+        {
             tracing::warn!(error = %e, "tray menu action failed");
         }
     }
@@ -1058,6 +1474,8 @@ async fn perform_menu_action(
     action: MenuAction,
     net_state: &mut Reconnecting<NetworkManagerBackend>,
     bt_state: &mut Reconnecting<BlueZBackend>,
+    power_state: &mut Reconnecting<LogindBackend>,
+    night_light_belief: &NightLightBelief,
 ) -> anyhow::Result<()> {
     match action {
         MenuAction::OpenSettings(screen) => {
@@ -1126,6 +1544,31 @@ async fn perform_menu_action(
             backend.disconnect(&address).await?;
             Ok(())
         }
+        MenuAction::KeepAwake(on) => {
+            let backend = keep_awake_backend(power_state)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("systemd-logind unavailable"))?;
+            if on {
+                backend.take(WhatSet::keep_awake(), KEEP_AWAKE_WHO, KEEP_AWAKE_WHY).await?;
+            } else {
+                backend.release().await?;
+            }
+            Ok(())
+        }
+        MenuAction::NightLightOff => {
+            // `hyprctl`/`pgrep` are both synchronous and bounded (see
+            // `command::output`'s own timeout) — `spawn_blocking` keeps a
+            // slow one from stalling the runtime, not from running
+            // forever; nothing here waits without a bound of its own.
+            tokio::task::spawn_blocking(|| Hyprsunset.turn_off()).await??;
+            *night_light_belief.lock().unwrap_or_else(|e| e.into_inner()) = false;
+            Ok(())
+        }
+        MenuAction::NightLightSet(kelvin) => {
+            tokio::task::spawn_blocking(move || Hyprsunset.set_temperature(kelvin)).await??;
+            *night_light_belief.lock().unwrap_or_else(|e| e.into_inner()) = true;
+            Ok(())
+        }
     }
 }
 
@@ -1147,9 +1590,41 @@ mod tests {
         "network-wireless-signal-weak",
         "network-wireless-signal-none",
         "network-wireless-disconnected",
-        "network-wireless-offline",
+        "dialog-warning",
     ];
-    const BLUETOOTH_ICON_NAMES: &[&str] = &["bluetooth-active", "bluetooth-disabled", "bluetooth-offline"];
+    const BLUETOOTH_ICON_NAMES: &[&str] = &["network-bluetooth-activated-symbolic", "network-bluetooth-inactive-symbolic", "dialog-warning"];
+    // Every name in this file is resolved against a real installed icon
+    // theme by `live_icons.rs`, because an unresolvable name is the
+    // quietest failure in this daemon: the bar draws a blank gap, and
+    // nothing logs anything at any layer.
+    //
+    // The names here are not the prettiest available. GNOME's
+    // `night-light-symbolic` is the obvious choice for night light and
+    // exists only in Adwaita, so it vanishes on a Breeze-derived theme;
+    // `redshift-status-*` ships far more widely because redshift is the
+    // application every theme drew an icon for. Likewise
+    // `network-bluetooth-*` over `bluetooth-*`, which several themes
+    // never had.
+    //
+    // Confirmed present in both Adwaita and Breeze's own icon trees on
+    // this machine (`/usr/share/icons/{Adwaita,breeze}`), unlike most of
+    // the other names in this file, which only Adwaita ships — the
+    // closest thing to a cross-desktop-environment standard available
+    // for "prevent/allow the machine to sleep".
+    const KEEP_AWAKE_ICON_NAMES: &[&str] =
+        &["changes-prevent-symbolic", "changes-allow-symbolic", "dialog-warning"];
+    // `redshift-status-on`/`-off`, rather than GNOME's
+    // `night-light-symbolic`, which reads better and exists only in
+    // Adwaita. This machine's theme inherits Breeze rather than Adwaita,
+    // so the GNOME name resolved to nothing at all — the icon was simply
+    // absent from the bar, which is how this whole class of bug is
+    // found: by looking, not by testing a name against a list.
+    const NIGHT_LIGHT_ICON_NAMES: &[&str] = &[
+        "redshift-status-on-symbolic",
+        "redshift-status-off-symbolic",
+        "dialog-warning",
+        "dialog-information",
+    ];
 
     fn net_status(radio: RadioState, connected: Option<&str>) -> NetStatus {
         NetStatus { radio, connected_to: connected.map(Ssid::new) }
@@ -1234,7 +1709,7 @@ mod tests {
     fn an_unavailable_network_daemon_produces_an_icon_and_tooltip_that_say_so() {
         let item = network_item(None, None, None, true);
         assert_eq!(item.status, TrayStatus::Active, "must stay visible to be seen at all");
-        assert_eq!(item.icon_name, "network-wireless-offline");
+        assert_eq!(item.icon_name, "dialog-warning");
         assert!(item.tooltip_title.to_lowercase().contains("unavailable"));
 
         let nothing_connected = network_item(Some(&net_status(RadioState::On, None)), None, None, false);
@@ -1258,7 +1733,7 @@ mod tests {
     fn an_unavailable_bluetooth_daemon_produces_an_icon_and_tooltip_that_say_so() {
         let item = bluetooth_item(None, None, true);
         assert_eq!(item.status, TrayStatus::Active);
-        assert_eq!(item.icon_name, "bluetooth-offline");
+        assert_eq!(item.icon_name, "dialog-warning");
         assert!(item.tooltip_title.to_lowercase().contains("unavailable"));
 
         let nothing_connected = bluetooth_item(Some(&bt_status(AdapterState::On)), None, false);
@@ -1448,7 +1923,7 @@ mod tests {
     #[test]
     fn a_missing_tray_toml_refreshes_to_the_defaults() {
         with_temp_config_home(|_dir| {
-            let mut current = Prefs { network: false, bluetooth: false };
+            let mut current = Prefs { network: false, bluetooth: false, keep_awake: false, night_light: false };
             let mut warned = false;
             refresh_prefs(&mut current, &mut warned);
             assert!(current.network, "a missing file is first run: both icons shown");
@@ -1467,12 +1942,12 @@ mod tests {
             std::fs::create_dir_all(tray_toml.parent().unwrap()).unwrap();
             std::fs::write(&tray_toml, "network = yes please\n").unwrap();
 
-            let mut current = Prefs { network: true, bluetooth: false };
+            let mut current = Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false };
             let mut warned = false;
             refresh_prefs(&mut current, &mut warned);
             assert_eq!(
                 current,
-                Prefs { network: true, bluetooth: false },
+                Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false },
                 "a failed read must not change what is currently shown"
             );
             assert!(warned, "the failure is reported");
@@ -1821,5 +2296,222 @@ mod tests {
     fn hex_round_trips_arbitrary_bytes_including_non_utf8_ones() {
         let bytes = vec![0u8, 1, 254, 255, b'a'];
         assert_eq!(hex_decode(&hex_encode(&bytes)), Some(bytes));
+    }
+
+    // --- keep awake ------------------------------------------------------
+
+    fn inhibitor(who: &str, why: &str) -> InhibitorInfo {
+        InhibitorInfo {
+            what: "sleep:idle".to_string(),
+            who: who.to_string(),
+            why: why.to_string(),
+            mode: "block".to_string(),
+            uid: 1000,
+            pid: 4242,
+        }
+    }
+
+    #[test]
+    fn every_keep_awake_icon_the_function_can_return_is_a_documented_freedesktop_name() {
+        let other = [inhibitor("systemd-inhibit", "working")];
+        let items = [
+            keep_awake_item(None, &[], true),
+            keep_awake_item(Some(false), &[], false),
+            keep_awake_item(Some(true), &[], false),
+            keep_awake_item(Some(true), &other, false),
+            keep_awake_item(Some(false), &other, false),
+        ];
+        for item in items {
+            assert!(
+                KEEP_AWAKE_ICON_NAMES.contains(&item.icon_name.as_str()),
+                "invented icon name: {}",
+                item.icon_name
+            );
+        }
+    }
+
+    /// The property the task calls out by name: unlike a radio, keep
+    /// awake has nothing worth monitoring while it's off, so it is
+    /// genuinely passive rather than merely unconnected.
+    #[test]
+    fn keep_awake_is_passive_when_not_inhibiting_and_active_when_inhibiting() {
+        let off = keep_awake_item(Some(false), &[], false);
+        assert_eq!(off.status, TrayStatus::Passive);
+
+        let on = keep_awake_item(Some(true), &[], false);
+        assert_eq!(on.status, TrayStatus::Active);
+    }
+
+    #[test]
+    fn an_unavailable_logind_produces_an_icon_and_tooltip_that_say_so() {
+        let item = keep_awake_item(None, &[], true);
+        assert_eq!(item.status, TrayStatus::Active, "must stay visible to be seen at all");
+        assert!(item.tooltip_title.to_lowercase().contains("unavailable"));
+    }
+
+    /// The property this daemon's own filtering exists for: logind
+    /// reports every inhibitor it holds, ours included, so `main`'s "who"
+    /// string has to be filtered back out before it reaches a menu built
+    /// to show *other* holders.
+    #[test]
+    fn our_own_inhibitor_is_excluded_from_the_list_of_other_holders() {
+        let all = vec![inhibitor(KEEP_AWAKE_WHO, KEEP_AWAKE_WHY), inhibitor("mpv", "playing a video")];
+        let others = other_inhibitors(all);
+        assert_eq!(others.len(), 1);
+        assert_eq!(others[0].who, "mpv");
+    }
+
+    /// Another process's inhibitor shows up in the menu as a disabled
+    /// row, and ours never appears a second time next to the checkmark
+    /// that already represents it.
+    #[test]
+    fn another_processs_inhibitor_appears_in_the_keep_awake_menu_and_ours_does_not_appear_twice() {
+        let all = vec![inhibitor(KEEP_AWAKE_WHO, KEEP_AWAKE_WHY), inhibitor("mpv", "playing a video")];
+        let others = other_inhibitors(all);
+        let menu = keep_awake_menu(Some(true), &others, false);
+        let rows = menu.flatten();
+
+        let mpv_rows: Vec<_> = rows.iter().filter(|i| i.label.contains("mpv")).collect();
+        assert_eq!(mpv_rows.len(), 1, "the other holder should appear exactly once");
+        assert!(!mpv_rows[0].enabled, "another process's lock cannot be released from here");
+
+        let own_rows: Vec<_> = rows.iter().filter(|i| i.label.contains(KEEP_AWAKE_WHO)).collect();
+        assert!(own_rows.is_empty(), "our own inhibitor must not appear in the disabled list too");
+    }
+
+    #[test]
+    fn the_keep_awake_menus_checkmark_reflects_whether_we_are_holding_it() {
+        let held = keep_awake_menu(Some(true), &[], false);
+        let row = held.flatten().into_iter().find(|i| i.kind == ItemKind::Checkmark).unwrap();
+        assert_eq!(row.toggle, Some(true));
+        assert_eq!(row.action.as_deref(), Some("keepawake:off"));
+
+        let not_held = keep_awake_menu(Some(false), &[], false);
+        let row = not_held.flatten().into_iter().find(|i| i.kind == ItemKind::Checkmark).unwrap();
+        assert_eq!(row.toggle, Some(false));
+        assert_eq!(row.action.as_deref(), Some("keepawake:on"));
+    }
+
+    // --- night light -------------------------------------------------------
+
+    #[test]
+    fn every_night_light_icon_the_function_can_return_is_a_documented_freedesktop_name() {
+        let items = [
+            night_light_item(&NightLightState::NotRunning),
+            night_light_item(&NightLightState::CouldNotCheck),
+            night_light_item(&NightLightState::Known { temperature: 4500, on: true }),
+            night_light_item(&NightLightState::Known { temperature: 4500, on: false }),
+        ];
+        for item in items {
+            assert!(
+                NIGHT_LIGHT_ICON_NAMES.contains(&item.icon_name.as_str()),
+                "invented icon name: {}",
+                item.icon_name
+            );
+        }
+    }
+
+    /// The property the task calls out by name: a daemon that is not
+    /// running must never be reported the same way as night light being
+    /// deliberately switched off, in either the icon or the menu.
+    #[test]
+    fn hyprsunset_not_running_produces_a_menu_that_says_so_distinct_from_night_light_off() {
+        let not_running = night_light_item(&NightLightState::NotRunning);
+        let off = night_light_item(&NightLightState::Known { temperature: 4500, on: false });
+        assert_ne!(not_running.icon_name, off.icon_name);
+        assert_ne!(not_running.tooltip_title, off.tooltip_title);
+        assert!(not_running.tooltip_title.to_lowercase().contains("unavailable"));
+        assert!(off.tooltip_title.to_lowercase().contains("off"));
+
+        let not_running_menu = night_light_menu(&NightLightState::NotRunning);
+        let off_menu = night_light_menu(&NightLightState::Known { temperature: 4500, on: false });
+        assert_ne!(not_running_menu, off_menu);
+        assert!(not_running_menu
+            .flatten()
+            .iter()
+            .any(|i| i.label.to_lowercase().contains("running")));
+        // The "off" menu, unlike the "not running" one, offers a
+        // checkmark to act on — there is something here to toggle.
+        assert!(off_menu.flatten().iter().any(|i| i.kind == ItemKind::Checkmark));
+        assert!(!not_running_menu.flatten().iter().any(|i| i.kind == ItemKind::Checkmark));
+    }
+
+    /// The third state: the check itself failing must read differently
+    /// from both "not running" and "off", not collapse into either.
+    #[test]
+    fn a_failed_check_reads_differently_from_not_running_and_from_off() {
+        let could_not_check = night_light_item(&NightLightState::CouldNotCheck);
+        let not_running = night_light_item(&NightLightState::NotRunning);
+        let off = night_light_item(&NightLightState::Known { temperature: 4500, on: false });
+        assert_ne!(could_not_check.icon_name, not_running.icon_name);
+        assert_ne!(could_not_check.icon_name, off.icon_name);
+        assert_ne!(could_not_check.tooltip_title, not_running.tooltip_title);
+        assert_ne!(could_not_check.tooltip_title, off.tooltip_title);
+    }
+
+    #[test]
+    fn a_known_reading_shows_the_temperature_only_while_believed_on() {
+        let on = night_light_item(&NightLightState::Known { temperature: 3500, on: true });
+        assert!(on.tooltip_body.contains("3500"));
+        assert_eq!(on.status, TrayStatus::Active);
+
+        let off = night_light_item(&NightLightState::Known { temperature: 3500, on: false });
+        assert_eq!(off.status, TrayStatus::Passive);
+        assert!(!off.tooltip_body.contains("3500"), "off has nothing numeric to show");
+    }
+
+    #[test]
+    fn the_current_preset_is_shown_checked_and_others_are_not() {
+        let menu = night_light_menu(&NightLightState::Known { temperature: 3500, on: true });
+        let current = menu.flatten().into_iter().find(|i| i.label == "3500K").unwrap();
+        assert_eq!(current.toggle, Some(true));
+
+        let other = menu.flatten().into_iter().find(|i| i.label == "4500K").unwrap();
+        assert_ne!(other.toggle, Some(true));
+    }
+
+    // --- the action vocabulary, extended -----------------------------------
+
+    /// Mirrors `every_action_a_built_menu_can_contain_parses_back_to_the_operation_that_built_it`
+    /// for the two new menus, rather than folding them into that test —
+    /// each set of menus is built from its own state enum, and keeping
+    /// them apart makes it obvious which menu a failure came from.
+    #[test]
+    fn every_keep_awake_and_night_light_action_parses_back_to_an_operation() {
+        let other = [inhibitor("mpv", "playing a video")];
+        let keep_awake_menus = [
+            keep_awake_menu(None, &[], true),
+            keep_awake_menu(Some(false), &[], false),
+            keep_awake_menu(Some(true), &other, false),
+        ];
+        let night_light_menus = [
+            night_light_menu(&NightLightState::NotRunning),
+            night_light_menu(&NightLightState::CouldNotCheck),
+            night_light_menu(&NightLightState::Known { temperature: 4500, on: true }),
+            night_light_menu(&NightLightState::Known { temperature: 2700, on: false }),
+        ];
+
+        for menu in keep_awake_menus.iter().chain(night_light_menus.iter()) {
+            for item in menu.flatten() {
+                let Some(action) = item.action.as_deref() else { continue };
+                if action.is_empty() {
+                    continue;
+                }
+                assert!(
+                    parse_menu_action(action).is_some(),
+                    "action {action:?} on row {:?} does not parse back to an operation",
+                    item.label
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn keep_awake_and_night_light_actions_round_trip_to_distinct_operations() {
+        assert_eq!(parse_menu_action("keepawake:on"), Some(MenuAction::KeepAwake(true)));
+        assert_eq!(parse_menu_action("keepawake:off"), Some(MenuAction::KeepAwake(false)));
+        assert_eq!(parse_menu_action("nightlight:off"), Some(MenuAction::NightLightOff));
+        assert_eq!(parse_menu_action("nightlight:set:2700"), Some(MenuAction::NightLightSet(2700)));
+        assert_eq!(parse_menu_action("nightlight:set:not-a-number"), None);
     }
 }

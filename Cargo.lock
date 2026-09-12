@@ -1676,8 +1676,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "hyprforge-bluetooth",
+ "hyprforge-ecosystem",
  "hyprforge-network",
  "hyprforge-paths",
+ "hyprforge-power",
  "serde",
  "tempfile",
  "thiserror 2.0.19",
