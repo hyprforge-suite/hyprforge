@@ -746,47 +746,80 @@ impl<B: Backend + 'static> LockScreen<B> {
     /// compositor releasing the session runs here, and only the
     /// `wl_keyboard` delivery is left out.
     fn key(&mut self, keysym: Keysym, utf8: Option<String>) {
-        // Nothing about a keystroke is logged here, ever. A keysym name
-        // *is* the character — `XK_a` for `a`, `XK_comma` for `,` — so
-        // logging "just the keysym" to debug input writes the password
-        // to disk in a barely-encoded form. This comment exists because
-        // that mistake was made here once already.
         // Nothing is being asked until the lock is granted, so a key
         // pressed in that window has nowhere to go.
         let Some(conversation) = self.conversation.as_mut() else {
             return;
         };
-        match keysym {
-            Keysym::Return | Keysym::KP_Enter => match conversation.state() {
-                State::Telling { .. } => conversation.acknowledge(),
-                State::Failed { .. } => conversation.retry(),
-                _ => conversation.submit(),
-            },
-            Keysym::Escape => conversation.clear(),
-            Keysym::BackSpace => {
+        dispatch_key(conversation, keysym, utf8);
+        self.mark_dirty();
+    }
+}
+
+/// The keystroke rules, over a `Conversation` alone.
+///
+/// Split out from [`LockScreen::key`] so they can be tested without a
+/// Wayland connection. Every decision about what a key means lives here;
+/// the method above only supplies the conversation and repaints.
+fn dispatch_key<B: hyprforge_authui::conversation::Backend>(
+    conversation: &mut Conversation<B>,
+    keysym: Keysym,
+    utf8: Option<String>,
+) {
+    // Nothing about a keystroke is logged here, ever. A keysym name *is*
+    // the character — `XK_a` for `a`, `XK_comma` for `,` — so logging
+    // "just the keysym" to debug input writes the password to disk in a
+    // barely-encoded form. This comment exists because that mistake was
+    // made here once already.
+    match keysym {
+        Keysym::Return | Keysym::KP_Enter => match conversation.state() {
+            State::Telling { .. } => conversation.acknowledge(),
+            State::Failed { .. } => conversation.retry(),
+            _ => conversation.submit(),
+        },
+        // Both of these check for `Failed` first, and both used to
+        // not. `clear` and `type_into` are no-ops in that state, so
+        // Escape and Backspace — the two keys a person actually
+        // reaches for after a wrong password — did nothing at all.
+        // The error stayed put and the lock screen read as frozen,
+        // on the one screen where that is frightening.
+        //
+        // The `_` arm below already dismissed the error for every
+        // other key; these two were matched before they could reach
+        // it.
+        Keysym::Escape => {
+            if matches!(conversation.state(), State::Failed { .. }) {
+                conversation.retry();
+            } else {
+                conversation.clear();
+            }
+        }
+        Keysym::BackSpace => {
+            if matches!(conversation.state(), State::Failed { .. }) {
+                conversation.retry();
+            } else {
                 let mut entered = conversation.entered().to_string();
                 entered.pop();
                 conversation.type_into(entered);
             }
-            _ => {
-                // Any key at all leaves the failed state, so the user can
-                // simply start typing again rather than having to work
-                // out which key dismisses the error.
-                if matches!(conversation.state(), State::Failed { .. }) {
-                    conversation.retry();
-                }
-                if let Some(text) = utf8 {
-                    // Control characters would otherwise count as typed
-                    // characters and show a dot for nothing.
-                    if !text.is_empty() && !text.chars().any(char::is_control) {
-                        let mut entered = conversation.entered().to_string();
-                        entered.push_str(&text);
-                        conversation.type_into(entered);
-                    }
+        }
+        _ => {
+            // Any key at all leaves the failed state, so the user can
+            // simply start typing again rather than having to work
+            // out which key dismisses the error.
+            if matches!(conversation.state(), State::Failed { .. }) {
+                conversation.retry();
+            }
+            if let Some(text) = utf8 {
+                // Control characters would otherwise count as typed
+                // characters and show a dot for nothing.
+                if !text.is_empty() && !text.chars().any(char::is_control) {
+                    let mut entered = conversation.entered().to_string();
+                    entered.push_str(&text);
+                    conversation.type_into(entered);
                 }
             }
         }
-        self.mark_dirty();
     }
 }
 
@@ -927,6 +960,88 @@ delegate_registry!(@<B: Backend + 'static> LockScreen<B>);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hyprforge_authui::conversation::Response;
+
+    /// Asks for a password once, then rejects whatever it is given.
+    ///
+    /// Enough to reach `State::Failed`, which is the only state these
+    /// tests are about.
+    struct AlwaysRejects {
+        queued: Vec<Response>,
+    }
+
+    impl hyprforge_authui::conversation::Backend for AlwaysRejects {
+        fn start(&mut self, _username: &str) {
+            self.queued.push(Response::Ask(hyprforge_authui::conversation::Prompt::secret(
+                "Password:",
+            )));
+        }
+        fn answer(&mut self, _answer: &str) {
+            self.queued.push(Response::Failure { reason: "wrong".to_string() });
+        }
+        fn proceed(&mut self) {}
+        fn poll(&mut self) -> Option<Response> {
+            if self.queued.is_empty() {
+                None
+            } else {
+                Some(self.queued.remove(0))
+            }
+        }
+    }
+
+    fn failed_conversation() -> Conversation<AlwaysRejects> {
+        // `new` already calls `start`, so the fixture only has to type a
+        // wrong answer and send it.
+        let mut conversation =
+            Conversation::new(AlwaysRejects { queued: Vec::new() }, "someone");
+        dispatch_key(&mut conversation, Keysym::NoSymbol, Some("x".to_string()));
+        dispatch_key(&mut conversation, Keysym::Return, None);
+        assert!(
+            matches!(conversation.state(), State::Failed { .. }),
+            "the fixture must actually reach a failure"
+        );
+        conversation
+    }
+
+    /// After a wrong password, Escape and Backspace are the two keys a
+    /// person actually reaches for — and `clear` and `type_into` are both
+    /// no-ops in `Failed`, so they did nothing at all. The error stayed on
+    /// screen and the lock read as frozen, on the one screen where that is
+    /// frightening. Every *other* key already dismissed it, which made the
+    /// two that didn't harder to explain rather than easier.
+    #[test]
+    fn a_failed_password_is_dismissed_by_the_keys_people_actually_press() {
+        for key in [Keysym::Escape, Keysym::BackSpace] {
+            let mut conversation = failed_conversation();
+            dispatch_key(&mut conversation, key, None);
+            assert!(
+                !matches!(conversation.state(), State::Failed { .. }),
+                "{key:?} left the failure on screen"
+            );
+        }
+    }
+
+    /// Dismissing must not also submit. After `retry` the conversation is
+    /// asking again with an empty field, and an Enter that carried on into
+    /// `submit` would send an empty answer to PAM — spending a `faillock`
+    /// slot for a password nobody typed.
+    #[test]
+    fn dismissing_a_failure_never_sends_an_answer_of_its_own() {
+        let mut conversation = failed_conversation();
+        dispatch_key(&mut conversation, Keysym::Escape, None);
+        assert_eq!(conversation.entered(), "", "the fresh prompt must start empty");
+        assert_eq!(conversation.failures(), 1, "dismissing must not count as an attempt");
+    }
+
+    /// The behaviour that was already right, pinned so the fix above
+    /// doesn't cost it: a character key dismisses the error *and* is kept,
+    /// so the user can just start typing their password again.
+    #[test]
+    fn typing_after_a_failure_keeps_the_first_character() {
+        let mut conversation = failed_conversation();
+        dispatch_key(&mut conversation, Keysym::NoSymbol, Some("h".to_string()));
+        assert_eq!(conversation.entered(), "h");
+    }
 
     /// A theme file whose colours don't parse falls back to the default
     /// theme *as a whole*, rather than rendering some fields black.
