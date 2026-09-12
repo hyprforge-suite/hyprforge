@@ -568,6 +568,22 @@ impl ShortcutsModule {
         )
     }
 
+    /// Replaces whatever is being edited, invalidating every conflict check
+    /// still in flight.
+    ///
+    /// Every draft lifecycle change goes through here, because the
+    /// generation counter is what stops a reply landing on the wrong draft
+    /// and `edit_chord` bumping it alone was not enough. Save shells out to
+    /// `hyprctl`, so there is a real window in which the user can cancel and
+    /// start a new shortcut; without this, the reply for the *saved* chord
+    /// arrived with the counter unchanged, matched, and committed the blank
+    /// draft that had replaced it — writing a junk bind and reloading
+    /// Hyprland over the edit the user actually wanted.
+    fn set_draft(&mut self, draft: Option<ShortcutDraft>) {
+        self.conflict_generation += 1;
+        self.draft = draft;
+    }
+
     fn edit_draft(&mut self, f: impl FnOnce(&mut ShortcutDraft)) -> Task<Message> {
         if let Some(d) = &mut self.draft {
             f(d);
@@ -800,12 +816,12 @@ impl SettingsModule for ShortcutsModule {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Add => {
-                self.draft = Some(ShortcutDraft::default());
+                self.set_draft(Some(ShortcutDraft::default()));
                 Task::none()
             }
             Message::Edit(i) => {
                 if let Some(shortcut) = self.shortcuts.get(i) {
-                    self.draft = Some(ShortcutDraft::from_shortcut(i, shortcut));
+                    self.set_draft(Some(ShortcutDraft::from_shortcut(i, shortcut)));
                 }
                 Task::none()
             }
@@ -926,7 +942,7 @@ impl SettingsModule for ShortcutsModule {
                 })
             }
             Message::DraftCancel => {
-                self.draft = None;
+                self.set_draft(None);
                 Task::none()
             }
             Message::ConflictChecked(generation, result) => {
@@ -1770,6 +1786,51 @@ mod tests {
 
     /// Save stays disabled until the form can produce a bind that loads —
     /// a half-filled action would fail the whole generated file.
+    /// A conflict check is asynchronous: `Save` shells out to `hyprctl`,
+    /// which leaves a real window in which the user can give up on that
+    /// chord and start editing something else. The reply belongs to the
+    /// draft that asked for it, not to whatever happens to be open when it
+    /// lands.
+    ///
+    /// Before the draft lifecycle went through `set_draft`, only
+    /// `edit_chord` bumped the generation counter — so Save, Cancel, Add
+    /// left it unchanged, the stale reply matched, and the `Ok(_) | Err(_)`
+    /// arm committed the *blank* draft that had replaced the real one: a
+    /// junk bind written and Hyprland reloaded over the edit the user
+    /// wanted.
+    #[test]
+    fn a_reply_for_a_cancelled_draft_never_commits_the_one_that_replaced_it() {
+        let mut module = test_module();
+        // `persist` writes to the user's own shortcuts.toml. Nothing in a
+        // unit test may reach it, and `store_unreadable` is the existing
+        // refuse-to-write path rather than a test-only branch.
+        module.store_unreadable = Some("test fixture: never write".to_string());
+
+        let _ = module.update(Message::Add);
+        let _ = module.update(Message::DraftKey("Q".to_string()));
+        let _ = module.update(Message::DraftEntry(EntryChoice(
+            catalog::by_id("window.close").expect("catalog entry"),
+        )));
+        let in_flight = module.conflict_generation;
+        let _ = module.update(Message::DraftSave);
+
+        // The user gives up on that chord and starts a fresh shortcut.
+        let _ = module.update(Message::DraftCancel);
+        let _ = module.update(Message::Add);
+
+        let _ = module.update(Message::SaveConflictChecked(in_flight, Ok(Vec::new())));
+
+        assert!(
+            module.shortcuts.is_empty(),
+            "a stale reply committed a draft the user had already abandoned: {:?}",
+            module.shortcuts
+        );
+        assert!(
+            module.draft.is_some(),
+            "the new draft must still be open — the stale reply took it"
+        );
+    }
+
     #[test]
     fn blockers_name_what_is_missing() {
         let mut draft = ShortcutDraft::default();
