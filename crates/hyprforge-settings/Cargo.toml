@@ -35,3 +35,7 @@ anyhow.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+# `test-util` for `#[tokio::test(start_paused = true)]`: the displayd call
+# bounds are 5s and 25s, and a test suite must not spend half a minute
+# actually waiting them out to prove they fire.
+tokio = { workspace = true, features = ["test-util", "macros", "rt"] }
