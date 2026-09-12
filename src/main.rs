@@ -18,8 +18,54 @@ use modules::network::{LazyNetworkManagerBackend, NetworkModule};
 use modules::shortcuts::ShortcutsModule;
 use modules::window_rules::WindowRulesModule;
 
+/// Opens the app on one screen: `hyprforge-settings --screen network`.
+///
+/// Deep-linking, the way `gnome-control-center wifi` does it, so a
+/// desktop entry or a notification can point at the page it is about
+/// rather than at the front door.
+///
+/// It is also what makes a screen reviewable. Proving a page *looks*
+/// right means opening it and taking a picture, and without this there
+/// is no way to reach one from outside the app — Ctrl+1..3 cover three
+/// of the nine screens, and injecting a click needs tooling that is not
+/// on every machine. A screenshot is how the `web-colors` bug was found;
+/// this is what makes taking one repeatable.
+fn screen_from_cli(name: &str) -> Option<Screen> {
+    Some(match name.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+        "monitors" | "displays" => Screen::Monitors,
+        "window-rules" | "windowrules" | "rules" => Screen::WindowRules,
+        "shortcuts" | "keybinds" => Screen::Shortcuts,
+        "input" | "keyboard" => Screen::Input,
+        "network" | "wifi" | "wi-fi" => Screen::Network,
+        "appearance" | "theme" => Screen::Appearance,
+        "desktop" | "wallpaper" => Screen::Desktop,
+        "session" | "autostart" => Screen::Session,
+        "system" => Screen::System,
+        _ => return None,
+    })
+}
+
+/// Every name [`screen_from_cli`] accepts, for the usage message. The
+/// aliases are deliberately left out: one canonical name per screen is
+/// what a help text is for.
+const SCREEN_NAMES: &[&str] = &[
+    "monitors",
+    "window-rules",
+    "shortcuts",
+    "input",
+    "network",
+    "appearance",
+    "desktop",
+    "session",
+    "system",
+];
+
 const SIDEBAR_WIDTH: f32 = 240.0;
 const CONTENT_MAX_WIDTH: f32 = 880.0;
+
+/// Set once from `--screen` before iced starts. A static because
+/// `iced::daemon` builds the app from a function taking no arguments.
+static INITIAL_SCREEN: std::sync::OnceLock<Screen> = std::sync::OnceLock::new();
 
 fn main() -> iced::Result {
     // `from_default_env()` alone defaults to ERROR, and these crates emit
@@ -47,6 +93,31 @@ fn main() -> iced::Result {
     // its own window: a change that blanks a screen may well leave the
     // settings window itself invisible, so the prompt to undo it can't live
     // inside that window.
+    // Hand-rolled rather than clap: one optional flag does not justify
+    // pulling an argument parser into a GUI's dependency graph, and the
+    // whole surface is visible here.
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        let value = match arg.as_str() {
+            "--screen" => args.next(),
+            other => other.strip_prefix("--screen=").map(str::to_string),
+        };
+        let Some(value) = value else {
+            eprintln!("usage: hyprforge-settings [--screen <{}>]", SCREEN_NAMES.join("|"));
+            std::process::exit(2);
+        };
+        match screen_from_cli(&value) {
+            Some(screen) => INITIAL_SCREEN.set(screen).ok().unwrap_or(()),
+            None => {
+                // Naming a screen that does not exist is a typo worth
+                // reporting, not a silent fall back to Monitors.
+                eprintln!("hyprforge-settings: no screen called {value:?}");
+                eprintln!("  known screens: {}", SCREEN_NAMES.join(", "));
+                std::process::exit(2);
+            }
+        }
+    }
+
     iced::daemon(App::new, App::update, App::view)
         .title(App::title)
         .theme(App::theme)
@@ -265,7 +336,7 @@ impl App {
         let (system, system_task) = SystemModule::new();
         (
             App {
-                screen: Screen::Monitors,
+                screen: INITIAL_SCREEN.get().copied().unwrap_or(Screen::Monitors),
                 displays,
                 window_rules,
                 shortcuts,
