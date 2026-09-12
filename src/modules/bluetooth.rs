@@ -7,6 +7,7 @@
 
 use hyprforge_bluetooth::backend::{for_display, BluetoothBackend};
 use hyprforge_bluetooth::{Address, AdapterState, BluetoothError, Device, Status};
+use hyprforge_tray::Prefs as TrayPrefs;
 use hyprforge_ui::theme::{self, spacing, FontScale};
 use hyprforge_ui::widgets::{divider, meta_text, scaled_text, secondary_button, section};
 use iced::widget::{checkbox, column, row};
@@ -107,6 +108,10 @@ pub enum Message {
     /// asked for in order to show the outcome without waiting on the next
     /// poll to re-read it.
     Trusted(Address, bool, Result<(), LoadError>),
+    /// Whether `hyprforge-trayd` should show the Bluetooth icon. Same
+    /// shape as `network::Message::TrayToggled` — only reachable from a
+    /// loaded [`TrayPrefs`], guarded again in `update`.
+    TrayToggled(bool),
 }
 
 pub struct BluetoothModule<B: BluetoothBackend + 'static> {
@@ -127,6 +132,12 @@ pub struct BluetoothModule<B: BluetoothBackend + 'static> {
     /// Already grouped and sorted by [`for_display`] — this module does
     /// not re-implement that.
     devices: Vec<Device>,
+    /// The on-disk `tray.toml`, loaded once at construction. Same shape
+    /// and same reasoning as `network::NetworkModule::tray_prefs`: kept
+    /// as the whole [`TrayPrefs`] so a toggle here can write back
+    /// `network` unchanged, and `Err` (a file that exists and would not
+    /// parse) renders no checkbox at all rather than guessing a value.
+    tray_prefs: Result<TrayPrefs, String>,
 }
 
 impl<B: BluetoothBackend + 'static> BluetoothModule<B> {
@@ -138,13 +149,22 @@ impl<B: BluetoothBackend + 'static> BluetoothModule<B> {
     /// that is `Message::ScanToggled`'s alone to do, from an explicit
     /// click.
     pub fn new(backend: Arc<B>) -> (Self, Task<Message>) {
+        // A missing file is first run and loads as defaults; a file that
+        // exists and will not parse is reported here, in the same banner
+        // every other load failure on this screen uses, rather than
+        // silently treated as "both icons shown".
+        let (tray_prefs, tray_error) = match hyprforge_tray::prefs::load() {
+            Ok(prefs) => (Ok(prefs), None),
+            Err(e) => (Err(e.to_string()), Some(e.to_string())),
+        };
         let module = BluetoothModule {
             backend,
             loading: true,
             unavailable: None,
-            error: None,
+            error: tray_error,
             status: None,
             devices: Vec::new(),
+            tray_prefs,
         };
         let task = Task::perform(load(Arc::clone(&module.backend)), Message::Loaded);
         (module, task)
@@ -327,6 +347,21 @@ impl<B: BluetoothBackend + 'static> SettingsModule for BluetoothModule<B> {
                 self.error = Some(e.message);
                 Task::none()
             }
+            Message::TrayToggled(shown) => {
+                let Ok(prefs) = &self.tray_prefs else {
+                    // `tray_row` renders no checkbox while `tray_prefs` is
+                    // `Err`, so a stray message here still must not turn
+                    // an unreadable file into a freshly-written default.
+                    return Task::none();
+                };
+                let mut updated = *prefs;
+                updated.bluetooth = shown;
+                match hyprforge_tray::prefs::save(&updated) {
+                    Ok(()) => self.tray_prefs = Ok(updated),
+                    Err(e) => self.error = Some(e.to_string()),
+                }
+                Task::none()
+            }
         }
     }
 
@@ -348,10 +383,17 @@ impl<B: BluetoothBackend + 'static> SettingsModule for BluetoothModule<B> {
         // running", so the rest of the screen doesn't render at all —
         // same call `network.rs` makes for NetworkManager being gone.
         if let Some(msg) = &self.unavailable {
+            // The tray toggle stays reachable here. It is the one control
+            // on this screen that does not depend on the daemon being up
+            // — and it is wanted most when the daemon is down, because
+            // that is exactly when the tray icon is sitting there showing
+            // an error nobody can currently do anything about. Hiding the
+            // switch that turns it off is its own small dead end.
             content = content.push(section(
                 "Bluetooth",
                 scale,
-                column![scaled_text(msg.clone(), 14.0, scale)].spacing(spacing::SM),
+                column![scaled_text(msg.clone(), 14.0, scale), self.tray_row(scale)]
+                    .spacing(spacing::SM),
             ));
             return content.into();
         }
@@ -421,7 +463,27 @@ impl<B: BluetoothBackend + 'static> BluetoothModule<B> {
             }
             None => meta_text("Bluetooth status unknown.", 14.0, scale).into(),
         };
-        section("Bluetooth", scale, body)
+        section("Bluetooth", scale, column![body, self.tray_row(scale)].spacing(spacing::SM))
+    }
+
+    /// The "show in tray" row, appended to the Bluetooth section. Same
+    /// shape and same reasoning as `network::NetworkModule::tray_row`.
+    fn tray_row(&self, scale: FontScale) -> Element<'_, Message> {
+        match &self.tray_prefs {
+            Ok(prefs) => row![
+                checkbox(prefs.bluetooth).on_toggle(Message::TrayToggled),
+                scaled_text("Show in tray", 15.0, scale),
+            ]
+            .spacing(spacing::SM)
+            .align_y(Alignment::Center)
+            .into(),
+            Err(_) => meta_text(
+                "Tray setting unavailable — see the error above.",
+                13.0,
+                scale,
+            )
+            .into(),
+        }
     }
 
     /// Discovery: an explicit toggle, never implied by a refresh or by
@@ -645,6 +707,68 @@ mod tests {
         let backend = Arc::new(MockBackend::new());
         let (module, _task) = BluetoothModule::new(Arc::clone(&backend));
         (module, backend)
+    }
+
+    /// Runs `f` with `$XDG_CONFIG_HOME` repointed at a throwaway
+    /// directory, holding `CONFIG_ENV_LOCK` for the duration — same
+    /// reasoning as `network::tests::with_temp_config`, whose sibling
+    /// this is: the variable is process-global, so the two must not race.
+    fn with_temp_config<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
+        let _lock = crate::modules::CONFIG_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", dir.path());
+        }
+        let out = f(dir.path());
+        match previous {
+            Some(p) => unsafe { std::env::set_var("XDG_CONFIG_HOME", p) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+        out
+    }
+
+    // --- tray preferences -------------------------------------------------
+
+    /// A missing `tray.toml` is first run: both icons read as shown, and
+    /// nothing about it is reported as an error.
+    #[test]
+    fn a_missing_tray_toml_is_first_run_and_reads_as_shown() {
+        with_temp_config(|_dir| {
+            let (m, _backend) = module();
+            let prefs = m.tray_prefs.as_ref().expect("a missing file is defaults, not an error");
+            assert!(prefs.network);
+            assert!(prefs.bluetooth);
+            assert!(m.error.is_none(), "a first run is not a load failure");
+        });
+    }
+
+    /// A `tray.toml` that exists and will not parse must be reported in
+    /// this screen's error banner too, and a toggle afterwards must not
+    /// overwrite it — the same property `network.rs` pins for its own
+    /// screen.
+    #[test]
+    fn an_unreadable_tray_toml_is_reported_and_not_overwritten_by_a_toggle() {
+        with_temp_config(|dir| {
+            let tray_toml = dir.join("hyprforge").join("tray.toml");
+            std::fs::create_dir_all(tray_toml.parent().unwrap()).unwrap();
+            std::fs::write(&tray_toml, "bluetooth = yes please\n").unwrap();
+
+            let (mut m, _backend) = module();
+            assert!(m.tray_prefs.is_err(), "a malformed file must not be treated as defaults");
+            assert!(
+                m.error.as_ref().is_some_and(|e| e.contains("tray.toml")),
+                "the failure must reach the screen's own error banner, got {:?}",
+                m.error
+            );
+
+            let before = std::fs::read_to_string(&tray_toml).unwrap();
+            let _ = m.update(Message::TrayToggled(false));
+            let after = std::fs::read_to_string(&tray_toml).unwrap();
+            assert_eq!(before, after, "a toggle must never overwrite a file it could not read");
+        });
     }
 
     /// The distinction `hyprforge-bluetooth` exists to keep, one layer up:
