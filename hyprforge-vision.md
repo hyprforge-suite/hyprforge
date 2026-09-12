@@ -65,7 +65,7 @@ with zero GTK/Qt dependency anywhere in the stack.
 | — Window Rules module | `hyprforge-windowrules` (lib) | hand-written Lua rules | no | in progress |
 | — Shortcuts module | `hyprforge-shortcuts` (lib) | hand-edited keybinds | no | in progress; TOML storage, Lua codegen, live conflict detection against `hyprctl binds` |
 | — Network module | `hyprforge-network` (lib) | nm-applet/nmtui | no new daemon, talks to NetworkManager D-Bus directly | in progress; model, backend seam, NetworkManager client and the Settings screen (Wi-Fi list, join, forget, radio toggle) are done. Deferred: VPN, 802.1X enterprise, hotspot |
-| — Bluetooth module | *(planned)* | blueman | talks to BlueZ D-Bus directly | not started |
+| — Bluetooth module | `hyprforge-bluetooth` (lib) | blueman | no new daemon, talks to BlueZ D-Bus directly | in progress; adapter power, discovery, device list, connect/disconnect/forget/trust, and a Settings screen. Pairing deferred — needs an `org.bluez.Agent1` passkey flow |
 | — Audio module | *(planned)* | pavucontrol | talks to PipeWire | not started |
 | — Power module | *(planned)* | — | talks to UPower/power-profiles-daemon | not started |
 | — Desktop module (wallpaper, night light, idle) | `hyprforge-ecosystem` (lib) | hyprpaper/hyprsunset/hypridle config by hand | no (drives the existing daemons) | in progress |
@@ -75,6 +75,7 @@ with zero GTK/Qt dependency anywhere in the stack.
 | — System module (behaviour, shortcuts behaviour, X11, rendering) | `hyprforge-system` (lib) | hand-edited hyprland.lua | no | in progress |
 | — Users/time module | *(planned)* | — | accountsservice/timedated | not started |
 | — Lua import (hand-written config) | `hyprforge-lua-import` (lib) | — | no (sandboxed `mlua` evaluator, the only crate depending on mlua) | in progress; imports hand-written `hl.bind()`/`hl.window_rule()`/`hl.monitor()` calls |
+| **Tray icons** | `hyprforge-tray` (lib + `hyprforge-trayd`) | nm-applet, blueman-tray | **yes**, a small user daemon | in progress; Wi-Fi and Bluetooth icons over `org.kde.StatusNotifierItem` with `com.canonical.dbusmenu` menus, scanning on menu open. Deferred: submenus, and items for Audio/Power until those backends exist |
 | **Lock screen** | `hyprforge-lock` (binary), `hyprforge-authui` (conversation model) | hyprlock | no (a client holding `ext-session-lock-v1`) | locks, draws, authenticates against PAM and unlocks, with a look shared with the greeter via `hyprforge-look`; see "The lock screen" in the README for the genuine remaining gaps (no input-method support, password not zeroized, no attempt limiting of its own) |
 | *(shared foundation)* | `hyprforge-paths` (xdg + atomic writes), `hyprforge-look` (colour type + runtime Theme), `hyprforge-ui` (iced widgets and palette) | — | no | in place; every future app builds on these |
 | **Greeter / display manager** | `hyprforge-greet`, on `hyprforge-authui` | greetd greeters (gtkgreet/tuigreet) | runs under greetd | ~885 lines; has an installer (`./hyprforge --install --greeter`) and its own `INSTALL.md` |

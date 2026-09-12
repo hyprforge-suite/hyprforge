@@ -43,9 +43,16 @@ Hyprland-facing
                             hl.bind()/hl.window_rule()/hl.monitor() calls —
                             the only crate depending on mlua
   hyprforge-network/       Wi-Fi, wired status and the radio toggle, over
-                            NetworkManager. The only module whose backend
+                            NetworkManager. The first module whose backend
                             trait came before its D-Bus client, so the
                             screen is testable without an adapter.
+  hyprforge-bluetooth/     adapters and devices over BlueZ, on the same
+                            backend-trait-first shape. Pairing not yet.
+  hyprforge-tray/          the StatusNotifierItem and dbusmenu protocols,
+                            and hyprforge-trayd, which puts a Wi-Fi and a
+                            Bluetooth icon in whatever bar is running. A
+                            tray icon is a D-Bus object, not a widget —
+                            which is why it needs no GTK or Qt.
 
 Apps
   hyprforge-settings/      the iced GUI, hosting the settings modules
