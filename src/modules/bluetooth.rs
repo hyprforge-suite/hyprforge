@@ -6,10 +6,10 @@
 //! drive a [`MockBackend`] while `main.rs` drives the real one.
 
 use hyprforge_bluetooth::backend::{for_display, BluetoothBackend};
-use hyprforge_bluetooth::{Address, AdapterState, BluetoothError, Device, Status};
+use hyprforge_bluetooth::{Address, AdapterState, BluetoothError, Device, PairingPrompt, Passkey, Status};
 use hyprforge_tray::Prefs as TrayPrefs;
 use hyprforge_ui::theme::{self, spacing, FontScale};
-use hyprforge_ui::widgets::{divider, meta_text, scaled_text, secondary_button, section};
+use hyprforge_ui::widgets::{divider, meta_text, primary_button, scaled_text, secondary_button, section};
 use iced::widget::{checkbox, column, row};
 use iced::{Alignment, Element, Length, Subscription, Task};
 use std::sync::Arc;
@@ -112,6 +112,47 @@ pub enum Message {
     /// shape as `network::Message::TrayToggled` — only reachable from a
     /// loaded [`TrayPrefs`], guarded again in `update`.
     TrayToggled(bool),
+
+    // --- Pairing ------------------------------------------------------
+    //
+    // `Device::unsupported_reason` used to be the whole story for an
+    // unpaired device: a string telling the user to run `bluetoothctl`.
+    // That string is now stale — pairing is wired up here — but it still
+    // lives in `hyprforge-bluetooth`, a crate this change must not touch,
+    // so it should be deleted there in a follow-up. This screen just
+    // stops calling it for that purpose; see `device_row`.
+    /// The device a Pair button was pressed for.
+    PairPressed(Address),
+    Paired(Address, Result<(), LoadError>),
+    /// A prompt BlueZ wants answered, relayed from whatever agent is
+    /// registered — `org.bluez.Agent1`, driven by
+    /// `hyprforge_bluetooth::agent`.
+    ///
+    /// This screen is built entirely in terms of [`PairingPrompt`], which
+    /// already existed when this was written — every test below drives
+    /// this variant directly, the same way it would be driven by a real
+    /// subscription once one is wired up. See the comment above
+    /// `LazyBlueZBackend` for why the real `agent::PairingRequest`
+    /// channel isn't plumbed all the way to `subscription()` yet, and
+    /// what's needed to finish that.
+    ///
+    /// `#[allow(dead_code)]`: nothing constructs this outside tests until
+    /// that wiring exists, and that's the honest state of things rather
+    /// than something to paper over with a fake caller.
+    #[allow(dead_code)]
+    PairingPrompted(PairingPrompt),
+    /// Match (on a [`PairingPrompt::Confirm`]) or Accept (on
+    /// [`PairingPrompt::Authorize`]) — answering the prompt
+    /// affirmatively. Never produced for [`PairingPrompt::Display`],
+    /// whose dialog has no button that would send it — see
+    /// [`PairingPrompt::needs_an_answer`].
+    PairingAccepted,
+    /// Don't match, Cancel, or dismissing the dialog by any other means
+    /// — all the same action underneath: give up on this pairing and
+    /// tell BlueZ, so a dismissed dialog doesn't leave it waiting on an
+    /// answer that will never come.
+    PairingCancelled,
+    PairingCancelSet(Result<(), LoadError>),
 }
 
 pub struct BluetoothModule<B: BluetoothBackend + 'static> {
@@ -138,6 +179,12 @@ pub struct BluetoothModule<B: BluetoothBackend + 'static> {
     /// `network` unchanged, and `Err` (a file that exists and would not
     /// parse) renders no checkbox at all rather than guessing a value.
     tray_prefs: Result<TrayPrefs, String>,
+    /// The pairing conversation currently in front of the user, if any —
+    /// set by [`Message::PairingPrompted`] and cleared by an answer, a
+    /// cancel, or the underlying `pair()` call resolving one way or the
+    /// other. At most one at a time: the screen shows one dialog, the
+    /// same way `network::NetworkModule::joining` is one draft at a time.
+    pairing: Option<PairingPrompt>,
 }
 
 impl<B: BluetoothBackend + 'static> BluetoothModule<B> {
@@ -165,6 +212,7 @@ impl<B: BluetoothBackend + 'static> BluetoothModule<B> {
             status: None,
             devices: Vec::new(),
             tray_prefs,
+            pairing: None,
         };
         let task = Task::perform(load(Arc::clone(&module.backend)), Message::Loaded);
         (module, task)
@@ -258,11 +306,15 @@ impl<B: BluetoothBackend + 'static> SettingsModule for BluetoothModule<B> {
                 // button wired to it — see `device_row` — so a stray
                 // message here still must not start a connection that can
                 // only fail. Same guard `network.rs` keeps for enterprise
-                // Wi-Fi.
+                // Wi-Fi. Checked as `!paired` directly rather than via
+                // `unsupported_reason()`: that method's *string* is
+                // stale now that pairing has a screen (see the comment
+                // in `device_row`), and this guard's correctness must
+                // not depend on text that's due to be deleted.
                 let Some(device) = self.devices.iter().find(|d| d.address == address) else {
                     return Task::none();
                 };
-                if device.unsupported_reason().is_some() {
+                if !device.paired {
                     return Task::none();
                 }
                 self.error = None;
@@ -362,6 +414,88 @@ impl<B: BluetoothBackend + 'static> SettingsModule for BluetoothModule<B> {
                 }
                 Task::none()
             }
+            Message::PairPressed(address) => {
+                // The view renders no Pair button once a device is
+                // paired — see `device_row` — but the guard stays here
+                // too, for the same reason `ConnectPressed` keeps its
+                // own: a stray message must not reach the backend with a
+                // call that can only fail or race.
+                let Some(device) = self.devices.iter().find(|d| d.address == address) else {
+                    return Task::none();
+                };
+                if device.paired {
+                    return Task::none();
+                }
+                self.error = None;
+                let backend = Arc::clone(&self.backend);
+                let for_result = address.clone();
+                Task::perform(
+                    async move { backend.pair(&address).await.map_err(LoadError::from) },
+                    move |result| Message::Paired(for_result.clone(), result),
+                )
+            }
+            Message::Paired(address, Ok(())) => {
+                self.error = None;
+                // Same immediacy as `Connected`: the round trip that
+                // just succeeded is itself proof of the new state, and
+                // the row should read "paired" the moment it is, not up
+                // to ten seconds later.
+                if let Some(d) = self.devices.iter_mut().find(|d| d.address == address) {
+                    d.paired = true;
+                }
+                // BlueZ would not report success while still waiting on
+                // an answer, so whatever prompt was open for this device
+                // is resolved now.
+                if self.pairing.as_ref().is_some_and(|p| p.device() == &address) {
+                    self.pairing = None;
+                }
+                self.refresh_task()
+            }
+            Message::Paired(address, Err(e)) => {
+                self.error = Some(e.message);
+                // Nothing to revert — the device was never marked paired
+                // in the first place — but a dialog left open for a
+                // conversation that's already over would be asking the
+                // user to answer a question BlueZ has stopped listening
+                // for.
+                if self.pairing.as_ref().is_some_and(|p| p.device() == &address) {
+                    self.pairing = None;
+                }
+                Task::none()
+            }
+            Message::PairingPrompted(prompt) => {
+                self.pairing = Some(prompt);
+                Task::none()
+            }
+            Message::PairingAccepted => {
+                // BlueZ is blocked on this answer. The `pair()` call
+                // started by `PairPressed` does not complete until the
+                // conversation does, and `Message::Paired` is what
+                // updates the row afterwards.
+                answer_pairing(true);
+                self.pairing = None;
+                Task::none()
+            }
+            Message::PairingCancelled => {
+                let Some(prompt) = self.pairing.take() else {
+                    return Task::none();
+                };
+                // Answer first, then cancel. BlueZ is waiting on the
+                // agent's reply, and `CancelPairing` on a conversation
+                // that is still blocked on us is the slower way round.
+                answer_pairing(false);
+                let backend = Arc::clone(&self.backend);
+                let address = prompt.device().clone();
+                Task::perform(
+                    async move { backend.cancel_pairing(&address).await.map_err(LoadError::from) },
+                    Message::PairingCancelSet,
+                )
+            }
+            Message::PairingCancelSet(Ok(())) => Task::none(),
+            Message::PairingCancelSet(Err(e)) => {
+                self.error = Some(e.message);
+                Task::none()
+            }
         }
     }
 
@@ -411,6 +545,10 @@ impl<B: BluetoothBackend + 'static> SettingsModule for BluetoothModule<B> {
             content = content.push(self.devices_section(scale));
         }
 
+        if let Some(prompt) = &self.pairing {
+            content = content.push(self.pairing_dialog(prompt, scale));
+        }
+
         content.into()
     }
 
@@ -418,7 +556,18 @@ impl<B: BluetoothBackend + 'static> SettingsModule for BluetoothModule<B> {
         if self.unavailable.is_some() {
             return Subscription::none();
         }
-        iced::time::every(POLL_INTERVAL).map(|_| Message::Refresh)
+        // The pairing agent runs alongside the poll rather than only
+        // while a dialog is open: BlueZ asks the agent *during* `pair()`,
+        // so an agent registered in response to the first prompt would
+        // already be too late.
+        //
+        // Safe to name here in tests as well — an iced `Subscription` is
+        // a description, and nothing connects to a bus until the runtime
+        // polls the stream.
+        Subscription::batch([
+            iced::time::every(POLL_INTERVAL).map(|_| Message::Refresh),
+            Subscription::run(pairing_stream),
+        ])
     }
 }
 
@@ -536,19 +685,24 @@ impl<B: BluetoothBackend + 'static> BluetoothModule<B> {
         };
 
         let connection = if device.connected { " \u{b7} Connected" } else { "" };
-        let mut line = column![
+        let line = column![
             name,
             meta_text(format!("{}{}", device.kind.label(), connection), 12.0, scale),
         ]
         .spacing(2.0);
 
-        // Unpaired devices are listed but never get a Connect button — the
-        // reason is the row's own second line instead, exactly how
-        // `network.rs` handles enterprise Wi-Fi, so a user scanning the
-        // list sees why without clicking first and being told.
-        if let Some(reason) = device.unsupported_reason() {
-            line = line.push(meta_text(reason, 12.0, scale));
-            return row![line.width(Length::Fill)]
+        // `Device::unsupported_reason` is *not* read here on purpose: its
+        // "use bluetoothctl" string is stale now that pairing has a
+        // screen of its own, and it should be deleted from
+        // `hyprforge-bluetooth` in a follow-up (that crate is off limits
+        // for this change). An unpaired device gets a Pair button
+        // instead of an explanation, the same way a device with nothing
+        // else to offer used to get only text.
+        if !device.paired {
+            let pair_action: Element<'_, Message> = secondary_button("Pair")
+                .on_press(Message::PairPressed(device.address.clone()))
+                .into();
+            return row![line.width(Length::Fill), pair_action]
                 .spacing(spacing::SM)
                 .align_y(Alignment::Center)
                 .into();
@@ -585,7 +739,140 @@ impl<B: BluetoothBackend + 'static> BluetoothModule<B> {
             .align_y(Alignment::Center)
             .into()
     }
+
+    /// The pairing conversation, shaped like `network::join_dialog` —
+    /// one dialog, appended below the device list while it's open.
+    ///
+    /// Every arm ends in a Cancel (or, for `Confirm`, "Don't match")
+    /// that dismisses it. There is no way to close this dialog other
+    /// than a button that sends [`Message::PairingCancelled`] or
+    /// [`Message::PairingAccepted`] — no implicit dismissal on, say,
+    /// leaving the screen — because either message is what tells BlueZ
+    /// the conversation is over. A dialog that could vanish on its own
+    /// would be exactly the "left waiting" case `cancel_pairing` exists
+    /// to prevent.
+    fn pairing_dialog<'a>(&'a self, prompt: &'a PairingPrompt, scale: FontScale) -> Element<'a, Message> {
+        let mut body = column![scaled_text(format!("Pair with {}", prompt.name()), 16.0, scale)]
+            .spacing(spacing::SM);
+
+        match prompt {
+            PairingPrompt::Confirm { passkey, .. } => {
+                // The digits are the entire security property of a
+                // numeric-comparison pairing, so they get the biggest
+                // text on this screen rather than blending in with a
+                // line of prose above or below them.
+                body = body.push(scaled_text(passkey_digits(passkey), 28.0, scale));
+                body = body.push(meta_text(
+                    "Check that the other device is showing the same six digits.",
+                    13.0,
+                    scale,
+                ));
+            }
+            PairingPrompt::Authorize { .. } => {
+                // "Just Works": nothing to compare. Showing no digits
+                // here isn't an omission — inviting the user to check a
+                // number that doesn't exist is worse than showing none.
+                body = body.push(meta_text(
+                    "This device has no screen or keypad to show a code on. \
+                     Only continue if you meant to pair it.",
+                    13.0,
+                    scale,
+                ));
+            }
+            PairingPrompt::Display { passkey, .. } => {
+                body = body.push(scaled_text(passkey_digits(passkey), 28.0, scale));
+                body = body.push(meta_text(
+                    "Type this code on the other device to finish pairing.",
+                    13.0,
+                    scale,
+                ));
+            }
+        }
+
+        let mut actions = row![].spacing(spacing::SM);
+        if pairing_offers_accept(prompt) {
+            let accept_label = if matches!(prompt, PairingPrompt::Confirm { .. }) {
+                "Match"
+            } else {
+                "Accept"
+            };
+            actions = actions.push(primary_button(accept_label).on_press(Message::PairingAccepted));
+        }
+        let cancel_label =
+            if matches!(prompt, PairingPrompt::Confirm { .. }) { "Don't match" } else { "Cancel" };
+        actions = actions.push(secondary_button(cancel_label).on_press(Message::PairingCancelled));
+        body = body.push(actions);
+
+        section("Pairing", scale, body)
+    }
 }
+
+/// Whether the pairing dialog should render a button that answers the
+/// prompt right now, as opposed to a Cancel-only dialog.
+///
+/// Pulled out of `pairing_dialog` as its own function, the same way
+/// `adapter_offers_toggle` is pulled out of `adapter_row`: the property
+/// — [`PairingPrompt::Display`] gets no accept button, because
+/// [`PairingPrompt::needs_an_answer`] is false for it and the far end
+/// answers by typing — becomes something a test can assert directly
+/// instead of only being implied by which arm of a view function
+/// happens to push a button.
+fn pairing_offers_accept(prompt: &PairingPrompt) -> bool {
+    prompt.needs_an_answer()
+}
+
+/// The digits shown in a `Confirm` or `Display` dialog.
+///
+/// Always [`Passkey`]'s own `Display` impl, which zero-pads to six
+/// digits — never `passkey.as_u32()` formatted here instead. That
+/// zero-pad is load-bearing: a passkey of `1234` shown as "1234" next to
+/// a device showing "001234" is a user correctly deciding the codes
+/// don't match. Pulled into its own function so a test pins that this
+/// screen goes through `Passkey::to_string`, not a shortcut around it.
+fn passkey_digits(passkey: &Passkey) -> String {
+    passkey.to_string()
+}
+
+// The seam where `hyprforge_bluetooth::agent`'s pairing-prompt channel
+// plugs in — and why it stops at a seam rather than going all the way
+// to `subscription()`.
+//
+// `hyprforge_bluetooth::agent` landed while this module was being
+// written. Its `register(connection)` hands back an
+// `mpsc::UnboundedReceiver<agent::PairingRequest>`, and each
+// `PairingRequest` carries a `pub prompt: PairingPrompt` alongside
+// `accept(self)`/`reject(self)` — deliberately consuming, so accept and
+// reject can't be swapped at the call site.
+//
+// Two things stop this screen from owning that receiver directly:
+//
+// 1. `PairingRequest`'s constructor is private — `register` is the only
+//    way to produce one. That is almost certainly deliberate (the same
+//    instinct as `PairingPrompt::needs_an_answer` being the only way to
+//    ask what a prompt wants), but it also means this module's own
+//    tests, which construct every `PairingPrompt` variant directly,
+//    cannot construct a `PairingRequest` to drive `Message::Paired`'s
+//    sibling messages the same way. Message would need to carry the
+//    request in order to call `accept`/`reject` on it later, and this
+//    module cannot build one to test that path.
+// 2. Registering the agent needs a live `zbus::Connection` up front,
+//    kept for the app's lifetime. `LazyBlueZBackend` (below) only
+//    creates one lazily, inside a private `get()`, on the first status
+//    or device call — there is nothing today that hands a `Connection`
+//    to `main.rs` at startup to register against.
+//
+// Both are `main.rs`-level decisions, not this screen's: whether the
+// backend grows a way to expose or share its connection, and how a
+// `PairingRequest` becomes a `Message::PairingPrompted(prompt)` plus
+// something *outside* this module's own state that still holds the
+// means to answer it when `PairingAccepted`/`PairingCancelled` comes
+// back out. `Message::PairingPrompted(PairingPrompt)` and the
+// `PairingAccepted`/`PairingCancelled` messages this screen already
+// sends are the seam — whatever bridges the real channel just needs to
+// map a `PairingRequest` into `PairingPrompted(request.prompt.clone())`
+// on the way in, and watch for this screen's own outgoing messages (or
+// take the accept/reject decision some other way) to call
+// `request.accept()` / `request.reject()` on the way out.
 
 /// The real backend, connected lazily.
 ///
@@ -595,6 +882,86 @@ impl<B: BluetoothBackend + 'static> BluetoothModule<B> {
 /// wait. Wrapping the connection behind [`BluetoothBackend`] itself means
 /// `BluetoothModule` never needs an `Option` for "not connected yet":
 /// connecting is just what the first call does.
+/// The answer half of a pairing conversation.
+///
+/// The two halves genuinely live in different places. A `PairingRequest`
+/// arrives on the subscription below, which owns it and is the only thing
+/// that can answer it — but the answer comes from `update`, which cannot
+/// reach into a running stream. This is the wire between them.
+///
+/// `Message` deliberately carries only a [`PairingPrompt`], never the
+/// request itself: the prompt is plain data any test can build, and a
+/// request's constructor is private to `hyprforge-bluetooth`. Keeping the
+/// message testable is worth one process-global sender.
+static PAIRING_ANSWERS: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<bool>> =
+    std::sync::OnceLock::new();
+
+/// Answers the pairing conversation currently in flight, if any.
+///
+/// A no-op when nothing is listening — which is the case in every test in
+/// this module, and is why the dialog's own behaviour can be asserted
+/// without a bus.
+fn answer_pairing(accept: bool) {
+    if let Some(tx) = PAIRING_ANSWERS.get() {
+        let _ = tx.send(accept);
+    }
+}
+
+/// Registers the pairing agent and turns its prompts into messages.
+///
+/// Its own system-bus connection, not the backend's: registering an agent
+/// needs a connection that outlives any one call, and `LazyBlueZBackend`
+/// only makes one lazily inside a method.
+///
+/// Deliberately not bounded by a call timeout — this is a subscription,
+/// and waiting is what it does. The agent applies its own bound to each
+/// individual prompt, which is where the bound belongs.
+fn pairing_stream() -> impl iced::futures::Stream<Item = Message> {
+    iced::stream::channel(16, |mut output| async move {
+        loop {
+            if let Err(e) = forward_pairing(&mut output).await {
+                tracing::warn!(error = %e, "pairing agent stopped; retrying in 3s");
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+    })
+}
+
+async fn forward_pairing(
+    output: &mut iced::futures::channel::mpsc::Sender<Message>,
+) -> anyhow::Result<()> {
+    use iced::futures::SinkExt;
+
+    let connection = zbus::Connection::system().await?;
+    let (_handle, mut prompts) = hyprforge_bluetooth::agent::register(&connection)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let (answers_tx, mut answers) = tokio::sync::mpsc::unbounded_channel();
+    // Only the first registration wins; a retry after a dropped
+    // connection reuses the sender the screen already holds.
+    let _ = PAIRING_ANSWERS.set(answers_tx);
+
+    while let Some(request) = prompts.recv().await {
+        // Discard anything answered for a prompt that has already gone —
+        // one that timed out inside the agent, say. Without this, a click
+        // that arrived too late for its own dialog would silently answer
+        // the *next* pairing, which is the one failure here that must
+        // never happen quietly.
+        while answers.try_recv().is_ok() {}
+
+        output.send(Message::PairingPrompted(request.prompt.clone())).await?;
+
+        match answers.recv().await {
+            Some(true) => request.accept(),
+            // A closed channel means the screen is gone. Reject: an
+            // unanswered pairing left hanging is worse than a refused one.
+            Some(false) | None => request.reject(),
+        }
+    }
+    Ok(())
+}
+
 pub struct LazyBlueZBackend {
     /// Only a *successful* connection is cached.
     ///
@@ -653,6 +1020,14 @@ impl BluetoothBackend for LazyBlueZBackend {
 
     async fn set_powered(&self, on: bool) -> Result<(), BluetoothError> {
         self.get().await?.set_powered(on).await
+    }
+
+    async fn pair(&self, address: &Address) -> Result<(), BluetoothError> {
+        self.get().await?.pair(address).await
+    }
+
+    async fn cancel_pairing(&self, address: &Address) -> Result<(), BluetoothError> {
+        self.get().await?.cancel_pairing(address).await
     }
 
     async fn connect(&self, address: &Address) -> Result<(), BluetoothError> {
@@ -940,5 +1315,235 @@ mod tests {
 
         m.error = Some("a connect failed".to_string());
         let _ = m.view(scale); // error banner over a populated list
+    }
+
+    // --- Pairing ------------------------------------------------------
+
+    /// The property `device_row` is now built around, replacing the
+    /// stale "use bluetoothctl" text: an unpaired device offers a way to
+    /// pair it, and pressing that button actually reaches the backend
+    /// rather than being a no-op the way `ConnectPressed` still is for
+    /// the same row.
+    #[test]
+    fn an_unpaired_device_offers_a_pair_action_that_reaches_the_backend() {
+        let (mut m, _backend) = module();
+        let stranger = device("Stranger", "AA:BB:CC:DD:EE:09", false, false);
+        let _ = m.update(Message::Loaded(loaded(status(AdapterState::On, false), vec![stranger.clone()])));
+        let _ = m.view(FontScale::default());
+
+        let task = m.update(Message::PairPressed(stranger.address.clone()));
+        assert_ne!(task.units(), 0, "pairing an unpaired device must reach the backend");
+    }
+
+    /// A stray `PairPressed` for a device that's already paired (or that
+    /// doesn't exist) must be a no-op, the same guard every other action
+    /// message on this screen keeps against a message that outlives the
+    /// state it was built from.
+    #[test]
+    fn pairing_an_already_paired_device_is_a_no_op() {
+        let (mut m, _backend) = module();
+        let paired = device("Headset", "AA:BB:CC:DD:EE:16", true, false);
+        let _ = m.update(Message::Loaded(loaded(status(AdapterState::On, false), vec![paired.clone()])));
+
+        let task = m.update(Message::PairPressed(paired.address.clone()));
+        assert_eq!(task.units(), 0, "an already-paired device must never be re-paired");
+    }
+
+    /// The spec's own zero-pad rule, pinned at this screen's boundary:
+    /// `passkey_digits` — the only place this module is allowed to turn
+    /// a `Passkey` into text — must go through `Passkey::to_string`, not
+    /// a shortcut like `passkey.as_u32()` that would drop the padding a
+    /// device showing "001234" depends on to be comparable at all.
+    #[test]
+    fn a_confirm_prompts_passkey_is_shown_zero_padded_to_six_digits() {
+        assert_eq!(passkey_digits(&Passkey::new(1234)), "001234");
+        assert_eq!(passkey_digits(&Passkey::new(0)), "000000");
+
+        let (mut m, _backend) = module();
+        let addr = Address::new("AA:BB:CC:DD:EE:17");
+        let _ = m.update(Message::PairingPrompted(PairingPrompt::Confirm {
+            device: addr,
+            name: "Phone".to_string(),
+            passkey: Passkey::new(1234),
+        }));
+        assert!(m.pairing.is_some());
+        let _ = m.view(FontScale::default());
+    }
+
+    /// `Authorize` carries no `Passkey` field at all — structurally, not
+    /// just by choice, there's nothing for this screen to show digits
+    /// for. Pairing.rs pins the same split from the type's own side; this
+    /// pins that the screen renders such a prompt without trying to
+    /// invent a code that doesn't exist.
+    #[test]
+    fn an_authorize_prompt_has_no_digits_to_show() {
+        let (mut m, _backend) = module();
+        let _ = m.update(Message::PairingPrompted(PairingPrompt::Authorize {
+            device: Address::new("AA:BB:CC:DD:EE:18"),
+            name: "Speaker".to_string(),
+        }));
+        assert!(m.pairing.is_some());
+        let _ = m.view(FontScale::default());
+    }
+
+    /// The property `pairing_dialog` is built around for `Display`: no
+    /// button answers it from this end, because
+    /// `PairingPrompt::needs_an_answer` is false and the far end answers
+    /// by typing. Asserted directly via `pairing_offers_accept` rather
+    /// than only implied by the view building without panicking.
+    #[test]
+    fn a_display_prompt_offers_no_accept_action() {
+        let display = PairingPrompt::Display {
+            device: Address::new("AA:BB:CC:DD:EE:19"),
+            name: "Keyboard".to_string(),
+            passkey: Passkey::new(42),
+            entered: 0,
+        };
+        assert!(!pairing_offers_accept(&display));
+        assert!(pairing_offers_accept(&PairingPrompt::Confirm {
+            device: Address::new("AA:BB:CC:DD:EE:20"),
+            name: "Phone".to_string(),
+            passkey: Passkey::new(1),
+        }));
+        assert!(pairing_offers_accept(&PairingPrompt::Authorize {
+            device: Address::new("AA:BB:CC:DD:EE:21"),
+            name: "Speaker".to_string(),
+        }));
+
+        let (mut m, _backend) = module();
+        let _ = m.update(Message::PairingPrompted(display));
+        let _ = m.view(FontScale::default());
+    }
+
+    /// The rule item 2 of the task exists to keep: a dismissed dialog
+    /// must not leave BlueZ waiting on an answer that will never come.
+    /// `PairingCancelled` has to both close the dialog immediately and
+    /// dispatch `cancel_pairing` — closing it without the call would be
+    /// exactly the silent abandonment this is testing against.
+    #[test]
+    fn dismissing_a_pairing_dialog_cancels_it_rather_than_abandoning_it() {
+        let (mut m, _backend) = module();
+        let addr = Address::new("AA:BB:CC:DD:EE:22");
+        let _ = m.update(Message::PairingPrompted(PairingPrompt::Confirm {
+            device: addr,
+            name: "Phone".to_string(),
+            passkey: Passkey::new(4321),
+        }));
+        assert!(m.pairing.is_some());
+
+        let task = m.update(Message::PairingCancelled);
+        assert!(m.pairing.is_none(), "the dialog must close immediately");
+        assert_ne!(task.units(), 0, "cancelling must reach the backend, not just clear local state");
+    }
+
+    /// A stray `PairingCancelled` with no dialog open must not dispatch
+    /// a `cancel_pairing` call for a pairing that isn't happening.
+    #[test]
+    fn cancelling_with_no_pairing_open_is_a_no_op() {
+        let (mut m, _backend) = module();
+        let task = m.update(Message::PairingCancelled);
+        assert_eq!(task.units(), 0);
+    }
+
+    /// Accepting is answering, not dismissing — it must clear the dialog
+    /// without calling `cancel_pairing`, the opposite of the property
+    /// above. There is no "confirm" call to make yet (see the doc
+    /// comment on `Message::PairingAccepted`), so this is local state
+    /// only.
+    #[test]
+    fn accepting_a_pairing_prompt_clears_it_without_cancelling() {
+        let (mut m, _backend) = module();
+        let addr = Address::new("AA:BB:CC:DD:EE:23");
+        let _ = m.update(Message::PairingPrompted(PairingPrompt::Authorize {
+            device: addr,
+            name: "Speaker".to_string(),
+        }));
+
+        let task = m.update(Message::PairingAccepted);
+        assert!(m.pairing.is_none(), "accepting closes the dialog");
+        assert_eq!(task.units(), 0, "accepting must not itself call cancel_pairing");
+    }
+
+    /// Item 3 of the task: a pairing that succeeds updates the row so it
+    /// can be connected to, and clears whatever dialog was open for it.
+    #[test]
+    fn a_successful_pairing_updates_the_row_and_closes_its_dialog() {
+        let (mut m, _backend) = module();
+        let stranger = device("Stranger", "AA:BB:CC:DD:EE:24", false, false);
+        let _ = m.update(Message::Loaded(loaded(status(AdapterState::On, false), vec![stranger.clone()])));
+        let _ = m.update(Message::PairPressed(stranger.address.clone()));
+        let _ = m.update(Message::PairingPrompted(PairingPrompt::Confirm {
+            device: stranger.address.clone(),
+            name: "Stranger".to_string(),
+            passkey: Passkey::new(555555),
+        }));
+        assert!(m.pairing.is_some());
+
+        let _ = m.update(Message::Paired(stranger.address.clone(), Ok(())));
+        assert!(m.devices[0].paired, "the row must show paired without waiting on the next poll");
+        assert!(m.pairing.is_none(), "a resolved pairing must not leave a stale dialog open");
+    }
+
+    /// Item 3 of the task: a pairing that fails reports the backend's
+    /// own text in the existing error banner and must never invent
+    /// "check the logs" in its place — and the device it was tried
+    /// against stays unpaired, not left in some in-between state.
+    #[test]
+    fn a_failed_pairing_reports_in_the_banner_and_leaves_the_device_unpaired() {
+        let (mut m, _backend) = module();
+        let stranger = device("Stranger", "AA:BB:CC:DD:EE:25", false, false);
+        let _ = m.update(Message::Loaded(loaded(status(AdapterState::On, false), vec![stranger.clone()])));
+        let _ = m.update(Message::PairPressed(stranger.address.clone()));
+        let _ = m.update(Message::PairingPrompted(PairingPrompt::Confirm {
+            device: stranger.address.clone(),
+            name: "Stranger".to_string(),
+            passkey: Passkey::new(1),
+        }));
+
+        let _ = m.update(Message::Paired(
+            stranger.address.clone(),
+            Err(LoadError::from(BluetoothError::Refused("authentication failed".to_string()))),
+        ));
+
+        assert!(
+            m.error.as_ref().is_some_and(|e| e.contains("authentication failed")),
+            "the backend's own text must reach the banner, got {:?}",
+            m.error
+        );
+        assert!(!m.devices[0].paired, "a failed pairing must not be shown as paired");
+        assert!(m.pairing.is_none(), "a dialog for a pairing that's already failed must not linger");
+    }
+
+    /// Every state `pairing_dialog` can be asked to build has to build
+    /// without panicking — the three prompt kinds this task lists
+    /// explicitly, on top of everything `the_screen_builds_in_every_state`
+    /// already covers.
+    #[test]
+    fn the_screen_builds_with_each_pairing_prompt_kind() {
+        let scale = FontScale::default();
+        let (mut m, _backend) = module();
+        let _ = m.update(Message::Loaded(loaded(status(AdapterState::On, false), Vec::new())));
+        let addr = Address::new("AA:BB:CC:DD:EE:26");
+
+        let _ = m.update(Message::PairingPrompted(PairingPrompt::Confirm {
+            device: addr.clone(),
+            name: "Phone".to_string(),
+            passkey: Passkey::new(56),
+        }));
+        let _ = m.view(scale); // Confirm
+
+        let _ = m.update(Message::PairingPrompted(PairingPrompt::Authorize {
+            device: addr.clone(),
+            name: "Speaker".to_string(),
+        }));
+        let _ = m.view(scale); // Authorize
+
+        let _ = m.update(Message::PairingPrompted(PairingPrompt::Display {
+            device: addr,
+            name: "Keyboard".to_string(),
+            passkey: Passkey::new(7),
+            entered: 3,
+        }));
+        let _ = m.view(scale); // Display
     }
 }
