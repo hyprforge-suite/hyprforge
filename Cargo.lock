@@ -1445,14 +1445,17 @@ dependencies = [
 name = "hyprforge-clipboard"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "blake3",
  "hyprforge-paths",
  "serde",
  "tempfile",
  "thiserror 2.0.19",
+ "tokio",
  "toml",
  "tracing",
  "wayland-client",
+ "wayland-protocols",
  "wayland-protocols-wlr",
 ]
 

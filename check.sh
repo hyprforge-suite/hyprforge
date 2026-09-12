@@ -110,7 +110,7 @@ else
         # are named. That also survives a test being renamed, which
         # `--skip` on the test names would not.
         output=$(
-            cargo test --workspace --exclude hyprforge-ecosystem --exclude hyprforge-network --exclude hyprforge-bluetooth --exclude hyprforge-tray --exclude hyprforge-power -- --ignored --test-threads=1 2>&1
+            cargo test --workspace --exclude hyprforge-ecosystem --exclude hyprforge-network --exclude hyprforge-bluetooth --exclude hyprforge-tray --exclude hyprforge-power --exclude hyprforge-clipboard -- --ignored --test-threads=1 2>&1
             cargo test -p hyprforge-ecosystem --lib --test live_ecosystem -- --ignored --test-threads=1 2>&1
         )
         if grep -q "test result: FAILED" <<<"$output"; then
@@ -263,6 +263,27 @@ else
     # name that no theme carries draws a blank gap and logs nothing
     # anywhere, so a list of "standard" names cannot catch it and only a
     # real theme can.
+    # Gated on a Wayland session, which is what these ask — the
+    # clipboard is the compositor's, and data-control is how it is read.
+    # Read-only: they enumerate what is offered and never set or clear a
+    # selection. The clipboard belongs to whoever is using the machine.
+    step "Live tests against the Wayland clipboard"
+    if [[ -z "${WAYLAND_DISPLAY:-}" ]]; then
+        skip "clipboard tests" "no WAYLAND_DISPLAY — not in a Wayland session"
+    else
+        output=$(cargo test -p hyprforge-clipboard \
+            -- --ignored --test-threads=1 --nocapture 2>&1)
+        if grep -q "test result: FAILED" <<<"$output"; then
+            bad "clipboard tests failed — the code disagrees with the running compositor"
+            grep -E '^test .* FAILED' <<<"$output" | head -20
+        else
+            ok "$(count_tests <<<"$output") clipboard tests passed"
+            while IFS= read -r reason; do
+                [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
+            done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^(]*\).*/\1/p' <<<"$output" | sort -u)
+        fi
+    fi
+
     step "Icon names against the installed theme"
     if ! command -v gsettings >/dev/null; then
         skip "icon resolution" "gsettings not available to ask which theme is set"

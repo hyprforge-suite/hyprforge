@@ -51,6 +51,38 @@ pub fn tray_toml_path() -> PathBuf {
     hyprforge_config_dir().join("tray.toml")
 }
 
+/// Where the clipboard manager keeps its history. Its own subdirectory,
+/// not a file directly under `hyprforge_config_dir()`, because the index
+/// is one file but image content is one file *per entry* — see
+/// [`clipboard_images_dir`] — and both need a directory to live in.
+pub fn clipboard_dir() -> PathBuf {
+    hyprforge_config_dir().join("clipboard")
+}
+
+/// The clipboard history's index: ids, timestamps, pins, text content and
+/// image *references*. Never image bytes themselves — see
+/// [`clipboard_images_dir`] for why those live elsewhere.
+pub fn clipboard_index_path() -> PathBuf {
+    clipboard_dir().join("history.toml")
+}
+
+/// Where clipboard image bytes are kept, one file per entry, named by its
+/// content hash. Inlining a screenshot's bytes into the index as base64
+/// would make that file unreadable by eye, unparseable at any real size,
+/// and would mean rewriting the whole index — text entries included —
+/// every time a single image is added or evicted.
+pub fn clipboard_images_dir() -> PathBuf {
+    clipboard_dir().join("images")
+}
+
+/// The path for one clipboard entry's image bytes, keyed by its
+/// `EntryId` (as returned by `EntryId::as_str`) so the index and the
+/// file agree on which entry a file belongs to without either side
+/// having to store the other's full path.
+pub fn clipboard_image_path(id: &str) -> PathBuf {
+    clipboard_images_dir().join(format!("{id}.bin"))
+}
+
 /// Write `contents` to `path` atomically and durably: write a sibling temp
 /// file, flush it to disk, rename over the target, then flush the
 /// directory.
@@ -68,6 +100,15 @@ pub fn tray_toml_path() -> PathBuf {
 /// is being protected is the only record of something the user cannot
 /// reconstruct — their profiles, their keybinds.
 pub fn write_atomic(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    write_atomic_bytes(path, contents.as_bytes())
+}
+
+/// The same guarantee as [`write_atomic`], for content that is not text —
+/// clipboard image bytes, specifically. Kept as a second entry point
+/// rather than making [`write_atomic`] generic over `AsRef<[u8]>`. so
+/// every existing caller (all of which pass `&str`) keeps its exact
+/// signature.
+pub fn write_atomic_bytes(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -107,7 +148,7 @@ pub fn write_atomic(path: &std::path::Path, contents: &str) -> std::io::Result<(
         {
             use std::io::Write as _;
             let mut writer = std::io::BufWriter::new(&file);
-            writer.write_all(contents.as_bytes())?;
+            writer.write_all(contents)?;
             writer.flush()?;
         }
         file.sync_all()?;
@@ -321,5 +362,35 @@ mod tests {
             appearance_toml_path(),
             PathBuf::from("/custom/config/hyprforge/appearance.toml")
         );
+    }
+
+    #[test]
+    fn clipboard_paths_hang_off_their_own_subdirectory() {
+        let _g = EnvGuard::set(Some("/custom/config"), Some("/home/someone"));
+        assert_eq!(
+            clipboard_dir(),
+            PathBuf::from("/custom/config/hyprforge/clipboard")
+        );
+        assert_eq!(
+            clipboard_index_path(),
+            PathBuf::from("/custom/config/hyprforge/clipboard/history.toml")
+        );
+        assert_eq!(
+            clipboard_images_dir(),
+            PathBuf::from("/custom/config/hyprforge/clipboard/images")
+        );
+        assert_eq!(
+            clipboard_image_path("abc123"),
+            PathBuf::from("/custom/config/hyprforge/clipboard/images/abc123.bin")
+        );
+    }
+
+    #[test]
+    fn write_atomic_bytes_round_trips_binary_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("image.bin");
+        let bytes: Vec<u8> = (0..=255).collect();
+        write_atomic_bytes(&path, &bytes).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
 }

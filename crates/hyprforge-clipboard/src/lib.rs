@@ -15,6 +15,13 @@
 //! logged. `Debug` on an entry renders a description rather than the
 //! content, for the same reason `hyprforge-authui` hand-writes its own.
 
+pub mod backend;
+pub mod resolve;
+pub mod store;
 pub mod types;
+pub mod wayland;
 
+pub use backend::ClipboardWatcher;
+pub use store::{History, HistoryError, Recordable};
 pub use types::{Content, Entry, EntryId, Mime, Sensitivity};
+pub use wayland::WaylandWatcher;

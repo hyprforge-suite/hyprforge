@@ -9,15 +9,26 @@ license.workspace = true
 # wlr-data-control / ext-data-control. No daemon of our own owns it.
 wayland-client.workspace = true
 wayland-protocols-wlr.workspace = true
+# Not a workspace dependency: nothing else in the workspace speaks
+# ext-data-control-v1 yet. Pinned to the version already in the lock
+# file (a transitive dependency of nothing here before now, pulled in
+# indirectly by wayland-protocols-wlr's own tree). "staging" is the
+# feature that gates ext-data-control-v1 in this crate — it has not
+# graduated to stable — and "client" is the client-side bindings.
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 hyprforge-paths.workspace = true
 serde.workspace = true
 toml.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 blake3.workspace = true
+anyhow.workspace = true
+# `sync` for the `UnboundedReceiver` the watcher trait hands back.
+tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 
 [features]
 # Exposes `backend::mock::MockBackend` outside `#[cfg(test)]`, so the

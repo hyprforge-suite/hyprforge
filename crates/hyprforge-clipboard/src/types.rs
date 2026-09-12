@@ -115,7 +115,10 @@ pub enum Content {
     /// called them. Not decoded here — decoding a 36-megapixel PNG to
     /// measure it is how the lock screen once peaked at 296MB, and this
     /// crate may be handed anything.
-    Image { bytes: Vec<u8>, mime: Mime },
+    Image {
+        bytes: Vec<u8>,
+        mime: Mime,
+    },
 }
 
 impl Content {
@@ -150,7 +153,10 @@ impl Content {
                 if collapsed.chars().count() <= max_chars {
                     return collapsed;
                 }
-                let cut: String = collapsed.chars().take(max_chars.saturating_sub(1)).collect();
+                let cut: String = collapsed
+                    .chars()
+                    .take(max_chars.saturating_sub(1))
+                    .collect();
                 format!("{cut}\u{2026}")
             }
         }
