@@ -115,6 +115,16 @@ pub struct Daemon {
     monitors_lua_path: PathBuf,
     greet_monitors_path: PathBuf,
     profiles: Mutex<Vec<Profile>>,
+    /// Held only for the duration of a commit to the compositor.
+    ///
+    /// Separate from `profiles` on purpose. The thing that must not happen
+    /// twice at once is the commit itself; the thing that must stay
+    /// answerable throughout is the profile store. Using one lock for both
+    /// conflated them, and since `apply_configuration` blocks for up to 18s
+    /// — three attempts at 3s to test plus 3s to apply — every D-Bus query
+    /// and the revert timer queued behind a commit that had nothing to do
+    /// with them.
+    apply_gate: Mutex<()>,
     competing_monitor_rules: Mutex<Vec<String>>,
     suppress_learn_until: Mutex<Option<tokio::time::Instant>>,
     /// The last plan that was committed and then *still* wasn't reflected in
@@ -148,6 +158,7 @@ impl Daemon {
             monitors_lua_path,
             greet_monitors_path,
             profiles: Mutex::new(profiles),
+            apply_gate: Mutex::new(()),
             competing_monitor_rules: Mutex::new(Vec::new()),
             suppress_learn_until: Mutex::new(None),
             unsatisfied_plan: Mutex::new(None),
@@ -367,6 +378,26 @@ impl Daemon {
             .await;
     }
 
+    /// Commits `plan` to the compositor, one at a time.
+    ///
+    /// **Never call this while holding `profiles`.** `apply_configuration`
+    /// is synchronous and blocks for up to 18s, so a caller holding the
+    /// profile store across it makes every query and the revert timer wait
+    /// out someone else's mode change. The `apply_gate` provides the
+    /// mutual exclusion that is actually needed — one commit at a time —
+    /// without the store being collateral.
+    /// Deliberately does **not** touch `suppress_learn_until`. Callers own
+    /// that, because they do not all want it at the same moment:
+    /// `handle_settled_topology` has to read the cooldown left by the
+    /// *previous* apply before starting a new one, and setting it here
+    /// inverted that ordering — the settle saw its own fresh cooldown, took
+    /// the drift for an echo of itself, and stopped auto-learning layouts
+    /// the user had changed externally.
+    async fn commit(&self, plan: &LayoutPlan) -> anyhow::Result<()> {
+        let _gate = self.apply_gate.lock().await;
+        self.backend.apply_configuration(plan)
+    }
+
     /// Puts back both halves of the snapshot: the profile store first (so a
     /// later hotplug re-applies the good layout), then the live compositor
     /// state.
@@ -394,7 +425,7 @@ impl Daemon {
         // user externally rearranging their displays.
         *self.suppress_learn_until.lock().await =
             Some(tokio::time::Instant::now() + AUTO_LEARN_COOLDOWN);
-        self.backend.apply_configuration(&plan)
+        self.commit(&plan).await
     }
 
     /// Force-applies `profile_id` regardless of whether it currently
@@ -402,7 +433,7 @@ impl Daemon {
     /// and the D-Bus `ApplyProfile` method.
     pub async fn apply_profile(&self, profile_id: &str) -> anyhow::Result<()> {
         let heads = self.backend.list_outputs()?;
-        let mut profiles = self.profiles.lock().await;
+        let profiles = self.profiles.lock().await;
         let idx = profiles
             .iter()
             .position(|p| p.id == profile_id)
@@ -420,7 +451,24 @@ impl Daemon {
         // making a deliberate mode or scale change appear to do nothing.
         *self.suppress_learn_until.lock().await =
             Some(tokio::time::Instant::now() + AUTO_LEARN_COOLDOWN);
-        self.backend.apply_configuration(&plan)?;
+        // Released before committing: `commit` blocks for up to 18s and
+        // nothing about the profile store needs to be frozen for it.
+        drop(profiles);
+        self.commit(&plan).await?;
+
+        // Re-resolved by id rather than by the index taken earlier: the
+        // profile can have been renamed, reordered or deleted while the
+        // compositor was busy. A profile that is gone is not resurrected —
+        // the layout is applied either way, and writing back a deleted
+        // profile would be a worse surprise than not recording the use.
+        let mut profiles = self.profiles.lock().await;
+        let Some(idx) = profiles.iter().position(|p| p.id == profile_id) else {
+            tracing::warn!(
+                profile = %profile_id,
+                "profile was deleted while its layout was being applied; not recording the use"
+            );
+            return Ok(());
+        };
         profiles[idx].touch();
         self.persist(&profiles)?;
         Ok(())
@@ -647,6 +695,11 @@ impl Daemon {
 
         let profile_idx = profiles.iter().position(|p| p.id == profile_id).unwrap();
         let plan = build_layout_plan(&profiles[profile_idx], &heads);
+        // Everything the commit needs has been read out of the store, so
+        // the store is released for it. `commit` blocks for up to 18s and
+        // holding `profiles` across it made every D-Bus query wait out a
+        // mode change it had no part in.
+        drop(profiles);
 
         if let Err(e) = plan.validate() {
             tracing::error!(error = %e, profile = %profile_id, "refusing to apply invalid plan");
@@ -722,7 +775,7 @@ impl Daemon {
                 ));
                 return;
             }
-            if let Err(e) = self.backend.apply_configuration(&plan) {
+            if let Err(e) = self.commit(&plan).await {
                 tracing::error!(error = %e, profile = %profile_id, "failed to apply layout");
                 // The change did not land, so the screen still shows what
                 // these heads describe. Same argument as the two branches
@@ -753,6 +806,17 @@ impl Daemon {
         *self.suppress_learn_until.lock().await =
             Some(tokio::time::Instant::now() + AUTO_LEARN_COOLDOWN);
 
+        // Re-taken after the commit, and re-resolved by id: the index read
+        // before it describes a store that a concurrent D-Bus call may have
+        // reordered or shortened.
+        let mut profiles = self.profiles.lock().await;
+        let Some(profile_idx) = profiles.iter().position(|p| p.id == profile_id) else {
+            tracing::warn!(
+                profile = %profile_id,
+                "profile was deleted while its layout was being applied; not recording the use"
+            );
+            return;
+        };
         profiles[profile_idx].touch();
         let name = profiles[profile_idx].name.clone();
         let tier_str = match tier {

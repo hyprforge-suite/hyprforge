@@ -1126,3 +1126,45 @@ async fn learning_a_topology_also_writes_the_fallback_for_it() {
         .expect("learning a topology must leave a monitors.lua behind");
     assert!(lua.contains("hl.monitor("), "got: {lua}");
 }
+
+/// `apply_configuration` is synchronous and blocks for up to 18s: three
+/// attempts at 3s to test plus 3s to apply. The daemon used to hold the
+/// profile store across it, so every D-Bus query — and the revert timer —
+/// queued behind a mode change it had no part in, and the Settings app
+/// looked frozen for the duration.
+///
+/// Real threads and a real clock here on purpose. The point is that one
+/// task is genuinely blocked inside a synchronous call while another runs,
+/// which a paused single-threaded runtime cannot express.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_profile_store_still_answers_while_a_layout_is_being_applied() {
+    let h = Harness::new();
+    let boe = identity("BOE", "0x0BC9", "");
+    h.backend.set_topology(vec![boe.clone()]);
+
+    // Let the daemon learn a profile to apply.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let learned = h.daemon.profiles().await;
+    let id = learned.first().expect("a profile should have been learned").id.clone();
+
+    let (entered, release) = h.backend.hold_applies();
+
+    let daemon = h.daemon.clone();
+    let applying = tokio::spawn(async move { daemon.apply_profile(&id).await });
+
+    // Wait until the commit is genuinely in flight rather than merely
+    // scheduled, or the assertion below could pass by arriving early.
+    tokio::task::spawn_blocking(move || entered.recv_timeout(Duration::from_secs(5)))
+        .await
+        .unwrap()
+        .expect("the apply should have reached the backend");
+
+    let answered = tokio::time::timeout(Duration::from_secs(2), h.daemon.profiles()).await;
+    assert!(
+        answered.is_ok(),
+        "the profile store was still locked by the in-flight apply"
+    );
+
+    let _ = release.send(());
+    applying.await.unwrap().expect("the apply itself should still succeed");
+}
