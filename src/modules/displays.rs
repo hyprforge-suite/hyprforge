@@ -3037,4 +3037,98 @@ mod tests {
         m.scale = None;
         assert_eq!(m.geometry().unwrap().scale, 1.0);
     }
+
+    /// The other half of the `GetProfile` contract.
+    ///
+    /// [`ProfileDetail`] and [`HeadDetail`] are hand-written mirrors of
+    /// `hyprforge_displayd::profile::Profile` and `HeadRecord`, because
+    /// depending on the daemon crate would pull Wayland into this GUI's
+    /// build. Two declarations of one wire format, in two crates, with
+    /// nothing between them that the compiler can see.
+    ///
+    /// So the daemon has a test asserting it still *sends* these names —
+    /// `get_profile_names_every_field_the_displays_screen_reads` in
+    /// `hyprforge-displayd/src/dbus.rs` — and this one asserts we can
+    /// still *read* them. The JSON below is what that daemon-side test
+    /// builds. Renaming a field on either side fails exactly one of the
+    /// two, which is how you find out which side moved.
+    #[test]
+    fn a_profile_detail_parses_the_json_the_daemon_actually_sends() {
+        let json = r#"{
+            "id": "abc123",
+            "name": "Desk",
+            "last_used": "2026-09-12T10:00:00Z",
+            "extra_output_policy": "extend_right",
+            "head_swaps": [["DP-1", "DP-2"]],
+            "head": [{
+                "make": "Dell",
+                "model": "U2720Q",
+                "serial": "ABC",
+                "connector_hint": "DP-1",
+                "x": 0,
+                "y": 0,
+                "width": 3840,
+                "height": 2160,
+                "refresh_mhz": 59997,
+                "scale": 1.5,
+                "transform": "Normal",
+                "enabled": true
+            }]
+        }"#;
+
+        let detail: ProfileDetail =
+            serde_json::from_str(json).expect("GetProfile's JSON parses into ProfileDetail");
+
+        assert_eq!(detail.id, "abc123");
+        assert_eq!(detail.name, "Desk");
+        assert_eq!(detail.extra_output_policy, "extend_right");
+        // `head`, not `heads`: the daemon renames the field, and this is
+        // the rename actually being exercised rather than assumed.
+        assert_eq!(detail.heads.len(), 1);
+
+        let head = &detail.heads[0];
+        assert_eq!(head.connector_hint, "DP-1");
+        assert_eq!((head.width, head.height), (3840, 2160));
+        assert_eq!(head.refresh_mhz, 59997);
+        assert_eq!(head.scale, 1.5);
+        assert_eq!(head.transform, "Normal");
+        assert!(head.enabled);
+    }
+
+    /// `last_used` is sent and this screen does not read it. That is
+    /// fine — serde ignores unknown fields — but it means the parse
+    /// succeeding is not by itself proof the field names line up, which
+    /// is why the test above asserts values rather than just `is_ok`.
+    #[test]
+    fn a_field_the_screen_does_not_use_does_not_break_the_parse() {
+        let json = r#"{
+            "id": "x", "name": "n", "last_used": "whenever",
+            "extra_output_policy": "mirror", "head_swaps": [],
+            "head": [], "a_field_added_later": 5
+        }"#;
+        let detail: ProfileDetail = serde_json::from_str(json).expect("unknown fields are ignored");
+        assert_eq!(detail.extra_output_policy, "mirror");
+    }
+
+    /// The two fields the `desc:` selector resolution needs out of
+    /// `GetCurrentLayout`. Paired with
+    /// `get_current_layout_names_the_two_fields_that_resolve_a_monitor_selector`
+    /// on the daemon side.
+    #[test]
+    fn a_live_head_parses_the_layout_json_the_daemon_actually_sends() {
+        let json = r#"[{
+            "connector": "DP-1",
+            "identity": {"make": "Dell", "model": "U2720Q", "serial": "ABC"},
+            "description": "Dell U2720Q (DP-1)",
+            "modes": [], "current_mode": null,
+            "position": [0, 0], "transform": "Normal",
+            "scale": 1.0, "enabled": true
+        }]"#;
+        let live: Vec<LiveHead> =
+            serde_json::from_str(json).expect("GetCurrentLayout's JSON parses into LiveHead");
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].connector, "DP-1");
+        assert_eq!(live[0].description, "Dell U2720Q (DP-1)");
+    }
+
 }
