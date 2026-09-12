@@ -56,6 +56,17 @@ feature stays off; comparing a screenshot's centre pixel against the
 theme value is how it was found, and is the way to settle any
 "these two should look the same" question.
 
+**In a last-one-wins format, flagging the duplicate that *wins* deletes the
+value that applies.** Every `invalid()` here doubles as a filter: `generate`
+skips whatever it reports. So "which row do I mark as the dead one" is not a
+wording choice — mark the last occurrence and the generator drops the row in
+effect and writes the superseded one instead. `hl.env` did this (editing a
+variable and leaving the old row made the *old* value take effect) and so did
+hyprpaper's blocks (a new wallpaper left the old image on screen). Both existing
+tests asserted the wrong index, one of them contradicting its own doc comment.
+`core::supersede` owns the rule now; a test that only checks *that* something
+was flagged will not catch this, so assert the generated value too.
+
 **`pkill -f <pattern>` matches the shell running it**, because the pattern
 appears in that shell's own command line. It kills the shell and exits 144. Use
 `pkill -x <name>` or a literal PID.
