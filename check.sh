@@ -51,6 +51,17 @@ else
     bad "clippy: $warnings warning(s) — run: cargo clippy --workspace --all-targets"
 fi
 
+# A dependency-feature fact, so no Rust test can see it — and the damage
+# it does is invisible to every test we have, because both renderers
+# report the same `Color` and only the pixels differ.
+step "Renderer colour space"
+if cargo tree --workspace -e features 2>/dev/null | grep -q 'web-colors'; then
+    bad "iced's \`web-colors\` is enabled — the wgpu hosts will draw the theme"
+    bad "  lighter than the tiny-skia ones. See the iced entry in Cargo.toml."
+else
+    ok "iced web-colors: off, so every host draws the same theme the same way"
+fi
+
 step "Unit and integration tests"
 output=$(cargo test --workspace 2>&1)
 if grep -q "test result: FAILED" <<<"$output"; then

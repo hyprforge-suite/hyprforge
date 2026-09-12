@@ -43,6 +43,19 @@ or `tokio::time::timeout` in async code. A timeout arrives as
 `io::ErrorKind::TimedOut`, so callers that already handle a failed spawn need no
 new branch: not answering and not starting are the same problem from their side.
 
+**A shared `Theme` does not give you a shared look — the renderer can
+change the colour underneath it.** iced 0.14 enables `web-colors` by
+default, which skips the sRGB->linear conversion on the `iced_wgpu`
+path. `iced_tiny_skia` has no such feature. So the greeter and the
+Settings app drew `rgba(26263aff)` as (107, 107, 130) while the lock
+screen drew it as (38, 38, 58) — one extra sRGB encode, and a login
+screen visibly washed out beside a lock screen reading the same file.
+Nothing in the type system or the tests can see this: both hosts report
+the same `Color` and only the pixels differ. `check.sh` asserts the
+feature stays off; comparing a screenshot's centre pixel against the
+theme value is how it was found, and is the way to settle any
+"these two should look the same" question.
+
 **`pkill -f <pattern>` matches the shell running it**, because the pattern
 appears in that shell's own command line. It kills the shell and exits 144. Use
 `pkill -x <name>` or a literal PID.

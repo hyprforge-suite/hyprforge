@@ -50,7 +50,30 @@ hyprforge-lua-import = { path = "crates/hyprforge-lua-import" }
 # doesn't need a system Lua install.
 mlua = { version = "0.12", features = ["lua54", "vendored", "serde"] }
 
-iced = "0.14"
+# `web-colors` is in iced's own default features and is the reason the
+# greeter looked washed out beside the lock screen. It skips the
+# sRGB->linear conversion on the wgpu path, so a colour reaches an sRGB
+# surface already encoded and gets encoded again: the theme's
+# `surface = rgba(26263aff)` — (38, 38, 58) — rendered as (107, 107, 130),
+# which is srgb_encode(38/255) to within a rounding step.
+#
+# `iced_tiny_skia` has no such feature, so the lock screen was unaffected
+# and the two hosts drew the same theme in visibly different colours.
+# That is the exact failure this suite exists to prevent, occurring
+# inside the suite, and no amount of sharing one `Theme` would have
+# caught it — the divergence is below the colour, in what the renderer
+# does with it.
+#
+# Everything else iced enables by default is kept.
+iced = { version = "0.14", default-features = false, features = [
+    "wgpu",
+    "tiny-skia",
+    "crisp",
+    "thread-pool",
+    "linux-theme-detection",
+    "x11",
+    "wayland",
+] }
 # The auth screen's clock. default-features off: no serde, no oldtime,
 # no wasm bindings — a lock screen wants the smallest thing that can
 # format a strftime string.
