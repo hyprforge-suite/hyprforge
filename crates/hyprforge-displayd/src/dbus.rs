@@ -288,3 +288,246 @@ pub async fn forward_signals(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `Transform`, listed — with a `match` that stops compiling if
+    /// the enum grows.
+    ///
+    /// The list is the part that rots. A variant added to `Transform`
+    /// would otherwise leave the round-trip below passing while saying
+    /// nothing about the new one, so the match is what keeps the list
+    /// honest; it is not decoration.
+    fn every_transform() -> Vec<Transform> {
+        fn _exhaustive(t: Transform) {
+            match t {
+                Transform::Normal
+                | Transform::Rotate90
+                | Transform::Rotate180
+                | Transform::Rotate270
+                | Transform::Flipped
+                | Transform::Flipped90
+                | Transform::Flipped180
+                | Transform::Flipped270 => {}
+            }
+        }
+        vec![
+            Transform::Normal,
+            Transform::Rotate90,
+            Transform::Rotate180,
+            Transform::Rotate270,
+            Transform::Flipped,
+            Transform::Flipped90,
+            Transform::Flipped180,
+            Transform::Flipped270,
+        ]
+    }
+
+    fn every_policy() -> Vec<ExtraOutputPolicy> {
+        fn _exhaustive(p: ExtraOutputPolicy) {
+            match p {
+                ExtraOutputPolicy::ExtendRight
+                | ExtraOutputPolicy::Mirror
+                | ExtraOutputPolicy::Disable => {}
+            }
+        }
+        vec![
+            ExtraOutputPolicy::ExtendRight,
+            ExtraOutputPolicy::Mirror,
+            ExtraOutputPolicy::Disable,
+        ]
+    }
+
+    /// The GUI reads a transform out of `GetProfile`'s JSON and hands the
+    /// same string straight back to `SetHeadGeometry`. That only works
+    /// while the hand-written `FromStr` above agrees with the `Serialize`
+    /// derive on `Transform` — two definitions of one name, in different
+    /// files, with nothing but this test between them.
+    ///
+    /// A `#[serde(rename_all = ...)]` added to `Transform` would break
+    /// the round-trip without touching a line the compiler objects to,
+    /// and the symptom would be a rotation the Displays screen refuses to
+    /// save with "unknown transform".
+    #[test]
+    fn every_transform_parses_back_from_the_json_the_gui_reads_it_from() {
+        for transform in every_transform() {
+            let json = serde_json::to_string(&transform).expect("a Transform serialises");
+            let on_the_wire = json.trim_matches('"');
+            assert_eq!(
+                Transform::from_str(on_the_wire),
+                Ok(transform),
+                "GetProfile's JSON calls {transform:?} {on_the_wire:?}, and SetHeadGeometry \
+                 cannot read that back — the FromStr in dbus.rs and the Serialize derive on \
+                 Transform have stopped agreeing"
+            );
+        }
+    }
+
+    /// Same coupling, other enum: `SetExtraOutputPolicy` takes the name
+    /// serde gives the variant, so its `rename_all` and the `FromStr`
+    /// have to say the same thing.
+    #[test]
+    fn every_extra_output_policy_parses_back_from_the_name_serde_gives_it() {
+        for policy in every_policy() {
+            let json = serde_json::to_string(&policy).expect("a policy serialises");
+            let on_the_wire = json.trim_matches('"');
+            assert_eq!(
+                ExtraOutputPolicy::from_str(on_the_wire),
+                Ok(policy),
+                "the profile stores {policy:?} as {on_the_wire:?} and the bus cannot parse it"
+            );
+        }
+    }
+
+    /// `Transform` derives `Default = Normal`, so anything that reached
+    /// for `unwrap_or_default()` on this parse would quietly un-rotate a
+    /// monitor the user had deliberately rotated — a wrong value, not a
+    /// refused one. Saying no is the behaviour `SetHeadGeometry` turns
+    /// into `InvalidArgs`.
+    #[test]
+    fn an_unrecognised_transform_is_refused_rather_than_becoming_normal() {
+        for bad in ["", "rotate90", "ROTATE90", "Rotate45", "normal", "90"] {
+            assert_eq!(
+                Transform::from_str(bad),
+                Err(()),
+                "{bad:?} was accepted as a transform"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unrecognised_policy_is_refused_rather_than_becoming_extend_right() {
+        for bad in ["", "ExtendRight", "extend-right", "clone", "off"] {
+            assert_eq!(
+                ExtraOutputPolicy::from_str(bad),
+                Err(()),
+                "{bad:?} was accepted as an extra-output policy"
+            );
+        }
+    }
+
+    /// The two enums do **not** use the same casing on the bus, and that
+    /// is now a contract rather than an oversight: `Transform` reaches
+    /// callers through serde's default variant names (`Rotate90`), while
+    /// `ExtraOutputPolicy` carries `rename_all = "snake_case"`
+    /// (`extend_right`). Making them agree would be tidier and would
+    /// break every existing caller of one or the other, so the
+    /// inconsistency is pinned where someone tempted to fix it will see
+    /// what it costs.
+    /// The field names `GetProfile` puts on the bus.
+    ///
+    /// The Displays screen parses this JSON into its own `ProfileDetail`
+    /// and `HeadDetail`, declared in
+    /// `hyprforge-settings/src/modules/displays.rs` — deliberately *not*
+    /// a dependency on this crate, which would drag Wayland into the
+    /// GUI's build. The comment there says the field names "mirror
+    /// `hyprforge_displayd::profile::Profile` exactly", and until now
+    /// nothing checked that claim.
+    ///
+    /// Renaming a field here, or dropping the `#[serde(rename = "head")]`
+    /// on `Profile::heads`, compiles cleanly on both sides and breaks the
+    /// layout editor at runtime. There is a matching test on the other
+    /// side of the contract:
+    /// `a_profile_detail_parses_the_json_the_daemon_actually_sends`.
+    /// Change one and the other fails, which is the whole point of there
+    /// being two.
+    #[test]
+    fn get_profile_names_every_field_the_displays_screen_reads() {
+        let profile = crate::profile::Profile {
+            id: "abc123".to_string(),
+            name: "Desk".to_string(),
+            last_used: "2026-09-12T10:00:00Z".to_string(),
+            extra_output_policy: ExtraOutputPolicy::ExtendRight,
+            head_swaps: vec![("DP-1".to_string(), "DP-2".to_string())],
+            heads: vec![crate::profile::HeadRecord {
+                make: "Dell".to_string(),
+                model: "U2720Q".to_string(),
+                serial: "ABC".to_string(),
+                connector_hint: "DP-1".to_string(),
+                x: 0,
+                y: 0,
+                width: 3840,
+                height: 2160,
+                refresh_mhz: 59997,
+                scale: 1.5,
+                transform: Transform::Normal,
+                enabled: true,
+            }],
+        };
+        let json: serde_json::Value =
+            serde_json::to_value(&profile).expect("a Profile serialises");
+
+        for field in ["id", "name", "extra_output_policy", "head_swaps", "head"] {
+            assert!(
+                json.get(field).is_some(),
+                "GetProfile no longer sends {field:?}; the Displays screen's ProfileDetail                  still expects it"
+            );
+        }
+        let head = json["head"]
+            .get(0)
+            .expect("`head` is the array of per-head records");
+        for field in [
+            "make",
+            "model",
+            "serial",
+            "connector_hint",
+            "x",
+            "y",
+            "width",
+            "height",
+            "refresh_mhz",
+            "scale",
+            "transform",
+            "enabled",
+        ] {
+            assert!(
+                head.get(field).is_some(),
+                "GetProfile's head records no longer carry {field:?}; the Displays screen's                  HeadDetail still expects it"
+            );
+        }
+    }
+
+    /// `GetCurrentLayout` serialises `Head`, and the Displays screen reads
+    /// two fields out of it to resolve a `desc:` monitor selector into a
+    /// connector. Same duplicated contract as above, smaller surface —
+    /// see `LiveHead` in the settings crate.
+    #[test]
+    fn get_current_layout_names_the_two_fields_that_resolve_a_monitor_selector() {
+        let head = crate::types::Head {
+            connector: "DP-1".to_string(),
+            identity: crate::types::Identity {
+                make: "Dell".to_string(),
+                model: "U2720Q".to_string(),
+                serial: "ABC".to_string(),
+            },
+            description: "Dell U2720Q (DP-1)".to_string(),
+            modes: vec![],
+            current_mode: None,
+            position: (0, 0),
+            transform: Transform::Normal,
+            scale: 1.0,
+            enabled: true,
+        };
+        let json: serde_json::Value = serde_json::to_value(&head).expect("a Head serialises");
+        for field in ["connector", "description"] {
+            assert!(
+                json.get(field).is_some(),
+                "GetCurrentLayout no longer sends {field:?}; the Displays screen's LiveHead                  needs it to resolve a desc: selector"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_bus_enums_keep_the_casing_their_callers_already_send() {
+        assert_eq!(
+            serde_json::to_string(&Transform::Rotate90).unwrap(),
+            "\"Rotate90\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ExtraOutputPolicy::ExtendRight).unwrap(),
+            "\"extend_right\""
+        );
+    }
+}
