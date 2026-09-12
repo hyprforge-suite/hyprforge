@@ -187,7 +187,7 @@ fn apply_key<B: hyprforge_authui::conversation::Backend>(
             },
             Key::Named(Named::Escape) => conversation.clear(),
             Key::Named(Named::Backspace) => {
-                let mut entered = conversation.entered().to_string();
+                let mut entered = conversation.typed().to_string();
                 entered.pop();
                 conversation.type_into(entered);
             }
@@ -205,7 +205,7 @@ fn apply_key<B: hyprforge_authui::conversation::Backend>(
                 // characters and show a dot for nothing — Enter and
                 // Backspace both produce text as well as being keys.
                 if !text.is_empty() && !text.chars().any(char::is_control) {
-                    let mut entered = conversation.entered().to_string();
+                    let mut entered = conversation.typed().to_string();
                     entered.push_str(&text);
                     conversation.type_into(entered);
                 }
