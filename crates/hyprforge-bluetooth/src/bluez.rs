@@ -35,6 +35,12 @@ pub const TIMEOUT: Duration = Duration::from_secs(5);
 /// otherwise.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Pairing. Longer than everything else here because BlueZ does not
+/// answer until the conversation finishes, and part of that conversation
+/// is a person reading six digits off two screens. Still bounded: a far
+/// end that walks away must not leave the screen waiting forever.
+pub const PAIR_TIMEOUT: Duration = Duration::from_secs(120);
+
 #[zbus::proxy(
     interface = "org.freedesktop.DBus.ObjectManager",
     default_service = "org.bluez",
@@ -79,6 +85,8 @@ trait AdapterDbus {
 trait DeviceDbus {
     fn connect(&self) -> zbus::Result<()>;
     fn disconnect(&self) -> zbus::Result<()>;
+    fn pair(&self) -> zbus::Result<()>;
+    fn cancel_pairing(&self) -> zbus::Result<()>;
 
     #[zbus(property)]
     fn set_trusted(&self, trusted: bool) -> zbus::Result<()>;
@@ -325,6 +333,22 @@ impl BluetoothBackend for BlueZBackend {
     async fn set_powered(&self, on: bool) -> Result<(), BluetoothError> {
         let adapter = self.adapter().await?;
         bounded(TIMEOUT, adapter.set_powered(on)).await
+    }
+
+    async fn pair(&self, address: &Address) -> Result<(), BluetoothError> {
+        let device = self.device_proxy(address).await?;
+        // `PAIR_TIMEOUT`, not `CONNECT_TIMEOUT`: BlueZ does not answer
+        // this until the pairing conversation is over, and that includes
+        // however long a person takes to look at two screens and decide
+        // the digits match. A radio's timeout is the wrong unit.
+        bounded(PAIR_TIMEOUT, device.pair()).await
+    }
+
+    async fn cancel_pairing(&self, address: &Address) -> Result<(), BluetoothError> {
+        let device = self.device_proxy(address).await?;
+        // Short: this is the *abandon* path, and it must not itself wait
+        // out a pairing that has already stopped answering.
+        bounded(TIMEOUT, device.cancel_pairing()).await
     }
 
     async fn connect(&self, address: &Address) -> Result<(), BluetoothError> {

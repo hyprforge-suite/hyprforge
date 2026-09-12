@@ -76,6 +76,10 @@ with zero GTK/Qt dependency anywhere in the stack.
 | — Users/time module | *(planned)* | — | accountsservice/timedated | not started |
 | — Lua import (hand-written config) | `hyprforge-lua-import` (lib) | — | no (sandboxed `mlua` evaluator, the only crate depending on mlua) | in progress; imports hand-written `hl.bind()`/`hl.window_rule()`/`hl.monitor()` calls |
 | **Tray icons** | `hyprforge-tray` (lib + `hyprforge-trayd`) | nm-applet, blueman-tray | **yes**, a small user daemon | in progress; Wi-Fi and Bluetooth icons over `org.kde.StatusNotifierItem` with `com.canonical.dbusmenu` menus, scanning on menu open. Deferred: submenus, and items for Audio/Power until those backends exist |
+| — Tray: keep awake | `hyprforge-tray` item *(planned)* | a hand-run `systemd-inhibit … sleep 8h` | no (logind `Inhibit`) | not started; the smallest of these and the one already being done by hand |
+| — Tray: night light | `hyprforge-tray` item *(planned)* | redshift/gammastep applets | no (drives hyprsunset) | not started; `ecosystem::sunset` models the profiles but has no runtime toggle yet |
+| — Tray: displays | `hyprforge-tray` item *(planned)* | — | no (talks to `hyprforge-displayd` over D-Bus) | not started; switch profile on dock, and surface the revert countdown. The first item with a real use for `Status::Passive` — invisible until it has something to say |
+| **Bar** | *(planned)* | waybar | no | not started; would also be the `StatusNotifierHost`, so the tray items already target it |
 | **Lock screen** | `hyprforge-lock` (binary), `hyprforge-authui` (conversation model) | hyprlock | no (a client holding `ext-session-lock-v1`) | locks, draws, authenticates against PAM and unlocks, with a look shared with the greeter via `hyprforge-look`; see "The lock screen" in the README for the genuine remaining gaps (no input-method support, password not zeroized, no attempt limiting of its own) |
 | *(shared foundation)* | `hyprforge-paths` (xdg + atomic writes), `hyprforge-look` (colour type + runtime Theme), `hyprforge-ui` (iced widgets and palette) | — | no | in place; every future app builds on these |
 | **Greeter / display manager** | `hyprforge-greet`, on `hyprforge-authui` | greetd greeters (gtkgreet/tuigreet) | runs under greetd | ~885 lines; has an installer (`./hyprforge --install --greeter`) and its own `INSTALL.md` |
@@ -88,6 +92,12 @@ with zero GTK/Qt dependency anywhere in the stack.
 | **Notepad** | `hyprforge-notes` | Notepad/TextEdit | no | not started |
 | **Calculator** | `hyprforge-calc` | Calculator apps | no | not started |
 | **Calendar** | `hyprforge-calendar` | Calendar apps | possibly syncs via CalDAV — daemon TBD if background sync is wanted | not started |
+
+Five or six tray icons is not obviously too many *here*, because a bar of
+this suite's own is planned and the two decisions are related: an item
+that is spec-compliant `StatusNotifierItem` works in waybar today and in
+that bar later, unchanged. Until then `tray.toml` carries a per-icon
+switch, and new items default to off.
 
 This list is not necessarily final or exhaustive — treat it as the current
 shared understanding of scope, updated as decisions are made, not as a

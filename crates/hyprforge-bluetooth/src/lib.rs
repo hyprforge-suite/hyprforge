@@ -8,17 +8,18 @@
 //! implementation and a mock, so the logic above it is testable on a
 //! machine with no adapter.
 //!
-//! # What this does not do yet
-//!
-//! **Pairing.** It needs an `org.bluez.Agent1` — a passkey or yes/no
-//! confirmation exchanged with the remote device, registered with BlueZ
-//! and driven from the UI — which is its own piece of work. Unpaired
-//! devices are listed and say so; see [`types::Device::unsupported_reason`].
+//! Pairing is the exception to "everything goes through the backend": it
+//! is a conversation BlueZ starts, over `org.bluez.Agent1`, not a call this
+//! crate makes — see [`agent`].
 
+pub mod agent;
 pub mod backend;
+pub mod pairing;
 pub mod bluez;
 pub mod types;
 
+pub use agent::{register, AgentError, AgentHandle, PairingAgent, PairingRequest};
+pub use pairing::{PairingPrompt, Passkey};
 pub use backend::{for_display, BluetoothBackend};
 pub use bluez::BlueZBackend;
 pub use types::{Address, AdapterState, BluetoothError, Device, DeviceKind, Status};

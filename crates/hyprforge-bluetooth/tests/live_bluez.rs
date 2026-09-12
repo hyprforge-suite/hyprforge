@@ -135,3 +135,41 @@ async fn a_machine_with_a_bluetooth_controller_is_not_reported_as_having_no_adap
         _ => {}
     }
 }
+
+/// Does BlueZ accept the agent this crate registers?
+///
+/// `RegisterAgent` validates the capability string and the object path,
+/// and a wrong one is an error at registration rather than a mystery at
+/// pairing time. Nothing here pairs, and nothing here calls
+/// `RequestDefaultAgent` — that would take the system's default pairing
+/// handler away from whatever holds it (blueman-applet, on this machine),
+/// which is not something a test may do. The agent is unregistered on
+/// every path.
+#[tokio::test]
+#[ignore]
+async fn bluez_accepts_the_pairing_agent_this_crate_registers() {
+    let connection = match zbus::Connection::system().await {
+        Ok(connection) => connection,
+        Err(e) => {
+            eprintln!("{SKIP_MARKER} no system bus to reach BlueZ on ({e})");
+            return;
+        }
+    };
+
+    let (handle, _prompts) = match hyprforge_bluetooth::agent::register(&connection).await {
+        Ok(registered) => registered,
+        Err(hyprforge_bluetooth::BluetoothError::Unavailable) => {
+            eprintln!("{SKIP_MARKER} bluetoothd is not running");
+            return;
+        }
+        Err(e) => panic!("BlueZ refused the agent: {e}"),
+    };
+
+    // Unregister before asserting anything, so a failure below cannot
+    // leave an agent registered against a connection this test drops.
+    let unregistered = handle.unregister().await;
+    assert!(
+        unregistered.is_ok(),
+        "the agent registered but could not be unregistered: {unregistered:?}"
+    );
+}

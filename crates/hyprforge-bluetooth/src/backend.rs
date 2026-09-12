@@ -26,6 +26,18 @@ pub trait BluetoothBackend: Send + Sync {
 
     async fn set_powered(&self, on: bool) -> Result<(), BluetoothError>;
 
+    /// Pairs with a device, which is a *conversation*: BlueZ will call
+    /// back into whatever agent is registered and wait for the user.
+    ///
+    /// Long-running by nature, and the one operation here whose duration
+    /// is set by a person rather than a radio.
+    async fn pair(&self, address: &Address) -> Result<(), BluetoothError>;
+
+    /// Abandons a pairing in progress. Needed because the far end may
+    /// never answer, and a dialog the user dismissed must not leave BlueZ
+    /// waiting.
+    async fn cancel_pairing(&self, address: &Address) -> Result<(), BluetoothError>;
+
     async fn connect(&self, address: &Address) -> Result<(), BluetoothError>;
     async fn disconnect(&self, address: &Address) -> Result<(), BluetoothError>;
 
@@ -84,6 +96,8 @@ pub mod mock {
         pub discovery_calls: Mutex<Vec<bool>>,
         pub connected: Mutex<Vec<Address>>,
         pub forgotten: Mutex<Vec<Address>>,
+        pub paired: Mutex<Vec<Address>>,
+        pub cancelled: Mutex<Vec<Address>>,
         pub trusted: Mutex<Vec<(Address, bool)>>,
     }
 
@@ -172,6 +186,19 @@ pub mod mock {
                 discovering: on && current.discovering,
                 ..current
             });
+            Ok(())
+        }
+
+        async fn pair(&self, address: &Address) -> Result<(), BluetoothError> {
+            self.guard_action()?;
+            self.paired.lock().unwrap().push(address.clone());
+            self.with_device(address, |d| d.paired = true);
+            Ok(())
+        }
+
+        async fn cancel_pairing(&self, address: &Address) -> Result<(), BluetoothError> {
+            self.guard_action()?;
+            self.cancelled.lock().unwrap().push(address.clone());
             Ok(())
         }
 
@@ -282,6 +309,26 @@ mod tests {
         let status = backend.status().await.unwrap();
         assert_eq!(status.state, crate::types::AdapterState::Off);
         assert!(!status.discovering, "an adapter that is off is not discovering");
+    }
+
+    /// Pairing is what turns a listed stranger into something usable, so
+    /// a paired device must actually read back as paired — the list
+    /// groups on exactly that.
+    #[tokio::test]
+    async fn a_paired_device_reads_back_as_paired() {
+        let addr = Address::new("00:00:00:00:00:01");
+        let backend =
+            MockBackend::with_devices(vec![device("Headset", addr.as_str(), false, false)]);
+        assert!(backend.devices().await.unwrap()[0].unsupported_reason().is_some());
+
+        backend.pair(&addr).await.unwrap();
+
+        let device = backend.devices().await.unwrap().remove(0);
+        assert!(device.paired);
+        assert!(
+            device.unsupported_reason().is_none(),
+            "a paired device no longer says pairing is unsupported"
+        );
     }
 
     #[tokio::test]
