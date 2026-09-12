@@ -94,7 +94,11 @@ impl TrayItem {
             // today; there is no `--screen` argument for a specific tab,
             // so this opens the screen and leaves picking the tab to
             // whoever clicked.
-            "hyprforge-night-light" => Some("desktop"),
+            // Each names a *tab*, not just a screen, so a click lands on
+            // the page carrying that icon's own setting rather than on
+            // whichever tab the Desktop screen opens with.
+            "hyprforge-night-light" => Some("night-light"),
+            "hyprforge-keep-awake" => Some("idle"),
             // Keep awake has no Settings screen of its own yet — see
             // `hyprforge-trayd`'s module doc for why that is a follow-up
             // rather than something this daemon invents a destination
@@ -136,11 +140,14 @@ mod tests {
         assert_eq!(item("something-else").activate_screen(), None);
     }
 
-    /// Night light opens the Desktop screen; keep awake has nowhere to
-    /// send a click yet, and must fall through to `None` rather than
-    /// invent a screen that does not exist.
+    /// Each icon opens the page its own setting is on.
+    ///
+    /// Both of these live on a *tab* of the Desktop screen, so they name
+    /// the tab rather than the screen: naming the screen landed night
+    /// light on Wallpaper, and keep awake had no mapping at all, so its
+    /// click resolved to `None` and was silently dropped.
     #[test]
-    fn night_light_opens_desktop_and_keep_awake_opens_nothing_yet() {
+    fn every_icon_opens_the_page_its_own_setting_is_on() {
         let item = |id: &str| TrayItem {
             id: id.to_string(),
             category: Category::SystemServices,
@@ -150,7 +157,13 @@ mod tests {
             tooltip_title: String::new(),
             tooltip_body: String::new(),
         };
-        assert_eq!(item("hyprforge-night-light").activate_screen(), Some("desktop"));
-        assert_eq!(item("hyprforge-keep-awake").activate_screen(), None);
+        assert_eq!(
+            item("hyprforge-night-light").activate_screen(),
+            Some("night-light")
+        );
+        assert_eq!(item("hyprforge-keep-awake").activate_screen(), Some("idle"));
+        // An id nothing claims still resolves to nothing, rather than to
+        // whichever arm happens to be last.
+        assert_eq!(item("hyprforge-nonsense").activate_screen(), None);
     }
 }
