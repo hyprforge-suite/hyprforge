@@ -20,7 +20,7 @@
 //! of it. That is what every `dropped` field below is for, and why each
 //! recovered item carries the lines it came from.
 
-use crate::{idle, sunset, wallpaper};
+use crate::{idle, portal, sunset, wallpaper};
 use hyprforge_core::hyprlang::{Document, Item};
 
 /// One recovered item, the lines it occupied, and what was not understood.
@@ -295,6 +295,71 @@ pub fn sunset(doc: &Document) -> (Option<i64>, Review<sunset::Profile>) {
     (max_gamma, review)
 }
 
+const SCREENCOPY_KEYS: &[&str] = &[
+    "max_fps",
+    "allow_token_by_default",
+    "custom_picker_binary",
+    "force_shm",
+    "cursor_mode",
+];
+
+/// What an `xdph.conf` says, as this app models it.
+///
+/// One item rather than a list: `screencopy` is a single settings block,
+/// not a category that accumulates. It is still wrapped in the same
+/// [`Imported`] as the others so the review screen, the checkbox handling
+/// and the retire bookkeeping stay identical for every tab.
+///
+/// `general:toplevel_dynamic_bind` is deliberately unmodelled — the wiki
+/// gives neither its type nor its default — but a `general` block is
+/// still reported as unreadable rather than ignored, so a user who set it
+/// keeps it and its lines are never retired.
+pub fn portal(doc: &Document) -> Review<portal::Settings> {
+    let mut review = Review { items: Vec::new(), problems: doc.problems.clone() };
+
+    if let Some(item) = doc.blocks("screencopy").last() {
+        let mut settings = portal::Settings::default();
+        for (key, value, line) in fields(item) {
+            match key {
+                "max_fps" => match value.parse() {
+                    Ok(fps) => settings.max_fps = Some(fps),
+                    Err(_) => review
+                        .problems
+                        .push((line, format!("`max_fps = {value}` isn't a number"))),
+                },
+                "allow_token_by_default" => settings.allow_token_by_default = flag(value),
+                "custom_picker_binary" => settings.custom_picker_binary = value.to_string(),
+                "force_shm" => settings.force_shm = flag(value),
+                "cursor_mode" => match value.parse().ok().and_then(portal::CursorMode::from_int) {
+                    Some(mode) => settings.cursor_mode = mode,
+                    None => review
+                        .problems
+                        .push((line, format!("`cursor_mode = {value}` isn't 0, 1 or 2"))),
+                },
+                _ => {}
+            }
+        }
+        let (line, end_line) = span(item);
+        review.items.push(Imported {
+            value: settings,
+            dropped: unknown(item, SCREENCOPY_KEYS),
+            line,
+            end_line,
+        });
+    }
+
+    // Reported, not adopted. Saying "there is something here this screen
+    // doesn't cover" is the difference between the user keeping a setting
+    // and this app retiring a line it never understood.
+    for item in doc.blocks("general") {
+        review.problems.push((
+            item.line(),
+            "this screen doesn't cover the `general` block, so it's left as it is".to_string(),
+        ));
+    }
+    review
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,6 +459,48 @@ mod tests {
         assert_eq!(max_gamma, settings.max_gamma);
         let profiles: Vec<_> = review.items.into_iter().map(|i| i.value).collect();
         assert_eq!(profiles, settings.profiles);
+    }
+
+    #[test]
+    fn everything_the_screen_sharing_screen_writes_reads_back_as_itself() {
+        let settings = portal::Settings {
+            max_fps: Some(60),
+            allow_token_by_default: true,
+            custom_picker_binary: "my-picker".to_string(),
+            force_shm: true,
+            cursor_mode: portal::CursorMode::Embedded,
+        };
+        let review = portal(&parse(&portal::generate(&settings)));
+        assert!(review.is_complete(), "{review:?}");
+        assert_eq!(review.items[0].value, settings);
+    }
+
+    /// The file most people have is no file at all. Importing from one
+    /// that exists but says nothing must not invent settings.
+    #[test]
+    fn an_xdph_conf_with_no_screencopy_block_offers_nothing() {
+        let review = portal(&parse("# just a comment\n"));
+        assert!(review.items.is_empty());
+        assert!(review.is_complete());
+    }
+
+    /// `general:toplevel_dynamic_bind` is real but undocumented, so this
+    /// app won't put a control on it. Silence would be worse: the line
+    /// has to be visible, or a user who set it would see a clean import
+    /// and wonder where their setting went.
+    #[test]
+    fn an_unmodelled_general_block_is_reported_rather_than_ignored() {
+        let review = portal(&parse("general {\n    toplevel_dynamic_bind = true\n}\n"));
+        assert_eq!(review.problems.len(), 1);
+        assert!(review.problems[0].1.contains("general"), "{:?}", review.problems);
+        assert!(!review.is_complete(), "an unread block must block retiring the file");
+    }
+
+    #[test]
+    fn a_cursor_mode_that_is_not_a_mode_is_reported() {
+        let review = portal(&parse("screencopy {\n    cursor_mode = 7\n}\n"));
+        assert_eq!(review.problems.len(), 1);
+        assert!(review.problems[0].1.contains("0, 1 or 2"), "{:?}", review.problems);
     }
 
     /// The reason `dropped` exists. hypridle accepts keys this app does

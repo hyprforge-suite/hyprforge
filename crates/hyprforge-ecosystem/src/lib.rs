@@ -18,6 +18,7 @@
 pub mod apply;
 pub mod import;
 pub mod idle;
+pub mod portal;
 pub mod storage;
 pub mod sunset;
 pub mod wallpaper;

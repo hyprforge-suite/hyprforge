@@ -18,7 +18,7 @@ use hyprforge_ui::widgets::{
 };
 use crate::module::SettingsModule;
 use hyprforge_ecosystem::apply::{self, Applied};
-use hyprforge_ecosystem::{idle, import, sunset, wallpaper};
+use hyprforge_ecosystem::{idle, import, portal, sunset, wallpaper};
 use iced::widget::{checkbox, column, container, pick_list, row, scrollable, text_input};
 use iced::{Element, Length, Task};
 use std::collections::BTreeMap;
@@ -29,16 +29,19 @@ pub enum Tab {
     Wallpaper,
     NightLight,
     Idle,
+    ScreenSharing,
 }
 
 impl Tab {
-    const ALL: [Tab; 3] = [Tab::Wallpaper, Tab::NightLight, Tab::Idle];
+    const ALL: [Tab; 4] =
+        [Tab::Wallpaper, Tab::NightLight, Tab::Idle, Tab::ScreenSharing];
 
     fn label(self) -> &'static str {
         match self {
             Tab::Wallpaper => "Wallpaper",
             Tab::NightLight => "Night light",
             Tab::Idle => "Idle",
+            Tab::ScreenSharing => "Screen sharing",
         }
     }
 }
@@ -65,6 +68,9 @@ impl Field {
             | Field::OnTimeout
             | Field::OnResume
             | Field::IgnoreInhibit => Tab::Idle,
+            Field::MaxFps | Field::PickerBinary | Field::AllowToken | Field::ForceShm => {
+                Tab::ScreenSharing
+            }
         }
     }
 }
@@ -85,6 +91,10 @@ pub enum Field {
     OnTimeout,
     OnResume,
     IgnoreInhibit,
+    MaxFps,
+    PickerBinary,
+    AllowToken,
+    ForceShm,
 }
 
 /// One thing found in a daemon's own config file, offered for adoption.
@@ -96,6 +106,7 @@ pub enum Field {
 #[derive(Debug, Clone)]
 pub enum AdoptItem {
     Wallpaper(wallpaper::Entry),
+    Portal(portal::Settings),
     Profile(sunset::Profile),
     Listener(idle::Listener),
     IdleGeneral(idle::General),
@@ -132,6 +143,33 @@ impl AdoptItem {
                 }
             }
             AdoptItem::IdleGeneral(_) => "Session commands (lock, sleep, wake)".to_string(),
+            AdoptItem::Portal(p) => {
+                let mut said = Vec::new();
+                if let Some(fps) = p.max_fps {
+                    said.push(if fps == 0 {
+                        "no frame rate limit".to_string()
+                    } else {
+                        format!("up to {fps} fps")
+                    });
+                }
+                if p.allow_token_by_default {
+                    said.push("don't re-ask each time".to_string());
+                }
+                if p.force_shm {
+                    said.push("use SHM instead of DMA-BUF".to_string());
+                }
+                if !p.custom_picker_binary.trim().is_empty() {
+                    said.push(format!("picker: {}", p.custom_picker_binary.trim()));
+                }
+                if p.cursor_mode != portal::CursorMode::Default {
+                    said.push(p.cursor_mode.label().to_lowercase());
+                }
+                if said.is_empty() {
+                    "Screen sharing (nothing set)".to_string()
+                } else {
+                    format!("Screen sharing: {}", said.join(", "))
+                }
+            }
         }
     }
 }
@@ -190,6 +228,10 @@ pub enum Message {
     Commit,
     RestartIdle,
     Applied(Tab, Result<Applied, String>),
+    PortalChanged(Field, String),
+    PortalToggled(Field, bool),
+    PortalCursorMode(portal::CursorMode),
+    RestartPortal,
     AdoptOpen,
     AdoptToggle(usize, bool),
     AdoptConfirm,
@@ -208,6 +250,7 @@ pub struct DesktopModule {
     wallpapers: wallpaper::Settings,
     sunset: sunset::Settings,
     idle: idle::Settings,
+    portal: portal::Settings,
     /// Text mid-edit, keyed by `(tab, index, field)`. Held rather than
     /// committed per keystroke: every save rewrites a config file and
     /// pokes a daemon.
@@ -218,6 +261,9 @@ pub struct DesktopModule {
     status: Option<String>,
     /// Set while the idle config on disk is ahead of the running daemon.
     idle_needs_restart: bool,
+    /// Set while the screen-sharing config on disk is ahead of the
+    /// running portal.
+    portal_needs_restart: bool,
     store_unreadable: Option<String>,
     /// The review shown after "Import from …", before anything is
     /// written. `None` when no import is in progress.
@@ -243,18 +289,21 @@ impl DesktopModule {
         let wallpapers = load_or_note(&wallpaper_toml(), &mut unreadable);
         let sunset = load_or_note(&sunset_toml(), &mut unreadable);
         let idle = load_or_note(&idle_toml(), &mut unreadable);
+        let portal = load_or_note(&portal_toml(), &mut unreadable);
         (
             DesktopModule {
                 tab: Tab::Wallpaper,
                 wallpapers,
                 sunset,
                 idle,
+                portal,
                 drafts: BTreeMap::new(),
                 images: Vec::new(),
                 monitors: Vec::new(),
                 error: None,
                 status: None,
                 idle_needs_restart: false,
+                portal_needs_restart: false,
                 adopt: None,
                 pending_retire: None,
                 store_unreadable: (!unreadable.is_empty()).then(|| unreadable.join("; ")),
@@ -289,6 +338,9 @@ impl DesktopModule {
             Tab::Wallpaper => hyprforge_ecosystem::storage::save(&wallpaper_toml(), &self.wallpapers),
             Tab::NightLight => hyprforge_ecosystem::storage::save(&sunset_toml(), &self.sunset),
             Tab::Idle => hyprforge_ecosystem::storage::save(&idle_toml(), &self.idle),
+            Tab::ScreenSharing => {
+                hyprforge_ecosystem::storage::save(&portal_toml(), &self.portal)
+            }
         };
         // The wallpaper is also the auth screens' background, so saving
         // it has to reach them too. Doing this only in Appearance is how
@@ -323,6 +375,13 @@ impl DesktopModule {
                     move |r| Message::Applied(tab, r),
                 )
             }
+            Tab::ScreenSharing => {
+                let settings = self.portal.clone();
+                Task::perform(
+                    apply_portal(generated_dir.join("xdph.conf"), hypr.join("xdph.conf"), settings),
+                    move |r| Message::Applied(tab, r),
+                )
+            }
         }
     }
 
@@ -333,6 +392,7 @@ impl DesktopModule {
             Tab::Wallpaper => hypr.join("hyprpaper.conf"),
             Tab::NightLight => hypr.join("hyprsunset.conf"),
             Tab::Idle => hypr.join("hypridle.conf"),
+            Tab::ScreenSharing => hypr.join("xdph.conf"),
         }
     }
 
@@ -360,6 +420,19 @@ impl DesktopModule {
                     candidates.push(AdoptCandidate {
                         checked: found.is_faithful(),
                         item: AdoptItem::Wallpaper(found.value),
+                        dropped: found.dropped,
+                        line: found.line,
+                        end_line: found.end_line,
+                    });
+                }
+            }
+            Tab::ScreenSharing => {
+                let review = import::portal(&document);
+                problems = review.problems;
+                for found in review.items {
+                    candidates.push(AdoptCandidate {
+                        checked: found.is_faithful(),
+                        item: AdoptItem::Portal(found.value),
                         dropped: found.dropped,
                         line: found.line,
                         end_line: found.end_line,
@@ -435,6 +508,9 @@ impl DesktopModule {
                 AdoptItem::Profile(profile) => self.sunset.profiles.push(profile),
                 AdoptItem::Listener(listener) => self.idle.listeners.push(listener),
                 AdoptItem::IdleGeneral(general) => self.idle.general = general,
+                // A single settings block, not a list: adopting replaces
+                // rather than appends, because there is only ever one.
+                AdoptItem::Portal(settings) => self.portal = settings,
             }
         }
 
@@ -532,6 +608,27 @@ impl DesktopModule {
     fn apply_draft(&mut self, index: usize, field: Field, raw: &str) -> bool {
         let text = raw.trim().to_string();
         match field {
+            // Empty is a value here, not a missing one: it means "leave
+            // the portal's own default", which is different from every
+            // number the field can hold — 0 included, since 0 is "no
+            // limit at all".
+            Field::MaxFps => {
+                if text.is_empty() {
+                    self.portal.max_fps = None;
+                    return true;
+                }
+                match text.parse() {
+                    Ok(fps) => {
+                        self.portal.max_fps = Some(fps);
+                        true
+                    }
+                    Err(_) => false,
+                }
+            }
+            Field::PickerBinary => {
+                self.portal.custom_picker_binary = text;
+                true
+            }
             Field::Monitor | Field::Path => {
                 let Some(e) = self.wallpapers.entries.get_mut(index) else {
                     return true;
@@ -770,6 +867,34 @@ impl SettingsModule for DesktopModule {
                 }
                 Task::none()
             }
+            Message::PortalChanged(field, value) => {
+                self.drafts.insert((0, field), value);
+                Task::none()
+            }
+            Message::PortalToggled(field, on) => {
+                match field {
+                    Field::AllowToken => self.portal.allow_token_by_default = on,
+                    Field::ForceShm => self.portal.force_shm = on,
+                    _ => return Task::none(),
+                }
+                self.save(Tab::ScreenSharing)
+            }
+            Message::PortalCursorMode(mode) => {
+                self.portal.cursor_mode = mode;
+                self.save(Tab::ScreenSharing)
+            }
+            Message::RestartPortal => {
+                match apply::restart_portal() {
+                    Ok(()) => {
+                        self.portal_needs_restart = false;
+                        self.status =
+                            Some("Screen sharing restarted — your settings are live.".into());
+                        self.error = None;
+                    }
+                    Err(e) => self.error = Some(format!("Couldn't restart screen sharing: {e}")),
+                }
+                Task::none()
+            }
             Message::AdoptOpen => {
                 self.adopt = Some(self.read_daemon_config());
                 self.error = None;
@@ -800,6 +925,8 @@ impl SettingsModule for DesktopModule {
                 }
                 self.idle_needs_restart =
                     tab == Tab::Idle && applied == Applied::NeedsRestart;
+                self.portal_needs_restart =
+                    tab == Tab::ScreenSharing && applied == Applied::NeedsRestart;
                 match applied {
                     // Refusals are an error, not a status: the setting is
                     // saved but the screen did not change, and calling
@@ -814,10 +941,20 @@ impl SettingsModule for DesktopModule {
                         ));
                     }
                     Applied::Live => self.status = Some("Saved and applied.".into()),
+                    // Named per tab. Two daemons reach this now and they
+                    // are restarted differently — one is `hl.exec_cmd`,
+                    // the other a systemd unit — so "restart it below"
+                    // has to be about the one the user is looking at.
                     Applied::NeedsRestart => {
                         self.status = Some(
-                            "Saved. hypridle has no way to be told — restart it below to apply."
-                                .into(),
+                            match tab {
+                                Tab::ScreenSharing =>
+                                    "Saved. The portal only reads this when it starts — \
+                                     restart it below to apply.",
+                                _ => "Saved. hypridle has no way to be told — \
+                                      restart it below to apply.",
+                            }
+                            .into(),
                         )
                     }
                     Applied::DaemonNotRunning => {
@@ -937,6 +1074,7 @@ impl SettingsModule for DesktopModule {
             Tab::Wallpaper => content.push(self.wallpaper_view(scale)),
             Tab::NightLight => content.push(self.sunset_view(scale)),
             Tab::Idle => self.idle_view(content, scale),
+            Tab::ScreenSharing => content.push(self.portal_view(scale)),
         };
 
         scrollable(container(content).padding(spacing::LG))
@@ -1134,6 +1272,113 @@ impl DesktopModule {
         );
 
         section("Import", scale, body)
+    }
+
+    fn portal_view(&self, scale: FontScale) -> Element<'_, Message> {
+        let mut body = column![meta_text(
+            "What happens when an app asks to capture your screen. These are \
+             read by xdg-desktop-portal-hyprland, which is what Firefox, Chrome \
+             and Discord actually talk to.",
+            12.0,
+            scale,
+        )]
+        .spacing(spacing::SM);
+
+        for (index, problem) in self.portal.invalid() {
+            let _ = index;
+            body = body.push(scaled_text(problem, 13.0, scale));
+        }
+
+        // Empty means "whatever the portal does by default", which is a
+        // real choice and has to be reachable — so the placeholder says
+        // the number rather than leaving the user to guess what blank does.
+        body = body.push(labelled(
+            "Maximum frame rate",
+            text_input(
+                &format!("{} (the portal's default)", portal::DEFAULT_MAX_FPS),
+                &self.draft(
+                    0,
+                    Field::MaxFps,
+                    self.portal.max_fps.map(|f| f.to_string()).unwrap_or_default(),
+                ),
+            )
+            .on_input(move |v| Message::PortalChanged(Field::MaxFps, v))
+            .into(),
+            scale,
+        ));
+        body = body.push(meta_text(
+            "0 means no limit. Lowering it is the usual fix for a share that \
+             stutters or heats the machine up.",
+            12.0,
+            scale,
+        ));
+
+        body = body.push(labelled(
+            "Share picker",
+            text_input(
+                portal::DEFAULT_PICKER,
+                &self.draft(0, Field::PickerBinary, &self.portal.custom_picker_binary),
+            )
+            .on_input(move |v| Message::PortalChanged(Field::PickerBinary, v))
+            .into(),
+            scale,
+        ));
+
+        body = body.push(labelled(
+            "Pointer in the stream",
+            pick_list(portal::CursorMode::ALL, Some(self.portal.cursor_mode), |mode| {
+                Message::PortalCursorMode(mode)
+            })
+            .into(),
+            scale,
+        ));
+
+        body = body.push(
+            row![
+                checkbox(self.portal.allow_token_by_default)
+                    .on_toggle(|v| Message::PortalToggled(Field::AllowToken, v)),
+                scaled_text("Remember my choice, so apps stop asking every time", 13.0, scale),
+            ]
+            .spacing(spacing::SM)
+            .align_y(iced::Alignment::Center),
+        );
+        body = body.push(
+            row![
+                checkbox(self.portal.force_shm)
+                    .on_toggle(|v| Message::PortalToggled(Field::ForceShm, v)),
+                scaled_text("Use the slower, more compatible capture path", 13.0, scale),
+            ]
+            .spacing(spacing::SM)
+            .align_y(iced::Alignment::Center),
+        );
+        body = body.push(meta_text(
+            "Try that one if screen sharing comes out black — it's the documented \
+             way around buffer allocation failing on machines with two GPUs.",
+            12.0,
+            scale,
+        ));
+
+        if self.portal_needs_restart {
+            body = body.push(divider());
+            body = body.push(scaled_text(
+                "Saved. The portal only reads this when it starts, so it's still \
+                 using the old settings.",
+                13.0,
+                scale,
+            ));
+            // Said before they press it, not after. Restarting mid-call
+            // is exactly when someone would regret finding out.
+            body = body.push(meta_text(
+                "Restarting it will end any screen share that's running right now.",
+                12.0,
+                scale,
+            ));
+            body = body.push(
+                secondary_button("Restart the portal").on_press(Message::RestartPortal),
+            );
+        }
+
+        section("Screen sharing", scale, body)
     }
 
     fn sunset_view(&self, scale: FontScale) -> Element<'_, Message> {
@@ -1419,6 +1664,18 @@ async fn apply_idle(
     .map_err(|e| e.to_string())?
 }
 
+async fn apply_portal(
+    generated: PathBuf,
+    target: PathBuf,
+    settings: portal::Settings,
+) -> Result<Applied, String> {
+    tokio::task::spawn_blocking(move || {
+        apply::portal(&generated, &target, &settings).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Local minutes past midnight.
 ///
 /// Read from `date` rather than computed from the Unix epoch: the epoch
@@ -1445,6 +1702,10 @@ fn sunset_toml() -> PathBuf {
 
 fn idle_toml() -> PathBuf {
     hyprforge_core::paths::hyprforge_config_dir().join("idle.toml")
+}
+
+fn portal_toml() -> PathBuf {
+    hyprforge_core::paths::hyprforge_config_dir().join("screen-sharing.toml")
 }
 
 #[cfg(test)]
@@ -1664,6 +1925,104 @@ listener {
 
             assert_eq!(m.idle.listeners.len(), 3);
             assert_eq!(m.idle.listeners[0].on_timeout, "mine", "the user's own must survive");
+        });
+    }
+
+    /// Blank is a value on this field, not a missing one. It means
+    /// "whatever the portal does by default" — which is different from
+    /// every number the field can hold, 0 included, since 0 means no
+    /// limit at all.
+    #[test]
+    fn an_empty_frame_rate_means_the_portals_default_not_no_limit() {
+        with_temp_config(|m| {
+            m.tab = Tab::ScreenSharing;
+            let _ = m.update(Message::PortalChanged(Field::MaxFps, "60".to_string()));
+            let _ = m.update(Message::Commit);
+            assert_eq!(m.portal.max_fps, Some(60));
+
+            let _ = m.update(Message::PortalChanged(Field::MaxFps, String::new()));
+            let _ = m.update(Message::Commit);
+            assert_eq!(m.portal.max_fps, None, "blank must not become Some(0)");
+        });
+    }
+
+    #[test]
+    fn a_frame_rate_that_is_not_a_number_keeps_what_was_typed_and_says_so() {
+        with_temp_config(|m| {
+            m.tab = Tab::ScreenSharing;
+            let _ = m.update(Message::PortalChanged(Field::MaxFps, "sixty".to_string()));
+            let _ = m.update(Message::Commit);
+            assert_eq!(m.portal.max_fps, None);
+            assert_eq!(
+                m.drafts.get(&(0, Field::MaxFps)).map(String::as_str),
+                Some("sixty"),
+                "what was typed must survive"
+            );
+            assert!(m.error.is_some(), "and be reported");
+        });
+    }
+
+    /// The portal's own defaults must not be baked into a file. A later
+    /// xdph could change one and this file would keep the old value
+    /// forever with nothing to say why.
+    #[test]
+    fn a_screen_sharing_save_writes_only_what_was_changed() {
+        with_temp_config(|m| {
+            m.tab = Tab::ScreenSharing;
+            let _ = m.update(Message::PortalToggled(Field::ForceShm, true));
+
+            // `save` returns the apply as a Task, which no unit test
+            // runs, so the generated file is produced here directly —
+            // from the module's own state, which is what the wiring
+            // under test actually decides.
+            let generated = hyprforge_core::paths::hypr_hyprforge_dir().join("xdph.conf");
+            let target = hyprforge_core::paths::hypr_config_dir().join("xdph.conf");
+            hyprforge_ecosystem::apply::portal(&generated, &target, &m.portal)
+                .expect("writing the generated config");
+            let out = std::fs::read_to_string(&generated).expect("the generated file");
+            assert!(out.contains("force_shm = true"), "{out}");
+            assert!(!out.contains("max_fps"), "{out}");
+            assert!(!out.contains("cursor_mode"), "{out}");
+        });
+    }
+
+    /// Importing an `xdph.conf` someone wrote by hand replaces the
+    /// block rather than appending — unlike listeners and wallpapers,
+    /// `screencopy` is one settings block and there is only ever one.
+    #[test]
+    fn importing_screen_sharing_settings_replaces_rather_than_appends() {
+        with_temp_config(|m| {
+            let path = DesktopModule::daemon_config_path(Tab::ScreenSharing);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let body = "screencopy {\n    max_fps = 30\n    force_shm = true\n}\n";
+            std::fs::write(&path, body).unwrap();
+            std::fs::write(path.with_extension("conf.hyprforge.bak"), body).unwrap();
+
+            m.tab = Tab::ScreenSharing;
+            let _ = m.update(Message::AdoptOpen);
+            assert_eq!(m.adopt.as_ref().unwrap().candidates.len(), 1);
+            let _ = m.update(Message::AdoptConfirm);
+
+            assert_eq!(m.portal.max_fps, Some(30));
+            assert!(m.portal.force_shm);
+        });
+    }
+
+    /// `general:toplevel_dynamic_bind` is real but undocumented, so the
+    /// screen won't put a control on it. It still has to be *visible*,
+    /// or a user who set it sees a clean import and loses it silently.
+    #[test]
+    fn an_unmodelled_portal_setting_is_shown_rather_than_swallowed() {
+        with_temp_config(|m| {
+            let path = DesktopModule::daemon_config_path(Tab::ScreenSharing);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "general {\n    toplevel_dynamic_bind = true\n}\n").unwrap();
+
+            m.tab = Tab::ScreenSharing;
+            let _ = m.update(Message::AdoptOpen);
+            let review = m.adopt.as_ref().expect("a review");
+            assert_eq!(review.problems.len(), 1, "{:?}", review.problems);
+            assert!(review.problems[0].1.contains("general"), "{:?}", review.problems);
         });
     }
 

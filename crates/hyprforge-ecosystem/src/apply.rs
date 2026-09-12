@@ -14,7 +14,7 @@
 //! So [`Applied`] reports what actually happened rather than returning
 //! `()`, and the caller shows the difference.
 
-use crate::{idle, sunset, wallpaper};
+use crate::{idle, portal, sunset, wallpaper};
 use hyprforge_core::hyprlang;
 use std::path::Path;
 use std::process::Command;
@@ -254,6 +254,65 @@ pub fn restart_idle() -> Result<(), std::io::Error> {
         .stderr(std::process::Stdio::null())
         .spawn()?;
     Ok(())
+}
+
+/// Writes the screen-sharing config.
+///
+/// Never restarts the portal. It reads `xdph.conf` only at startup, so a
+/// change needs one — but restarting it drops any screen share in
+/// progress, and a save button that can end someone's call mid-sentence
+/// is not a trade this app makes for them. Same reasoning as
+/// [`idle`]: report [`Applied::NeedsRestart`] and let them choose.
+pub fn portal(
+    generated: &Path,
+    target: &Path,
+    settings: &portal::Settings,
+) -> Result<Applied, ApplyError> {
+    write_and_source(generated, target, &portal::generate(settings))?;
+    // Unlike the other three this is a systemd user unit, so "running" is
+    // a question for systemd rather than `pgrep`.
+    match portal_running() {
+        Some(true) => Ok(Applied::NeedsRestart),
+        Some(false) => Ok(Applied::DaemonNotRunning),
+        None => Ok(Applied::DaemonUnknown),
+    }
+}
+
+/// Whether the portal unit is active: `Some(false)` for "checked, it
+/// isn't", `None` for "couldn't check".
+fn portal_running() -> Option<bool> {
+    hyprforge_core::command::output(
+        Command::new("systemctl")
+            .args(["--user", "is-active", "--quiet", PORTAL_UNIT]),
+        hyprforge_core::command::TIMEOUT,
+    )
+    .map(|o| o.status.success())
+    .ok()
+}
+
+const PORTAL_UNIT: &str = "xdg-desktop-portal-hyprland.service";
+
+/// Restarts the screen-sharing portal, on explicit request.
+///
+/// `systemctl --user restart`, not `pkill`: unlike hypridle this one is a
+/// systemd user unit, and killing it would have the unit restart it under
+/// systemd's own policy rather than ours.
+pub fn restart_portal() -> Result<(), String> {
+    let output = hyprforge_core::command::output(
+        Command::new("systemctl").args(["--user", "restart", PORTAL_UNIT]),
+        hyprforge_core::command::TIMEOUT,
+    )
+    .map_err(|e| e.to_string())?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    Err(if stderr.is_empty() {
+        format!("systemctl couldn't restart {PORTAL_UNIT}")
+    } else {
+        stderr.to_string()
+    })
 }
 
 #[cfg(test)]
