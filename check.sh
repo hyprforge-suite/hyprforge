@@ -11,7 +11,8 @@
 #   3. parse tests          — do the ecosystem daemons agree? The generated
 #                             config files are handed to hyprpaper/hypridle
 #                             themselves. Needs those installed, not running.
-#   3b. NetworkManager      — does NetworkManager agree? Read-only checks
+#   3b. services            — do NetworkManager, BlueZ, logind and whatever
+#                             bar is running agree? Read-only checks
 #                             that its interface is the shape
 #                             hyprforge-network claims. Needs it running.
 #   3c. BlueZ               — does BlueZ agree? Read-only checks that its
@@ -109,7 +110,7 @@ else
         # are named. That also survives a test being renamed, which
         # `--skip` on the test names would not.
         output=$(
-            cargo test --workspace --exclude hyprforge-ecosystem --exclude hyprforge-network --exclude hyprforge-bluetooth --exclude hyprforge-tray -- --ignored --test-threads=1 2>&1
+            cargo test --workspace --exclude hyprforge-ecosystem --exclude hyprforge-network --exclude hyprforge-bluetooth --exclude hyprforge-tray --exclude hyprforge-power -- --ignored --test-threads=1 2>&1
             cargo test -p hyprforge-ecosystem --lib --test live_ecosystem -- --ignored --test-threads=1 2>&1
         )
         if grep -q "test result: FAILED" <<<"$output"; then
@@ -212,6 +213,30 @@ else
     # compositor nor a system service. Registering really does put an icon
     # in the user's bar for a fraction of a second — that is the smallest
     # observable form of "a host accepted it", and no unit test can reach it.
+    # Gated on the bus name rather than on `systemctl is-active
+    # systemd-logind`, because what these tests need is something
+    # answering on `org.freedesktop.login1` — which is the thing they
+    # actually ask, and is true on a system where logind is socket
+    # -activated and not yet started as a unit.
+    step "Live tests against systemd-logind"
+    if ! command -v busctl >/dev/null; then
+        skip "logind tests" "busctl not available to ask"
+    elif ! busctl --system status org.freedesktop.login1 >/dev/null 2>&1; then
+        skip "logind tests" "nothing is answering on org.freedesktop.login1"
+    else
+        output=$(cargo test -p hyprforge-power --test live_logind \
+            -- --ignored --test-threads=1 --nocapture 2>&1)
+        if grep -q "test result: FAILED" <<<"$output"; then
+            bad "logind tests failed — the code disagrees with the running service"
+            grep -E '^test .* FAILED' <<<"$output" | head -20
+        else
+            ok "$(count_tests <<<"$output") logind tests passed"
+            while IFS= read -r reason; do
+                [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
+            done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^(]*\).*/\1/p' <<<"$output" | sort -u)
+        fi
+    fi
+
     step "Live tests against a tray host"
     if ! command -v busctl >/dev/null; then
         skip "tray tests" "busctl not available to ask"
