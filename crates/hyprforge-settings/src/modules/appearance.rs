@@ -581,6 +581,18 @@ impl SettingsModule for AppearanceModule {
                 self.desktop_undo = previous
                     .filter(|p| self.desktop.get(key) != Some(p))
                     .map(|p| (key, p));
+                // The third writer on this screen, and the one that used to
+                // forget. `look::resolve` takes the font family and size
+                // straight from gsettings, so changing the system font here
+                // updated the Settings app and left the lock screen and the
+                // greeter on the old one — the two drifting apart, which is
+                // the failure this suite exists to prevent, happening inside
+                // the suite.
+                //
+                // After the write, not before: gsettings has stored the
+                // value by now, so this publishes what it kept rather than
+                // what we sent it.
+                crate::look::republish();
                 // Re-read rather than assume: gsettings normalises some
                 // values, and showing what we sent instead of what it
                 // stored would be the same lie the settings rows told.
@@ -1340,6 +1352,38 @@ mod tests {
             },
             overridden,
         }
+    }
+
+    /// Three things on this screen write the look, and this one used to
+    /// forget to republish it. `look::resolve` reads the font family and
+    /// size straight from gsettings, so changing the system font restyled
+    /// the Settings app and left the lock screen and the greeter on the
+    /// old one — the drift this whole shared-theme arrangement exists to
+    /// prevent, happening inside the suite.
+    #[test]
+    fn a_font_change_reaches_the_lock_screen_and_the_greeter() {
+        with_temp_config(|m| {
+            let published = hyprforge_paths::lock_toml_path();
+            assert!(!published.exists(), "nothing should be published yet");
+
+            let _ = m.update(Message::DesktopWritten("font-name", Ok(None)));
+
+            assert!(
+                published.exists(),
+                "a font change must republish the look, or only this app follows it"
+            );
+        });
+    }
+
+    #[test]
+    fn a_font_change_that_failed_publishes_nothing() {
+        with_temp_config(|m| {
+            let _ = m.update(Message::DesktopWritten("font-name", Err("nope".to_string())));
+            assert!(
+                !hyprforge_paths::lock_toml_path().exists(),
+                "a write that failed has nothing to publish"
+            );
+        });
     }
 
     #[test]
