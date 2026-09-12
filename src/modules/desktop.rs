@@ -351,6 +351,16 @@ impl DesktopModule {
     /// Nothing irreversible runs unless the write returned `Ok` — the
     /// ordering rule that exists because doing it the other way round
     /// cost a real user 37 hand-written binds.
+    /// Opens the screen on a particular tab.
+    ///
+    /// For `--screen night-light` and the tray icons that use it: a
+    /// setting that lives on a tab is not reachable by naming the screen
+    /// alone, and landing someone on Wallpaper when they asked for night
+    /// light is the same miss as not deep-linking at all.
+    pub fn open_on(&mut self, tab: Tab) {
+        self.tab = tab;
+    }
+
     fn save(&mut self, tab: Tab) -> Task<Message> {
         if let Some(reason) = &self.store_unreadable {
             self.error = Some(format!(

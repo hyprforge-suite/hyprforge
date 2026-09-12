@@ -31,20 +31,31 @@ use modules::window_rules::WindowRulesModule;
 /// of the nine screens, and injecting a click needs tooling that is not
 /// on every machine. A screenshot is how the `web-colors` bug was found;
 /// this is what makes taking one repeatable.
-fn screen_from_cli(name: &str) -> Option<Screen> {
-    Some(match name.trim().to_ascii_lowercase().replace('_', "-").as_str() {
-        "monitors" | "displays" => Screen::Monitors,
-        "window-rules" | "windowrules" | "rules" => Screen::WindowRules,
-        "shortcuts" | "keybinds" => Screen::Shortcuts,
-        "input" | "keyboard" => Screen::Input,
-        "network" | "wifi" | "wi-fi" => Screen::Network,
-        "bluetooth" | "bt" => Screen::Bluetooth,
-        "appearance" | "theme" => Screen::Appearance,
-        "desktop" | "wallpaper" => Screen::Desktop,
-        "session" | "autostart" => Screen::Session,
-        "system" => Screen::System,
+fn screen_from_cli(name: &str) -> Option<(Screen, Option<modules::desktop::Tab>)> {
+    use modules::desktop::Tab;
+    let screen = match name.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+        "monitors" | "displays" => (Screen::Monitors, None),
+        "window-rules" | "windowrules" | "rules" => (Screen::WindowRules, None),
+        "shortcuts" | "keybinds" => (Screen::Shortcuts, None),
+        "input" | "keyboard" => (Screen::Input, None),
+        "network" | "wifi" | "wi-fi" => (Screen::Network, None),
+        "bluetooth" | "bt" => (Screen::Bluetooth, None),
+        "appearance" | "theme" => (Screen::Appearance, None),
+        "desktop" => (Screen::Desktop, None),
+        // These name a *tab*. A setting that lives on one is not
+        // reachable by naming its screen alone, and landing someone on
+        // Wallpaper when they asked for night light is the same miss as
+        // not deep-linking at all. The tray icons are why: each opens the
+        // page carrying its own setting.
+        "wallpaper" => (Screen::Desktop, Some(Tab::Wallpaper)),
+        "night-light" | "nightlight" => (Screen::Desktop, Some(Tab::NightLight)),
+        "idle" | "keep-awake" => (Screen::Desktop, Some(Tab::Idle)),
+        "screen-sharing" | "screensharing" => (Screen::Desktop, Some(Tab::ScreenSharing)),
+        "session" | "autostart" => (Screen::Session, None),
+        "system" => (Screen::System, None),
         _ => return None,
-    })
+    };
+    Some(screen)
 }
 
 /// Every name [`screen_from_cli`] accepts, for the usage message. The
@@ -59,6 +70,10 @@ const SCREEN_NAMES: &[&str] = &[
     "bluetooth",
     "appearance",
     "desktop",
+    "wallpaper",
+    "night-light",
+    "idle",
+    "screen-sharing",
     "session",
     "system",
 ];
@@ -69,6 +84,16 @@ const CONTENT_MAX_WIDTH: f32 = 880.0;
 /// Set once from `--screen` before iced starts. A static because
 /// `iced::daemon` builds the app from a function taking no arguments.
 static INITIAL_SCREEN: std::sync::OnceLock<Screen> = std::sync::OnceLock::new();
+
+/// The tab to open the Desktop screen on, when `--screen` named one.
+///
+/// Some settings live on a tab rather than a screen, and landing a user
+/// on the Desktop screen's first tab when they asked for night light is
+/// the same kind of miss as not deep-linking at all. The tray's icons
+/// are the reason this exists: each one opens the page its own setting
+/// is on.
+static INITIAL_DESKTOP_TAB: std::sync::OnceLock<modules::desktop::Tab> =
+    std::sync::OnceLock::new();
 
 fn main() -> iced::Result {
     // `from_default_env()` alone defaults to ERROR, and these crates emit
@@ -110,7 +135,12 @@ fn main() -> iced::Result {
             std::process::exit(2);
         };
         match screen_from_cli(&value) {
-            Some(screen) => INITIAL_SCREEN.set(screen).ok().unwrap_or(()),
+            Some((screen, tab)) => {
+                INITIAL_SCREEN.set(screen).ok().unwrap_or(());
+                if let Some(tab) = tab {
+                    INITIAL_DESKTOP_TAB.set(tab).ok().unwrap_or(());
+                }
+            }
             None => {
                 // Naming a screen that does not exist is a typo worth
                 // reporting, not a silent fall back to Monitors.
@@ -344,7 +374,10 @@ impl App {
         let (bluetooth, bluetooth_task) =
             BluetoothModule::new(std::sync::Arc::new(LazyBlueZBackend::new()));
         let (appearance, appearance_task) = AppearanceModule::new();
-        let (desktop, desktop_task) = DesktopModule::new();
+        let (mut desktop, desktop_task) = DesktopModule::new();
+        if let Some(tab) = INITIAL_DESKTOP_TAB.get() {
+            desktop.open_on(*tab);
+        }
         let (session, session_task) = SessionModule::new();
         let (system, system_task) = SystemModule::new();
         (
@@ -770,5 +803,56 @@ impl App {
             shortcuts,
             window::close_events().map(Message::WindowClosed),
         ])
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    use modules::desktop::Tab;
+
+    /// Every tray icon opens the page its own setting is on. The two
+    /// that live on a tab are the reason `--screen` can name one: before
+    /// this, clicking night light landed on Wallpaper, and clicking keep
+    /// awake did nothing at all because it had no mapping.
+    #[test]
+    fn each_tray_icon_opens_the_page_carrying_its_own_setting() {
+        for (icon, expected_screen, expected_tab) in [
+            ("network", Screen::Network, None),
+            ("bluetooth", Screen::Bluetooth, None),
+            ("night-light", Screen::Desktop, Some(Tab::NightLight)),
+            ("idle", Screen::Desktop, Some(Tab::Idle)),
+        ] {
+            assert_eq!(
+                screen_from_cli(icon),
+                Some((expected_screen, expected_tab)),
+                "{icon} does not open where its setting lives"
+            );
+        }
+    }
+
+    /// Naming the screen still works and leaves the tab alone, so
+    /// `--screen desktop` opens wherever that screen opens.
+    #[test]
+    fn naming_a_screen_rather_than_a_tab_does_not_choose_one() {
+        assert_eq!(screen_from_cli("desktop"), Some((Screen::Desktop, None)));
+    }
+
+    /// A name in the help text that the parser rejects is a promise the
+    /// program does not keep.
+    #[test]
+    fn every_name_the_usage_message_lists_actually_parses() {
+        for name in SCREEN_NAMES {
+            assert!(
+                screen_from_cli(name).is_some(),
+                "{name} is offered in --help but is not accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_screen_is_refused_rather_than_falling_back() {
+        assert_eq!(screen_from_cli("bogus"), None);
+        assert_eq!(screen_from_cli(""), None);
     }
 }
