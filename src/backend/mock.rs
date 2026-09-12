@@ -18,6 +18,18 @@ struct MockState {
 pub struct MockBackend {
     state: Mutex<MockState>,
     applies: std::sync::atomic::AtomicUsize,
+    /// Installed by [`MockBackend::hold_applies`] to make
+    /// `apply_configuration` block, the way the real one does for up to
+    /// 18s. Without a way to reproduce that, nothing could test what the
+    /// rest of the daemon is able to do *while* a commit is in flight.
+    hold: Mutex<Option<Hold>>,
+}
+
+/// The two halves of a held apply: a ping when one is entered, and the
+/// release that lets it finish.
+struct Hold {
+    entered: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
 }
 
 impl Default for MockBackend {
@@ -27,6 +39,19 @@ impl Default for MockBackend {
 }
 
 impl MockBackend {
+    /// Makes the *next* `apply_configuration` block until the returned
+    /// sender is used, and pings the returned receiver once it is inside.
+    ///
+    /// The real backend blocks for up to 18s per commit — three attempts at
+    /// 3s to test plus 3s to apply — and what the daemon can still do
+    /// during that window is a property worth testing rather than assuming.
+    pub fn hold_applies(&self) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *self.hold.lock().unwrap() = Some(Hold { entered: entered_tx, release: release_rx });
+        (entered_rx, release_tx)
+    }
+
     pub fn new() -> Self {
         MockBackend {
             state: Mutex::new(MockState {
@@ -35,6 +60,7 @@ impl MockBackend {
                 mode_locked: std::collections::HashSet::new(),
             }),
             applies: std::sync::atomic::AtomicUsize::new(0),
+            hold: Mutex::new(None),
         }
     }
 
@@ -116,6 +142,14 @@ impl OutputBackend for MockBackend {
 
     fn apply_configuration(&self, plan: &LayoutPlan) -> anyhow::Result<()> {
         plan.validate()?;
+        // Blocks here, before touching any state, so a test can observe the
+        // daemon mid-commit. The lock is released first: holding it would
+        // make this a test of the mock's own mutex rather than the daemon's.
+        let held = self.hold.lock().unwrap().take();
+        if let Some(hold) = held {
+            let _ = hold.entered.send(());
+            let _ = hold.release.recv();
+        }
         self.applies
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut state = self.state.lock().unwrap();
