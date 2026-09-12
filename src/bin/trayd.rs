@@ -96,6 +96,9 @@ async fn main() -> anyhow::Result<()> {
     // operation to perform. `sni.rs` keeps the two apart for the same
     // reason — see `TrayIcon::register_with_menu`'s doc comment.
     let (menu_clicks_tx, menu_clicks_rx) = tokio::sync::mpsc::unbounded_channel();
+    // Lets a menu open pull the next poll forward, so the scan it kicks
+    // off is actually reflected before the ten-second tick would.
+    let (refresh_tx, refresh_rx) = tokio::sync::mpsc::unbounded_channel();
 
     // Registered unavailable-looking to start: the first real poll is at
     // most one `POLL_INTERVAL` away, and an icon that starts blank until
@@ -129,9 +132,10 @@ async fn main() -> anyhow::Result<()> {
         bluetooth_slot.clone(),
         clicks_tx.clone(),
         menu_clicks_tx.clone(),
+        refresh_rx,
     ));
     let click_task = tokio::spawn(handle_clicks(clicks_rx));
-    let menu_click_task = tokio::spawn(handle_menu_clicks(menu_clicks_rx));
+    let menu_click_task = tokio::spawn(handle_menu_clicks(menu_clicks_rx, refresh_tx));
     let reannounce_task = tokio::spawn(reannounce_loop(probe, network_slot, bluetooth_slot));
 
     // None of these four loops return under normal operation. If one
@@ -417,6 +421,7 @@ async fn poll_loop(
     bluetooth_slot: IconSlot,
     clicks: tokio::sync::mpsc::UnboundedSender<String>,
     menu_clicks: tokio::sync::mpsc::UnboundedSender<String>,
+    mut refresh_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
 ) {
     let mut net_state = Reconnecting::new();
     let mut bt_state = Reconnecting::new();
@@ -432,7 +437,14 @@ async fn poll_loop(
     // wait a further `POLL_INTERVAL`.
     let mut ticker = tokio::time::interval(POLL_INTERVAL);
     loop {
-        ticker.tick().await;
+        // Either the ordinary tick, or someone opening a menu asked for
+        // the next one early. A refresh that arrives while this loop is
+        // mid-sample is not lost: the channel holds it and the next
+        // `select!` takes it immediately.
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = refresh_rx.recv() => {}
+        }
 
         refresh_prefs(&mut prefs, &mut prefs_load_failed);
 
@@ -547,7 +559,7 @@ fn network_item(
     strength: Option<u8>,
     unavailable: bool,
 ) -> TrayItem {
-    let id = "hyprforge-network".to_string();
+    let id = NETWORK_ITEM_ID.to_string();
     let title = "Wi-Fi".to_string();
 
     let Some(status) = status.filter(|_| !unavailable) else {
@@ -924,10 +936,62 @@ fn parse_menu_action(action: &str) -> Option<MenuAction> {
 /// a second connection to NetworkManager or BlueZ is unremarkable, and
 /// sharing one would need a lock held across every backend call this loop
 /// makes, for no benefit worth that cost.
-async fn handle_menu_clicks(mut actions: tokio::sync::mpsc::UnboundedReceiver<String>) {
+/// Asks NetworkManager to scan, then has the menu rebuilt once the
+/// results have had time to land.
+///
+/// The rebuild is spawned rather than awaited: this runs on the task that
+/// reads menu events, and sleeping here would stall every click that
+/// arrived during the wait.
+async fn scan_then_refresh(
+    net_state: &mut Reconnecting<hyprforge_network::NetworkManagerBackend>,
+    refresh: tokio::sync::mpsc::UnboundedSender<()>,
+) {
+    let Some(backend) = network_backend(net_state).await else {
+        return;
+    };
+    if let Err(e) = backend.request_scan().await {
+        // Not worth a warning at every menu open on a machine with no
+        // Wi-Fi; the menu simply shows what is already known.
+        tracing::debug!(error = %e, "scan on menu open was refused");
+        return;
+    }
+    tokio::spawn(async move {
+        tokio::time::sleep(SCAN_SETTLE).await;
+        let _ = refresh.send(());
+    });
+}
+
+/// How long to wait after asking for a scan before rebuilding the menu.
+///
+/// NetworkManager answers `RequestScan` immediately and finds access
+/// points over the next few seconds, so refreshing straight away would
+/// rebuild from the same stale list. This is long enough for results to
+/// land and short enough that the menu is fresh by the time someone
+/// closes it and opens it again.
+/// The ids the two items register under. `TrayItem::activate_screen`
+/// matches on these too, so they are not free-form strings.
+const NETWORK_ITEM_ID: &str = "hyprforge-network";
+
+const SCAN_SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
+
+async fn handle_menu_clicks(
+    mut actions: tokio::sync::mpsc::UnboundedReceiver<String>,
+    refresh: tokio::sync::mpsc::UnboundedSender<()>,
+) {
     let mut net_state = Reconnecting::new();
     let mut bt_state = Reconnecting::new();
     while let Some(action) = actions.recv().await {
+        // A menu being opened is an event, not a click, and only the
+        // Wi-Fi one wants anything done about it.
+        if let Some(id) = action.strip_prefix(hyprforge_tray::dbusmenu::OPENED_PREFIX) {
+            if id == NETWORK_ITEM_ID {
+                scan_then_refresh(&mut net_state, refresh.clone()).await;
+            }
+            // Bluetooth deliberately does nothing: starting discovery
+            // costs battery on every device in range, and a popup opening
+            // is not someone asking for that.
+            continue;
+        }
         let Some(parsed) = parse_menu_action(&action) else {
             tracing::warn!(action = %action, "unknown tray menu action; ignoring");
             continue;
@@ -1538,6 +1602,38 @@ mod tests {
     }
 
     // --- the action vocabulary --------------------------------------------
+
+    /// A menu open is handled before actions are parsed. If it ever fell
+    /// through to the parser it would be logged as an unknown action on
+    /// every single open — noise that would bury the warnings that
+    /// matter.
+    #[test]
+    fn a_menu_open_is_not_mistaken_for_a_click() {
+        let opened = format!(
+            "{}{}",
+            hyprforge_tray::dbusmenu::OPENED_PREFIX,
+            NETWORK_ITEM_ID
+        );
+        assert!(
+            opened.strip_prefix(hyprforge_tray::dbusmenu::OPENED_PREFIX).is_some(),
+            "the open event must be recognisable by its prefix"
+        );
+        assert!(
+            parse_menu_action(&opened).is_none(),
+            "an open is an event, not an action"
+        );
+    }
+
+    /// The id in the open event has to be the id the item registers
+    /// under, or the Wi-Fi menu opening scans nothing.
+    #[test]
+    fn the_network_items_id_is_the_one_the_open_event_carries() {
+        let (item, _menu) = {
+            let status = net_status(RadioState::On, None);
+            (network_item(Some(&status), None, None, false), ())
+        };
+        assert_eq!(item.id, NETWORK_ITEM_ID);
+    }
 
     #[test]
     fn an_unknown_action_string_is_ignored_rather_than_misrouted() {

@@ -26,6 +26,21 @@ pub struct LayoutNode(i32, HashMap<String, OwnedValue>, Vec<OwnedValue>);
 
 pub const MENU_PATH_SUFFIX: &str = "/Menu";
 
+/// Prefix of the event sent when a host is about to show a menu; the
+/// item's own id follows, as `menu:opened:hyprforge-network`.
+///
+/// The id matters because both menus share one channel and they do not
+/// want the same thing: a Wi-Fi open should scan, and a Bluetooth open
+/// must *not* start discovery — that costs battery on every device in
+/// range and is an explicit action, not something a popup does.
+///
+/// Not a click, and deliberately not spelled like one: a daemon needs
+/// this to refresh what the menu is about to display. A Wi-Fi list is the
+/// case that needs it — NetworkManager's access points decay when nothing
+/// scans, so a menu built from them goes stale sitting still, and the
+/// moment the user opens it is exactly when it should not be.
+pub const OPENED_PREFIX: &str = "menu:opened:";
+
 /// The properties a host asks for, per row.
 fn properties(item: &MenuItem) -> HashMap<String, OwnedValue> {
     let mut props: HashMap<String, OwnedValue> = HashMap::new();
@@ -124,24 +139,31 @@ fn into_value(node: LayoutNode) -> OwnedValue {
 
 /// The menu object a host reads and clicks.
 pub struct MenuInterface {
+    /// The owning item's id, so an open event says which menu it was.
+    id: String,
     menu: Arc<Mutex<Menu>>,
     revision: Arc<Mutex<u32>>,
     /// Clicked actions, as the strings the [`Menu`] carries. Unbounded
     /// and never awaited on, for the same reason the item's clicks are:
-    /// the host is blocked on `Event` returning.
-    clicks: tokio::sync::mpsc::UnboundedSender<String>,
+    /// the host is blocked on the D-Bus method returning.
+    ///
+    /// Carries menu *events*, not only clicks — [`OPENED`] arrives here
+    /// too, so a daemon can refresh what the menu is about to show.
+    events: tokio::sync::mpsc::UnboundedSender<String>,
 }
 
 impl MenuInterface {
     pub fn new(
+        id: String,
         menu: Arc<Mutex<Menu>>,
         revision: Arc<Mutex<u32>>,
-        clicks: tokio::sync::mpsc::UnboundedSender<String>,
+        events: tokio::sync::mpsc::UnboundedSender<String>,
     ) -> Self {
         MenuInterface {
+            id,
             menu,
             revision,
-            clicks,
+            events,
         }
     }
 }
@@ -212,7 +234,7 @@ impl MenuInterface {
         }
         let action = self.menu.lock().await.action_for(id).map(str::to_string);
         if let Some(action) = action {
-            let _ = self.clicks.send(action);
+            let _ = self.events.send(action);
         }
     }
 
@@ -228,15 +250,27 @@ impl MenuInterface {
         Vec::new()
     }
 
-    /// `false` — the layout this returns is always current, because the
-    /// daemon rebuilds it on its own schedule and bumps the revision.
-    /// Answering `true` makes a host re-fetch the whole tree on every
-    /// open for no gain.
+    /// Announces the open and answers `false`.
+    ///
+    /// `false` because the layout already served is the current one —
+    /// the daemon rebuilds it on its own schedule and bumps the revision,
+    /// so `true` would make a host re-fetch the whole tree every time for
+    /// nothing.
+    ///
+    /// The useful half is the announcement. Anything this menu is built
+    /// from that goes stale while nobody looks at it can be refreshed
+    /// now, and the *next* open shows it — which is what `nm-applet` does
+    /// with a scan, and the reason its network list is never as empty as
+    /// one built only on a timer.
     async fn about_to_show(&self, _id: i32) -> bool {
+        let _ = self.events.send(format!("{OPENED_PREFIX}{}", self.id));
         false
     }
 
+    /// The batched form. Hosts use one or the other, so both have to
+    /// announce or the refresh silently never happens on half of them.
     async fn about_to_show_group(&self, _ids: Vec<i32>) -> (Vec<i32>, Vec<i32>) {
+        let _ = self.events.send(format!("{OPENED_PREFIX}{}", self.id));
         (Vec::new(), Vec::new())
     }
 
@@ -281,6 +315,31 @@ mod tests {
             MenuItem::separator(),
             MenuItem::standard("home", "connect:home"),
         ])
+    }
+
+    /// Both forms of "about to show" must announce. Hosts use one or
+    /// the other, so implementing only the singular means the refresh
+    /// silently never happens on half of them — and silence is exactly
+    /// what that failure looks like.
+    #[tokio::test]
+    async fn both_forms_of_about_to_show_announce_which_menu_opened() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let iface = MenuInterface::new(
+            "hyprforge-network".to_string(),
+            Arc::new(Mutex::new(menu())),
+            Arc::new(Mutex::new(1)),
+            tx,
+        );
+
+        assert!(!iface.about_to_show(0).await, "the served layout is current");
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            "menu:opened:hyprforge-network",
+            "the event carries the id, so a daemon knows which menu it was"
+        );
+
+        let _ = iface.about_to_show_group(vec![0]).await;
+        assert_eq!(rx.recv().await.unwrap(), "menu:opened:hyprforge-network");
     }
 
     /// A separator must say so. Without `type = separator` a host draws a
