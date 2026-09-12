@@ -16,6 +16,7 @@
 //!   deliberate rather than incidental.
 
 use hyprforge_core::lua::lua_string;
+use hyprforge_core::supersede;
 use serde::{Deserialize, Serialize};
 
 /// Variables where a wrong value costs more than a wrong setting
@@ -83,18 +84,20 @@ impl Settings {
                 out.push((i, problem));
             }
         }
-        // A later `hl.env` for the same name wins, so an earlier one is
-        // dead weight that reads as if it were in effect.
-        let mut seen: Vec<&str> = Vec::new();
-        for (i, variable) in self.variables.iter().enumerate() {
-            if !variable.enabled {
-                continue;
-            }
-            let name = variable.name.trim();
-            if seen.contains(&name) {
-                out.push((i, format!("{name} is set again below — only the last one applies")));
-            }
-            seen.push(name);
+        // A later `hl.env` for the same name wins, so every *earlier* one
+        // is dead weight that reads as if it were in effect.
+        //
+        // Which row gets flagged is not cosmetic: `generate` skips whatever
+        // lands in here, so flagging the last occurrence — the one that
+        // actually applies — dropped the winner from the file and wrote the
+        // superseded value instead. Editing a variable and leaving the old
+        // row above it made the *old* value take effect, in the one module
+        // where a wrong value can stop the session starting.
+        for i in supersede::superseded(&self.variables, |v| {
+            v.enabled.then(|| v.name.trim().to_string())
+        }) {
+            let name = self.variables[i].name.trim();
+            out.push((i, format!("{name} is set again below — this one has no effect")));
         }
         out
     }
@@ -184,15 +187,49 @@ mod tests {
 
     /// A later `hl.env` for the same name wins, so an earlier one reads
     /// as if it were in effect while doing nothing.
+    ///
+    /// The index is the whole point: this asserted `1` — the row that
+    /// actually applies — which is both a message that isn't true of it
+    /// ("set again below" when nothing is below it) and, because
+    /// `generate` skips flagged rows, the reason the file ended up with
+    /// the superseded value.
     #[test]
-    fn a_repeated_name_is_reported() {
+    fn the_row_that_loses_is_the_one_that_gets_flagged() {
         let settings = Settings {
             variables: vec![variable("GTK_THEME", "A"), variable("GTK_THEME", "B")],
         };
         let problems = settings.invalid();
         assert_eq!(problems.len(), 1);
-        assert_eq!(problems[0].0, 1);
+        assert_eq!(problems[0].0, 0, "the dead row is the first one, not the one in effect");
         assert!(problems[0].1.contains("GTK_THEME"), "{}", problems[0].1);
+    }
+
+    /// The consequence of flagging the wrong row, stated directly: a user
+    /// edits a variable, leaves the old row above it, and the old value is
+    /// what the session gets.
+    #[test]
+    fn a_duplicated_variable_still_writes_the_value_that_wins() {
+        let settings = Settings {
+            variables: vec![variable("NVIDIA_DRM", "0"), variable("NVIDIA_DRM", "1")],
+        };
+        let out = generate(&settings);
+        assert_eq!(out.matches("hl.env").count(), 1, "{out}");
+        assert!(out.contains("[[1]]"), "the later value must be the one written: {out}");
+        assert!(!out.contains("[[0]]"), "the superseded value must not be written: {out}");
+    }
+
+    /// Three in a row: only the last survives, and both losers say so.
+    #[test]
+    fn every_superseded_row_is_flagged_not_just_the_first() {
+        let settings = Settings {
+            variables: vec![
+                variable("PATH_LIKE", "a"),
+                variable("PATH_LIKE", "b"),
+                variable("PATH_LIKE", "c"),
+            ],
+        };
+        let flagged: Vec<usize> = settings.invalid().into_iter().map(|(i, _)| i).collect();
+        assert_eq!(flagged, vec![0, 1]);
     }
 
     #[test]

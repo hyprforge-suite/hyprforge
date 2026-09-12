@@ -18,6 +18,7 @@
 //! nothing for a single image.
 
 use hyprforge_core::hyprlang;
+use hyprforge_core::supersede;
 use serde::{Deserialize, Serialize};
 
 /// How an image is fitted to the output.
@@ -137,21 +138,23 @@ impl Settings {
             }
         }
         // Two blocks for the same monitor: hyprpaper takes the last, so
-        // the earlier one silently does nothing.
-        let mut seen: Vec<&str> = Vec::new();
-        for (i, entry) in self.entries.iter().enumerate() {
-            let monitor = entry.monitor.trim();
-            if seen.contains(&monitor) {
-                out.push((
-                    i,
-                    if monitor.is_empty() {
-                        "a second fallback — only the last one applies".to_string()
-                    } else {
-                        format!("a second block for {monitor} — only the last one applies")
-                    },
-                ));
-            }
-            seen.push(monitor);
+        // every earlier one silently does nothing.
+        //
+        // The earlier one is what gets flagged, and that is load-bearing
+        // rather than cosmetic — `generate` skips whatever lands here, so
+        // flagging the block that actually applies dropped it and wrote the
+        // superseded one instead. Setting a new wallpaper and leaving the
+        // old block above it left the old image on screen.
+        for i in supersede::superseded(&self.entries, |e| Some(e.monitor.trim().to_string())) {
+            let monitor = self.entries[i].monitor.trim();
+            out.push((
+                i,
+                if monitor.is_empty() {
+                    "a second fallback below replaces this one".to_string()
+                } else {
+                    format!("a second block for {monitor} below replaces this one")
+                },
+            ));
         }
         out
     }
@@ -195,12 +198,44 @@ pub fn for_auth_screen(settings: &Settings) -> Option<std::path::PathBuf> {
         let path = std::path::PathBuf::from(expand_tilde(&entry.path));
         path.is_file().then_some(path)
     };
+    // The *last* fallback, not the first: hyprpaper takes the last block
+    // for a given monitor, so reading the first would put a different
+    // image behind the lock screen than the one on the desktop — two of
+    // this suite's own apps disagreeing about the same setting, which is
+    // the failure it exists to prevent.
     settings
         .entries
         .iter()
+        .rev()
         .find(|e| e.is_fallback())
         .and_then(|e| usable(&e))
         .or_else(|| settings.entries.iter().find_map(|e| usable(&e)))
+}
+
+#[cfg(test)]
+mod auth_screen_fallback {
+    use super::*;
+
+    /// hyprpaper takes the last block for a monitor. If the auth screens
+    /// read the first, the lock screen and the desktop show different
+    /// images from the same file.
+    #[test]
+    fn the_auth_screen_takes_the_fallback_hyprpaper_actually_uses() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old.png");
+        let new = dir.path().join("new.png");
+        std::fs::write(&old, b"x").unwrap();
+        std::fs::write(&new, b"x").unwrap();
+
+        let settings = Settings {
+            entries: vec![
+                Entry { monitor: String::new(), path: old.display().to_string(), ..Entry::default() },
+                Entry { monitor: String::new(), path: new.display().to_string(), ..Entry::default() },
+            ],
+            ..Settings::default()
+        };
+        assert_eq!(for_auth_screen(&settings), Some(new));
+    }
 }
 
 /// Images and folders worth offering as wallpapers.
@@ -414,15 +449,31 @@ mod tests {
 
     /// hyprpaper takes the last block for a monitor, so an earlier
     /// duplicate silently does nothing.
+    ///
+    /// This asserted index 1 — the block that applies — which contradicted
+    /// the sentence above it and, because `generate` skips flagged rows,
+    /// meant the winning block was the one thrown away.
     #[test]
-    fn a_duplicate_monitor_is_reported() {
+    fn the_duplicate_block_that_loses_is_the_one_reported() {
         let mut s = Settings::default();
         s.entries.push(entry("eDP-2", "/a.png"));
         s.entries.push(entry("eDP-2", "/b.png"));
         let problems = s.invalid();
         assert_eq!(problems.len(), 1);
-        assert_eq!(problems[0].0, 1);
+        assert_eq!(problems[0].0, 0, "the dead block is the first one");
         assert!(problems[0].1.contains("eDP-2"), "{}", problems[0].1);
+    }
+
+    /// The consequence, stated directly: picking a new wallpaper without
+    /// deleting the old block left the old image on screen.
+    #[test]
+    fn a_duplicated_monitor_still_writes_the_block_that_wins() {
+        let mut s = Settings::default();
+        s.entries.push(entry("eDP-2", "/old.png"));
+        s.entries.push(entry("eDP-2", "/new.png"));
+        let out = generate(&s);
+        assert!(out.contains("/new.png"), "the block that applies must be written: {out}");
+        assert!(!out.contains("/old.png"), "the superseded block must not be: {out}");
     }
 
     #[test]

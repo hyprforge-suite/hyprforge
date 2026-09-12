@@ -7,6 +7,7 @@ pub mod lua;
 pub mod monitors;
 pub mod lua_setup;
 pub mod paths;
+pub mod supersede;
 
 #[cfg(feature = "dbus")]
 pub mod displayd_proxy;
