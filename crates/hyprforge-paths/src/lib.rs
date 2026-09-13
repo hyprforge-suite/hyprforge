@@ -51,6 +51,18 @@ pub fn tray_toml_path() -> PathBuf {
     hyprforge_config_dir().join("tray.toml")
 }
 
+/// The emoji picker's own preferences — currently just the default skin
+/// tone a long-press (or its keyboard equivalent) sets. Lives beside
+/// `tray.toml`/`appearance.toml` rather than the picker inventing its own
+/// directory, for the same reason every other single-file Hyprforge
+/// setting does: one place a person restoring their dotfiles from a
+/// backup already knows to look. A missing file here is first-run, never
+/// an error — see `hyprforge-emojimenu::config`'s own doc for how it
+/// tells that apart from a file that exists but will not parse.
+pub fn emojimenu_toml_path() -> PathBuf {
+    hyprforge_config_dir().join("emojimenu.toml")
+}
+
 /// Where the clipboard manager keeps its history. Its own subdirectory,
 /// not a file directly under `hyprforge_config_dir()`, because the index
 /// is one file but image content is one file *per entry* — see
@@ -361,6 +373,15 @@ mod tests {
         assert_eq!(
             appearance_toml_path(),
             PathBuf::from("/custom/config/hyprforge/appearance.toml")
+        );
+    }
+
+    #[test]
+    fn the_emojimenu_config_hangs_off_the_hyprforge_dir_too() {
+        let _g = EnvGuard::set(Some("/custom/config"), Some("/home/someone"));
+        assert_eq!(
+            emojimenu_toml_path(),
+            PathBuf::from("/custom/config/hyprforge/emojimenu.toml")
         );
     }
 

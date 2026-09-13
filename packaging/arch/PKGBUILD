@@ -26,6 +26,7 @@ pkgname=(
   hyprforge-displayd
   hyprforge-tray
   hyprforge-clipboard
+  hyprforge-emojimenu
   hyprforge
 )
 pkgver=0.1.0
@@ -139,6 +140,21 @@ package_hyprforge-clipboard() {
     "$pkgdir/usr/lib/systemd/user/hyprforge-clipd.service"
 }
 
+package_hyprforge-emojimenu() {
+  pkgdesc="Emoji picker popup at the pointer"
+  # Same runtime linkage as hyprforge-clipmenu (confirmed with ldd against
+  # this same build, not assumed from the clipboard package's own list):
+  # libxkbcommon for keymap handling, wayland for the layer-shell surface
+  # and protocols it dlopens at runtime. `noto-fonts-emoji` is a hard
+  # dependency, not an optdepend: a picker that cannot render the very
+  # thing it exists to pick is broken, not degraded, and this crate
+  # deliberately has no runtime check or fallback message for a missing
+  # emoji font — the package requiring one is what keeps that true.
+  depends=(wayland libxkbcommon noto-fonts-emoji)
+  cd "$startdir/../.."
+  _bin hyprforge-emojimenu
+}
+
 package_hyprforge() {
   pkgdesc="Native Hyprland desktop applications (everything)"
   depends=(
@@ -147,6 +163,7 @@ package_hyprforge() {
     hyprforge-displayd
     hyprforge-tray
     hyprforge-clipboard
+    hyprforge-emojimenu
   )
   # The greeter is deliberately not here. Installing it is not the
   # dangerous step — enabling greetd is, because that decides which VT

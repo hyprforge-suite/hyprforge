@@ -1541,6 +1541,28 @@ name = "hyprforge-emoji"
 version = "0.1.0"
 
 [[package]]
+name = "hyprforge-emojimenu"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hyprforge-appearance",
+ "hyprforge-clipboard",
+ "hyprforge-emoji",
+ "hyprforge-look",
+ "hyprforge-paths",
+ "hyprforge-popup",
+ "hyprforge-process",
+ "iced_renderer",
+ "iced_runtime",
+ "iced_tiny_skia",
+ "iced_widget",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "hyprforge-greet"
 version = "0.1.0"
 dependencies = [

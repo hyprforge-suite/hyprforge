@@ -185,6 +185,34 @@ pub trait PopupApp {
     /// with that outcome.
     fn key(&mut self, keysym: smithay_client_toolkit::seat::keyboard::Keysym, utf8: Option<String>) -> Option<Self::Outcome>;
 
+    /// How long the pointer must stay down before a press becomes a
+    /// "long press" rather than an ordinary click — `None` (the default)
+    /// disables the whole mechanism, which is what every existing
+    /// consumer wants: `hyprforge-clipmenu`'s rows have nothing a
+    /// long-press should do, and leaving this at the default means a
+    /// click there fires exactly as it always has (immediately on
+    /// `Press`, at the pressed position — see [`Popup`]'s own pointer
+    /// handling). Only when this returns `Some` does [`Popup`] defer a
+    /// click until `Release` at all, which is what makes the two paths
+    /// distinguishable in the first place; see [`Self::pointer_long_press`].
+    fn long_press_duration(&self) -> Option<std::time::Duration> {
+        None
+    }
+
+    /// The pointer has been held at `position` for at least
+    /// [`Self::long_press_duration`] without releasing. Returns whether
+    /// anything changed (and therefore needs a redraw) — an emoji picker
+    /// opening a skin-tone strip over a tone-capable cell says `true`;
+    /// a press that landed on nothing worth long-pressing says `false`,
+    /// which is what lets [`Popup`] still treat the eventual release as
+    /// an ordinary click rather than silently swallowing it (see
+    /// [`Popup`]'s `pointer_frame` for exactly that distinction). Called
+    /// at most once per press, never repeated while the button stays
+    /// down.
+    fn pointer_long_press(&mut self, _theme: &Theme, _position: (f64, f64)) -> bool {
+        false
+    }
+
     /// Whether `outcome` needs [`Self::finish`] called — and therefore
     /// needs this popup's own surface torn down and the compositor's
     /// teardown of it confirmed — before the process using this popup
@@ -242,6 +270,26 @@ pub struct Popup<A: PopupApp> {
     size: (u32, u32),
     renderer: iced_tiny_skia::Renderer,
     cache: Cache,
+
+    /// The position and start time of a left-button press this popup has
+    /// not yet resolved into a click, kept only for an app that opted
+    /// into long-press detection at all (see [`PopupApp::long_press_duration`]).
+    /// An app that never opts in never has this set, and a click there
+    /// still fires the instant `Press` arrives — see `pointer_frame`'s own
+    /// comment for why this is gated on `long_press_duration` rather than
+    /// deferring every click unconditionally.
+    pending_press: Option<((f64, f64), std::time::Instant)>,
+    /// Whether [`Self::pending_press`]'s elapsed time has already been
+    /// checked against [`PopupApp::long_press_duration`] — set the first
+    /// time it crosses the threshold so [`PopupApp::pointer_long_press`]
+    /// is called exactly once per press, not on every tick the button
+    /// stays down.
+    long_press_checked: bool,
+    /// Whether [`PopupApp::pointer_long_press`] actually changed
+    /// something for the current press — `Release` uses this, not
+    /// `long_press_checked`, to decide whether the eventual release is
+    /// still an ordinary click (see `pointer_frame`).
+    long_press_fired: bool,
 }
 
 impl<A: PopupApp + 'static> Popup<A> {
@@ -284,6 +332,9 @@ impl<A: PopupApp + 'static> Popup<A> {
                 iced_runtime::core::Pixels(theme.font_size),
             ),
             cache: Cache::default(),
+            pending_press: None,
+            long_press_checked: false,
+            long_press_fired: false,
         };
 
         // Outputs have to be known before a surface can be pinned to
@@ -300,7 +351,36 @@ impl<A: PopupApp + 'static> Popup<A> {
             .map_err(|e| PopupError::EventLoop(e.to_string()))?;
 
         while popup.outcome.is_none() {
-            event_loop.dispatch(None, &mut popup).map_err(|_| PopupError::Disconnected)?;
+            // No app this crate serves today opts into long-press
+            // detection (`PopupApp::long_press_duration` defaults to
+            // `None`), so `dispatch(None, ..)` — block until the next
+            // Wayland event, burning no CPU while idle — is still what
+            // every existing popup gets. Only while a press is actually
+            // pending *and* the app wants long-press at all does this
+            // wake up on its own, so elapsed time can be checked below
+            // even with no new pointer event to trigger it.
+            let timeout = popup
+                .pending_press
+                .is_some()
+                .then(|| popup.app.long_press_duration())
+                .flatten()
+                .map(|_| std::time::Duration::from_millis(16));
+            event_loop.dispatch(timeout, &mut popup).map_err(|_| PopupError::Disconnected)?;
+
+            if let Some((position, started)) = popup.pending_press {
+                if !popup.long_press_checked {
+                    if let Some(duration) = popup.app.long_press_duration() {
+                        if started.elapsed() >= duration {
+                            popup.long_press_checked = true;
+                            if popup.app.pointer_long_press(&popup.theme, position) {
+                                popup.long_press_fired = true;
+                                popup.mark_dirty();
+                            }
+                        }
+                    }
+                }
+            }
+
             if popup.dirty {
                 popup.draw();
             }
@@ -706,10 +786,49 @@ impl<A: PopupApp + 'static> PointerHandler for Popup<A> {
                 }
                 PointerEventKind::Press { button, .. } => {
                     if *button == BTN_LEFT {
-                        self.pointer_click(event.position);
+                        // Deferring the click to `Release` unconditionally
+                        // would change every existing popup's timing (click
+                        // on mouse-up instead of mouse-down) for no benefit
+                        // to it — long-press detection is the only reason
+                        // to wait at all, so this only defers when the app
+                        // actually opted in (see `PopupApp::long_press_duration`'s
+                        // own doc). `hyprforge-clipmenu` never does, so its
+                        // click still fires right here, exactly as before.
+                        if self.app.long_press_duration().is_some() {
+                            self.pending_press = Some((event.position, std::time::Instant::now()));
+                            self.long_press_checked = false;
+                            self.long_press_fired = false;
+                        } else {
+                            self.pointer_click(event.position);
+                        }
                     }
                 }
-                PointerEventKind::Release { .. } => {}
+                PointerEventKind::Release { button, .. } => {
+                    if *button == BTN_LEFT {
+                        if let Some((press_position, _)) = self.pending_press.take() {
+                            if self.long_press_fired {
+                                // The long press already changed
+                                // something (opened a tone strip, say);
+                                // the release that ends the hold is not
+                                // also a click on whatever was underneath
+                                // it — that would both open the overlay
+                                // *and* choose the cell it opened on.
+                            } else {
+                                // Either long-press detection is off, or
+                                // the button came up before the threshold,
+                                // or it stayed down past the threshold
+                                // over nothing worth long-pressing — all
+                                // three are an ordinary click, at the
+                                // position the press itself landed on
+                                // (not wherever the pointer drifted to
+                                // before releasing).
+                                self.pointer_click(press_position);
+                            }
+                        }
+                        self.long_press_checked = false;
+                        self.long_press_fired = false;
+                    }
+                }
                 PointerEventKind::Axis { vertical, .. } => {
                     self.pointer_scroll(crate::scroll::scroll_rows(vertical.discrete, vertical.value120, vertical.absolute));
                 }
