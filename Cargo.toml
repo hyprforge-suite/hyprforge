@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "A StatusNotifierItem/dbusmenu tray library, plus the hyprforge-trayd daemon that puts Wi-Fi, Bluetooth, keep-awake and night-light icons in whatever bar is running."
-repository = "https://github.com/apost/hyprforge"
+repository = "https://github.com/adamrpostjr/hyprforge"
 documentation = "https://docs.rs/hyprforge-tray"
 readme = "README.md"
 keywords = ["hyprland", "tray", "statusnotifier", "dbusmenu", "linux"]
@@ -48,21 +48,21 @@ anyhow = "1"
 # touches the network; standalone, cargo fetches them from git.
 #
 # Where the preference file lives, and the atomic write that replaces it.
-hyprforge-paths = { git = "https://github.com/apost/hyprforge" }
+hyprforge-paths = { git = "https://github.com/adamrpostjr/hyprforge" }
 
 # Used only by the binary. Cargo has no way to say that for a crate with
 # both, and splitting into two crates to express it would be more
 # ceremony than the fact is worth — hyprforge-displayd carries the same
 # arrangement.
-hyprforge-network = { git = "https://github.com/apost/hyprforge" }
-hyprforge-bluetooth = { git = "https://github.com/apost/hyprforge" }
+hyprforge-network = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-bluetooth = { git = "https://github.com/adamrpostjr/hyprforge" }
 # Keep awake (systemd-logind) and night light (hyprsunset via hyprctl) —
 # same "binary-only" arrangement as network/bluetooth above.
-hyprforge-power = { git = "https://github.com/apost/hyprforge" }
-hyprforge-ecosystem = { git = "https://github.com/apost/hyprforge" }
+hyprforge-power = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-ecosystem = { git = "https://github.com/adamrpostjr/hyprforge" }
 
 [dev-dependencies]
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }
 tempfile = "3"
-hyprforge-network = { git = "https://github.com/apost/hyprforge", features = ["mock"] }
-hyprforge-bluetooth = { git = "https://github.com/apost/hyprforge", features = ["mock"] }
+hyprforge-network = { git = "https://github.com/adamrpostjr/hyprforge", features = ["mock"] }
+hyprforge-bluetooth = { git = "https://github.com/adamrpostjr/hyprforge", features = ["mock"] }
