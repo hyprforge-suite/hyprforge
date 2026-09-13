@@ -66,6 +66,9 @@ flush_current() {
 NEXT_DISPLAYD=
 NEXT_TRAY=
 NEXT_CLIPBOARD=
+NEXT_EMOJI=
+STATE_EMOJI=todo
+REASON_EMOJI=
 NEXT_LOCK=
 NEXT_SETTINGS=
 NEXT_GREETER=
@@ -259,10 +262,10 @@ greeter_step_state() {
 }
 
 print_next_steps() {
-    local labels=("Display daemon" "Tray icons" "Clipboard" "Lock" "Settings app" "Greeter")
-    local texts=("$NEXT_DISPLAYD" "$NEXT_TRAY" "$NEXT_CLIPBOARD" "$NEXT_LOCK" "$NEXT_SETTINGS" "$NEXT_GREETER")
-    local states=("$STATE_DISPLAYD" "$STATE_TRAY" "$STATE_CLIPBOARD" "$STATE_LOCK" "$STATE_SETTINGS" "$STATE_GREETER")
-    local reasons=("$REASON_DISPLAYD" "$REASON_TRAY" "$REASON_CLIPBOARD" "$REASON_LOCK" "$REASON_SETTINGS" "$REASON_GREETER")
+    local labels=("Display daemon" "Tray icons" "Clipboard" "Emoji picker" "Lock" "Settings app" "Greeter")
+    local texts=("$NEXT_DISPLAYD" "$NEXT_TRAY" "$NEXT_CLIPBOARD" "$NEXT_EMOJI" "$NEXT_LOCK" "$NEXT_SETTINGS" "$NEXT_GREETER")
+    local states=("$STATE_DISPLAYD" "$STATE_TRAY" "$STATE_CLIPBOARD" "$STATE_EMOJI" "$STATE_LOCK" "$STATE_SETTINGS" "$STATE_GREETER")
+    local reasons=("$REASON_DISPLAYD" "$REASON_TRAY" "$REASON_CLIPBOARD" "$REASON_EMOJI" "$REASON_LOCK" "$REASON_SETTINGS" "$REASON_GREETER")
 
     # Steps that are `done` collapse into this count instead of being
     # read one by one, matching the "N already current" pattern used
@@ -360,6 +363,8 @@ ${B}Components${N}
   --clipboard      Clipboard history: the daemon as a systemd user
                    service, plus the popup its keybind launches.
   --settings       The Settings app and its launcher entry.
+  --emoji          The emoji picker popup, bound from Settings ->
+                   Shortcuts (it has no daemon and no service).
   --all            Every component above.
 
 ${B}Options${N}
@@ -397,8 +402,9 @@ while [[ $# -gt 0 ]]; do
         --displayd)      COMPONENTS+=(displayd) ;;
         --tray)          COMPONENTS+=(tray) ;;
         --clipboard)     COMPONENTS+=(clipboard) ;;
+        --emoji)         COMPONENTS+=(emoji) ;;
         --settings)      COMPONENTS+=(settings) ;;
-        --all)           COMPONENTS+=(greeter lock displayd tray clipboard settings) ;;
+        --all)           COMPONENTS+=(greeter lock displayd tray clipboard emoji settings) ;;
         --force-cleanup) FORCE_CLEANUP=true ;;
         --dry-run)       DRY_RUN=true ;;
         --yes|-y)        ASSUME_YES=true ;;
@@ -766,6 +772,39 @@ EOF
     STATE_CLIPBOARD=$CHECK_STATE; REASON_CLIPBOARD=$CHECK_REASON
 }
 
+install_emoji() {
+    build hyprforge-emojimenu
+    step "Emoji picker"
+    install_file target/release/hyprforge-emojimenu "$PREFIX/hyprforge-emojimenu" 755
+
+    # No service and no daemon: it is a popup that runs, does one thing
+    # and exits, the same shape as hyprforge-clipmenu. The only thing it
+    # needs from the user is a key to open it on, and Hyprforge owns
+    # keybinds.lua — so the binding belongs in Settings, not in a file
+    # this script edits behind the user's back.
+    NEXT_EMOJI=$(cat <<'EOF'
+  Bind it in Settings -> Shortcuts. Hyprforge owns keybinds.lua, so a
+  hand-edited binding there is overwritten on the next save:
+      hyprforge-emojimenu
+
+  It needs an emoji font to show anything. Without one every cell
+  renders as an identical empty box, which looks like a broken picker
+  rather than a missing font:
+      pacman -S noto-fonts-emoji
+EOF
+)
+}
+
+uninstall_emoji() {
+    step "Emoji picker: removing"
+    remove_file "$PREFIX/hyprforge-emojimenu"
+    # The chosen skin tone is the user's, and is left alone for the same
+    # reason the clipboard history is.
+    if [[ -e "$HOME/.config/hyprforge/emojimenu.toml" ]]; then
+        skip "kept your emoji settings in ~/.config/hyprforge/emojimenu.toml"
+    fi
+}
+
 uninstall_clipboard() {
     step "Clipboard: removing"
     if ! $DRY_RUN && systemctl --user is-enabled hyprforge-clipd >/dev/null 2>&1; then
@@ -1004,6 +1043,7 @@ show_status() {
     status_binary hyprforge-trayd
     status_binary hyprforge-clipd
     status_binary hyprforge-clipmenu
+    status_binary hyprforge-emojimenu
     status_binary hyprforge-settings
 
     step "Supporting files"
@@ -1053,6 +1093,7 @@ case $ACTION in
         has_component displayd && install_displayd
         has_component tray && install_tray
         has_component clipboard && install_clipboard
+        has_component emoji && install_emoji
         has_component settings && install_settings
         print_next_steps
         step "Done"
@@ -1062,6 +1103,7 @@ case $ACTION in
         has_component greeter  && uninstall_greeter
         has_component lock     && uninstall_lock
         has_component clipboard && uninstall_clipboard
+        has_component emoji && uninstall_emoji
         has_component tray && uninstall_tray
         has_component displayd && uninstall_displayd
         has_component settings && uninstall_settings
