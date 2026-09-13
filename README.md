@@ -8,7 +8,7 @@ supplies a window and talks to greetd. That's the whole reason the
 greeter and the lock screen look like one system — not because they
 were styled to match, but because there is one of them.
 
-Part of [Hyprforge](https://github.com/apost/hyprforge), a suite of
+Part of [Hyprforge](https://github.com/adamrpostjr/hyprforge), a suite of
 native Hyprland desktop apps — but it runs alone.
 
 ## The property this repository must not lose
