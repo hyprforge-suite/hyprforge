@@ -7,7 +7,7 @@
 //! directly, the same split `hyprforge-bluetooth`'s and
 //! `hyprforge-network`'s D-Bus-backed modules use for their own models.
 
-use hyprforge_clipboard::{Entry, HistoryError};
+use hyprforge_clipboard::{Entry, EntryId, HistoryError};
 
 /// How the history read from disk turned out.
 ///
@@ -45,22 +45,57 @@ pub struct Model {
     /// within bounds of a non-empty filtered list; meaningless (and
     /// never read) when the filtered list is empty.
     selected: usize,
+    /// The message from the most recent pin/unpin attempt that did not
+    /// succeed — shown in the header in place of the filter text until
+    /// the next action of any kind (see `surface::dispatch_action`).
+    /// Never carries clipboard content, only an id (a hash) and the
+    /// daemon's own reason, or a note that there was nobody to ask.
+    ///
+    /// Deliberately not "sticky": CLAUDE.md is explicit that a failed
+    /// connection must never be cached as a reason to stop trying, and
+    /// a notice that lingered after the user had moved on would start to
+    /// look exactly like that — this field is cleared the moment
+    /// anything else happens, not just on the next successful pin.
+    pin_notice: Option<String>,
+    /// How many rows either side of the selection are worth building a
+    /// real widget for. Everything else in the filtered list is real
+    /// data the user can scroll to, but nothing is decoded or laid out
+    /// for it until it is.
+    ///
+    /// This used to be a hardcoded 24 regardless of the popup's own
+    /// height: at a 44px row inside a 420px popup that laid out 1104px
+    /// of rows in a surface a quarter that tall, so the drawn rows could
+    /// not possibly be where a pointer's hit-test computed them — the
+    /// popup's own doc on `geometry::RowLayout::rows_that_fit` tells the
+    /// rest of that story. The fix is that this crate has exactly one
+    /// number for "how many rows", derived once in `main.rs` from
+    /// `RowLayout::rows_that_fit(POPUP_HEIGHT)` and threaded in here via
+    /// [`Model::set_window`] — not read back from the popup's actual
+    /// size, and not reinvented as a second constant, either of which
+    /// could drift from what `rows_that_fit` says fits.
+    window: usize,
 }
 
-/// How many rows either side of the selection are worth building a real
-/// widget for. Everything else in the filtered list is real data the
-/// user can scroll to, but nothing is decoded or laid out for it until
-/// it is.
-///
-/// Chosen generously enough that a full popup's height is covered twice
-/// over — the popup does not show hundreds of rows at once — while
-/// still bounding the work done per frame to a window instead of the
-/// whole (up to 500-entry) history.
-pub const VISIBLE_WINDOW: usize = 24;
+/// [`Model::window`]'s value until [`Model::set_window`] is called.
+/// Every test in this crate that does not care about window sizing
+/// leaves it at this default; `main.rs` always overrides it with the
+/// popup's real row count before showing anything.
+const DEFAULT_WINDOW: usize = 24;
 
 impl Model {
     pub fn new(history: HistoryState) -> Model {
-        Model { history, filter: String::new(), selected: 0 }
+        Model { history, filter: String::new(), selected: 0, pin_notice: None, window: DEFAULT_WINDOW }
+    }
+
+    /// Sets how many rows [`Model::visible_range`] builds around the
+    /// selection — see [`Model::window`]'s own doc for why this is a
+    /// field set after construction rather than a constant. Clamped to
+    /// at least one: a window of zero would make `visible_range` unable
+    /// to show anything even when the filtered list is non-empty, which
+    /// is a worse failure than showing one row more than a degenerate
+    /// height technically fit.
+    pub fn set_window(&mut self, window: usize) {
+        self.window = window.max(1);
     }
 
     /// The entries matching the current filter, newest-first /
@@ -147,7 +182,7 @@ impl Model {
     }
 
     /// The range of the filtered list worth building real widgets for
-    /// right now: a window of [`VISIBLE_WINDOW`] rows centred on the
+    /// right now: a window of [`Model::window`] rows centred on the
     /// selection, clamped to the list's own bounds.
     ///
     /// This is the piece that keeps an image entry from being decoded
@@ -156,8 +191,60 @@ impl Model {
     /// mean 500 decode attempts on every keystroke.
     pub fn visible_range(&self) -> std::ops::Range<usize> {
         let len = self.filtered().len();
-        visible_range(len, self.selected, VISIBLE_WINDOW)
+        visible_range(len, self.selected, self.window)
     }
+
+    /// Reflects a pin/unpin the daemon has already confirmed, in this
+    /// popup's own copy of the history — this never writes anything to
+    /// disk and never talks to the daemon itself; that already happened
+    /// by the time `surface::dispatch_action` calls this. A no-op if
+    /// `id` is not in the current history (it was removed or the popup
+    /// is showing stale state some other way) rather than a panic.
+    ///
+    /// Re-sorts with exactly the same rule
+    /// `hyprforge_clipboard::store::History::sort` uses — pinned first,
+    /// then newest first, ties broken by id — so the row lands where a
+    /// fresh load would put it next time the popup opens, instead of
+    /// drifting from what the daemon's own file now says. Then keeps
+    /// the *same entry* selected across the reorder: the id, not the
+    /// index, is what the user cared about, and pinning something is
+    /// supposed to move it, not lose the selection.
+    pub fn set_entry_pinned(&mut self, id: &EntryId, pinned: bool) {
+        let HistoryState::Loaded(entries) = &mut self.history else { return };
+        let Some(entry) = entries.iter_mut().find(|e| &e.id == id) else { return };
+        entry.pinned = pinned;
+        sort_entries(entries);
+        if let Some(new_index) = self.filtered().iter().position(|e| &e.id == id) {
+            self.selected = new_index;
+        }
+    }
+
+    /// The reason the last pin/unpin attempt did not succeed, if any —
+    /// see the field's own doc for why this is cleared so aggressively.
+    pub fn pin_notice(&self) -> Option<&str> {
+        self.pin_notice.as_deref()
+    }
+
+    pub fn set_pin_notice(&mut self, notice: Option<String>) {
+        self.pin_notice = notice;
+    }
+}
+
+/// The same ordering `History::sort` applies on the daemon side, kept as
+/// a free function so `set_entry_pinned` can call it without punching a
+/// hole in `HistoryState` for the sort itself. Duplicated rather than
+/// shared because there is nothing to share *from*: `History::sort` is
+/// a private method on a type this crate does not construct (it only
+/// ever reads a `Vec<Entry>` out of one) — sharing it would mean making
+/// it public API of `hyprforge-clipboard` for exactly one caller outside
+/// the daemon.
+fn sort_entries(entries: &mut [Entry]) {
+    entries.sort_by(|a, b| {
+        b.pinned
+            .cmp(&a.pinned)
+            .then(b.copied_at.cmp(&a.copied_at))
+            .then(a.id.cmp(&b.id))
+    });
 }
 
 /// The windowing rule above, pulled out so it can be pinned without a
@@ -286,16 +373,95 @@ mod tests {
     }
 
     #[test]
+    fn pinning_an_entry_moves_it_above_unpinned_ones() {
+        let mut model = model_with(&["a", "b", "c"]);
+        let b_id = model.filtered()[1].id.clone();
+        model.set_entry_pinned(&b_id, true);
+        assert_eq!(model.filtered()[0].id, b_id, "the pinned entry must sort first");
+    }
+
+    #[test]
+    fn unpinning_lets_an_entry_fall_back_out_of_the_pinned_group() {
+        let mut model = model_with(&["a", "b", "c"]);
+        let b_id = model.filtered()[1].id.clone();
+        model.set_entry_pinned(&b_id, true);
+        model.set_entry_pinned(&b_id, false);
+        assert!(
+            model.filtered().iter().all(|e| !e.pinned),
+            "nothing should still be pinned"
+        );
+    }
+
+    #[test]
+    fn pinning_the_selected_entry_keeps_it_selected_after_it_moves() {
+        let mut model = model_with(&["a", "b", "c"]);
+        model.select(2); // "c"
+        let c_id = model.filtered()[2].id.clone();
+        model.set_entry_pinned(&c_id, true);
+        assert_eq!(
+            model.filtered()[model.selected_index()].id,
+            c_id,
+            "the same entry must still be selected even though its row moved"
+        );
+    }
+
+    #[test]
+    fn pinning_an_id_that_is_not_in_the_history_does_nothing() {
+        let mut model = model_with(&["a"]);
+        let bogus = EntryId::from_raw("not-a-real-id".to_string());
+        model.set_entry_pinned(&bogus, true);
+        assert!(model.filtered().iter().all(|e| !e.pinned));
+    }
+
+    #[test]
+    fn a_fresh_model_has_no_pin_notice() {
+        let model = model_with(&["a"]);
+        assert_eq!(model.pin_notice(), None);
+    }
+
+    #[test]
+    fn a_pin_notice_can_be_set_and_cleared() {
+        let mut model = model_with(&["a"]);
+        model.set_pin_notice(Some("hyprforge-clipd isn't running".to_string()));
+        assert_eq!(model.pin_notice(), Some("hyprforge-clipd isn't running"));
+        model.set_pin_notice(None);
+        assert_eq!(model.pin_notice(), None);
+    }
+
+    #[test]
     fn the_visible_window_stays_within_the_lists_bounds() {
-        let range = visible_range(500, 3, VISIBLE_WINDOW);
+        let range = visible_range(500, 3, DEFAULT_WINDOW);
         assert_eq!(range.start, 0);
         assert!(range.end <= 500);
 
-        let range = visible_range(500, 499, VISIBLE_WINDOW);
+        let range = visible_range(500, 499, DEFAULT_WINDOW);
         assert_eq!(range.end, 500);
         assert!(range.start < range.end);
 
-        let range = visible_range(3, 1, VISIBLE_WINDOW);
+        let range = visible_range(3, 1, DEFAULT_WINDOW);
         assert_eq!(range, 0..3, "a list shorter than the window is shown in full");
+    }
+
+    /// The property `main.rs` depends on: telling the model a new window
+    /// size actually changes how many rows `visible_range` builds,
+    /// rather than the field being write-only.
+    #[test]
+    fn set_window_changes_how_many_rows_are_built() {
+        let mut model = model_with(&["a", "b", "c", "d", "e"]);
+        model.set_window(2);
+        assert_eq!(model.visible_range().len(), 2);
+        model.set_window(4);
+        assert_eq!(model.visible_range().len(), 4);
+    }
+
+    /// A window of zero would leave `visible_range` unable to show
+    /// anything even for a non-empty list — `set_window` floors it at
+    /// one rather than letting a degenerate popup height (or a future
+    /// caller's bug) do that.
+    #[test]
+    fn set_window_floors_at_one_rather_than_showing_nothing() {
+        let mut model = model_with(&["a", "b"]);
+        model.set_window(0);
+        assert_eq!(model.visible_range().len(), 1);
     }
 }

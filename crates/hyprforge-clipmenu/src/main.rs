@@ -28,11 +28,13 @@
 mod chooser;
 mod geometry;
 mod model;
+mod pinner;
+mod singleton;
 mod surface;
 mod thumbnail;
 mod view;
 
-use geometry::{Monitor, Point, Size};
+use geometry::{Monitor, Point, RowLayout, Size};
 use hyprforge_process::{output, TIMEOUT};
 use model::{HistoryState, Model};
 use std::process::Command;
@@ -148,6 +150,25 @@ fn placement(monitors: &[Monitor], cursor: Option<Point>) -> Option<Placement> {
 }
 
 fn main() -> std::process::ExitCode {
+    // Only one popup at a time: a keybind pressed twice while one is
+    // already open must leave the first alone and exit quietly, not
+    // start a second process — see `singleton`'s own doc for why this is
+    // an flock rather than a PID file or a process-name match.
+    let lock_path = singleton::lock_path();
+    let _lock = match singleton::acquire(&lock_path) {
+        Ok(Some(lock)) => Some(lock),
+        // Someone already has it: this is a keybind pressed twice, not
+        // an error — silent and successful, exactly as if this process
+        // had never run.
+        Ok(None) => return std::process::ExitCode::SUCCESS,
+        // Couldn't even check — never let a broken lock lock out every
+        // future popup; proceed without one.
+        Err(e) => {
+            eprintln!("couldn't set up the single-instance lock ({e}) — continuing anyway");
+            None
+        }
+    };
+
     let monitors = monitors();
     if monitors.is_empty() {
         eprintln!("couldn't read any monitors from hyprctl — is Hyprland running?");
@@ -159,10 +180,20 @@ fn main() -> std::process::ExitCode {
     };
 
     let history = HistoryState::from_result(hyprforge_clipboard::History::load());
-    let model = Model::new(history);
+    let mut model = Model::new(history);
 
     let mut theme = hyprforge_appearance::look::resolve();
     theme.font_size = sane_font_size(&theme);
+
+    // How many rows the fixed-height popup actually has room for — the
+    // fix for the bug that motivated this: `Model` used to build a
+    // hardcoded 24 rows regardless of `POPUP_HEIGHT`, which laid out
+    // more than twice the popup's own height in rows, so nothing a
+    // pointer touched was where the drawn rows actually were. Deriving
+    // it from `RowLayout::rows_that_fit` — the exact inverse of the hit
+    // test — is what keeps rows drawn, rows hit-tested and rows that
+    // physically fit from ever being three different numbers again.
+    model.set_window(RowLayout::for_font_size(theme.font_size).rows_that_fit(POPUP_HEIGHT));
 
     let connection = match wayland_client::Connection::connect_to_env() {
         Ok(connection) => connection,
@@ -185,7 +216,7 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    match ClipMenu::run(connection, placement, model, chooser, theme) {
+    match ClipMenu::run(connection, placement, model, chooser, pinner::Wired, theme) {
         Ok(Outcome::Chosen | Outcome::Cancelled) => std::process::ExitCode::SUCCESS,
         Ok(Outcome::Closed | Outcome::Disconnected) => {
             eprintln!("the popup closed unexpectedly");
@@ -230,6 +261,46 @@ mod tests {
         let placed = placement(&monitors, Some(Point { x: 1590.0, y: 990.0 })).unwrap();
         assert!(placed.margin_left as f64 + placed.width as f64 <= 1600.0);
         assert!(placed.margin_top as f64 + placed.height as f64 <= 1000.0);
+    }
+
+    /// The regression test for the bug that started all of this: the
+    /// model's row window has to be *derived* from the popup's own fixed
+    /// height, not a separate hardcoded number that can drift out of
+    /// step with it. A history far longer than the window still has to
+    /// build only as many rows as physically fit — `rows_that_fit` and
+    /// `set_window` are exercised exactly the way `main` wires them
+    /// together, against a history long enough that the old hardcoded
+    /// 24 would have shown a different number than this does.
+    #[test]
+    fn the_models_row_window_is_derived_from_the_popups_actual_height() {
+        let layout = RowLayout::for_font_size(15.0);
+        let expected_rows = layout.rows_that_fit(POPUP_HEIGHT);
+
+        let history = model::HistoryState::Loaded(
+            (0..200).map(|i| test_entry(&format!("entry {i}"))).collect(),
+        );
+        let mut model = Model::new(history);
+        model.set_window(layout.rows_that_fit(POPUP_HEIGHT));
+
+        assert_eq!(model.visible_range().len(), expected_rows);
+        // And every one of those rows has to actually fit: the same
+        // check `geometry`'s own `fit_tests` module pins for
+        // `rows_that_fit` in isolation, repeated here end to end through
+        // `Model`.
+        let stride = layout.row_height + layout.row_spacing;
+        let last_row_bottom =
+            layout.padding + layout.header_height + (expected_rows as f64 - 1.0) * stride + layout.row_height;
+        assert!(last_row_bottom <= POPUP_HEIGHT - layout.padding);
+    }
+
+    fn test_entry(text: &str) -> hyprforge_clipboard::Entry {
+        let content = hyprforge_clipboard::Content::Text(text.to_string());
+        hyprforge_clipboard::Entry {
+            id: hyprforge_clipboard::EntryId::of(&content),
+            content,
+            copied_at: 0,
+            pinned: false,
+        }
     }
 
     #[test]

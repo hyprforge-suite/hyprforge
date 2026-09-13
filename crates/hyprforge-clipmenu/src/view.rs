@@ -24,6 +24,7 @@ pub fn view<'a, Message, Renderer>(
     model: &'a Model,
     theme: &'a Theme,
     thumbnails: &mut thumbnail::Cache,
+    now: u64,
 ) -> Element<'a, Message, iced_widget::Theme, Renderer>
 where
     Message: 'a,
@@ -45,25 +46,50 @@ where
     // Copied out by value for the same reason the row's colours are: the
     // style closure outlives the borrow of `theme` this call holds.
     let root_background = theme.surfaces.root;
-    let popup_border = theme.surfaces.card_border;
+    // The accent, not `card_border` — the popup's own outline is meant
+    // to read, not just separate it from the desktop behind it.
+    let popup_border = theme.accent;
     let popup_radius = corner_radius(theme);
 
-    let header: Element<'a, Message, iced_widget::Theme, Renderer> = if model.filter_text().is_empty()
+    // A failed pin/unpin takes over this same fixed-height slot rather
+    // than adding a banner above the rows: `geometry::RowLayout` derives
+    // where the first row starts from `header_height` alone, so growing
+    // the header area by an extra element would move every row down on
+    // screen without `RowLayout::row_at` knowing anything changed —
+    // exactly the "hit-test disagrees with what was drawn" failure
+    // CLAUDE.md warns about. Reusing the header's own slot means the
+    // notice can appear and clear (see `Model::pin_notice`'s doc — any
+    // other action clears it) without the row geometry ever moving.
+    let header_inner: Element<'a, Message, iced_widget::Theme, Renderer> = if let Some(notice) =
+        model.pin_notice()
     {
-        text("Type to filter")
-            .size(theme.font_size * 0.85)
-            .height(Length::Fixed(header_text_height as f32))
-            .wrapping(Wrapping::None)
-            .color(dim_color)
-            .into()
+        text(notice.to_string()).size(theme.font_size * 0.85).wrapping(Wrapping::None).color(to_iced(theme.error)).into()
+    } else if model.filter_text().is_empty() {
+        text("Type to filter").size(theme.font_size * 0.85).wrapping(Wrapping::None).color(dim_color).into()
     } else {
-        text(model.filter_text().to_string())
-            .size(theme.font_size * 0.85)
-            .height(Length::Fixed(header_text_height as f32))
-            .wrapping(Wrapping::None)
-            .color(text_color)
-            .into()
+        text(model.filter_text().to_string()).size(theme.font_size * 0.85).wrapping(Wrapping::None).color(text_color).into()
     };
+    // A search field, not a plain line of text — the whole reason this
+    // is a `container` around the text rather than the text itself:
+    // `header_height` (and therefore where the first row starts) is
+    // untouched, since the container's own height is fixed to exactly
+    // `header_text_height`, the same number the text used to carry
+    // directly. Only the horizontal padding and the visible field
+    // (background plus an accent outline) are new.
+    let field_background = theme.surfaces.card;
+    let field_border = theme.accent;
+    let field_radius = corner_radius(theme).min((header_text_height / 2.0) as f32);
+    let header: Element<'a, Message, iced_widget::Theme, Renderer> = container(header_inner)
+        .width(Length::Fill)
+        .height(Length::Fixed(header_text_height as f32))
+        .padding(Padding { top: 0.0, right: 8.0, bottom: 0.0, left: 8.0 })
+        .align_y(iced_runtime::core::alignment::Vertical::Center)
+        .style(move |_: &iced_widget::Theme| container::Style {
+            background: Some(to_iced(field_background).into()),
+            border: iced_runtime::core::Border { radius: field_radius.into(), width: 1.0, color: to_iced(field_border) },
+            ..Default::default()
+        })
+        .into();
 
     let body: Element<'a, Message, iced_widget::Theme, Renderer> = match model.history() {
         // Never collapse "could not be read" into "there is nothing
@@ -90,7 +116,9 @@ where
                 let window = &filtered[range.clone()];
                 let rows = range
                     .zip(window.iter())
-                    .map(|(index, entry)| entry_row(entry, index == selected, theme, &layout, thumbnails))
+                    .map(|(index, entry)| {
+                        entry_row(entry, index == selected, theme, &layout, thumbnails, now)
+                    })
                     .collect::<Vec<_>>();
                 column(rows).spacing(RowLayout::ROW_SPACING as f32).into()
             }
@@ -137,6 +165,46 @@ fn corner_radius(theme: &Theme) -> f32 {
     theme.rounding.min(MAX_ROUNDING) as f32
 }
 
+/// A short, glanceable age for a copy, both `now` and `copied_at` in
+/// seconds since the Unix epoch — the same unit `Entry::copied_at` is
+/// stored in.
+///
+/// The vocabulary is deliberately narrow: "now" under a minute old, then
+/// whole minutes, hours, or days. A clipboard history is skimmed, not
+/// read for precision — telling "the thing I just copied" apart from
+/// "the thing from this morning" needs a category, not a stopwatch, and
+/// a narrower vocabulary is also a narrower thing for a translator or a
+/// future reader to get wrong.
+///
+/// `now.saturating_sub(copied_at)` is what keeps this from ever
+/// underflowing. A `u64` subtraction that went negative would wrap to a
+/// number near `u64::MAX` instead of panicking, which would silently
+/// print an age of several hundred billion years — so the saturating
+/// subtraction is not just tidiness, it is what turns two different real
+/// failure modes into the same harmless "now": a `copied_at` that is
+/// genuinely in the future (a clock that jumped backward between the
+/// daemon recording the copy and this popup drawing it), and a `now`
+/// that is itself behind `copied_at` for the same reason from the other
+/// side. Both read as "just copied" rather than as an error, which is
+/// the least surprising thing to show for a clock glitch neither side
+/// caused.
+fn relative_age(now: u64, copied_at: u64) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+
+    let elapsed = now.saturating_sub(copied_at);
+    if elapsed < MINUTE {
+        "now".to_string()
+    } else if elapsed < HOUR {
+        format!("{}m", elapsed / MINUTE)
+    } else if elapsed < DAY {
+        format!("{}h", elapsed / HOUR)
+    } else {
+        format!("{}d", elapsed / DAY)
+    }
+}
+
 fn message<'a, Message, Renderer>(
     text_value: &str,
     color: iced_runtime::core::Color,
@@ -158,6 +226,7 @@ fn entry_row<'a, Message, Renderer>(
     theme: &Theme,
     layout: &RowLayout,
     thumbnails: &mut thumbnail::Cache,
+    now: u64,
 ) -> Element<'a, Message, iced_widget::Theme, Renderer>
 where
     Message: 'a,
@@ -182,7 +251,7 @@ where
         .color(text_color)
         .into();
 
-    let content: Element<'a, Message, iced_widget::Theme, Renderer> = match &entry.content {
+    let preview: Element<'a, Message, iced_widget::Theme, Renderer> = match &entry.content {
         // Only entries actually built into a row (see
         // `Model::visible_range`) ever reach `thumbnails.get`, so a
         // history of hundreds of images costs nothing until scrolled
@@ -202,15 +271,79 @@ where
         },
         Content::Text(_) => label,
     };
+    // Fixed to `Length::Fill` rather than left to shrink to the text's
+    // own width: everything after it (the pin toggle, the time label) is
+    // positioned at a fixed offset from the row's *right* edge, and
+    // `geometry::RowLayout::hit_test` computes that same offset
+    // independently of whatever this widget tree actually measures out
+    // to. If the preview were free to grow with an unusually long line,
+    // it could push the pin toggle somewhere `hit_test` does not expect
+    // it — precisely the "drawn" and "hit-tested" positions disagreeing
+    // that caused the original bug this whole layout exists to avoid.
+    let preview: Element<'a, Message, iced_widget::Theme, Renderer> = container(preview).width(Length::Fill).into();
+
+    // The pin toggle: a small round indicator, filled with the accent
+    // colour when pinned and merely outlined in it otherwise — readable
+    // at a glance, and its own click target (see `surface::pointer_click`
+    // and `geometry::RowLayout::hit_test`), not just the F2 keybind's
+    // visual echo. Fixed-size for the same reason the thumbnail is: a
+    // size read back from the renderer could disagree with what
+    // `hit_test` was told to expect.
+    let pinned = entry.pinned;
+    let pin_color = if pinned { to_iced(theme.accent) } else { to_iced(theme.surfaces.text_dim) };
+    let pin_size = layout.pin_size as f32;
+    let pin_toggle: Element<'a, Message, iced_widget::Theme, Renderer> = container(Space::new())
+        .width(Length::Fixed(pin_size))
+        .height(Length::Fixed(pin_size))
+        .style(move |_: &iced_widget::Theme| container::Style {
+            background: if pinned { Some(pin_color.into()) } else { None },
+            border: iced_runtime::core::Border { radius: (pin_size / 2.0).into(), width: 1.5, color: pin_color },
+            ..Default::default()
+        })
+        .into();
+
+    // The age sits at the row's right-hand end, in its own fixed-width
+    // box for the same reason the pin toggle needs one: `hit_test`
+    // computes this label's left edge to know where the pin toggle's
+    // own box ends, so its width has to be a number both sides agree on
+    // rather than whatever `relative_age`'s string happens to measure.
+    let age_color = to_iced(theme.surfaces.text_dim);
+    let age_label: Element<'a, Message, iced_widget::Theme, Renderer> = text(relative_age(now, entry.copied_at))
+        .size(theme.font_size * 0.75)
+        .wrapping(Wrapping::None)
+        .color(age_color)
+        .into();
+    let age_box: Element<'a, Message, iced_widget::Theme, Renderer> = container(age_label)
+        .width(Length::Fixed(layout.time_width as f32))
+        .align_x(iced_runtime::core::alignment::Horizontal::Right)
+        .into();
+
+    // Left to right: the preview, the pin toggle, the time — exactly the
+    // order `geometry::RowLayout::hit_test` assumes when it works
+    // backward from the row's right edge.
+    let content: Element<'a, Message, iced_widget::Theme, Renderer> = row![
+        preview,
+        Space::new().width(RowLayout::PIN_GAP as f32),
+        pin_toggle,
+        Space::new().width(RowLayout::PIN_GAP as f32),
+        age_box,
+    ]
+    .align_y(iced_runtime::core::alignment::Vertical::Center)
+    .into();
 
     // Copied out of `theme` as plain `Color`s rather than captured by
     // reference: the style closure below has to be `'static`-ish (bound
     // by `'a`, same as the `Element` it ends up in), and `theme` itself
     // only ever borrows for the length of one `view` call.
     let row_background = to_iced(if selected { theme.surfaces.row } else { theme.surfaces.card });
-    // The accent, not `card_border`: this border only exists when the row
-    // is selected, so it is the selection indicator rather than an edge.
-    // The popup's own outline is the one that takes `card_border`.
+    // The accent, not `card_border`: this border is a selection
+    // indicator rather than an edge — the popup's own outline is the one
+    // that takes `card_border`. Pinning used to borrow this same border
+    // at a thinner width, but now that the pin toggle itself shows
+    // pinned-or-not (filled versus outlined, see `pin_toggle` above) that
+    // reads as redundant clutter rather than a second signal — CLAUDE.md's
+    // "must look different" is satisfied by the toggle alone now, so this
+    // border is selection-only.
     let border_color = to_iced(theme.accent);
     let border_width = if selected { 1.5 } else { 0.0 };
     // Never more than half the row's height. A radius larger than that
@@ -276,5 +409,49 @@ mod tests {
         let radius = corner_radius(&theme);
         assert!(radius.is_finite());
         assert!(radius <= 64.0, "got {radius}");
+    }
+
+    // --- `relative_age`: the vocabulary and the arithmetic behind it.
+
+    #[test]
+    fn anything_copied_less_than_a_minute_ago_reads_as_now() {
+        assert_eq!(relative_age(1_000, 1_000), "now", "copied this instant");
+        assert_eq!(relative_age(1_000, 950), "now", "copied 50 seconds ago");
+    }
+
+    #[test]
+    fn minutes_hours_and_days_use_the_narrow_vocabulary() {
+        assert_eq!(relative_age(1_000 + 5 * 60, 1_000), "5m");
+        assert_eq!(relative_age(1_000 + 59 * 60, 1_000), "59m");
+        assert_eq!(relative_age(1_000 + 2 * 3600, 1_000), "2h");
+        assert_eq!(relative_age(1_000 + 23 * 3600, 1_000), "23h");
+        assert_eq!(relative_age(1_000 + 3 * 86_400, 1_000), "3d");
+    }
+
+    /// The boundary between two units lands on the unit that just
+    /// started, not the one that just ended — exactly 60 seconds is
+    /// "1m", not "60s" and not "now".
+    #[test]
+    fn a_boundary_belongs_to_the_unit_it_just_entered() {
+        assert_eq!(relative_age(1_060, 1_000), "1m");
+        assert_eq!(relative_age(1_000 + 3600, 1_000), "1h");
+        assert_eq!(relative_age(1_000 + 86_400, 1_000), "1d");
+    }
+
+    /// A `copied_at` in the future — a clock that jumped backward
+    /// between the daemon recording the copy and this popup drawing it
+    /// — must read as "now" rather than underflow the subtraction.
+    #[test]
+    fn a_copied_at_in_the_future_reads_as_now_rather_than_underflowing() {
+        assert_eq!(relative_age(1_000, 5_000), "now");
+    }
+
+    /// The same clock-jump hazard from the other side: `now` itself
+    /// behind where it should be. Still must not underflow or panic.
+    #[test]
+    fn now_is_saturating_even_at_the_extremes() {
+        assert_eq!(relative_age(0, u64::MAX), "now");
+        let age = relative_age(u64::MAX, 0);
+        assert!(age.ends_with('d'), "got {age:?}");
     }
 }

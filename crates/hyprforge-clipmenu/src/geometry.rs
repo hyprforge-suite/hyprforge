@@ -58,25 +58,45 @@ pub fn monitor_at(monitors: &[Monitor], global: Point) -> Option<&Monitor> {
     monitors.iter().find(|m| m.contains(global))
 }
 
-/// Clamps a popup's top-left corner so the whole popup stays on screen.
+/// Places a popup relative to the cursor the way a context menu does:
+/// prefer opening down-and-right of the cursor, flip to the opposite
+/// side on whichever axis does not have room, and clamp into the
+/// monitor only as a last resort when neither direction fits.
 ///
 /// `cursor` and `monitor` are both in the *same* monitor-local logical
 /// space (the origin has already been subtracted — see `main.rs`). The
 /// popup is anchored top-left in the layer-shell sense, so this returns
 /// the margins to hand the compositor directly.
 ///
-/// The rule is: put the top-left corner at the cursor when there is
-/// room; otherwise slide the corner back just far enough that the
-/// popup's far edge lands on the monitor's edge instead of past it.
-/// Never slides past 0 in either axis — a popup taller or wider than the
-/// whole monitor is clamped to the top-left corner rather than pushed
-/// negative, which would put it off the *opposite* edge instead.
+/// The previous rule here was a plain clamp: slide the popup's corner
+/// back just far enough that its far edge landed on the monitor's edge.
+/// That kept the whole popup on screen, but near the bottom or right
+/// edge it drew the popup *over* the cursor, with the pointer somewhere
+/// in the middle of it — exactly what a context menu does not do; a
+/// context menu flips to the other side of the point that opened it
+/// instead. [`flip_axis`] is that rule, applied to each axis
+/// independently.
 pub fn clamp_popup(cursor: Point, popup: Size, monitor: Size) -> Point {
-    let max_x = (monitor.width - popup.width).max(0.0);
-    let max_y = (monitor.height - popup.height).max(0.0);
     Point {
-        x: cursor.x.clamp(0.0, max_x),
-        y: cursor.y.clamp(0.0, max_y),
+        x: flip_axis(cursor.x, popup.width, monitor.width),
+        y: flip_axis(cursor.y, popup.height, monitor.height),
+    }
+}
+
+/// One axis of [`clamp_popup`]'s flip-then-clamp rule: prefer the
+/// forward direction (right, or down) from `point`, flip to the
+/// backward direction when the forward one does not fit the whole
+/// `size`, and clamp into `[0, extent - size]` only when neither
+/// direction has room for it — the same "never push past the opposite
+/// edge" guarantee the old plain clamp had, kept as the fallback rather
+/// than the whole rule.
+fn flip_axis(point: f64, size: f64, extent: f64) -> f64 {
+    if point + size <= extent {
+        point
+    } else if point - size >= 0.0 {
+        point - size
+    } else {
+        point.clamp(0.0, (extent - size).max(0.0))
     }
 }
 
@@ -111,6 +131,16 @@ pub struct RowLayout {
     pub row_height: f64,
     /// Vertical gap between two rows — `column::spacing` in `view::view`.
     pub row_spacing: f64,
+    /// Fixed width of the relative-age label at a row's right edge —
+    /// `view::entry_row`'s `age_box` container. Fixed (not left to the
+    /// text's own measured width) for the same reason the pin toggle's
+    /// size is fixed: whatever sits at a deterministic offset from the
+    /// row's right edge has to be at a pixel [`Self::hit_test`] can
+    /// compute without asking iced how wide a string turned out to be.
+    pub time_width: f64,
+    /// Side length of the pin toggle — `view::entry_row`'s `pin_toggle`
+    /// container. Same reasoning as `time_width`.
+    pub pin_size: f64,
 }
 
 impl RowLayout {
@@ -135,6 +165,11 @@ impl RowLayout {
     /// tall enough for whichever of a thumbnail or a line of text is
     /// bigger, and this module is the one place that arithmetic happens.
     pub const THUMBNAIL_SIZE: f64 = 32.0;
+    /// Gap on either side of the pin toggle, between it and the preview
+    /// on one side and the time label on the other —
+    /// `view::entry_row`'s two `Space::new().width(RowLayout::PIN_GAP)`
+    /// calls.
+    pub const PIN_GAP: f64 = 8.0;
 
     /// Derives the layout from the theme's font size, the one variable
     /// both sides of the hit-test already agree on.
@@ -158,6 +193,17 @@ impl RowLayout {
             header_height: line(font_size * 0.85) + Self::HEADER_GAP,
             row_height: content_height + Self::ROW_PADDING * 2.0,
             row_spacing: Self::ROW_SPACING,
+            // Wide enough for the longest strings `view::relative_age`
+            // actually prints ("59m", "23h", "6d", …) at the label's own
+            // 0.75x size, with a little slack — scaled with the font so
+            // a bigger theme doesn't clip its own time label.
+            time_width: (font_size * 2.0).max(28.0),
+            // A small round toggle, big enough to read pinned-or-not at
+            // a glance and to hit with a pointer, but never so big it
+            // competes with the preview text for space. Clamped rather
+            // than scaled without bound, the same reasoning
+            // `sane_font_size` bounds the font itself for.
+            pin_size: (font_size * 1.1).clamp(14.0, 22.0),
         }
     }
 
@@ -171,6 +217,30 @@ impl RowLayout {
     /// between two rows, or past the last row that is actually on
     /// screen. All three are "do nothing", the same as a keyboard press
     /// this popup does not recognise.
+    /// How many rows actually fit in a popup `height` tall.
+    ///
+    /// The inverse of [`Self::row_at`], and it has to stay that way. The
+    /// popup used to show a fixed twenty-four rows regardless of its own
+    /// height: at a 44px row in a 420px popup that laid out 1104px of
+    /// rows inside a surface a quarter that size, so the rows could not
+    /// possibly be where `row_at` computed them, and the highlight
+    /// landed nowhere near the pointer. Rows that are drawn and rows
+    /// that are hit-tested have to be the same rows, and the count is
+    /// as much a part of that as the positions are.
+    pub fn rows_that_fit(&self, height: f64) -> usize {
+        let available = height - self.padding * 2.0 - self.header_height;
+        if available <= 0.0 {
+            return 0;
+        }
+        let stride = self.row_height + self.row_spacing;
+        if stride <= 0.0 {
+            return 0;
+        }
+        // The last row needs no spacing under it, so a popup with room
+        // for exactly N rows and N-1 gaps fits N.
+        (((available + self.row_spacing) / stride).floor() as usize).max(1)
+    }
+
     pub fn row_at(&self, local_y: f64, visible_count: usize) -> Option<usize> {
         if visible_count == 0 {
             return None;
@@ -195,6 +265,59 @@ impl RowLayout {
         }
         Some(index)
     }
+
+    /// *What*, not just *which row*, a pointer position lands on: the
+    /// pin toggle at a row's right edge, or the rest of that row (the
+    /// preview, its padding, and the time label — everywhere a click
+    /// means "choose", not "pin").
+    ///
+    /// `popup_width` is the surface's actual current width (`main.rs`
+    /// keeps this fixed, but nothing here assumes that) — needed because
+    /// the pin toggle and the time label are positioned from the row's
+    /// *right* edge, not its left, so their pixel offsets move with the
+    /// popup's width the same way `view::entry_row`'s layout does. That
+    /// positioning has to match `view.rs`'s exactly, the same discipline
+    /// `row_height` already keeps with `row_at`: the pin's rectangle
+    /// here and the pin's drawn rectangle in `view::entry_row` are
+    /// computed from the same four numbers (`padding`, `ROW_PADDING`,
+    /// `time_width`, `PIN_GAP`, `pin_size`) for exactly that reason — two
+    /// separate arithmetic expressions computing "the same" rectangle
+    /// is how the original click-does-nothing bug happened once already.
+    pub fn hit_test(&self, popup_width: f64, position: (f64, f64), visible_count: usize) -> Option<Hit> {
+        let index = self.row_at(position.1, visible_count)?;
+        let content_right = popup_width - self.padding - Self::ROW_PADDING;
+        let time_left = content_right - self.time_width;
+        let pin_right = time_left - Self::PIN_GAP;
+        let pin_left = pin_right - self.pin_size;
+        if position.0 >= pin_left && position.0 <= pin_right {
+            Some(Hit::Pin(index))
+        } else {
+            Some(Hit::Row(index))
+        }
+    }
+}
+
+/// What a pointer position resolved to, from [`RowLayout::hit_test`] —
+/// which row, and whether it was the pin toggle or the rest of the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hit {
+    /// Anywhere on the row except the pin toggle — the preview, its
+    /// padding, or the time label. A click here chooses the row.
+    Row(usize),
+    /// The pin toggle. A click here pins or unpins the row instead of
+    /// choosing it.
+    Pin(usize),
+}
+
+impl Hit {
+    /// The row index, regardless of which part of it was hit — what a
+    /// caller wants to move the selection to before acting on whichever
+    /// variant this is.
+    pub fn row(self) -> usize {
+        match self {
+            Hit::Row(index) | Hit::Pin(index) => index,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -212,20 +335,56 @@ mod tests {
 
     #[test]
     fn the_popup_flips_left_off_the_right_edge() {
-        // Cursor near the right edge: the popup's right edge must not
-        // pass the monitor's right edge.
+        // No room to the right of the cursor: the popup opens to the
+        // left instead, so its right edge lands exactly at the cursor —
+        // not slid along the screen edge with the cursor buried in the
+        // middle of it, which is what a plain clamp used to draw here.
         let cursor = Point { x: 1550.0, y: 312.0 };
         let placed = clamp_popup(cursor, POPUP, MONITOR);
-        assert_eq!(placed.x, MONITOR.width - POPUP.width);
+        assert_eq!(placed.x, cursor.x - POPUP.width, "must flip left, not slide to the edge");
+        assert_eq!(placed.x + POPUP.width, cursor.x, "the popup's right edge must land at the cursor");
         assert!(placed.x + POPUP.width <= MONITOR.width);
     }
 
     #[test]
     fn the_popup_flips_up_off_the_bottom_edge() {
+        // Same rule on the other axis: no room below the cursor, so the
+        // popup opens upward with its bottom edge at the cursor.
         let cursor = Point { x: 753.0, y: 980.0 };
         let placed = clamp_popup(cursor, POPUP, MONITOR);
-        assert_eq!(placed.y, MONITOR.height - POPUP.height);
+        assert_eq!(placed.y, cursor.y - POPUP.height, "must flip up, not slide to the edge");
+        assert_eq!(placed.y + POPUP.height, cursor.y, "the popup's bottom edge must land at the cursor");
         assert!(placed.y + POPUP.height <= MONITOR.height);
+    }
+
+    /// Both axes flip at once in a corner — the case a context menu
+    /// handles by opening up-and-left, which is exactly what a user
+    /// expects and exactly what a plain clamp got wrong (it would have
+    /// drawn the popup over the cursor in both directions at once).
+    #[test]
+    fn the_popup_flips_both_axes_in_the_bottom_right_corner() {
+        // The real machine this was found on: a 2560x1600 monitor at
+        // scale 1.6 reports a 1600x1000 logical size — the exact
+        // `MONITOR` this test module already uses.
+        let cursor = Point { x: 1550.0, y: 980.0 };
+        let placed = clamp_popup(cursor, POPUP, MONITOR);
+        assert_eq!(placed.x, cursor.x - POPUP.width);
+        assert_eq!(placed.y, cursor.y - POPUP.height);
+        assert!(placed.x + POPUP.width <= MONITOR.width);
+        assert!(placed.y + POPUP.height <= MONITOR.height);
+    }
+
+    /// A popup wider than the monitor cannot fit either direction on
+    /// that axis alone, while the other axis still flips normally — the
+    /// mixed case a monitor-sized-only test (using a popup bigger on
+    /// both axes) cannot exercise.
+    #[test]
+    fn an_axis_with_room_neither_way_clamps_while_the_other_still_flips() {
+        let too_wide = Size { width: MONITOR.width + 100.0, height: POPUP.height };
+        let cursor = Point { x: 900.0, y: 980.0 };
+        let placed = clamp_popup(cursor, too_wide, MONITOR);
+        assert_eq!(placed.x, 0.0, "neither direction fits, so the wide axis clamps");
+        assert_eq!(placed.y, cursor.y - POPUP.height, "the other axis still flips normally");
     }
 
     #[test]
@@ -356,6 +515,78 @@ mod tests {
     /// problem could have introduced for image rows if the row height
     /// were derived from the font alone.
     #[test]
+    fn flip_axis_prefers_the_forward_direction_when_it_fits() {
+        assert_eq!(flip_axis(100.0, 50.0, 1000.0), 100.0);
+    }
+
+    #[test]
+    fn flip_axis_flips_backward_when_the_forward_direction_does_not_fit() {
+        // 980 + 50 = 1030 > 1000, so it must flip: 980 - 50 = 930.
+        assert_eq!(flip_axis(980.0, 50.0, 1000.0), 930.0);
+    }
+
+    #[test]
+    fn flip_axis_clamps_only_when_neither_direction_fits() {
+        // A 2000-wide span can never fit in a 1000-wide extent either
+        // way; this is the fallback, not the first choice.
+        assert_eq!(flip_axis(500.0, 2000.0, 1000.0), 0.0);
+    }
+
+    // --- `RowLayout::hit_test`: which part of a row a pointer position
+    // resolved to — the pin toggle, or the rest of the row (which
+    // chooses). These are the tests that would have caught the original
+    // "clicking does nothing" bug: a click has to land on the same
+    // rectangle this computes and `view::entry_row` draws.
+
+    const HIT_POPUP_WIDTH: f64 = 360.0;
+
+    #[test]
+    fn a_click_on_the_pin_toggle_hits_the_pin_not_the_row() {
+        let layout = RowLayout::for_font_size(15.0);
+        let first_row_top = layout.padding + layout.header_height;
+        let row_middle_y = first_row_top + layout.row_height / 2.0;
+        let content_right = HIT_POPUP_WIDTH - layout.padding - RowLayout::ROW_PADDING;
+        let pin_right = content_right - layout.time_width - RowLayout::PIN_GAP;
+        let pin_left = pin_right - layout.pin_size;
+        let pin_center_x = (pin_left + pin_right) / 2.0;
+        assert_eq!(
+            layout.hit_test(HIT_POPUP_WIDTH, (pin_center_x, row_middle_y), 5),
+            Some(Hit::Pin(0))
+        );
+    }
+
+    #[test]
+    fn a_click_on_the_preview_hits_the_row_not_the_pin() {
+        let layout = RowLayout::for_font_size(15.0);
+        let first_row_top = layout.padding + layout.header_height;
+        let row_middle_y = first_row_top + layout.row_height / 2.0;
+        assert_eq!(
+            layout.hit_test(HIT_POPUP_WIDTH, (layout.padding + 4.0, row_middle_y), 5),
+            Some(Hit::Row(0))
+        );
+    }
+
+    #[test]
+    fn a_click_in_the_gap_between_rows_hits_neither() {
+        let layout = RowLayout::for_font_size(15.0);
+        let first_row_top = layout.padding + layout.header_height;
+        let stride = layout.row_height + layout.row_spacing;
+        let gap_middle = first_row_top + layout.row_height + layout.row_spacing / 2.0;
+        assert!(gap_middle < first_row_top + stride);
+        assert_eq!(layout.hit_test(HIT_POPUP_WIDTH, (layout.padding + 4.0, gap_middle), 5), None);
+    }
+
+    #[test]
+    fn hit_test_reports_the_row_a_click_landed_on_regardless_of_which_part_it_hit() {
+        let layout = RowLayout::for_font_size(15.0);
+        let stride = layout.row_height + layout.row_spacing;
+        let first_row_top = layout.padding + layout.header_height;
+        let second_row_middle = first_row_top + stride + layout.row_height / 2.0;
+        let hit = layout.hit_test(HIT_POPUP_WIDTH, (layout.padding + 4.0, second_row_middle), 5).unwrap();
+        assert_eq!(hit.row(), 1);
+    }
+
+    #[test]
     fn a_small_font_still_leaves_room_for_the_thumbnail() {
         let layout = RowLayout::for_font_size(10.0);
         assert!(
@@ -364,5 +595,49 @@ mod tests {
             layout.row_height,
             RowLayout::THUMBNAIL_SIZE,
         );
+    }
+}
+
+#[cfg(test)]
+mod fit_tests {
+    use super::*;
+
+    /// The bug: a fixed twenty-four-row window in a 420px popup laid out
+    /// more than twice the popup's height in rows, so nothing the
+    /// pointer touched was where `row_at` said it was.
+    #[test]
+    fn the_row_count_and_the_popup_height_describe_the_same_rows() {
+        let layout = RowLayout::for_font_size(14.0);
+        let height = 420.0;
+        let fits = layout.rows_that_fit(height);
+
+        // Every row it claims fits must hit-test inside the popup.
+        let stride = layout.row_height + layout.row_spacing;
+        let last_row_bottom =
+            layout.padding + layout.header_height + (fits as f64 - 1.0) * stride + layout.row_height;
+        assert!(
+            last_row_bottom <= height - layout.padding,
+            "{fits} rows need {last_row_bottom}px inside {height}px"
+        );
+
+        // And the row after it must not, or we are leaving space unused.
+        let next_bottom = last_row_bottom + stride;
+        assert!(next_bottom > height - layout.padding, "one more row would still have fitted");
+    }
+
+    /// A popup with no room left after its own padding and header shows
+    /// nothing, rather than dividing by a stride it has no space for.
+    /// A popup with *some* room but less than a whole row shows that one
+    /// row clipped — the alternative is an empty popup on a screen that
+    /// plainly has a few pixels to spare, and `row_at` agrees with it
+    /// either way, which is the property that matters.
+    #[test]
+    fn a_popup_too_short_for_a_row_shows_nothing_rather_than_dividing_by_no_space() {
+        let layout = RowLayout::for_font_size(14.0);
+        assert_eq!(layout.rows_that_fit(0.0), 0);
+        assert_eq!(layout.rows_that_fit(1.0), 0, "1px is not room for a row");
+
+        let barely = layout.padding * 2.0 + layout.header_height + 5.0;
+        assert_eq!(layout.rows_that_fit(barely), 1, "a few pixels shows one clipped row");
     }
 }

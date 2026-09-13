@@ -19,7 +19,7 @@
 //! under the 36-megapixel image that produced a 296MB decode. Decoded
 //! RGBA8 at the cap is 16,777,216 * 4 bytes = 64MB for one image; the
 //! popup only ever builds a handle for rows in the visible window (see
-//! `model::VISIBLE_WINDOW`), so the worst case is that window's worth of
+//! `model::Model::set_window`), so the worst case is that window's worth of
 //! 64MB images, not the whole history's.
 
 use hyprforge_clipboard::{Content, Entry};

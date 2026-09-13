@@ -9,12 +9,13 @@
 //! only needs one layer-shell surface, positioned once, with no per-output
 //! fan-out and no PAM underneath it.
 
-use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
+use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState, SurfaceData};
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
 use smithay_client_toolkit::seat::keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers};
 use smithay_client_toolkit::seat::pointer::{
-    PointerEvent, PointerEventKind, PointerHandler, BTN_LEFT,
+    CursorIcon, PointerData, PointerEvent, PointerEventKind, PointerHandler, ThemeSpec,
+    ThemedPointer, BTN_LEFT,
 };
 use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
 use smithay_client_toolkit::shell::wlr_layer::{
@@ -34,8 +35,9 @@ use wayland_client::protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_s
 use wayland_client::{Connection, QueueHandle};
 
 use crate::chooser::Chooser;
-use crate::geometry::RowLayout;
+use crate::geometry::{Hit, RowLayout};
 use crate::model::Model;
+use crate::pinner::Pinner;
 use crate::thumbnail;
 use crate::view;
 use hyprforge_look::Theme;
@@ -107,12 +109,34 @@ pub struct ClipMenu<C: Chooser> {
 
     layer: Option<LayerSurface>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
-    pointer: Option<wl_pointer::WlPointer>,
+    /// A themed pointer rather than a bare `WlPointer`: this is what
+    /// gives rows and the pin toggle a hand cursor. `ThemedPointer` uses
+    /// `wp_cursor_shape_v1` under the hood when the compositor advertises
+    /// it and falls back to a themed software cursor drawn from the
+    /// system's own cursor theme when it does not — see `new_capability`
+    /// for where it is created and why nothing here has to probe for the
+    /// protocol itself.
+    pointer: Option<ThemedPointer<PointerData, SurfaceData>>,
+    /// Cloned from the connection `ClipMenu::run` was handed, so
+    /// `update_cursor` can call `ThemedPointer::set_cursor` (which needs
+    /// a `&Connection`) from inside pointer event handling without
+    /// threading one through every call site. Cheap — `Connection`'s own
+    /// `clone` is the same handle to the same socket, not a new one.
+    connection: Connection,
 
     placement: Placement,
     model: Model,
     thumbnails: thumbnail::Cache,
     chooser: C,
+    /// Boxed rather than a second generic parameter alongside `C`: this
+    /// popup has exactly one production `Pinner` (`pinner::Wired`) and
+    /// one mock, both zero-sized or nearly so, called at most once per
+    /// invocation — the dynamic dispatch costs nothing worth avoiding,
+    /// and it keeps every `impl<C: Chooser + 'static> ClipMenu<C>` block
+    /// and `delegate_*!` invocation below from having to grow a second
+    /// type parameter it would otherwise need to thread through all of
+    /// them just for this.
+    pinner: Box<dyn Pinner>,
     theme: Theme,
 
     outcome: Option<Outcome>,
@@ -140,6 +164,7 @@ impl<C: Chooser + 'static> ClipMenu<C> {
         placement: Placement,
         model: Model,
         chooser: C,
+        pinner: impl Pinner + 'static,
         theme: Theme,
     ) -> Result<Outcome, ClipMenuError> {
         let (globals, mut queue) = registry_queue_init(&connection)?;
@@ -160,10 +185,12 @@ impl<C: Chooser + 'static> ClipMenu<C> {
             layer: None,
             keyboard: None,
             pointer: None,
+            connection: connection.clone(),
             placement,
             model,
             thumbnails: thumbnail::Cache::new(),
             chooser,
+            pinner: Box::new(pinner),
             theme: theme.clone(),
             outcome: None,
             dirty: true,
@@ -279,9 +306,23 @@ impl<C: Chooser + 'static> ClipMenu<C> {
             return;
         };
 
+        // Seconds since the epoch, the same unit `Entry::copied_at` is
+        // stored in — computed fresh every frame rather than once at
+        // startup, since a popup can sit open for a while and "now"
+        // read once would make its own rows visibly stop aging. A clock
+        // that cannot be read at all (no realistic way on this machine,
+        // but `SystemTime::now` returning before the epoch is possible
+        // in principle) falls back to `0`, which `view::relative_age`
+        // treats the same as a clock that jumped backward: "now",
+        // never a panic or a nonsense multi-decade age.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
         let size = Size::new(width as f32, height as f32);
         let mut ui = UserInterface::<Nothing, iced_widget::Theme, iced_tiny_skia::Renderer>::build(
-            view::view(&self.model, &self.theme, &mut self.thumbnails),
+            view::view(&self.model, &self.theme, &mut self.thumbnails, now),
             size,
             std::mem::take(&mut self.cache),
             &mut self.renderer,
@@ -327,7 +368,9 @@ impl<C: Chooser + 'static> ClipMenu<C> {
     }
 
     fn key(&mut self, keysym: Keysym, utf8: Option<String>) {
-        if let Some(outcome) = dispatch_key(&mut self.model, &self.chooser, keysym, utf8) {
+        if let Some(outcome) =
+            dispatch_key(&mut self.model, &self.chooser, self.pinner.as_ref(), keysym, utf8)
+        {
             self.outcome = Some(outcome);
         }
         self.mark_dirty();
@@ -342,26 +385,73 @@ impl<C: Chooser + 'static> ClipMenu<C> {
     /// Landing outside every row (the header, the padding, a gap between
     /// rows) does nothing rather than clearing the selection — the same
     /// reasoning `move_selection` uses at the ends of the list: leaving
-    /// via the header does not mean "select nothing".
+    /// via the header does not mean "select nothing". Either way, this is
+    /// also where the cursor shape is kept in sync — see
+    /// [`Self::update_cursor`] — since every `Enter` and `Motion` event
+    /// routes through here (see `PointerHandler::pointer_frame` below).
     fn pointer_move(&mut self, position: (f64, f64)) {
         let layout = RowLayout::for_font_size(self.theme.font_size);
         let range = self.model.visible_range();
-        if let Some(row) = layout.row_at(position.1, range.len()) {
-            dispatch_action(&mut self.model, &self.chooser, Action::Select(range.start + row));
+        let row = layout.row_at(position.1, range.len());
+        if let Some(row) = row {
+            dispatch_action(
+                &mut self.model,
+                &self.chooser,
+                self.pinner.as_ref(),
+                Action::Select(range.start + row),
+            );
             self.mark_dirty();
         }
+        self.update_cursor(row.is_some());
     }
 
-    /// The pointer clicked at `position` — chosen through exactly the
-    /// same [`Action::Choose`] Enter goes through, so a click cannot pick
-    /// a different row than whatever last got highlighted by
-    /// [`Self::pointer_move`]. Re-hit-testing at the click position first
-    /// (rather than trusting the last hover) is what keeps a click that
-    /// lands between a hover event and a redraw honest about which row it
-    /// is actually over.
+    /// Sets the pointer to a hand cursor whenever it is over a row —
+    /// whether that row's preview (which chooses) or its pin toggle
+    /// (which pins) — and back to the default arrow everywhere else in
+    /// the popup (the header, the padding between rows and the popup's
+    /// own edge). Both targets get the same cursor: both are things a
+    /// click on this row does something to, and CLAUDE.md's ask was that
+    /// a row read as clickable at all, not that each kind of click look
+    /// different from the other.
+    ///
+    /// Errors from [`ThemedPointer::set_cursor`] (most commonly a missing
+    /// enter serial, in the gap before this popup's first pointer event
+    /// has actually arrived) are not worth reporting — a wrong cursor for
+    /// one frame is not a failure the user needs told about, and nothing
+    /// here depends on the request having landed.
+    fn update_cursor(&self, over_row: bool) {
+        let Some(pointer) = &self.pointer else { return };
+        let icon = if over_row { CursorIcon::Pointer } else { CursorIcon::Default };
+        let _ = pointer.set_cursor(&self.connection, icon);
+    }
+
+    /// The pointer clicked at `position`. Re-hit-tests at the click
+    /// position first (rather than trusting the last hover) — the same
+    /// reasoning the previous version of this method gave for calling
+    /// `pointer_move` before acting: a click that lands between a hover
+    /// event and a redraw must still be honest about which row, and now
+    /// which *part* of that row, it is actually over.
+    ///
+    /// [`geometry::RowLayout::hit_test`] answers that "which part": a hit
+    /// on the pin toggle selects the row and toggles its pin — the exact
+    /// same [`Action::TogglePin`] F2 already sends, never a second route
+    /// to pinning — and a hit anywhere else on the row selects and
+    /// chooses it, same as before this row grew a second click target.
     fn pointer_click(&mut self, position: (f64, f64)) {
-        self.pointer_move(position);
-        if let Some(outcome) = dispatch_action(&mut self.model, &self.chooser, Action::Choose) {
+        let layout = RowLayout::for_font_size(self.theme.font_size);
+        let range = self.model.visible_range();
+        let Some(hit) = layout.hit_test(self.size.0 as f64, position, range.len()) else { return };
+        dispatch_action(
+            &mut self.model,
+            &self.chooser,
+            self.pinner.as_ref(),
+            Action::Select(range.start + hit.row()),
+        );
+        let action = match hit {
+            Hit::Pin(_) => Action::TogglePin,
+            Hit::Row(_) => Action::Choose,
+        };
+        if let Some(outcome) = dispatch_action(&mut self.model, &self.chooser, self.pinner.as_ref(), action) {
             self.outcome = Some(outcome);
         }
         self.mark_dirty();
@@ -374,7 +464,7 @@ impl<C: Chooser + 'static> ClipMenu<C> {
         if rows == 0 {
             return;
         }
-        dispatch_action(&mut self.model, &self.chooser, Action::Move(rows));
+        dispatch_action(&mut self.model, &self.chooser, self.pinner.as_ref(), Action::Move(rows));
         self.mark_dirty();
     }
 }
@@ -460,6 +550,10 @@ enum Action {
     Cancel,
     Backspace,
     Type(char),
+    /// Pin the selected entry if it is not pinned, or unpin it if it
+    /// is — F2, the one keybind this popup has beyond filtering and
+    /// choosing.
+    TogglePin,
 }
 
 /// The one place any [`Action`] takes effect on a [`Model`] and a
@@ -467,7 +561,19 @@ enum Action {
 /// click or a keystroke *means* can be tested without a Wayland
 /// connection — the same split `hyprforge-lock::surface::dispatch_key`
 /// uses for the same reason, generalised here to cover the pointer too.
-fn dispatch_action<C: Chooser>(model: &mut Model, chooser: &C, action: Action) -> Option<Outcome> {
+fn dispatch_action<C: Chooser>(
+    model: &mut Model,
+    chooser: &C,
+    pinner: &dyn Pinner,
+    action: Action,
+) -> Option<Outcome> {
+    // Any action at all supersedes a stale pin notice from an earlier
+    // attempt — see `Model::pin_notice`'s own doc for why this is
+    // cleared this aggressively rather than left to linger until the
+    // next successful pin. `Action::TogglePin` below still gets the
+    // final say: if this new attempt also fails, it sets its own notice
+    // right back.
+    model.set_pin_notice(None);
     match action {
         Action::Cancel => Some(Outcome::Cancelled),
         Action::Choose => {
@@ -503,6 +609,26 @@ fn dispatch_action<C: Chooser>(model: &mut Model, chooser: &C, action: Action) -
             model.type_char(c);
             None
         }
+        Action::TogglePin => {
+            // Nothing selected (an empty filtered list) is nothing to
+            // pin — the same "no-op, not an error" `Action::Choose`
+            // above uses for the same situation.
+            let entry = model.selected_entry()?;
+            let new_pinned = !entry.pinned;
+            match pinner.set_pinned(entry.id.as_str(), new_pinned) {
+                // The daemon is still the only writer of the history
+                // file (see `hyprforge_clipboard::ipc`'s module doc) —
+                // this only updates the popup's own in-memory copy,
+                // once the daemon has already agreed to the change.
+                Ok(()) => model.set_entry_pinned(&entry.id, new_pinned),
+                // Never applied locally on failure: doing so would make
+                // the row look pinned when it is not, on disk or in the
+                // daemon's own memory — exactly the "must not look like
+                // it worked" failure this popup has to avoid.
+                Err(message) => model.set_pin_notice(Some(message)),
+            }
+            None
+        }
     }
 }
 
@@ -515,19 +641,29 @@ fn dispatch_action<C: Chooser>(model: &mut Model, chooser: &C, action: Action) -
 fn dispatch_key<C: Chooser>(
     model: &mut Model,
     chooser: &C,
+    pinner: &dyn Pinner,
     keysym: Keysym,
     utf8: Option<String>,
 ) -> Option<Outcome> {
     match keysym {
-        Keysym::Escape => dispatch_action(model, chooser, Action::Cancel),
-        Keysym::Return | Keysym::KP_Enter => dispatch_action(model, chooser, Action::Choose),
-        Keysym::Up => dispatch_action(model, chooser, Action::Move(-1)),
-        Keysym::Down => dispatch_action(model, chooser, Action::Move(1)),
-        Keysym::BackSpace => dispatch_action(model, chooser, Action::Backspace),
+        Keysym::Escape => dispatch_action(model, chooser, pinner, Action::Cancel),
+        Keysym::Return | Keysym::KP_Enter => dispatch_action(model, chooser, pinner, Action::Choose),
+        Keysym::Up => dispatch_action(model, chooser, pinner, Action::Move(-1)),
+        Keysym::Down => dispatch_action(model, chooser, pinner, Action::Move(1)),
+        Keysym::BackSpace => dispatch_action(model, chooser, pinner, Action::Backspace),
+        // F2 rather than a printable character or a modifier combo:
+        // every printable keystroke already means "append to the
+        // filter" (see the fallback arm below), and modifiers are not
+        // even tracked here (`update_modifiers` is a no-op — see this
+        // file's `KeyboardHandler` impl), so a Ctrl+P-style binding
+        // cannot be recognised without wiring that up. F2 is free,
+        // conventional for "rename/toggle a property of the selected
+        // row" elsewhere, and cannot collide with typing a search term.
+        Keysym::F2 => dispatch_action(model, chooser, pinner, Action::TogglePin),
         _ => {
             if let Some(text) = utf8 {
                 for c in text.chars().filter(|c| !c.is_control()) {
-                    dispatch_action(model, chooser, Action::Type(c));
+                    dispatch_action(model, chooser, pinner, Action::Type(c));
                 }
             }
             None
@@ -694,7 +830,30 @@ impl<C: Chooser + 'static> SeatHandler for ClipMenu<C> {
             self.keyboard = self.seats.get_keyboard(qh, &seat, None).ok();
         }
         if capability == Capability::Pointer && self.pointer.is_none() {
-            self.pointer = self.seats.get_pointer(qh, &seat).ok();
+            // `get_pointer_with_theme` is what makes this a hand cursor
+            // over a row rather than a plain arrow everywhere: it uses
+            // `wp_cursor_shape_v1` when the compositor advertises it and
+            // falls back to a themed software cursor (drawn from the
+            // system's own cursor theme, via `shm`, into its own small
+            // surface here) when the protocol is absent — this crate
+            // never has to check for it itself, and a compositor with
+            // neither just makes `ThemedPointer::set_cursor` return an
+            // error `update_cursor` already ignores, so the popup still
+            // opens and still works with the plain system cursor.
+            let cursor_surface = self.compositor.create_surface(qh);
+            match self.seats.get_pointer_with_theme(
+                qh,
+                &seat,
+                self.shm.wl_shm(),
+                cursor_surface,
+                ThemeSpec::default(),
+            ) {
+                Ok(pointer) => self.pointer = Some(pointer),
+                Err(e) => eprintln!(
+                    "couldn't set up a themed pointer cursor ({e}) — \
+                     clicking still works, just without a hand cursor over a row"
+                ),
+            }
         }
     }
 
@@ -711,9 +870,10 @@ impl<C: Chooser + 'static> SeatHandler for ClipMenu<C> {
             }
         }
         if capability == Capability::Pointer {
-            if let Some(pointer) = self.pointer.take() {
-                pointer.release();
-            }
+            // `ThemedPointer`'s own `Drop` releases the underlying
+            // `wl_pointer` and destroys the cursor surface (and any
+            // cursor-shape device) — nothing left to release by hand.
+            self.pointer = None;
         }
     }
 
@@ -843,6 +1003,7 @@ mod tests {
     use super::*;
     use crate::chooser::mock::MockChooser;
     use crate::model::HistoryState;
+    use crate::pinner::mock::MockPinner;
     use hyprforge_clipboard::{Content, Entry, EntryId};
 
     fn entry(text: &str) -> Entry {
@@ -858,7 +1019,8 @@ mod tests {
     fn escape_cancels_without_choosing_anything() {
         let mut model = model_with(&["a"]);
         let chooser = MockChooser::succeeding();
-        let outcome = dispatch_key(&mut model, &chooser, Keysym::Escape, None);
+        let pinner = MockPinner::succeeding();
+        let outcome = dispatch_key(&mut model, &chooser, &pinner, Keysym::Escape, None);
         assert_eq!(outcome, Some(Outcome::Cancelled));
         assert!(chooser.calls.borrow().is_empty());
     }
@@ -868,7 +1030,8 @@ mod tests {
         let mut model = model_with(&["a", "b"]);
         model.move_selection(1);
         let chooser = MockChooser::succeeding();
-        let outcome = dispatch_key(&mut model, &chooser, Keysym::Return, None);
+        let pinner = MockPinner::succeeding();
+        let outcome = dispatch_key(&mut model, &chooser, &pinner, Keysym::Return, None);
         assert_eq!(outcome, Some(Outcome::Chosen));
         assert_eq!(chooser.calls.borrow().as_slice(), &[EntryId::of(&Content::Text("b".into()))]);
     }
@@ -888,7 +1051,8 @@ mod tests {
     fn choosing_sets_the_clipboard_without_synthesizing_the_paste_yet() {
         let mut model = model_with(&["a"]);
         let chooser = MockChooser::succeeding();
-        let outcome = dispatch_key(&mut model, &chooser, Keysym::Return, None);
+        let pinner = MockPinner::succeeding();
+        let outcome = dispatch_key(&mut model, &chooser, &pinner, Keysym::Return, None);
         assert_eq!(outcome, Some(Outcome::Chosen));
         assert_eq!(chooser.log.borrow().as_slice(), &["set_clipboard"]);
     }
@@ -897,7 +1061,8 @@ mod tests {
     fn enter_with_an_empty_list_does_nothing() {
         let mut model = Model::new(HistoryState::Loaded(Vec::new()));
         let chooser = MockChooser::succeeding();
-        assert_eq!(dispatch_key(&mut model, &chooser, Keysym::Return, None), None);
+        let pinner = MockPinner::succeeding();
+        assert_eq!(dispatch_key(&mut model, &chooser, &pinner, Keysym::Return, None), None);
         assert!(chooser.calls.borrow().is_empty());
     }
 
@@ -905,7 +1070,8 @@ mod tests {
     fn a_failing_choose_still_ends_the_popup_rather_than_hanging_open() {
         let mut model = model_with(&["a"]);
         let chooser = MockChooser::failing("no seat");
-        let outcome = dispatch_key(&mut model, &chooser, Keysym::Return, None);
+        let pinner = MockPinner::succeeding();
+        let outcome = dispatch_key(&mut model, &chooser, &pinner, Keysym::Return, None);
         assert_eq!(outcome, Some(Outcome::Cancelled));
     }
 
@@ -913,9 +1079,10 @@ mod tests {
     fn up_and_down_move_the_selection_through_the_key_dispatcher() {
         let mut model = model_with(&["a", "b", "c"]);
         let chooser = MockChooser::succeeding();
-        dispatch_key(&mut model, &chooser, Keysym::Down, None);
+        let pinner = MockPinner::succeeding();
+        dispatch_key(&mut model, &chooser, &pinner, Keysym::Down, None);
         assert_eq!(model.selected_index(), 1);
-        dispatch_key(&mut model, &chooser, Keysym::Up, None);
+        dispatch_key(&mut model, &chooser, &pinner, Keysym::Up, None);
         assert_eq!(model.selected_index(), 0);
     }
 
@@ -923,8 +1090,9 @@ mod tests {
     fn typing_reaches_the_filter() {
         let mut model = model_with(&["alpha", "beta"]);
         let chooser = MockChooser::succeeding();
-        dispatch_key(&mut model, &chooser, Keysym::NoSymbol, Some("a".to_string()));
-        dispatch_key(&mut model, &chooser, Keysym::NoSymbol, Some("l".to_string()));
+        let pinner = MockPinner::succeeding();
+        dispatch_key(&mut model, &chooser, &pinner, Keysym::NoSymbol, Some("a".to_string()));
+        dispatch_key(&mut model, &chooser, &pinner, Keysym::NoSymbol, Some("l".to_string()));
         assert_eq!(model.filter_text(), "al");
         assert_eq!(model.filtered().len(), 1);
     }
@@ -941,20 +1109,41 @@ mod tests {
     fn hovering_a_row_selects_it_exactly_like_landing_on_it_with_the_keyboard() {
         let mut model = model_with(&["a", "b", "c"]);
         let chooser = MockChooser::succeeding();
-        assert_eq!(dispatch_action(&mut model, &chooser, Action::Select(2)), None);
+        let pinner = MockPinner::succeeding();
+        assert_eq!(dispatch_action(&mut model, &chooser, &pinner, Action::Select(2)), None);
         assert_eq!(model.selected_index(), 2);
         assert!(chooser.calls.borrow().is_empty(), "hovering must never choose anything");
+    }
+
+    /// Mirrors `ClipMenu::pointer_click`'s `Hit::Pin` branch: select, then
+    /// `TogglePin` rather than `Choose` — the same one-action, two-ways-
+    /// to-trigger-it property `hovering_a_row_selects_it_exactly_like_landing_on_it_with_the_keyboard`
+    /// pins for selection, applied to the pin toggle instead of choosing.
+    #[test]
+    fn clicking_the_pin_toggle_pins_the_row_instead_of_choosing_it() {
+        let mut model = model_with(&["a", "b"]);
+        let chooser = MockChooser::succeeding();
+        let pinner = MockPinner::succeeding();
+        dispatch_action(&mut model, &chooser, &pinner, Action::Select(1));
+        let outcome = dispatch_action(&mut model, &chooser, &pinner, Action::TogglePin);
+        assert_eq!(outcome, None, "pinning must never end the popup the way choosing does");
+        assert!(chooser.calls.borrow().is_empty(), "a pin click must never choose the row");
+        assert_eq!(
+            pinner.calls.borrow().as_slice(),
+            &[(EntryId::of(&Content::Text("b".into())).as_str().to_string(), true)]
+        );
     }
 
     #[test]
     fn a_click_chooses_whatever_row_the_hit_test_resolved_exactly_as_enter_does() {
         let mut model = model_with(&["a", "b", "c"]);
         let chooser = MockChooser::succeeding();
+        let pinner = MockPinner::succeeding();
         // The pointer's own path always selects the hit-tested row first
         // (see `ClipMenu::pointer_click`), then chooses — mirrored here
         // as two actions so this test does not need a live surface.
-        dispatch_action(&mut model, &chooser, Action::Select(1));
-        let outcome = dispatch_action(&mut model, &chooser, Action::Choose);
+        dispatch_action(&mut model, &chooser, &pinner, Action::Select(1));
+        let outcome = dispatch_action(&mut model, &chooser, &pinner, Action::Choose);
         assert_eq!(outcome, Some(Outcome::Chosen));
         assert_eq!(chooser.calls.borrow().as_slice(), &[EntryId::of(&Content::Text("b".into()))]);
     }
@@ -963,9 +1152,10 @@ mod tests {
     fn scrolling_moves_the_selection_through_the_same_action_up_and_down_use() {
         let mut model = model_with(&["a", "b", "c"]);
         let chooser = MockChooser::succeeding();
-        dispatch_action(&mut model, &chooser, Action::Move(1));
+        let pinner = MockPinner::succeeding();
+        dispatch_action(&mut model, &chooser, &pinner, Action::Move(1));
         assert_eq!(model.selected_index(), 1);
-        dispatch_action(&mut model, &chooser, Action::Move(-1));
+        dispatch_action(&mut model, &chooser, &pinner, Action::Move(-1));
         assert_eq!(model.selected_index(), 0);
     }
 
@@ -1000,5 +1190,115 @@ mod tests {
     #[test]
     fn value120_wins_over_discrete_when_a_compositor_reports_both() {
         assert_eq!(scroll_rows(1, 240, 0.0), 2);
+    }
+
+    // --- Pinning, via the F2 key and `Action::TogglePin`. `Pinner` is the
+    // same kind of seam `Chooser` is, so these are tested the same way:
+    // no socket, no daemon, just `MockPinner` recording what it was
+    // asked and handing back whatever result the test configured.
+
+    #[test]
+    fn f2_pins_the_selected_unpinned_entry() {
+        let mut model = model_with(&["a", "b"]);
+        model.move_selection(1); // "b"
+        let chooser = MockChooser::succeeding();
+        let pinner = MockPinner::succeeding();
+        let outcome = dispatch_key(&mut model, &chooser, &pinner, Keysym::F2, None);
+        assert_eq!(outcome, None, "pinning does not end the popup");
+        assert_eq!(
+            pinner.calls.borrow().as_slice(),
+            &[(EntryId::of(&Content::Text("b".into())).as_str().to_string(), true)]
+        );
+        assert!(
+            model.filtered().iter().find(|e| e.content == Content::Text("b".into())).unwrap().pinned,
+            "the popup's own copy must reflect the pin once the daemon confirmed it"
+        );
+    }
+
+    #[test]
+    fn f2_unpins_an_already_pinned_entry() {
+        let mut model = model_with(&["a"]);
+        let id = model.filtered()[0].id.clone();
+        model.set_entry_pinned(&id, true);
+        let chooser = MockChooser::succeeding();
+        let pinner = MockPinner::succeeding();
+        dispatch_key(&mut model, &chooser, &pinner, Keysym::F2, None);
+        assert_eq!(pinner.calls.borrow().as_slice(), &[(id.as_str().to_string(), false)]);
+        assert!(!model.filtered()[0].pinned);
+    }
+
+    #[test]
+    fn f2_with_nothing_selected_does_not_call_the_pinner_at_all() {
+        let mut model = Model::new(HistoryState::Loaded(Vec::new()));
+        let chooser = MockChooser::succeeding();
+        let pinner = MockPinner::succeeding();
+        assert_eq!(dispatch_key(&mut model, &chooser, &pinner, Keysym::F2, None), None);
+        assert!(pinner.calls.borrow().is_empty());
+    }
+
+    /// The failure case that matters most: no daemon to ask. The popup
+    /// must not crash, must not end, and — the property this test
+    /// exists to pin — must not apply the pin locally, which would make
+    /// the row look pinned when nothing on disk or in the daemon agrees.
+    #[test]
+    fn a_failed_pin_leaves_the_entry_unpinned_and_sets_a_notice() {
+        let mut model = model_with(&["a"]);
+        let chooser = MockChooser::succeeding();
+        let pinner = MockPinner::no_daemon();
+        let outcome = dispatch_key(&mut model, &chooser, &pinner, Keysym::F2, None);
+        assert_eq!(outcome, None);
+        assert!(
+            !model.filtered()[0].pinned,
+            "a failed pin must not look like it worked"
+        );
+        assert_eq!(
+            model.pin_notice(),
+            Some("hyprforge-clipd isn't running, so pinning isn't available right now")
+        );
+    }
+
+    /// Any other action clears a stale notice from an earlier failed
+    /// pin — see `Model::pin_notice`'s doc for why it must not linger.
+    #[test]
+    fn a_pin_notice_does_not_survive_the_next_unrelated_action() {
+        let mut model = model_with(&["a", "b"]);
+        let chooser = MockChooser::succeeding();
+        let failing_pinner = MockPinner::no_daemon();
+        dispatch_key(&mut model, &chooser, &failing_pinner, Keysym::F2, None);
+        assert!(model.pin_notice().is_some());
+
+        let succeeding_pinner = MockPinner::succeeding();
+        dispatch_key(&mut model, &chooser, &succeeding_pinner, Keysym::Down, None);
+        assert_eq!(model.pin_notice(), None, "an unrelated action must clear the notice");
+    }
+
+    /// The daemon's own refusal (an id it does not recognise, or
+    /// `can_save == false`) is shown verbatim, distinct from the generic
+    /// "isn't running" wording `MockPinner::no_daemon` produces —
+    /// proving the two are not collapsed into the same message at this
+    /// layer either.
+    #[test]
+    fn a_refusal_from_the_daemon_shows_its_own_message_not_a_generic_one() {
+        let mut model = model_with(&["a"]);
+        let chooser = MockChooser::succeeding();
+        let pinner = MockPinner::failing("no clipboard entry with id abc123");
+        dispatch_key(&mut model, &chooser, &pinner, Keysym::F2, None);
+        assert_eq!(model.pin_notice(), Some("no clipboard entry with id abc123"));
+    }
+
+    /// A successful pin clears any notice left over from a previous
+    /// failed attempt at the same entry.
+    #[test]
+    fn a_successful_pin_clears_a_previous_notice() {
+        let mut model = model_with(&["a"]);
+        let chooser = MockChooser::succeeding();
+        let failing_pinner = MockPinner::no_daemon();
+        dispatch_key(&mut model, &chooser, &failing_pinner, Keysym::F2, None);
+        assert!(model.pin_notice().is_some());
+
+        let succeeding_pinner = MockPinner::succeeding();
+        dispatch_key(&mut model, &chooser, &succeeding_pinner, Keysym::F2, None);
+        assert_eq!(model.pin_notice(), None);
+        assert!(model.filtered()[0].pinned);
     }
 }
