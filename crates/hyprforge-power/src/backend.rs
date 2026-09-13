@@ -17,7 +17,9 @@
 //! stay awake, released only by [`InhibitBackend::release`] or by the
 //! backend itself going away.
 
-use crate::types::{InhibitError, InhibitorInfo, WhatSet};
+use crate::types::{
+    BatteryError, BatteryInfo, InhibitError, InhibitorInfo, PowerProfile, ProfileError, WhatSet,
+};
 
 #[async_trait::async_trait]
 pub trait InhibitBackend: Send + Sync {
@@ -43,6 +45,42 @@ pub trait InhibitBackend: Send + Sync {
     /// inhibit, as logind reports it. Read-only: this never takes or
     /// releases anything on another process's behalf.
     async fn list_inhibitors(&self) -> Result<Vec<InhibitorInfo>, InhibitError>;
+}
+
+/// The boundary between this crate's logic and UPower.
+///
+/// A separate trait from [`InhibitBackend`], not a method added to it:
+/// UPower and `systemd-logind` are different daemons with independent
+/// lifetimes — one can be down while the other answers fine — and a
+/// caller asking "what's the battery doing" has no need to also depend on
+/// logind being reachable, or vice versa.
+#[async_trait::async_trait]
+pub trait BatteryBackend: Send + Sync {
+    /// `Ok(None)` when this machine has no system battery — a desktop
+    /// with only `AC` is a normal machine, not a failure. `Err(..)` is
+    /// reserved for UPower itself not answering; the two must never be
+    /// confused, which is the whole reason this returns an `Option`
+    /// inside a `Result` rather than an empty/default `BatteryInfo`.
+    async fn battery(&self) -> Result<Option<BatteryInfo>, BatteryError>;
+}
+
+/// The boundary between this crate's logic and `power-profiles-daemon`.
+///
+/// Also its own trait, for the same reason [`BatteryBackend`] is: this is
+/// a third daemon, independent of both `systemd-logind` and UPower.
+#[async_trait::async_trait]
+pub trait PowerProfilesBackend: Send + Sync {
+    /// The profiles this machine can be switched between — normally all
+    /// three, but read rather than assumed, since a machine could in
+    /// principle offer fewer.
+    async fn profiles(&self) -> Result<Vec<PowerProfile>, ProfileError>;
+
+    async fn active_profile(&self) -> Result<PowerProfile, ProfileError>;
+
+    /// Changes the active profile. A write, and the one call in this
+    /// crate a live test must never make — see the doc comment on
+    /// `tests/live_power_profiles.rs`.
+    async fn set_active_profile(&self, profile: PowerProfile) -> Result<(), ProfileError>;
 }
 
 // The settings/tray code that drives the "keep awake" toggle is generic
@@ -115,6 +153,99 @@ pub mod mock {
         async fn list_inhibitors(&self) -> Result<Vec<InhibitorInfo>, InhibitError> {
             self.guard()?;
             Ok(self.others.lock().unwrap().clone())
+        }
+    }
+
+    /// A UPower that does what the test says.
+    #[derive(Default)]
+    pub struct BatteryMockBackend {
+        pub battery: Mutex<Option<BatteryInfo>>,
+        /// Set to make every call fail, for the "UPower isn't there"
+        /// path — kept entirely separate from `battery` being `None`,
+        /// which means "no battery on this machine".
+        pub unavailable: Mutex<bool>,
+    }
+
+    impl BatteryMockBackend {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        fn guard(&self) -> Result<(), BatteryError> {
+            if *self.unavailable.lock().unwrap() {
+                return Err(BatteryError::Unavailable);
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BatteryBackend for BatteryMockBackend {
+        async fn battery(&self) -> Result<Option<BatteryInfo>, BatteryError> {
+            self.guard()?;
+            Ok(*self.battery.lock().unwrap())
+        }
+    }
+
+    /// A `power-profiles-daemon` that does what the test says.
+    #[derive(Default)]
+    pub struct PowerProfilesMockBackend {
+        pub profiles: Mutex<Vec<PowerProfile>>,
+        pub active: Mutex<Option<PowerProfile>>,
+        /// Set to make every call fail, for the "daemon isn't there"
+        /// path.
+        pub unavailable: Mutex<bool>,
+        /// Every profile `set_active_profile` was actually asked to
+        /// switch to — a test asserting the live tier never writes reads
+        /// this on the real backend's mock stand-in, not the daemon.
+        pub set_calls: Mutex<Vec<PowerProfile>>,
+    }
+
+    impl PowerProfilesMockBackend {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// The usual case: all three profiles offered, one active.
+        pub fn with_active(active: PowerProfile) -> Self {
+            let backend = Self::new();
+            *backend.profiles.lock().unwrap() = vec![
+                PowerProfile::PowerSaver,
+                PowerProfile::Balanced,
+                PowerProfile::Performance,
+            ];
+            *backend.active.lock().unwrap() = Some(active);
+            backend
+        }
+
+        fn guard(&self) -> Result<(), ProfileError> {
+            if *self.unavailable.lock().unwrap() {
+                return Err(ProfileError::Unavailable);
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PowerProfilesBackend for PowerProfilesMockBackend {
+        async fn profiles(&self) -> Result<Vec<PowerProfile>, ProfileError> {
+            self.guard()?;
+            Ok(self.profiles.lock().unwrap().clone())
+        }
+
+        async fn active_profile(&self) -> Result<PowerProfile, ProfileError> {
+            self.guard()?;
+            self.active
+                .lock()
+                .unwrap()
+                .ok_or_else(|| ProfileError::Refused("no active profile set".to_string()))
+        }
+
+        async fn set_active_profile(&self, profile: PowerProfile) -> Result<(), ProfileError> {
+            self.guard()?;
+            self.set_calls.lock().unwrap().push(profile);
+            *self.active.lock().unwrap() = Some(profile);
+            Ok(())
         }
     }
 }
@@ -196,5 +327,68 @@ mod tests {
         // Reading who else holds a lock must not be mistaken for holding
         // one ourselves.
         assert!(backend.held().await.unwrap().is_none());
+    }
+
+    // --- BatteryBackend --------------------------------------------------
+
+    use super::mock::{BatteryMockBackend, PowerProfilesMockBackend};
+    use crate::types::BatteryState;
+
+    #[tokio::test]
+    async fn a_machine_with_no_battery_is_not_confused_with_upower_being_down() {
+        let backend = BatteryMockBackend::new();
+        // Nothing set: this is the "desktop, no battery" case, and it
+        // must read as `Ok(None)`, not as an error.
+        assert_eq!(backend.battery().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_upower_is_an_error_not_a_missing_battery() {
+        let backend = BatteryMockBackend::new();
+        *backend.unavailable.lock().unwrap() = true;
+        assert!(matches!(backend.battery().await, Err(BatteryError::Unavailable)));
+    }
+
+    #[tokio::test]
+    async fn a_present_battery_is_reported_as_read() {
+        let info = BatteryInfo {
+            percentage: 90,
+            state: BatteryState::FullyCharged,
+            time_to_empty: None,
+            time_to_full: None,
+        };
+        let backend = BatteryMockBackend::new();
+        *backend.battery.lock().unwrap() = Some(info);
+        assert_eq!(backend.battery().await.unwrap(), Some(info));
+    }
+
+    // --- PowerProfilesBackend --------------------------------------------
+
+    #[tokio::test]
+    async fn an_unavailable_power_profiles_daemon_is_an_error_on_every_call() {
+        let backend = PowerProfilesMockBackend::new();
+        *backend.unavailable.lock().unwrap() = true;
+        assert!(matches!(backend.profiles().await, Err(ProfileError::Unavailable)));
+        assert!(matches!(backend.active_profile().await, Err(ProfileError::Unavailable)));
+        assert!(matches!(
+            backend.set_active_profile(PowerProfile::Balanced).await,
+            Err(ProfileError::Unavailable)
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_active_profile_is_always_one_of_the_offered_profiles() {
+        let backend = PowerProfilesMockBackend::with_active(PowerProfile::Performance);
+        let offered = backend.profiles().await.unwrap();
+        let active = backend.active_profile().await.unwrap();
+        assert!(offered.contains(&active));
+    }
+
+    #[tokio::test]
+    async fn setting_the_active_profile_changes_what_is_read_back() {
+        let backend = PowerProfilesMockBackend::with_active(PowerProfile::Balanced);
+        backend.set_active_profile(PowerProfile::PowerSaver).await.unwrap();
+        assert_eq!(backend.active_profile().await.unwrap(), PowerProfile::PowerSaver);
+        assert_eq!(*backend.set_calls.lock().unwrap(), vec![PowerProfile::PowerSaver]);
     }
 }

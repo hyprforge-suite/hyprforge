@@ -22,6 +22,14 @@
 #   3c. BlueZ               — does BlueZ agree? Read-only checks that its
 #                             interface is the shape hyprforge-bluetooth
 #                             claims. Needs bluetooth.service running.
+#   3d. UPower              — does UPower agree? Read-only checks that
+#                             battery status is the shape hyprforge-power
+#                             claims. Needs upower.service running.
+#   3e. power-profiles-daemon — does it agree? Read-only checks that the
+#                             offered profiles and the active one are the
+#                             shape hyprforge-power claims. Never sets the
+#                             active profile. Needs power-profiles-daemon
+#                             running.
 #
 # Tiers 2, 3, 3b and 3c each gate on the thing they actually ask, rather
 # than sharing one --ignored run: a check that silently never runs is
@@ -439,6 +447,65 @@ else
             grep -E '^test .* FAILED' <<<"$output" | head -20
         else
             ok "$(count_tests <<<"$output") logind tests passed"
+            while IFS= read -r reason; do
+                [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
+            done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^(]*\).*/\1/p' <<<"$output" | sort -u)
+        fi
+    fi
+
+    # Answers to UPower, not to Hyprland or to logind — its own gate, for
+    # the same reason NetworkManager and BlueZ got their own steps: folded
+    # into any of the runs above, this would need something that has
+    # nothing to do with UPower to be up before it ever ran. UPower and
+    # power-profiles-daemon are two separate services with independent
+    # lifetimes (one can be down while the other answers fine), so they
+    # get two separate gates below rather than one combined "power" step
+    # — a machine with UPower masked but power-profiles-daemon running
+    # should still get the second step's coverage, and vice versa.
+    #
+    # Every test behind this step is read-only: it only reads properties
+    # UPower already exposes read-only in the first place.
+    step "Live tests against UPower"
+    if ! command -v systemctl >/dev/null; then
+        skip "UPower tests" "systemctl not available to ask"
+    elif ! systemctl is-active --quiet upower; then
+        skip "UPower tests" "UPower isn't running"
+    else
+        output=$(cargo test -p hyprforge-power --test live_upower \
+            -- --ignored --test-threads=1 --nocapture 2>&1)
+        if grep -q "test result: FAILED" <<<"$output"; then
+            bad "UPower tests failed — the code disagrees with the running service"
+            grep -E '^test .* FAILED' <<<"$output" | head -20
+        else
+            ok "$(count_tests <<<"$output") UPower tests passed"
+            while IFS= read -r reason; do
+                [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
+            done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^(]*\).*/\1/p' <<<"$output" | sort -u)
+        fi
+    fi
+
+    # Answers to power-profiles-daemon, not to Hyprland or to UPower — see
+    # the note above for why this is a separate gate rather than folded
+    # into the UPower step.
+    #
+    # Every test behind this step is read-only, and deliberately never
+    # calls SetActiveProfile: this runs on a machine somebody is using,
+    # and changing the active profile changes how it performs and how
+    # loud its fans are out from under them. See
+    # `tests/live_power_profiles.rs`'s module doc for the full reasoning.
+    step "Live tests against power-profiles-daemon"
+    if ! command -v systemctl >/dev/null; then
+        skip "power-profiles-daemon tests" "systemctl not available to ask"
+    elif ! systemctl is-active --quiet power-profiles-daemon; then
+        skip "power-profiles-daemon tests" "power-profiles-daemon isn't running"
+    else
+        output=$(cargo test -p hyprforge-power --test live_power_profiles \
+            -- --ignored --test-threads=1 --nocapture 2>&1)
+        if grep -q "test result: FAILED" <<<"$output"; then
+            bad "power-profiles-daemon tests failed — the code disagrees with the running service"
+            grep -E '^test .* FAILED' <<<"$output" | head -20
+        else
+            ok "$(count_tests <<<"$output") power-profiles-daemon tests passed"
             while IFS= read -r reason; do
                 [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
             done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^(]*\).*/\1/p' <<<"$output" | sort -u)
