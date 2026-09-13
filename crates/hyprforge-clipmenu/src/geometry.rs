@@ -190,7 +190,17 @@ impl RowLayout {
         let content_height = line(font_size).max(Self::THUMBNAIL_SIZE);
         RowLayout {
             padding: Self::PADDING,
-            header_height: line(font_size * 0.85) + Self::HEADER_GAP,
+            // The search field is the same height as a row, not the
+            // height of its own text. It is the one control in this
+            // popup the user types into, and a field noticeably smaller
+            // than every row under it reads as a label rather than
+            // something to type in.
+            //
+            // `row_at` subtracts this, so the header and the rows cannot
+            // drift apart by changing it — and `rows_that_fit` takes it
+            // out of the available height, so a taller header simply
+            // means one fewer row rather than a row that overflows.
+            header_height: content_height + Self::ROW_PADDING * 2.0 + Self::HEADER_GAP,
             row_height: content_height + Self::ROW_PADDING * 2.0,
             row_spacing: Self::ROW_SPACING,
             // Wide enough for the longest strings `view::relative_age`

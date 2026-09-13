@@ -63,12 +63,16 @@ where
     let header_inner: Element<'a, Message, iced_widget::Theme, Renderer> = if let Some(notice) =
         model.pin_notice()
     {
-        text(notice.to_string()).size(theme.font_size * 0.85).wrapping(Wrapping::None).color(to_iced(theme.error)).into()
+        text(notice.to_string()).size(theme.font_size).wrapping(Wrapping::None).color(to_iced(theme.error)).into()
     } else if model.filter_text().is_empty() {
-        text("Type to filter").size(theme.font_size * 0.85).wrapping(Wrapping::None).color(dim_color).into()
+        text("Type to filter").size(theme.font_size).wrapping(Wrapping::None).color(dim_color).into()
     } else {
-        text(model.filter_text().to_string()).size(theme.font_size * 0.85).wrapping(Wrapping::None).color(text_color).into()
+        text(model.filter_text().to_string()).size(theme.font_size).wrapping(Wrapping::None).color(text_color).into()
     };
+    // Full `font_size`, not the 0.85 this used to draw at: the field is
+    // as tall as a row now, and text smaller than every row beneath it
+    // read as a caption rather than as something you type into.
+    //
     // A search field, not a plain line of text — the whole reason this
     // is a `container` around the text rather than the text itself:
     // `header_height` (and therefore where the first row starts) is
