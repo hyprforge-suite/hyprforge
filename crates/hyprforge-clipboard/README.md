@@ -3,7 +3,7 @@
 A Wayland clipboard history: the library, and `hyprforge-clipd`, the
 daemon that watches the compositor and records what is worth keeping.
 
-Part of [Hyprforge](https://github.com/apost/hyprforge), a suite of
+Part of [Hyprforge](https://github.com/adamrpostjr/hyprforge), a suite of
 native Hyprland desktop apps — but it runs alone. Installing this gets
 you a clipboard daemon and nothing else: no settings app, no tray, no
 Hyprland config machinery.

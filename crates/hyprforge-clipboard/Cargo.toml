@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "A Wayland clipboard library over wlr-data-control / ext-data-control, plus the hyprforge-clipd daemon that watches the compositor's clipboard and writes its history."
-repository = "https://github.com/apost/hyprforge"
+repository = "https://github.com/adamrpostjr/hyprforge"
 documentation = "https://docs.rs/hyprforge-clipboard"
 readme = "README.md"
 keywords = ["clipboard", "wayland", "wlr-data-control", "hyprland", "linux"]
@@ -51,11 +51,11 @@ xkbcommon = "0.8"
 # straight back to the local `crates/hyprforge-paths` and
 # `crates/hyprforge-secret` directories, so nothing here touches the
 # network; standalone, cargo fetches them from git.
-hyprforge-paths = { git = "https://github.com/apost/hyprforge" }
+hyprforge-paths = { git = "https://github.com/adamrpostjr/hyprforge" }
 # For the `chars`/`bytes` "redacted count" formatting `Content`'s `Debug`
 # shares with `hyprforge-network`'s `Psk` and `hyprforge-authui`'s typed
 # password — see `types.rs` for why `Content` is not itself a `Secret<T>`.
-hyprforge-secret = { git = "https://github.com/apost/hyprforge" }
+hyprforge-secret = { git = "https://github.com/adamrpostjr/hyprforge" }
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 thiserror = "2"

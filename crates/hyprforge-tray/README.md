@@ -5,7 +5,7 @@ A tray icon library over `org.kde.StatusNotifierItem` and
 Wi-Fi, Bluetooth, keep-awake and night-light icons in whatever bar is
 running.
 
-Part of [Hyprforge](https://github.com/apost/hyprforge), a suite of
+Part of [Hyprforge](https://github.com/adamrpostjr/hyprforge), a suite of
 native Hyprland desktop apps — but it runs alone. Installing this gets
 you a tray daemon and nothing else.
 

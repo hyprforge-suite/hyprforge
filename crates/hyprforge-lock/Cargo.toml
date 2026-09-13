@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "An ext-session-lock-v1 lock screen for Hyprland, authenticating against PAM and sharing its look with the greeter."
-repository = "https://github.com/apost/hyprforge"
+repository = "https://github.com/adamrpostjr/hyprforge"
 documentation = "https://docs.rs/hyprforge-lock"
 readme = "README.md"
 keywords = ["hyprland", "wayland", "lock-screen", "pam", "linux"]
@@ -22,9 +22,9 @@ path = "src/main.rs"
 # workspace, the root Cargo.toml's `[patch]` section redirects these
 # straight back to the local `crates/` directories, so nothing here
 # touches the network; standalone, cargo fetches them from git.
-hyprforge-authui = { git = "https://github.com/apost/hyprforge" }
-hyprforge-paths = { git = "https://github.com/apost/hyprforge" }
-hyprforge-look = { git = "https://github.com/apost/hyprforge" }
+hyprforge-authui = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-paths = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-look = { git = "https://github.com/adamrpostjr/hyprforge" }
 # default-features off drops softbuffer: this paints into the buffer the
 # compositor hands over, so it has no use for a windowing backend.
 iced_tiny_skia = { version = "0.14", default-features = false, features = ["image"] }

@@ -152,7 +152,7 @@ async-trait = "0.1"
 # delete an entry thinking it is unused just because nothing in
 # `[workspace.dependencies]` names a git URL — each exists entirely for
 # a split crate's sake.
-[patch."https://github.com/apost/hyprforge"]
+[patch."https://github.com/adamrpostjr/hyprforge"]
 hyprforge-paths = { path = "crates/hyprforge-paths" }
 hyprforge-secret = { path = "crates/hyprforge-secret" }
 hyprforge-authui = { path = "crates/hyprforge-authui" }

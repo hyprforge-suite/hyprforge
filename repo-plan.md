@@ -74,7 +74,7 @@ is now about *convenience* rather than *possibility*.
 
 The one-manifest problem is solved and worth knowing: the clipboard's
 `Cargo.toml` names the git URL, and the root `Cargo.toml` has a
-`[patch."https://github.com/apost/hyprforge"]` section redirecting those
+`[patch."https://github.com/adamrpostjr/hyprforge"]` section redirecting those
 two dependencies back to `crates/`. One file, both contexts, no
 divergence for `git subtree push` to conflict on forever, and no network
 access when building here.
