@@ -126,6 +126,22 @@ impl Model {
         self.selected
     }
 
+    /// Sets the selection to exactly this row of the filtered list —
+    /// what the pointer entering or moving over a row means, as opposed
+    /// to [`Model::move_selection`]'s relative Up/Down. Out-of-range is
+    /// clamped rather than ignored: a hit-test racing a list that just
+    /// got shorter (the user typed a filter character between the
+    /// pointer motion and this call landing) should still select
+    /// *something* sane rather than silently do nothing.
+    pub fn select(&mut self, index: usize) {
+        let len = self.filtered().len();
+        if len == 0 {
+            self.selected = 0;
+            return;
+        }
+        self.selected = index.min(len - 1);
+    }
+
     pub fn selected_entry(&self) -> Option<Entry> {
         self.filtered().get(self.selected).map(|e| (*e).clone())
     }
@@ -232,6 +248,20 @@ mod tests {
         model.move_selection(-1);
         model.move_selection(-1);
         assert_eq!(model.selected_index(), 0, "must stop at the first row, not wrap to the end");
+    }
+
+    #[test]
+    fn selecting_a_row_directly_lands_on_that_row() {
+        let mut model = model_with(&["a", "b", "c"]);
+        model.select(2);
+        assert_eq!(model.selected_index(), 2);
+    }
+
+    #[test]
+    fn selecting_past_the_end_of_the_list_clamps_to_the_last_row() {
+        let mut model = model_with(&["a", "b"]);
+        model.select(50);
+        assert_eq!(model.selected_index(), 1);
     }
 
     #[test]

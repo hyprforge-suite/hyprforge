@@ -13,6 +13,9 @@ use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
 use smithay_client_toolkit::seat::keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers};
+use smithay_client_toolkit::seat::pointer::{
+    PointerEvent, PointerEventKind, PointerHandler, BTN_LEFT,
+};
 use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
 use smithay_client_toolkit::shell::wlr_layer::{
     Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
@@ -22,15 +25,16 @@ use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shm::slot::SlotPool;
 use smithay_client_toolkit::shm::{Shm, ShmHandler};
 use smithay_client_toolkit::{
-    delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_registry,
-    delegate_seat, delegate_shm, registry_handlers,
+    delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_pointer,
+    delegate_registry, delegate_seat, delegate_shm, registry_handlers,
 };
 use calloop_wayland_source::WaylandSource;
 use wayland_client::globals::registry_queue_init;
-use wayland_client::protocol::{wl_keyboard, wl_output, wl_seat, wl_shm, wl_surface};
+use wayland_client::protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface};
 use wayland_client::{Connection, QueueHandle};
 
 use crate::chooser::Chooser;
+use crate::geometry::RowLayout;
 use crate::model::Model;
 use crate::thumbnail;
 use crate::view;
@@ -88,6 +92,7 @@ pub struct ClipMenu<C: Chooser> {
 
     layer: Option<LayerSurface>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
+    pointer: Option<wl_pointer::WlPointer>,
 
     placement: Placement,
     model: Model,
@@ -139,6 +144,7 @@ impl<C: Chooser + 'static> ClipMenu<C> {
             layer_shell,
             layer: None,
             keyboard: None,
+            pointer: None,
             placement,
             model,
             thumbnails: thumbnail::Cache::new(),
@@ -288,14 +294,113 @@ impl<C: Chooser + 'static> ClipMenu<C> {
         }
         self.mark_dirty();
     }
+
+    /// The pointer moved (or entered) at `position`, in the surface-local
+    /// logical-pixel space [`PointerEvent::position`] reports — the same
+    /// space `view.rs` draws into, which is what makes
+    /// `geometry::RowLayout::row_at` the right thing to hit-test against
+    /// without any translation first.
+    ///
+    /// Landing outside every row (the header, the padding, a gap between
+    /// rows) does nothing rather than clearing the selection — the same
+    /// reasoning `move_selection` uses at the ends of the list: leaving
+    /// via the header does not mean "select nothing".
+    fn pointer_move(&mut self, position: (f64, f64)) {
+        let layout = RowLayout::for_font_size(self.theme.font_size);
+        let range = self.model.visible_range();
+        if let Some(row) = layout.row_at(position.1, range.len()) {
+            dispatch_action(&mut self.model, &self.chooser, Action::Select(range.start + row));
+            self.mark_dirty();
+        }
+    }
+
+    /// The pointer clicked at `position` — chosen through exactly the
+    /// same [`Action::Choose`] Enter goes through, so a click cannot pick
+    /// a different row than whatever last got highlighted by
+    /// [`Self::pointer_move`]. Re-hit-testing at the click position first
+    /// (rather than trusting the last hover) is what keeps a click that
+    /// lands between a hover event and a redraw honest about which row it
+    /// is actually over.
+    fn pointer_click(&mut self, position: (f64, f64)) {
+        self.pointer_move(position);
+        if let Some(outcome) = dispatch_action(&mut self.model, &self.chooser, Action::Choose) {
+            self.outcome = Some(outcome);
+        }
+        self.mark_dirty();
+    }
+
+    /// One wheel/touchpad axis event — moved through
+    /// [`Action::Move`], the same action Up/Down produce, so scrolling
+    /// cannot desync from what the arrow keys do.
+    fn pointer_scroll(&mut self, rows: i32) {
+        if rows == 0 {
+            return;
+        }
+        dispatch_action(&mut self.model, &self.chooser, Action::Move(rows));
+        self.mark_dirty();
+    }
 }
 
-/// The keystroke rules, over a [`Model`] and a [`Chooser`] alone.
-///
-/// Split out from [`ClipMenu::key`] so every rule about Up/Down/Enter/
-/// Escape/typing can be tested without a Wayland connection — the same
-/// split `hyprforge-lock::surface::dispatch_key` uses for the same
-/// reason.
+/// What the user asked the popup to do, independent of whether a key or a
+/// pointer produced it. The seam that keeps mouse and keyboard handling
+/// from growing two different sets of rules for the same outcome:
+/// `dispatch_key` below turns a keysym into one of these, `ClipMenu`'s
+/// pointer handling turns a hit-tested row or a click into another, and
+/// [`dispatch_action`] is the one place either ends up.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Action {
+    /// Move the selection by this many rows (negative is up) — Up/Down,
+    /// or the wheel.
+    Move(i32),
+    /// Select exactly this row of the filtered list — the pointer
+    /// entering or moving over it.
+    Select(usize),
+    /// Choose whatever is currently selected — Enter, or a click.
+    Choose,
+    /// Close without choosing anything — Escape.
+    Cancel,
+    Backspace,
+    Type(char),
+}
+
+/// The one place any [`Action`] takes effect on a [`Model`] and a
+/// [`Chooser`]. Split out so every rule about what a row selection, a
+/// click or a keystroke *means* can be tested without a Wayland
+/// connection — the same split `hyprforge-lock::surface::dispatch_key`
+/// uses for the same reason, generalised here to cover the pointer too.
+fn dispatch_action<C: Chooser>(model: &mut Model, chooser: &C, action: Action) -> Option<Outcome> {
+    match action {
+        Action::Cancel => Some(Outcome::Cancelled),
+        Action::Choose => {
+            let entry = model.selected_entry()?;
+            match chooser.choose(&entry) {
+                Ok(()) => Some(Outcome::Chosen),
+                Err(message) => {
+                    eprintln!("couldn't paste the chosen entry: {message}");
+                    Some(Outcome::Cancelled)
+                }
+            }
+        }
+        Action::Move(delta) => {
+            model.move_selection(delta);
+            None
+        }
+        Action::Select(index) => {
+            model.select(index);
+            None
+        }
+        Action::Backspace => {
+            model.backspace();
+            None
+        }
+        Action::Type(c) => {
+            model.type_char(c);
+            None
+        }
+    }
+}
+
+/// The keystroke rules: which [`Action`] each key produces.
 ///
 /// Nothing typed here is ever logged, matched on for its value, or
 /// otherwise inspected beyond being appended to the filter — a
@@ -308,37 +413,48 @@ fn dispatch_key<C: Chooser>(
     utf8: Option<String>,
 ) -> Option<Outcome> {
     match keysym {
-        Keysym::Escape => Some(Outcome::Cancelled),
-        Keysym::Return | Keysym::KP_Enter => {
-            let entry = model.selected_entry()?;
-            match chooser.choose(&entry) {
-                Ok(()) => Some(Outcome::Chosen),
-                Err(message) => {
-                    eprintln!("couldn't paste the chosen entry: {message}");
-                    Some(Outcome::Cancelled)
-                }
-            }
-        }
-        Keysym::Up => {
-            model.move_selection(-1);
-            None
-        }
-        Keysym::Down => {
-            model.move_selection(1);
-            None
-        }
-        Keysym::BackSpace => {
-            model.backspace();
-            None
-        }
+        Keysym::Escape => dispatch_action(model, chooser, Action::Cancel),
+        Keysym::Return | Keysym::KP_Enter => dispatch_action(model, chooser, Action::Choose),
+        Keysym::Up => dispatch_action(model, chooser, Action::Move(-1)),
+        Keysym::Down => dispatch_action(model, chooser, Action::Move(1)),
+        Keysym::BackSpace => dispatch_action(model, chooser, Action::Backspace),
         _ => {
             if let Some(text) = utf8 {
                 for c in text.chars().filter(|c| !c.is_control()) {
-                    model.type_char(c);
+                    dispatch_action(model, chooser, Action::Type(c));
                 }
             }
             None
         }
+    }
+}
+
+/// Turns one scroll-wheel axis event into whole rows to move the
+/// selection by.
+///
+/// Tries three ways to answer "how many notches", in order of how
+/// reliable each is on a current compositor: `value120` is what a modern
+/// wl_pointer sends (120 per logical step — see the field's own doc),
+/// `discrete` is the older "one integer per click" event some
+/// compositors still send instead, and the sign of `absolute` (raw
+/// scrolled pixels) is the fallback for a touchpad's continuous scroll,
+/// which reports neither — moving exactly one row per axis frame there,
+/// since there is no such thing as half a row to select.
+fn scroll_rows(discrete: i32, value120: i32, absolute: f64) -> i32 {
+    if value120 != 0 {
+        match value120 / 120 {
+            0 if value120 > 0 => 1,
+            0 => -1,
+            steps => steps,
+        }
+    } else if discrete != 0 {
+        discrete
+    } else if absolute > 0.0 {
+        1
+    } else if absolute < 0.0 {
+        -1
+    } else {
+        0
     }
 }
 
@@ -471,6 +587,9 @@ impl<C: Chooser + 'static> SeatHandler for ClipMenu<C> {
         if capability == Capability::Keyboard && self.keyboard.is_none() {
             self.keyboard = self.seats.get_keyboard(qh, &seat, None).ok();
         }
+        if capability == Capability::Pointer && self.pointer.is_none() {
+            self.pointer = self.seats.get_pointer(qh, &seat).ok();
+        }
     }
 
     fn remove_capability(
@@ -485,9 +604,55 @@ impl<C: Chooser + 'static> SeatHandler for ClipMenu<C> {
                 keyboard.release();
             }
         }
+        if capability == Capability::Pointer {
+            if let Some(pointer) = self.pointer.take() {
+                pointer.release();
+            }
+        }
     }
 
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+}
+
+impl<C: Chooser + 'static> PointerHandler for ClipMenu<C> {
+    fn pointer_frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _pointer: &wl_pointer::WlPointer,
+        events: &[PointerEvent],
+    ) {
+        // A frame can bundle several events (see the trait's own doc
+        // comment) — a drag that leaves mid-click sends Release and
+        // Leave together, for instance — so every one of them is
+        // applied, not just the last.
+        for event in events {
+            match &event.kind {
+                PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
+                    self.pointer_move(event.position);
+                }
+                PointerEventKind::Leave { .. } => {
+                    // Nothing to un-highlight: the selection is the same
+                    // state the keyboard drives, and losing the pointer
+                    // is not a reason to lose the keyboard's selection
+                    // too.
+                }
+                PointerEventKind::Press { button, .. } => {
+                    if *button == BTN_LEFT {
+                        self.pointer_click(event.position);
+                    }
+                }
+                PointerEventKind::Release { .. } => {}
+                PointerEventKind::Axis { vertical, .. } => {
+                    self.pointer_scroll(scroll_rows(
+                        vertical.discrete,
+                        vertical.value120,
+                        vertical.absolute,
+                    ));
+                }
+            }
+        }
+    }
 }
 
 impl<C: Chooser + 'static> CompositorHandler for ClipMenu<C> {
@@ -562,6 +727,7 @@ delegate_compositor!(@<C: Chooser + 'static> ClipMenu<C>);
 delegate_output!(@<C: Chooser + 'static> ClipMenu<C>);
 delegate_seat!(@<C: Chooser + 'static> ClipMenu<C>);
 delegate_keyboard!(@<C: Chooser + 'static> ClipMenu<C>);
+delegate_pointer!(@<C: Chooser + 'static> ClipMenu<C>);
 delegate_shm!(@<C: Chooser + 'static> ClipMenu<C>);
 delegate_layer!(@<C: Chooser + 'static> ClipMenu<C>);
 delegate_registry!(@<C: Chooser + 'static> ClipMenu<C>);
@@ -635,5 +801,78 @@ mod tests {
         dispatch_key(&mut model, &chooser, Keysym::NoSymbol, Some("l".to_string()));
         assert_eq!(model.filter_text(), "al");
         assert_eq!(model.filtered().len(), 1);
+    }
+
+    // --- Pointer input, routed through the same `Action`/`dispatch_action`
+    // seam the keyboard uses (see `dispatch_key` above and `ClipMenu`'s
+    // `pointer_move`/`pointer_click`/`pointer_scroll`, which are thin
+    // wrappers over exactly this). The hit-test that turns a pointer
+    // position into a row index is `geometry::RowLayout::row_at`, pinned
+    // by its own tests in `geometry.rs`; what belongs here is what an
+    // already-resolved row or scroll *does*.
+
+    #[test]
+    fn hovering_a_row_selects_it_exactly_like_landing_on_it_with_the_keyboard() {
+        let mut model = model_with(&["a", "b", "c"]);
+        let chooser = MockChooser::succeeding();
+        assert_eq!(dispatch_action(&mut model, &chooser, Action::Select(2)), None);
+        assert_eq!(model.selected_index(), 2);
+        assert!(chooser.calls.borrow().is_empty(), "hovering must never choose anything");
+    }
+
+    #[test]
+    fn a_click_chooses_whatever_row_the_hit_test_resolved_exactly_as_enter_does() {
+        let mut model = model_with(&["a", "b", "c"]);
+        let chooser = MockChooser::succeeding();
+        // The pointer's own path always selects the hit-tested row first
+        // (see `ClipMenu::pointer_click`), then chooses — mirrored here
+        // as two actions so this test does not need a live surface.
+        dispatch_action(&mut model, &chooser, Action::Select(1));
+        let outcome = dispatch_action(&mut model, &chooser, Action::Choose);
+        assert_eq!(outcome, Some(Outcome::Chosen));
+        assert_eq!(chooser.calls.borrow().as_slice(), &[EntryId::of(&Content::Text("b".into()))]);
+    }
+
+    #[test]
+    fn scrolling_moves_the_selection_through_the_same_action_up_and_down_use() {
+        let mut model = model_with(&["a", "b", "c"]);
+        let chooser = MockChooser::succeeding();
+        dispatch_action(&mut model, &chooser, Action::Move(1));
+        assert_eq!(model.selected_index(), 1);
+        dispatch_action(&mut model, &chooser, Action::Move(-1));
+        assert_eq!(model.selected_index(), 0);
+    }
+
+    #[test]
+    fn a_high_resolution_wheel_step_of_exactly_120_moves_one_row() {
+        assert_eq!(scroll_rows(0, 120, 0.0), 1);
+        assert_eq!(scroll_rows(0, -120, 0.0), -1);
+    }
+
+    #[test]
+    fn a_fractional_high_resolution_step_still_moves_at_least_one_row() {
+        // A touchpad or a fine-grained wheel can report a `value120`
+        // smaller than one logical step; it must still count as a
+        // scroll, not be truncated away to nothing.
+        assert_eq!(scroll_rows(0, 40, 0.0), 1);
+        assert_eq!(scroll_rows(0, -40, 0.0), -1);
+    }
+
+    #[test]
+    fn a_legacy_discrete_step_is_used_when_no_value120_is_reported() {
+        assert_eq!(scroll_rows(2, 0, 0.0), 2);
+        assert_eq!(scroll_rows(-3, 0, 0.0), -3);
+    }
+
+    #[test]
+    fn a_touchpads_continuous_scroll_falls_back_to_one_row_per_frame() {
+        assert_eq!(scroll_rows(0, 0, 5.0), 1);
+        assert_eq!(scroll_rows(0, 0, -5.0), -1);
+        assert_eq!(scroll_rows(0, 0, 0.0), 0, "no motion at all must move nothing");
+    }
+
+    #[test]
+    fn value120_wins_over_discrete_when_a_compositor_reports_both() {
+        assert_eq!(scroll_rows(1, 240, 0.0), 2);
     }
 }
