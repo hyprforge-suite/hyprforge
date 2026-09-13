@@ -1,0 +1,16 @@
+[Unit]
+Description=Hyprforge clipboard history
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/hyprforge-clipd
+# The daemon owns every write to the history; the popup only reads it.
+# `always` rather than `on-failure`: a clean exit that stops recording is
+# exactly as bad as a crash and shows up as no failed unit at all.
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target
