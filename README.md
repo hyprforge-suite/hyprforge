@@ -137,6 +137,18 @@ directly — `hyprforge-lock`, say — is welcome and works: the maintainer pull
 it back into this repository the same way changes flow out. `repo-plan.md` has
 the mechanism in full, including why `--rejoin` is not optional.
 
+That branch still has to be pushed, and until now that was a manual `git
+push` typed by hand once per component, with nothing recording that it
+happened or checking it stayed true. `./sync.sh` is the day-2 counterpart:
+run alone, it reports — read-only — whether each published component
+repository still matches what this monorepo would produce right now.
+`./sync.sh --push` re-splits and pushes only the ones that have drifted; it
+refuses on a dirty tree, refuses if `./check.sh --quick` fails, and never
+force-pushes. A component whose published history is not an ancestor of the
+new split has diverged — meaning something was pushed to it directly — and
+that's `git subtree pull` and a human decision, not something this script
+will guess at.
+
 If you only care about one component, you don't need any of the above: clone
 its repository and `cargo test`.
 
@@ -166,23 +178,56 @@ child waiting for the pipe to drain, the parent waiting for the child.
 ./check.sh --quick  # no compositor or daemons needed
 ```
 
-Four gated steps, each answering a different question and each gating on
-the thing it actually asks, rather than sharing one `--ignored` run:
+Tier 1 runs everywhere, no system needed. Besides clippy and the unit and
+integration tests, it has two steps worth knowing about by name:
+**Renderer colour space** greps `cargo tree` for iced's `web-colors`
+feature and fails if it's on, because that fact is invisible to every
+Rust test — both renderers report the same `Color` and only the pixels
+differ (see the shared-look rule in `CLAUDE.md`). **Standalone crate
+dependency pins** exists because `hyprforge-clipboard`, `hyprforge-lock`
+and `hyprforge-greet` are prepared to become their own repositories,
+which means each hand-copies every third-party dependency's version and
+feature set instead of inheriting from `[workspace.dependencies]` — a
+crate that is its own repository root has nothing to inherit from. If
+the root bumps a version or a feature and the copy isn't updated, cargo
+resolves both happily: clippy stays silent and every test passes while
+the suite quietly builds two versions of the same dependency. A dropped
+`features = ["derive"]` was proved invisible to the rest of tier 1
+before this step existed. It discovers which crates to check by their
+shape — nothing in the manifest inherits from the workspace — rather
+than from a hardcoded list, so a newly prepared crate is covered
+automatically. It's also why `notif/` gets its own step: that's a
+second, separate cargo workspace (`exclude`d from this one — see
+Cargo.toml), so `cargo test --workspace` never reaches it, and a
+component whose tests silently never run is exactly the failure this
+project keeps naming.
+
+Past tier 1, every further step answers a different question and gates
+on the thing it actually asks, rather than sharing one `--ignored` run:
 
 | Step | Asks | Needs |
 |---|---|---|
-| clippy + unit tests | does the code do what *this project* thinks? | nothing |
-| live tests | does **Hyprland** agree? | Hyprland running |
-| parse tests | do the **ecosystem daemons** agree? | hyprpaper/hypridle installed |
-| NetworkManager tests | does **NetworkManager** agree? | NetworkManager running |
+| Live tests against Hyprland | does **Hyprland** agree? | Hyprland running |
+| Parse tests against the ecosystem daemons | do **hyprpaper/hypridle** agree? | hyprpaper/hypridle installed, not running |
+| Live tests against NetworkManager | does **NetworkManager** agree? | NetworkManager running |
+| Live tests against BlueZ | does **BlueZ** agree? | bluetooth.service running |
+| Live tests against hyprsunset | does **hyprsunset** agree? | hyprsunset running |
+| Live tests against systemd-logind | does **logind** agree? | something answering on `org.freedesktop.login1` |
+| Live tests against the Wayland clipboard | does the **compositor's clipboard** agree? | a Wayland session (`WAYLAND_DISPLAY` set) |
+| Icon names against the installed theme | do the tray's icon names resolve in the **installed icon theme**? | an icon theme to ask (via `gsettings`) |
+| Live tests against a tray host | does a real **tray host** accept these icons? | a `StatusNotifierWatcher` running (a bar with a tray) |
 
-The first step catches a mistake in the code. The rest catch the far
+Tier 1 catches a mistake in the code. Every step below it catches the far
 nastier kind: code that is internally consistent and wrong about the system
 it talks to. Every claim the option catalogues make — that an option exists,
 what type it is, what range it accepts — is checked against the running
 compositor, the generated hyprlang files are handed to the daemons
-themselves, and the network step is read-only checks that NetworkManager's
-interface is the shape `hyprforge-network` claims.
+themselves, and the NetworkManager, BlueZ, hyprsunset, logind, clipboard
+and tray steps are each read-only checks that the real service's interface
+is the shape the corresponding crate claims. Registering with a tray host
+is the one exception to read-only: it really does put an icon in the
+user's bar for a fraction of a second, which is the smallest observable
+form of "a host accepted it".
 
 That matters most where a mistake is *silent*. A misspelled key in a
 generated config isn't an error to hyprpaper or hypridle:
@@ -205,11 +250,13 @@ leaving the original alive but unreachable until it's restarted.
 **A skipped check announces itself instead of counting as a pass.** libtest
 has no skipped state — a test that returns early because a daemon isn't
 installed, or NetworkManager has no Wi-Fi device to ask, prints `ok`
-exactly like one that verified something. The parse and NetworkManager
-tests `eprintln!` an `HYPRFORGE-SKIP: <reason>` line before returning
-early, `check.sh` runs them with `--nocapture` and greps for the marker,
-and each one found is reported separately in yellow even on an otherwise
-green run.
+exactly like one that verified something. Every gated step except live
+tests against Hyprland — parse, NetworkManager, BlueZ, hyprsunset,
+logind, clipboard, icon names and tray — `eprintln!`s an
+`HYPRFORGE-SKIP: <reason>` line before returning early from a check it
+couldn't actually run, `check.sh` runs them with `--nocapture` and greps
+for the marker, and each one found is reported separately in yellow even
+on an otherwise green run.
 
 ## Build
 

@@ -120,6 +120,86 @@ tier gates on the thing it actually asks. When you add a live test, the
 question to answer before writing it is *what has to be running for this to
 mean anything*, and that is rarely what the tier above it needed.
 
+**`git subtree split` without `--rejoin` silently breaks the round trip.**
+A plain split produces a good branch and records nothing here, so a change
+made in the component repository cannot come back: `git subtree pull` finds
+no common ancestor and stops with `fatal: refusing to merge unrelated
+histories`. Outbound works, inbound does not, and nothing says so until the
+first outside pull request — the exact event the split exists to enable.
+`--rejoin` leaves a merge commit here (`Split 'crates/<crate>/' into commit
+'<sha>'`) recording which commit the split produced, so a later pull has an
+ancestor to find. `split.sh` does this; the rule exists because a hand-run
+`git subtree split` does not.
+
+**A `LICENSE` symlink dangles in a split repository.** The foundation crates
+symlink `LICENSE` to the repo root, and that is correct for them — `cargo
+package` dereferences a symlink into the tarball. Git carries a symlink as a
+symlink, so the moment a crate becomes a repository root, `../../LICENSE`
+points above it and resolves to nothing. The first split produced an MIT
+project with an unreadable licence. A crate that will become a repository
+needs a real file; `split.sh` refuses to split one that is still a symlink.
+
+**Cargo keys a git source on the URL string, so every manifest must spell it
+identically.** A standalone crate that depends on another standalone crate
+resolves two manifests — its own, and the depended-on crate's as fetched
+from inside its own repository. Two spellings of the same repository read
+as two different sources, and the second one gets fetched over the network.
+`hyprforge-settings` depends on `hyprforge-tray`, which names the URL in its
+own manifest, and that is the first pair with this shape. The URL is allowed
+to change; it has to change everywhere at once, which is what `split.sh`
+checks before it will split anything.
+
+**A git dependency on a crate that still inherits from the workspace
+resolves fine.** Cargo clones the whole repository, so the workspace root
+comes along with it. Only the crate being *extracted* needs a self-contained
+manifest — this was assumed to be otherwise, and the assumption made the
+remaining splits look far more expensive than they turned out to be.
+`hyprforge-settings` pulls in fifteen Hyprforge crates and none of them
+needed a single change.
+
+**A standalone crate's hand-copied dependency versions drift with no
+symptom.** A crate that is its own repository root cannot inherit
+`[workspace.dependencies]`, so it spells every version and feature out by
+hand. If the root bumps one and the copy is not updated, cargo resolves
+both, clippy stays silent and every test still passes. Dropping `features =
+["derive"]` from the clipboard's serde — version left alone — was proved
+invisible to all of tier 1 before the check existed. `check.sh`'s "Standalone
+crate dependency pins" step exists for exactly this, and it discovers which
+crates to check by their shape (no workspace inheritance left at all), so a
+newly prepared crate is covered automatically rather than silently missed.
+
+**Four separate things go wrong when CI fetches a private git dependency,
+and each one reports as if it were the last.** Worth one entry, written as
+the sequence it actually was, because the error text moved every time and
+read as though nothing had changed:
+- An Actions `GITHUB_TOKEN` is scoped to the repository its workflow runs
+  in and grants nothing on another private repository in the same account —
+  first failure, no credentials reached GitHub at all.
+- Cargo fetches git dependencies with libgit2, which does not honour
+  `url.<..>.insteadOf`, so a credential configured that way never reaches
+  the clone and the exact same "failed to authenticate" comes back even
+  though the token and the rewrite were now both correct.
+  `CARGO_NET_GIT_FETCH_WITH_CLI: true` makes cargo shell out to the `git`
+  binary instead, which does honour it.
+- `x-access-token:<token>` is the shape of a GitHub App installation token,
+  not a personal access token, and GitHub answers "Invalid username or
+  token. Password authentication is not supported." The `AUTHORIZATION:
+  basic` extraheader that `actions/checkout` installs for itself works for
+  both kinds, passed through `env:` so it never sits on a command line a
+  failing step would echo.
+- A fine-grained PAT scoped only to the automatic `Metadata: Read-only`
+  authenticates but cannot clone, and GitHub reports that shortfall as
+  `remote: Write access to repository not granted` with a 403 — naming the
+  wrong permission entirely, on a fetch, which sends you looking for a
+  problem that is not there. It needs `Contents: Read-only`.
+
+**`gh secret set` accepts an empty value without complaint, and `gh secret
+list` then shows the name as if it were set.** A paste that did not take
+produced a secret that existed and was empty, and CI failed for a
+completely different-looking reason than "no secret". The tell is the
+runner's own env dump: GitHub prints `***` for a populated secret, so a bare
+`NAME:` with nothing after it means the value never arrived.
+
 ## Never do this to the machine you are working on
 
 **Never point the lock screen at the live session.** `--fake-password` is
@@ -148,6 +228,14 @@ config, and one of its jobs is editing `hyprland.lua`.
 
 **Do not start a second `hyprpaper`** to validate a generated file — it takes
 over the IPC socket of the running one. Skip the check when it is running.
+
+**This generalises: never start a second instance of one of this suite's own
+daemons to inspect it.** The reason is sharper for `hyprforge-clipd` than it
+was for `hyprpaper`, because its own design makes it the only writer to the
+clipboard history file — there is no IPC socket to fail loudly on, just a
+second process now sharing state with the first. Starting one to check for a
+CLI flag connected it to the live clipboard. Read the source or `--help`
+instead of running a second copy to find out.
 
 ## The shape a D-Bus-backed module takes
 
@@ -238,11 +326,22 @@ belongs in the design — not in a user's surprise.
 Clippy must be silent and every test must pass before a commit. Three tiers, and
 the later ones exist because code can be internally consistent and wrong about
 the system it is talking to: tier 2 checks catalogue claims against the running
-compositor, tier 3 hands generated files to the real daemons.
+compositor, tier 3 hands generated files to the real daemons. Tier 1 now also
+includes the "Standalone crate dependency pins" step, which compares every
+split-ready crate's hand-copied dependency versions against the workspace
+table — see the rule above about drift with no symptom.
 
 `check.sh` does **not** cover the lock screen's live behaviour. Its unit tests
 run in tier 1, but proving it locks, draws and unlocks needs the nested
 compositor, by hand.
+
+`./split.sh <crate-name>` extracts one component into a branch that can
+become its own repository, history intact, and refuses to run until the
+crate is actually ready to leave (see the rules above about the manifest,
+the `LICENSE` symlink, and the git URL). `./sync.sh` reports whether each
+already-split component's published repository still matches what this
+monorepo would produce, and `./sync.sh --push` brings the ones that have
+drifted back into sync — see repo-plan.md for both.
 
 ## What the layering is for
 

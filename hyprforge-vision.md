@@ -60,14 +60,14 @@ with zero GTK/Qt dependency anywhere in the stack.
 
 | Component | Crate(s) | Replaces | Daemon? | Status |
 |---|---|---|---|---|
-| **Settings app** (shell) | `hyprforge-settings` | GNOME/KDE Settings | no (hosts modules that may talk to daemons) | eight working screens (Monitors, Window Rules, Shortcuts, Input, Appearance, Desktop, Session, System), ~17.5k lines |
+| **Settings app** (shell) | `hyprforge-settings` | GNOME/KDE Settings | no (hosts modules that may talk to daemons) | ten working screens (Monitors, Window Rules, Shortcuts, Input, Network, Bluetooth, Appearance, Desktop, Session, System), ~20.9k lines |
 | — Displays module | `hyprforge-displayd` (daemon) | manual `wlr-randr`/GUI fiddling | **yes**, systemd user service, D-Bus API | in progress |
 | — Window Rules module | `hyprforge-windowrules` (lib) | hand-written Lua rules | no | in progress |
 | — Shortcuts module | `hyprforge-shortcuts` (lib) | hand-edited keybinds | no | in progress; TOML storage, Lua codegen, live conflict detection against `hyprctl binds` |
 | — Network module | `hyprforge-network` (lib) | nm-applet/nmtui | no new daemon, talks to NetworkManager D-Bus directly | in progress; model, backend seam, NetworkManager client and the Settings screen (Wi-Fi list, join, forget, radio toggle) are done. Deferred: VPN, 802.1X enterprise, hotspot |
-| — Bluetooth module | `hyprforge-bluetooth` (lib) | blueman | no new daemon, talks to BlueZ D-Bus directly | in progress; adapter power, discovery, device list, connect/disconnect/forget/trust, and a Settings screen. Pairing deferred — needs an `org.bluez.Agent1` passkey flow |
+| — Bluetooth module | `hyprforge-bluetooth` (lib) | blueman | no new daemon, talks to BlueZ D-Bus directly | in progress; adapter power, discovery, device list, connect/disconnect/forget/trust, and a Settings screen. Pairing is now built: `agent::register` implements `org.bluez.Agent1`, `pairing::PairingPrompt` models Confirm/Display/Authorize, and the Settings screen's `subscription()` wires a live `pairing_stream()` that forwards BlueZ's prompts to the screen and sends the answer back |
 | — Audio module | *(planned)* | pavucontrol | talks to PipeWire | not started |
-| — Power module | *(planned)* | — | talks to UPower/power-profiles-daemon | not started |
+| — Power module (battery, power-profiles-daemon) | *(planned)* | — | talks to UPower/power-profiles-daemon | not started. A crate named `hyprforge-power` exists, but it is unrelated to this row: it is only the logind `Inhibit` client behind "Tray: keep awake" below — no UPower, no battery, no power profiles. Do not read the crate's existence as this module being done |
 | — Desktop module (wallpaper, night light, idle) | `hyprforge-ecosystem` (lib) | hyprpaper/hyprsunset/hypridle config by hand | no (drives the existing daemons) | in progress |
 | — Appearance module | `hyprforge-appearance` (lib) | GNOME/KDE appearance settings | no (writes gsettings via CLI) | in progress |
 | — Input/keyboard module | `hyprforge-input` (lib) | GNOME/KDE keyboard & touchpad settings | no | in progress |
@@ -75,11 +75,13 @@ with zero GTK/Qt dependency anywhere in the stack.
 | — System module (behaviour, shortcuts behaviour, X11, rendering) | `hyprforge-system` (lib) | hand-edited hyprland.lua | no | in progress |
 | — Users/time module | *(planned)* | — | accountsservice/timedated | not started |
 | — Lua import (hand-written config) | `hyprforge-lua-import` (lib) | — | no (sandboxed `mlua` evaluator, the only crate depending on mlua) | in progress; imports hand-written `hl.bind()`/`hl.window_rule()`/`hl.monitor()` calls |
-| **Tray icons** | `hyprforge-tray` (lib + `hyprforge-trayd`) | nm-applet, blueman-tray | **yes**, a small user daemon | in progress; Wi-Fi and Bluetooth icons over `org.kde.StatusNotifierItem` with `com.canonical.dbusmenu` menus, scanning on menu open. Deferred: submenus, and items for Audio/Power until those backends exist |
-| — Tray: keep awake | `hyprforge-tray` item *(planned)* | a hand-run `systemd-inhibit … sleep 8h` | no (logind `Inhibit`) | not started; the smallest of these and the one already being done by hand |
-| — Tray: night light | `hyprforge-tray` item *(planned)* | redshift/gammastep applets | no (drives hyprsunset) | not started; `ecosystem::sunset` models the profiles but has no runtime toggle yet |
+| **Tray icons** | `hyprforge-tray` (lib + `hyprforge-trayd`) | nm-applet, blueman-tray | **yes**, a small user daemon | in progress; four `org.kde.StatusNotifierItem`s (Wi-Fi, Bluetooth, keep-awake, night light) with `com.canonical.dbusmenu` menus, scanning on menu open, each icon's visibility gated by `hyprforge_tray::prefs` and re-read every poll tick. Deferred: submenus, and an Audio/Power item until those backends exist |
+| — Tray: keep awake | `hyprforge-tray` item, `hyprforge-power` (logind `Inhibit` client) | a hand-run `systemd-inhibit … sleep 8h` | no (logind `Inhibit`) | built; `check.sh` has a live tier, "Live tests against systemd-logind". No Settings screen yet — it has no home in `hyprforge-settings` at all today, only the tray item |
+| — Tray: night light | `hyprforge-tray` item, `hyprforge-ecosystem::sunset_control` | redshift/gammastep applets | no (drives hyprsunset via `hyprctl`) | built; `check.sh` has a live tier, "Live tests against hyprsunset". Its Settings home is a tab on the Desktop screen, with no way yet to deep-link the tray icon straight to it |
 | — Tray: displays | `hyprforge-tray` item *(planned)* | — | no (talks to `hyprforge-displayd` over D-Bus) | not started; switch profile on dock, and surface the revert countdown. The first item with a real use for `Status::Passive` — invisible until it has something to say |
 | **Bar** | *(planned)* | waybar | no | not started; would also be the `StatusNotifierHost`, so the tray items already target it |
+| **Clipboard** | `hyprforge-clipboard` (lib + `hyprforge-clipd` daemon), `hyprforge-clipmenu` (popup) | copyq | **yes**, `hyprforge-clipd`, a user daemon over `wlr-data-control`/`ext-data-control` | in progress; history recording, paste synthesis, and a popup that appears at the pointer are built. Built around one rule: `Sensitivity` is checked before an offer's bytes are ever requested, so a secret is never read, hashed, stored or logged, and `Debug` on an entry renders a description rather than content. `hyprforge-clipboard` is deliberately standalone — no settings app, no tray, no Hyprland config machinery — and is one of the five components already split into its own repository (see "Where things stand"). `check.sh` has a live tier, "Live tests against the Wayland clipboard"; the CI in the split repository is tier-1 only, since a compositor-backed test needs a real Wayland session no runner has |
+| **Notifications** | the nested `notif/` workspace: `notif-types`, `notif-config`, `notif-core`, `notif-dbus`, `notif-render`, `notif-wl`, `notif-ipc`, plus the `notifd`/`notifctl` binaries | dunst/mako | **yes**, `notifd`, a user daemon (`org.freedesktop.Notifications` over D-Bus) | built and usable standalone: full D-Bus notification server, layer-shell toasts, a notification-center panel, history, do-not-disturb, hot-reloading config, and `notifctl` for CLI control. Kept as its own nested Cargo workspace on purpose, excluded from the root workspace's `members` — zbus picks its async runtime by feature, the suite needs `zbus/tokio` and notif needs `zbus/async-io`, and unifying the two would give notif's D-Bus code a tokio code path with no tokio runtime under it. `notif-render`'s golden-image tests read the shared `hyprforge_look::Theme` (the same `lock.toml` the lock screen and Settings app read) so notification colours match the rest of the suite without being configured twice. `check.sh`'s "notif workspace" step is what runs its tests, since `cargo test --workspace` at the root does not reach it |
 | **Lock screen** | `hyprforge-lock` (binary), `hyprforge-authui` (conversation model) | hyprlock | no (a client holding `ext-session-lock-v1`) | locks, draws, authenticates against PAM and unlocks, with a look shared with the greeter via `hyprforge-look`; see "The lock screen" in the README for the genuine remaining gaps (no input-method support, password not zeroized, no attempt limiting of its own) |
 | *(shared foundation)* | `hyprforge-paths` (xdg + atomic writes), `hyprforge-look` (colour type + runtime Theme), `hyprforge-ui` (iced widgets and palette) | — | no | in place; every future app builds on these |
 | **Greeter / display manager** | `hyprforge-greet`, on `hyprforge-authui` | greetd greeters (gtkgreet/tuigreet) | runs under greetd | ~885 lines; has an installer (`./hyprforge --install --greeter`) and its own `INSTALL.md` |
@@ -105,22 +107,28 @@ locked spec.
 
 ## Workspace structure
 
-Single Cargo workspace at the repo root. The original intent was for every
-component above to get its own crate(s) under `crates/`, even before it's
-built — stub/empty crates as placeholders so the workspace shape reflects
-the intended full suite. That convention was not followed in practice:
-`Cargo.toml`'s `members` lists only crates that actually have code in them,
-and planned components with no crate yet (Bluetooth, Audio, Power,
-Users/time, File Manager, Photo Viewer, Video Viewer, Process Manager,
-Service Manager, Disk Utility, Notepad, Calculator, Calendar) simply have
-none. Treat the table above, not the workspace listing, as the source of
-truth for what's planned.
+Single Cargo workspace at the repo root, 25 crates under `crates/` plus the
+`notif/` nested workspace (see "Notifications" above for why that one is
+kept separate). The original intent was for every component above to get
+its own crate(s) under `crates/`, even before it's built — stub/empty
+crates as placeholders so the workspace shape reflects the intended full
+suite. That convention was not followed in practice: `Cargo.toml`'s
+`members` lists only crates that actually have code in them, and planned
+components with no crate yet (Audio, Users/time, File Manager, Photo
+Viewer, Video Viewer, Process Manager, Service Manager, Disk Utility,
+Notepad, Calculator, Calendar) simply have none. Power is a partial
+exception: `hyprforge-power` exists as a crate, but only for the
+keep-awake Inhibit client — the planned battery/power-profiles module
+this table lists separately still has no crate. Treat the table above,
+not the workspace listing, as the source of truth for what's planned.
 
 ```
 hyprforge/
   Cargo.toml
   crates/
     hyprforge-paths/            # xdg + atomic writes, no dependencies
+    hyprforge-process/           # a bounded subprocess wait, no dependencies
+    hyprforge-secret/            # Secret<T>, zeroizing on drop
     hyprforge-look/             # Color type + runtime Theme, no iced
     hyprforge-ui/                # the iced layer: widgets, palette, spacing
     hyprforge-core/              # Hyprland config machinery: hlconfig, hyprlang,
@@ -135,10 +143,17 @@ hyprforge/
     hyprforge-system/
     hyprforge-lua-import/
     hyprforge-network/
+    hyprforge-bluetooth/
+    hyprforge-power/             # logind Inhibit client (keep-awake) only
+    hyprforge-clipboard/         # clipboard history lib + hyprforge-clipd daemon
+    hyprforge-clipmenu/          # the clipboard popup
+    hyprforge-tray/              # lib + hyprforge-trayd
     hyprforge-settings/          # the Settings app shell + its modules
     hyprforge-authui/            # shared auth conversation model
     hyprforge-lock/
     hyprforge-greet/
+  notif/                        # separate nested Cargo workspace, excluded
+                                  # from the root's members (see "Notifications")
 ```
 
 ## Shared architectural patterns to reuse across components
@@ -185,12 +200,13 @@ occurring inside the suite. A new app should depend on `hyprforge-ui` and get
 the look for free; if it ever needs to define a colour of its own, that is a
 sign something belongs in `hyprforge-look` instead.
 
-### Where things stand (2026-09-12)
+### Where things stand (as of 2026-09-13)
 
 The Settings modules above marked *in progress* are functional; their look
 and feel is deliberately unfinished, functionality first. The Settings app
-itself is eight working screens (Monitors, Window Rules, Shortcuts, Input,
-Appearance, Desktop, Session, System) at roughly 17.5k lines.
+itself is ten working screens (Monitors, Window Rules, Shortcuts, Input,
+Network, Bluetooth, Appearance, Desktop, Session, System) at roughly
+20.9k lines.
 
 `hyprforge-lock` locks, draws, authenticates against PAM and unlocks, and
 now has the look: it shares `hyprforge-look`'s runtime `Theme` with the rest
@@ -217,3 +233,41 @@ It lists networks, joins them, forgets them and toggles the radio.
 Deliberately not done yet: VPN, 802.1X enterprise (listed, but says why it
 cannot be joined rather than offering a passphrase box that cannot work)
 and hotspot.
+
+`hyprforge-bluetooth` (over BlueZ) followed the same backend-trait shape,
+and now has a working pairing flow on top: `agent::register` implements
+`org.bluez.Agent1`, `pairing::PairingPrompt` models the Confirm/Display/
+Authorize shapes BlueZ can ask for, and the Bluetooth Settings screen's
+`subscription()` registers the real agent and turns its prompts into
+messages. Adapter power, discovery, device list, connect/disconnect/
+forget/trust and pairing are all in place.
+
+Two Tray items shipped since this section was last written: keep-awake
+(`hyprforge-power`, a logind `Inhibit` client — the crate's only job) and
+night light (driving `hyprsunset` through
+`hyprforge-ecosystem::sunset_control`). Neither has finished its Settings
+integration — keep-awake has no screen at all yet, night light's is a
+Desktop tab with no deep link from the tray icon — but both are
+live-tested in `check.sh` against the real service (`systemd-logind`,
+`hyprsunset`).
+
+Two components not previously in this document exist and work: the
+clipboard (`hyprforge-clipboard` + `hyprforge-clipd`, with the
+`hyprforge-clipmenu` popup, replacing copyq) and notifications (the
+nested `notif/` workspace, replacing dunst/mako). Both are described in
+the inventory table above.
+
+The suite also gained tooling to extract a component into its own
+repository while keeping it a workspace member here: `split.sh` (via
+`git subtree ... --rejoin`) and `sync.sh`, which checks whether a
+split-out repository has drifted from what this monorepo would produce.
+Five components have been split and pushed with their own green CI:
+clipboard, lock, greet, tray, and settings. `repo-plan.md` is the
+authority on this work — the reasoning behind it, the dependency-layer
+order, and what was learned doing it (a dangling `LICENSE` symlink, a
+missing README, and the two-spellings-of-one-git-URL trap once `settings`
+depends on an already-split `tray`) — read it rather than this summary.
+Nothing in the suite is published to crates.io; the split repositories
+currently build against `crates/` via git dependencies and a `[patch]`
+section, which is what makes standalone builds possible without a
+crates.io account.
