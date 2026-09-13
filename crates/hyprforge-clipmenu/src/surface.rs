@@ -98,6 +98,14 @@ pub struct Placement {
     pub height: u32,
 }
 
+/// The paste shortcut this popup was already committed to before it ever
+/// drew a frame — decided by `main.rs` (`target::paste_shortcut`) from
+/// whatever window had focus before this popup's own surface stole it.
+/// Threaded through as plain data so `finish_choice` can hand it to
+/// `Chooser::finish_paste` without this module knowing anything about
+/// window classes or `hyprctl` itself.
+pub use hyprforge_clipboard::Shortcut;
+
 pub struct ClipMenu<C: Chooser> {
     registry: RegistryState,
     outputs: OutputState,
@@ -128,6 +136,10 @@ pub struct ClipMenu<C: Chooser> {
     model: Model,
     thumbnails: thumbnail::Cache,
     chooser: C,
+    /// Decided once, before this popup's own surface existed to steal
+    /// focus — see [`Shortcut`]'s own doc. Read only by
+    /// [`finish_choice`], after the choice is made.
+    shortcut: Shortcut,
     /// Boxed rather than a second generic parameter alongside `C`: this
     /// popup has exactly one production `Pinner` (`pinner::Wired`) and
     /// one mock, both zero-sized or nearly so, called at most once per
@@ -166,6 +178,7 @@ impl<C: Chooser + 'static> ClipMenu<C> {
         chooser: C,
         pinner: impl Pinner + 'static,
         theme: Theme,
+        shortcut: Shortcut,
     ) -> Result<Outcome, ClipMenuError> {
         let (globals, mut queue) = registry_queue_init(&connection)?;
         let qh = queue.handle();
@@ -190,6 +203,7 @@ impl<C: Chooser + 'static> ClipMenu<C> {
             model,
             thumbnails: thumbnail::Cache::new(),
             chooser,
+            shortcut,
             pinner: Box::new(pinner),
             theme: theme.clone(),
             outcome: None,
@@ -230,7 +244,8 @@ impl<C: Chooser + 'static> ClipMenu<C> {
         // popup was driving has stopped: see `finish_choice`'s own doc
         // for why the ordering below is the fix, not an optimisation.
         if menu.outcome == Some(Outcome::Chosen) {
-            finish_choice(&connection, &mut menu);
+            let shortcut = menu.shortcut;
+            finish_choice(&connection, &mut menu, shortcut);
         }
 
         Ok(menu.outcome.unwrap_or(Outcome::Disconnected))
@@ -322,7 +337,7 @@ impl<C: Chooser + 'static> ClipMenu<C> {
 
         let size = Size::new(width as f32, height as f32);
         let mut ui = UserInterface::<Nothing, iced_widget::Theme, iced_tiny_skia::Renderer>::build(
-            view::view(&self.model, &self.theme, &mut self.thumbnails, now),
+            view::view(&self.model, &self.theme, &mut self.thumbnails, now, width as f64),
             size,
             std::mem::take(&mut self.cache),
             &mut self.renderer,
@@ -503,7 +518,7 @@ impl<C: Chooser + 'static> ClipMenu<C> {
 /// anyway, with a warning, is the lesser failure; see
 /// `chooser::Wired::finish_paste` for what happens if the paste itself
 /// then lands nowhere.
-fn finish_choice<C: Chooser + 'static>(connection: &Connection, menu: &mut ClipMenu<C>) {
+fn finish_choice<C: Chooser + 'static>(connection: &Connection, menu: &mut ClipMenu<C>, shortcut: Shortcut) {
     // Dropping the `LayerSurface` queues its role object's destroy
     // request (see `smithay_client_toolkit`'s `Drop for
     // LayerSurfaceInner`) — nothing is sent to the compositor yet,
@@ -527,7 +542,7 @@ fn finish_choice<C: Chooser + 'static>(connection: &Connection, menu: &mut ClipM
         );
     }
 
-    menu.chooser.finish_paste();
+    menu.chooser.finish_paste(shortcut);
 }
 
 /// What the user asked the popup to do, independent of whether a key or a

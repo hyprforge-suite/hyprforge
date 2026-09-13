@@ -305,6 +305,25 @@ impl RowLayout {
             Some(Hit::Row(index))
         }
     }
+
+    /// The pixel width left over for a row's preview text once the pin
+    /// toggle, the time label and the gaps around them have taken their
+    /// own space — computed from exactly the same numbers
+    /// [`Self::hit_test`] uses for the pin's own rectangle, so a preview
+    /// truncated to this width can never run into it.
+    ///
+    /// A popup narrower than what the pin, the time label and their gaps
+    /// alone need floors this at `0.0` rather than going negative — the
+    /// same "degenerate input, sane output" discipline `view::corner_radius`
+    /// applies to a hostile theme.
+    pub fn preview_width(&self, popup_width: f64) -> f64 {
+        let content_right = popup_width - self.padding - Self::ROW_PADDING;
+        let time_left = content_right - self.time_width;
+        let pin_right = time_left - Self::PIN_GAP;
+        let pin_left = pin_right - self.pin_size;
+        let preview_left = self.padding + Self::ROW_PADDING;
+        (pin_left - Self::PIN_GAP - preview_left).max(0.0)
+    }
 }
 
 /// What a pointer position resolved to, from [`RowLayout::hit_test`] —
@@ -594,6 +613,36 @@ mod tests {
         let second_row_middle = first_row_top + stride + layout.row_height / 2.0;
         let hit = layout.hit_test(HIT_POPUP_WIDTH, (layout.padding + 4.0, second_row_middle), 5).unwrap();
         assert_eq!(hit.row(), 1);
+    }
+
+    // --- `RowLayout::preview_width`: the space left for a row's preview
+    // text once the pin toggle and the time label have their own — this
+    // is the number `view::entry_row` truncates the preview to, so it
+    // stops running into the pin instead of merely clipping at the row's
+    // own far edge.
+
+    #[test]
+    fn preview_width_leaves_room_for_the_pin_and_time_label() {
+        let layout = RowLayout::for_font_size(15.0);
+        let width = layout.preview_width(HIT_POPUP_WIDTH);
+        // The preview's right edge (padding + preview_width) must land
+        // no further right than where the pin toggle's own rectangle
+        // starts (with its gap) — i.e. the two must never overlap.
+        let preview_right = layout.padding + RowLayout::ROW_PADDING + width;
+        let content_right = HIT_POPUP_WIDTH - layout.padding - RowLayout::ROW_PADDING;
+        let pin_right = content_right - layout.time_width - RowLayout::PIN_GAP;
+        let pin_left = pin_right - layout.pin_size;
+        assert!(
+            preview_right <= pin_left - RowLayout::PIN_GAP + 0.001,
+            "preview_right {preview_right} must not run into the pin toggle starting at {pin_left}"
+        );
+    }
+
+    #[test]
+    fn a_popup_too_narrow_for_the_pin_and_time_floors_preview_width_at_zero() {
+        let layout = RowLayout::for_font_size(15.0);
+        assert_eq!(layout.preview_width(0.0), 0.0);
+        assert_eq!(layout.preview_width(-100.0), 0.0);
     }
 
     #[test]

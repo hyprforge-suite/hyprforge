@@ -74,6 +74,32 @@ pub struct Model {
     /// size, and not reinvented as a second constant, either of which
     /// could drift from what `rows_that_fit` says fits.
     window: usize,
+    /// The index (into the filtered list) of the first row
+    /// [`Model::visible_range`] builds — **state**, not a value derived
+    /// fresh from `selected` on every call.
+    ///
+    /// This used to *not* exist: `visible_range` recomputed a window
+    /// centred on `selected` every time it was called, which reads fine
+    /// for keyboard movement but is exactly wrong for the mouse —
+    /// hovering a row calls `Model::select` on it (see
+    /// `surface::pointer_move`), and a window that recentres on whatever
+    /// was just selected puts a *different* row under a pointer that
+    /// never moved, which is indistinguishable from the list scrolling
+    /// on its own. Keeping the window's start as state and only ever
+    /// nudging it just far enough to keep the selection inside (see
+    /// [`scroll_start`]) is what makes "the row already under the
+    /// pointer is already visible" a no-op instead of a re-centre.
+    window_start: usize,
+    /// A short label for where a chosen entry will be pasted — "Ghostty",
+    /// say — shown in the header before anything is chosen. Cosmetic
+    /// only: nothing here reads this to decide *how* to paste; that
+    /// decision (`target::paste_shortcut`) is made once in `main.rs` from
+    /// the same focused-window lookup this label came from, and handed to
+    /// `ClipMenu::run` separately. `None` when `main.rs` could not work
+    /// out what had focus (an empty desktop, or `hyprctl` not answering)
+    /// — the header falls back to its plain "Type to filter" text rather
+    /// than naming a window that was never found.
+    paste_target: Option<String>,
 }
 
 /// [`Model::window`]'s value until [`Model::set_window`] is called.
@@ -84,7 +110,15 @@ const DEFAULT_WINDOW: usize = 24;
 
 impl Model {
     pub fn new(history: HistoryState) -> Model {
-        Model { history, filter: String::new(), selected: 0, pin_notice: None, window: DEFAULT_WINDOW }
+        Model {
+            history,
+            filter: String::new(),
+            selected: 0,
+            pin_notice: None,
+            window: DEFAULT_WINDOW,
+            window_start: 0,
+            paste_target: None,
+        }
     }
 
     /// Sets how many rows [`Model::visible_range`] builds around the
@@ -94,8 +128,33 @@ impl Model {
     /// to show anything even when the filtered list is non-empty, which
     /// is a worse failure than showing one row more than a degenerate
     /// height technically fit.
+    ///
+    /// Re-syncs [`Model::window_start`] afterward: a window that just
+    /// shrank could otherwise leave the selection outside it until the
+    /// next unrelated action nudged things back into range.
     pub fn set_window(&mut self, window: usize) {
         self.window = window.max(1);
+        self.sync_window();
+    }
+
+    /// The label [`Model::set_paste_target`] set, if any — see that
+    /// field's own doc.
+    pub fn paste_target(&self) -> Option<&str> {
+        self.paste_target.as_deref()
+    }
+
+    pub fn set_paste_target(&mut self, target: Option<String>) {
+        self.paste_target = target;
+    }
+
+    /// Re-clamps [`Model::window_start`] so the current selection is
+    /// inside it — see [`scroll_start`]'s own doc for the rule. Called
+    /// after anything that can move `selected` or shrink/grow the
+    /// filtered list out from under it: typing, backspace, an explicit
+    /// selection, or a changed window size.
+    fn sync_window(&mut self) {
+        let len = self.filtered().len();
+        self.window_start = scroll_start(len, self.window_start, self.selected, self.window);
     }
 
     /// The entries matching the current filter, newest-first /
@@ -135,11 +194,13 @@ impl Model {
     pub fn type_char(&mut self, c: char) {
         self.filter.push(c);
         self.selected = 0;
+        self.sync_window();
     }
 
     pub fn backspace(&mut self) {
         self.filter.pop();
         self.selected = 0;
+        self.sync_window();
     }
 
     /// Moves the selection by `delta` rows (negative is up), clamped to
@@ -155,6 +216,7 @@ impl Model {
         }
         let current = self.selected.min(len - 1) as i32;
         self.selected = (current + delta).clamp(0, len as i32 - 1) as usize;
+        self.sync_window();
     }
 
     pub fn selected_index(&self) -> usize {
@@ -175,6 +237,13 @@ impl Model {
             return;
         }
         self.selected = index.min(len - 1);
+        // The whole point of `window_start` being persisted state rather
+        // than derived from `selected`: a hover that lands on a row
+        // already inside the current window (which every hover does,
+        // since a hover only ever targets a row `view.rs` actually drew)
+        // leaves the window exactly where it was. See `scroll_start`'s
+        // own doc.
+        self.sync_window();
     }
 
     pub fn selected_entry(&self) -> Option<Entry> {
@@ -191,7 +260,7 @@ impl Model {
     /// mean 500 decode attempts on every keystroke.
     pub fn visible_range(&self) -> std::ops::Range<usize> {
         let len = self.filtered().len();
-        visible_range(len, self.selected, self.window)
+        clamp_window(len, self.window_start, self.window)
     }
 
     /// Reflects a pin/unpin the daemon has already confirmed, in this
@@ -216,6 +285,7 @@ impl Model {
         sort_entries(entries);
         if let Some(new_index) = self.filtered().iter().position(|e| &e.id == id) {
             self.selected = new_index;
+            self.sync_window();
         }
     }
 
@@ -247,22 +317,65 @@ fn sort_entries(entries: &mut [Entry]) {
     });
 }
 
-/// The windowing rule above, pulled out so it can be pinned without a
-/// `Model` around it.
-fn visible_range(len: usize, selected: usize, window: usize) -> std::ops::Range<usize> {
+/// Turns a window's `start` into the `start..end` range actually shown,
+/// for a list of length `len` and a window of `window` rows.
+///
+/// Deliberately ignorant of `selected` — see [`scroll_start`] for the
+/// function that decides where `start` itself should be, and this
+/// function's own call site (`Model::visible_range`) for why the two are
+/// split apart. All this does is keep a given `start` valid: never
+/// running past `len`, and — the one adjustment this makes to `start`
+/// itself — pulled back down so the window stays full-sized wherever the
+/// list is long enough to fill it, rather than shrinking once `start`
+/// alone would run it past the end. That shrink-at-the-end behaviour is
+/// the one thing carried over unchanged from this crate's original
+/// (`selected`-centred) windowing rule.
+fn clamp_window(len: usize, start: usize, window: usize) -> std::ops::Range<usize> {
     if len == 0 {
         return 0..0;
     }
-    let selected = selected.min(len - 1);
-    let half = window / 2;
-    let start = selected.saturating_sub(half);
     let end = (start + window).min(len);
-    // If `end` hit the list's own end before using the whole window,
-    // pull `start` back down so the window is still full-sized where
-    // there is enough list to fill it — otherwise scrolling to the
-    // bottom would shrink the window instead of just sliding it.
-    let start = end.saturating_sub(window).min(start);
+    let start = end.saturating_sub(window);
     start..end
+}
+
+/// Where the window should start so that `selected` (into a list of
+/// length `len`) falls inside a window of `window` rows beginning at
+/// `start` — moved by the *minimum* amount needed, never recentred.
+///
+/// This is the fix for the popup's own auto-scrolling bug: the previous
+/// rule recomputed `start` fresh from `selected` on every call, centring
+/// the window under whatever was selected — which included the pointer
+/// merely hovering a row (`Model::select`, called from
+/// `surface::pointer_move`), so hovering a row that was already on
+/// screen still recentred the list *under the cursor*, landing a
+/// different row there and reading as the list scrolling on its own.
+/// Keeping `start` as state and only nudging it here — never otherwise —
+/// is what makes "the row under the pointer is already visible" a true
+/// no-op: `selected` already satisfies `start <= selected < start +
+/// window`, so neither branch below fires and `start` is returned
+/// unchanged.
+///
+/// The two branches are keyboard movement's two edges: `selected` above
+/// the window pulls `start` down to meet it exactly (a scroll up by
+/// exactly the overshoot, one row at a time when `move_selection` is
+/// called one row at a time); `selected` at or past the window's far end
+/// pushes `start` up to meet it the same way. [`clamp_window`] (called by
+/// every reader of the resulting `start`, including this function's own
+/// final clamp) is what then keeps the window from running past the
+/// list's own end or shrinking there.
+fn scroll_start(len: usize, start: usize, selected: usize, window: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let selected = selected.min(len - 1);
+    let mut start = start;
+    if selected < start {
+        start = selected;
+    } else if selected >= start + window {
+        start = selected + 1 - window;
+    }
+    clamp_window(len, start, window).start
 }
 
 #[cfg(test)]
@@ -428,18 +541,60 @@ mod tests {
         assert_eq!(model.pin_notice(), None);
     }
 
+    // --- `clamp_window`: keeping a given `start` valid, independent of
+    // any selection at all.
+
     #[test]
-    fn the_visible_window_stays_within_the_lists_bounds() {
-        let range = visible_range(500, 3, DEFAULT_WINDOW);
-        assert_eq!(range.start, 0);
+    fn clamp_window_stays_within_the_lists_bounds() {
+        let range = clamp_window(500, 3, DEFAULT_WINDOW);
+        assert_eq!(range.start, 3);
         assert!(range.end <= 500);
 
-        let range = visible_range(500, 499, DEFAULT_WINDOW);
+        let range = clamp_window(500, 499, DEFAULT_WINDOW);
         assert_eq!(range.end, 500);
-        assert!(range.start < range.end);
+        assert!(range.start < range.end, "must still be full-sized, not shrunk to one row");
 
-        let range = visible_range(3, 1, DEFAULT_WINDOW);
+        let range = clamp_window(3, 1, DEFAULT_WINDOW);
         assert_eq!(range, 0..3, "a list shorter than the window is shown in full");
+    }
+
+    #[test]
+    fn clamp_window_pulls_start_back_so_the_window_stays_full_sized_at_the_end() {
+        // `start` alone would run the window past the list's end; the
+        // window must still show `window` rows, sliding `start` back
+        // rather than shrinking.
+        let range = clamp_window(10, 8, 5);
+        assert_eq!(range, 5..10);
+    }
+
+    // --- `scroll_start`: the fix for the auto-scrolling bug. Moves
+    // `start` by the minimum needed to keep `selected` inside the
+    // window — never recentres.
+
+    #[test]
+    fn scroll_start_leaves_start_untouched_when_selected_is_already_inside_the_window() {
+        assert_eq!(scroll_start(10, 2, 3, 4), 2, "selected 3 is already within [2, 6)");
+        assert_eq!(scroll_start(10, 2, 2, 4), 2, "selected at the window's own top edge is still inside it");
+        assert_eq!(scroll_start(10, 2, 5, 4), 2, "selected at the window's own bottom edge is still inside it");
+    }
+
+    #[test]
+    fn scroll_start_moves_down_by_exactly_the_overshoot_past_the_bottom_edge() {
+        // Window [2, 6); selecting row 6 is one past the edge, so start
+        // must move to exactly 3 — a one-row scroll, not a recentre.
+        assert_eq!(scroll_start(10, 2, 6, 4), 3);
+    }
+
+    #[test]
+    fn scroll_start_moves_up_to_meet_a_selection_above_the_window() {
+        // Window [4, 8); selecting row 2 is above it, so start must jump
+        // exactly to 2, not merely far enough to include it plus slack.
+        assert_eq!(scroll_start(10, 4, 2, 4), 2);
+    }
+
+    #[test]
+    fn scroll_start_never_runs_the_window_past_the_lists_own_end() {
+        assert_eq!(scroll_start(10, 0, 9, 4), 6, "window must end exactly at len, not run past it");
     }
 
     /// The property `main.rs` depends on: telling the model a new window
@@ -463,5 +618,76 @@ mod tests {
         let mut model = model_with(&["a", "b"]);
         model.set_window(0);
         assert_eq!(model.visible_range().len(), 1);
+    }
+
+    // --- The auto-scroll regression, exercised through `Model` itself
+    // rather than the bare `scroll_start`/`clamp_window` functions above —
+    // these are the properties the owner reported by name.
+
+    /// The bug: hovering a row that is already on screen re-centred the
+    /// window under it, since the old rule derived the window fresh from
+    /// `selected` on every call. A hover must be a true no-op when the
+    /// row it lands on is already visible.
+    #[test]
+    fn hovering_a_row_that_is_already_visible_does_not_move_the_window() {
+        let mut model = model_with(&["a", "b", "c", "d", "e"]);
+        model.set_window(3);
+        model.move_selection(2); // selected = 2, still inside the initial window [0, 3)
+        let before = model.visible_range();
+        model.select(1); // hover row 1 — already visible
+        assert_eq!(model.visible_range(), before, "hovering an already-visible row must not scroll");
+    }
+
+    #[test]
+    fn moving_past_the_bottom_edge_scrolls_the_window_by_exactly_one_row() {
+        let mut model = model_with(&["a", "b", "c", "d", "e"]);
+        model.set_window(3);
+        model.move_selection(2); // selected = 2, the window's own last visible row
+        assert_eq!(model.visible_range(), 0..3);
+        model.move_selection(1); // selected = 3, one past the window
+        assert_eq!(model.visible_range(), 1..4, "the window must slide down by exactly one row");
+    }
+
+    #[test]
+    fn moving_past_the_top_edge_scrolls_the_window_by_exactly_one_row() {
+        let mut model = model_with(&["a", "b", "c", "d", "e"]);
+        model.set_window(3);
+        model.select(4); // jump to the end; window becomes [2, 5)
+        assert_eq!(model.visible_range(), 2..5);
+        model.move_selection(-2); // selected = 2, the window's own top edge — not past it yet
+        assert_eq!(model.visible_range(), 2..5, "the window's own top edge is still inside it");
+        model.move_selection(-1); // selected = 1, now past the top edge
+        assert_eq!(model.visible_range(), 1..4, "the window must slide up by exactly one row");
+    }
+
+    #[test]
+    fn changing_the_filter_keeps_the_window_valid_for_the_new_shorter_list() {
+        let mut model = model_with(&["aa", "ab", "cc", "dd", "ee"]);
+        model.set_window(3);
+        model.select(4); // jump to the end of the full 5-item list; window becomes [2, 5)
+        assert_eq!(model.visible_range(), 2..5);
+        model.type_char('a'); // filters down to ["aa", "ab"] — 2 rows
+        assert_eq!(model.filtered().len(), 2);
+        assert_eq!(
+            model.visible_range(),
+            0..2,
+            "a filtered-down list shorter than the window must be shown in full, from the start"
+        );
+    }
+
+    // --- `paste_target`: purely cosmetic label state, never consulted
+    // for anything but the header text `view.rs` shows.
+
+    #[test]
+    fn a_fresh_model_has_no_paste_target() {
+        let model = model_with(&["a"]);
+        assert_eq!(model.paste_target(), None);
+    }
+
+    #[test]
+    fn a_paste_target_can_be_set_and_read_back() {
+        let mut model = model_with(&["a"]);
+        model.set_paste_target(Some("Ghostty".to_string()));
+        assert_eq!(model.paste_target(), Some("Ghostty"));
     }
 }

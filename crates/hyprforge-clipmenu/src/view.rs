@@ -25,6 +25,7 @@ pub fn view<'a, Message, Renderer>(
     theme: &'a Theme,
     thumbnails: &mut thumbnail::Cache,
     now: u64,
+    popup_width: f64,
 ) -> Element<'a, Message, iced_widget::Theme, Renderer>
 where
     Message: 'a,
@@ -65,7 +66,17 @@ where
     {
         text(notice.to_string()).size(theme.font_size).wrapping(Wrapping::None).color(to_iced(theme.error)).into()
     } else if model.filter_text().is_empty() {
-        text("Type to filter").size(theme.font_size).wrapping(Wrapping::None).color(dim_color).into()
+        // Shows where a chosen entry will land, if `main.rs` was able to
+        // work that out — confirmation that the popup picked up the
+        // right window before anything is even chosen, per the owner's
+        // "make it aware of where it's pasting" ask. Reuses the header's
+        // own text slot rather than adding a widget, so `header_height`
+        // (and therefore every row below it) never moves for this.
+        let placeholder = match model.paste_target() {
+            Some(target) => format!("Type to filter — pasting into {target}"),
+            None => "Type to filter".to_string(),
+        };
+        text(placeholder).size(theme.font_size).wrapping(Wrapping::None).color(dim_color).into()
     } else {
         text(model.filter_text().to_string()).size(theme.font_size).wrapping(Wrapping::None).color(text_color).into()
     };
@@ -121,7 +132,7 @@ where
                 let rows = range
                     .zip(window.iter())
                     .map(|(index, entry)| {
-                        entry_row(entry, index == selected, theme, &layout, thumbnails, now)
+                        entry_row(entry, index == selected, theme, &layout, thumbnails, now, popup_width)
                     })
                     .collect::<Vec<_>>();
                 column(rows).spacing(RowLayout::ROW_SPACING as f32).into()
@@ -209,6 +220,27 @@ fn relative_age(now: u64, copied_at: u64) -> String {
     }
 }
 
+/// How many characters of a preview fit in `available_width` pixels at
+/// `font_size`, so a row's preview text ends before the pin toggle
+/// rather than running into it.
+///
+/// This is necessarily an estimate: this crate builds a fresh
+/// `UserInterface` from scratch every frame (see `surface.rs::draw`)
+/// rather than keeping one running that could measure a string's actual
+/// shaped width ahead of time, so there is no real text-metrics call to
+/// make here. `0.6` is a plain average-glyph-width factor for a
+/// proportional font — generous enough that ordinary text (which is
+/// narrower on average, especially with `Content::preview`'s own
+/// whitespace collapsing) reliably fits inside the estimate rather than
+/// spilling past it, which is what matters here: the same "clip rather
+/// than overflow" backstop `entry_row`'s own `.clip(true)` and
+/// `Wrapping::None` already provide handles anything this estimate
+/// slightly undershoots.
+fn max_preview_chars(font_size: f32, available_width: f64) -> usize {
+    let avg_char_width = (font_size as f64 * 0.6).max(1.0);
+    ((available_width / avg_char_width).floor() as usize).max(1)
+}
+
 fn message<'a, Message, Renderer>(
     text_value: &str,
     color: iced_runtime::core::Color,
@@ -231,6 +263,7 @@ fn entry_row<'a, Message, Renderer>(
     layout: &RowLayout,
     thumbnails: &mut thumbnail::Cache,
     now: u64,
+    popup_width: f64,
 ) -> Element<'a, Message, iced_widget::Theme, Renderer>
 where
     Message: 'a,
@@ -248,7 +281,17 @@ where
     // regardless of how few characters got through, and a row full of
     // hyphen-free base64 or a URL would still lay out as several tall
     // lines instead of the one-line preview a clipboard history needs.
-    let preview = entry.content.preview(96);
+    //
+    // The character cap itself used to be the flat `96` regardless of
+    // how much room the row actually had, which is what let a long
+    // preview run straight into the pin toggle: `Wrapping::None` stops
+    // the row from *growing*, but does nothing to stop the text from
+    // *drawing* past its own allotted space toward whatever is laid out
+    // after it. `max_preview_chars` derives the cap from the same pixel
+    // geometry `RowLayout::hit_test` uses for the pin's own rectangle, so
+    // the preview is truncated to end where the pin toggle begins,
+    // rather than merely being clipped at the row's far edge.
+    let preview = entry.content.preview(max_preview_chars(theme.font_size, layout.preview_width(popup_width)));
     let label: Element<'a, Message, iced_widget::Theme, Renderer> = text(preview)
         .size(theme.font_size)
         .wrapping(Wrapping::None)
@@ -413,6 +456,31 @@ mod tests {
         let radius = corner_radius(&theme);
         assert!(radius.is_finite());
         assert!(radius <= 64.0, "got {radius}");
+    }
+
+    // --- `max_preview_chars`: the estimate that keeps a row's preview
+    // text from running into the pin toggle.
+
+    #[test]
+    fn a_wider_available_width_allows_more_characters() {
+        let narrow = max_preview_chars(15.0, 60.0);
+        let wide = max_preview_chars(15.0, 600.0);
+        assert!(wide > narrow, "more room must allow more characters, not fewer");
+    }
+
+    #[test]
+    fn zero_or_negative_width_still_allows_at_least_one_character() {
+        // Never zero: a preview of zero characters would show an empty
+        // row rather than the clipped-but-present text a degenerate popup
+        // size should still manage.
+        assert_eq!(max_preview_chars(15.0, 0.0), 1);
+    }
+
+    #[test]
+    fn a_bigger_font_needs_more_width_per_character() {
+        let small_font = max_preview_chars(12.0, 300.0);
+        let large_font = max_preview_chars(40.0, 300.0);
+        assert!(large_font < small_font, "a bigger font must fit fewer characters in the same width");
     }
 
     // --- `relative_age`: the vocabulary and the arithmetic behind it.

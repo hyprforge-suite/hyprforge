@@ -31,6 +31,7 @@ mod model;
 mod pinner;
 mod singleton;
 mod surface;
+mod target;
 mod thumbnail;
 mod view;
 
@@ -169,6 +170,16 @@ fn main() -> std::process::ExitCode {
         }
     };
 
+    // Read *before* `ClipMenu::run` ever creates a surface: once this
+    // popup's own layer surface exists and takes
+    // `KeyboardInteractivity::Exclusive`, the focused window *is* this
+    // popup, and asking `hyprctl` afterward would only ever answer that.
+    // See `target::focused_window`'s own doc.
+    let focused = target::focused_window();
+    let paste_shortcut =
+        focused.as_ref().map(|w| target::paste_shortcut(&w.class)).unwrap_or(hyprforge_clipboard::Shortcut::CtrlV);
+    let paste_target_label = focused.as_ref().map(|w| target::display_name(&w.class));
+
     let monitors = monitors();
     if monitors.is_empty() {
         eprintln!("couldn't read any monitors from hyprctl — is Hyprland running?");
@@ -181,6 +192,7 @@ fn main() -> std::process::ExitCode {
 
     let history = HistoryState::from_result(hyprforge_clipboard::History::load());
     let mut model = Model::new(history);
+    model.set_paste_target(paste_target_label);
 
     let mut theme = hyprforge_appearance::look::resolve();
     theme.font_size = sane_font_size(&theme);
@@ -216,7 +228,7 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    match ClipMenu::run(connection, placement, model, chooser, pinner::Wired, theme) {
+    match ClipMenu::run(connection, placement, model, chooser, pinner::Wired, theme, paste_shortcut) {
         Ok(Outcome::Chosen | Outcome::Cancelled) => std::process::ExitCode::SUCCESS,
         Ok(Outcome::Closed | Outcome::Disconnected) => {
             eprintln!("the popup closed unexpectedly");

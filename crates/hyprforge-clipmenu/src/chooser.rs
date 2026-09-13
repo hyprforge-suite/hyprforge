@@ -9,7 +9,8 @@
 //! crate through [`mock::MockChooser`]. `hyprforge-clipboard`'s write
 //! side landed before this was finished, so [`Wired`] below is the one
 //! place it plugs in — see its doc comment.
-use hyprforge_clipboard::{ClipboardWriter, Entry};
+use hyprforge_clipboard::ipc::ClientError;
+use hyprforge_clipboard::{ClipboardWriter, Entry, Shortcut};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -57,8 +58,15 @@ pub trait Chooser {
     /// Must not synthesize a paste itself — see this trait's own doc.
     fn set_clipboard(&self, entry: &Entry) -> Result<(), String>;
 
-    /// Synthesizes the paste and waits (bounded) for the clipboard
+    /// Synthesizes `shortcut` and waits (bounded) for the clipboard
     /// source `set_clipboard` created to be read or superseded.
+    ///
+    /// `shortcut` is decided by the caller (`main.rs`, via
+    /// `target::paste_shortcut`) from the window that had focus before
+    /// this popup opened — this trait only ever sends whatever it is
+    /// handed, the same seam `hyprforge-clipboard`'s own
+    /// `PasteSynthesizer` keeps between "which combination" and "how to
+    /// press it".
     ///
     /// Call this only after `set_clipboard` returned `Ok`, and only
     /// after the caller has released whatever kept the popup's own
@@ -67,7 +75,7 @@ pub trait Chooser {
     /// error by this point (a compositor with no virtual-keyboard
     /// protocol is reported to stderr, not returned, matching the
     /// original `choose`'s behaviour), so this cannot fail.
-    fn finish_paste(&self);
+    fn finish_paste(&self, shortcut: Shortcut);
 }
 
 /// **The seam**: the real implementation, over `hyprforge-clipboard`'s
@@ -119,6 +127,28 @@ impl Wired {
 
 impl Chooser for Wired {
     fn set_clipboard(&self, entry: &Entry) -> Result<(), String> {
+        // The daemon first, because on Wayland the selection is served
+        // by the client that set it — so a selection this popup owns
+        // dies when this popup exits, and the chosen entry can be pasted
+        // exactly once. `hyprforge-clipd` is already resident and is
+        // already the only writer of the history; holding the selection
+        // open is the same job, and it is what makes a chosen entry
+        // pasteable over and over without reopening the menu.
+        match hyprforge_clipboard::ipc::set_clipboard(entry.id.as_str()) {
+            Ok(()) => return Ok(()),
+            // Nobody to ask. Not an error, and not a reason to refuse to
+            // work: CLAUDE.md's rule is that a component runs alone, so
+            // the popup owns the selection itself instead — for as long
+            // as it lives, which is the one-paste behaviour above.
+            // `NoRuntimeDir` counts as nobody-to-ask for the same
+            // reason `Unreachable` does: there is no socket to try.
+            Err(ClientError::Unreachable(_) | ClientError::NoRuntimeDir) => {}
+            // The daemon answered and said no. That is a real answer and
+            // the caller should hear it rather than have it papered over
+            // by a local fallback that behaves differently.
+            Err(e) => return Err(e.to_string()),
+        }
+
         let guard = self
             .writer
             .set_selection(entry.content.clone())
@@ -127,13 +157,17 @@ impl Chooser for Wired {
         Ok(())
     }
 
-    fn finish_paste(&self) {
+    fn finish_paste(&self, shortcut: Shortcut) {
         use hyprforge_clipboard::{PasteOutcome, PasteSynthesizer, SelectionGuard, SelectionOutcome};
 
-        if self.paster.paste() == PasteOutcome::Unavailable {
+        if self.paster.paste(shortcut) == PasteOutcome::Unavailable {
+            let keys = match shortcut {
+                Shortcut::CtrlV => "Ctrl+V",
+                Shortcut::CtrlShiftV => "Ctrl+Shift+V",
+            };
             eprintln!(
                 "copied to the clipboard — this compositor has no virtual-keyboard \
-                 protocol, so press Ctrl+V yourself to paste it"
+                 protocol, so press {keys} yourself to paste it"
             );
         }
 
@@ -228,7 +262,7 @@ pub mod mock {
             self.result.clone()
         }
 
-        fn finish_paste(&self) {
+        fn finish_paste(&self, _shortcut: Shortcut) {
             self.log.borrow_mut().push("finish_paste");
         }
     }
@@ -277,7 +311,7 @@ mod tests {
     fn finishing_a_choice_runs_set_clipboard_before_finish_paste() {
         let chooser = MockChooser::succeeding();
         chooser.set_clipboard(&entry("x")).unwrap();
-        chooser.finish_paste();
+        chooser.finish_paste(Shortcut::CtrlV);
         assert_eq!(chooser.log.borrow().as_slice(), &["set_clipboard", "finish_paste"]);
     }
 }
