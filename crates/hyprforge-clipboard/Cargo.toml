@@ -6,6 +6,7 @@ license = "MIT"
 description = "A Wayland clipboard library over wlr-data-control / ext-data-control, plus the hyprforge-clipd daemon that watches the compositor's clipboard and writes its history."
 repository = "https://github.com/apost/hyprforge"
 documentation = "https://docs.rs/hyprforge-clipboard"
+readme = "README.md"
 keywords = ["clipboard", "wayland", "wlr-data-control", "hyprland", "linux"]
 categories = ["os::linux-apis", "gui"]
 
