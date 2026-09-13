@@ -188,6 +188,20 @@ If the answer is bad, `git subtree add` puts it back. If it is good,
 work up the layers: `tray`, `lock`, `greet`, then `settings` last,
 because it depends on fifteen crates and will be the hardest.
 
+All five are done and verified standalone — clipboard, lock, greet,
+tray, settings. `settings` was the largest and not the hardest: none of
+its fifteen dependencies needed changing, because a git dependency on a
+crate that still inherits from the workspace resolves fine.
+
+It did surface the one constraint that only appears once two of these
+exist in a chain. `settings` depends on `tray`, which is itself
+standalone-ready and names the git URL in its own manifest — so
+resolving `settings` standalone reads two manifests, and cargo keys a
+git source on the URL *string*. Two spellings of the same repository
+are two sources, and the second gets fetched over the network. The URL
+can change; it has to change everywhere at once, and `split.sh` now
+refuses to split while more than one spelling exists.
+
 **Judged, and the answers are: cheap, yes, and not yet.**
 
 *Cheap* — the clipboard is still an ordinary workspace member. One
@@ -254,5 +268,5 @@ the crate being extracted needs a self-contained manifest. `lock` and
 - [x] Step 4 judged: continue, with drift detection and per-repo CI added
 - [x] `lock` and `greet` prepared and verified standalone; not yet pushed
 - [x] `tray` prepared and verified standalone; not yet pushed
-- [ ] `settings` last
+- [x] `settings` prepared and verified standalone; not yet pushed
 - [ ] Push any of them to a repository someone can actually see
