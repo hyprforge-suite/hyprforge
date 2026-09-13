@@ -20,12 +20,40 @@ use hyprforge_emoji::Emoji;
 use hyprforge_look::Theme;
 use iced_runtime::core::alignment::{Horizontal, Vertical};
 use iced_runtime::core::text::Wrapping;
-use iced_runtime::core::{Element, Length, Padding};
+use iced_runtime::core::text::LineHeight;
+use iced_runtime::core::{Element, Font, Length, Padding};
 use iced_widget::{column, container, row, text, Space, Stack};
 
 fn to_iced(c: hyprforge_look::Color) -> iced_runtime::core::Color {
     iced_runtime::core::Color::from_rgba8(c.r, c.g, c.b, c.a as f32 / 255.0)
 }
+
+
+/// The font emoji cells are drawn in, named explicitly rather than left
+/// to the theme's UI font.
+///
+/// Without this, roughly half the grid renders as monochrome glyphs
+/// instead of emoji — and it is not a data problem: the table carries
+/// `U+FE0F` on all 365 entries that need it, and the 60 bare
+/// single-codepoint entries are `Emoji_Presentation=Yes` characters
+/// that do not. The cause is font selection. Plenty of ordinary UI
+/// fonts contain their own black-and-white glyphs for ✔ ☺ ⚙ and the
+/// like, so a renderer asked for the theme's font finds a glyph there,
+/// is satisfied, and never falls back to the colour emoji font sitting
+/// right beside it.
+///
+/// `noto-fonts-emoji` is a hard dependency of this package for exactly
+/// this reason — see `packaging/arch/PKGBUILD`. If it is missing, cells
+/// render as tofu, which is the honest failure rather than a silent
+/// half-monochrome grid.
+const EMOJI_FONT: Font = Font::with_name("Noto Color Emoji");
+
+/// How much of a cell the glyph fills.
+///
+/// Was 0.55, which left an emoji looking lost in its own cell. Emoji are
+/// square and have no descenders to leave room for, so they can take far
+/// more of the box than a line of text would.
+const GLYPH_FILL: f64 = 0.78;
 
 pub fn view<'a, Message, Renderer>(
     model: &'a Model,
@@ -140,8 +168,19 @@ where
     Renderer: iced_runtime::core::text::Renderer<Font = iced_runtime::core::Font> + 'a,
 {
     let glyph = model.display_char(entry).to_string();
-    let glyph_size = (grid.cell_size * 0.55) as f32;
-    let label = text(glyph).size(glyph_size).wrapping(Wrapping::None);
+    let glyph_size = (grid.cell_size * GLYPH_FILL) as f32;
+    // `LineHeight::Absolute` so the text box is exactly the glyph and
+    // not a line box with leading above and below it: the container
+    // centres whatever it is given, and centring a box that is taller
+    // than its own glyph puts the glyph high in the cell rather than in
+    // the middle of it.
+    let label = text(glyph)
+        .font(EMOJI_FONT)
+        .size(glyph_size)
+        .line_height(LineHeight::Absolute(glyph_size.into()))
+        .align_x(Horizontal::Center)
+        .align_y(Vertical::Center)
+        .wrapping(Wrapping::None);
 
     let border_color = to_iced(theme.accent);
     let cell_background = to_iced(if selected { theme.surfaces.row } else { theme.surfaces.card });
@@ -198,7 +237,15 @@ where
         let highlighted = index == cursor;
         let background = to_iced(if highlighted { theme.surfaces.row } else { theme.surfaces.card });
         let border_width = if highlighted { 1.5 } else { 0.0 };
-        let cell: Element<'a, Message, iced_widget::Theme, Renderer> = container(text(glyph).size(glyph_size).wrapping(Wrapping::None))
+        let cell: Element<'a, Message, iced_widget::Theme, Renderer> = container(
+            text(glyph)
+                .font(EMOJI_FONT)
+                .size(glyph_size)
+                .line_height(LineHeight::Absolute(glyph_size.into()))
+                .align_x(Horizontal::Center)
+                .align_y(Vertical::Center)
+                .wrapping(Wrapping::None),
+        )
             .width(Length::Fixed(strip.cell_size as f32))
             .height(Length::Fixed(strip.cell_size as f32))
             .align_x(Horizontal::Center)

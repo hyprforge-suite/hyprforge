@@ -75,7 +75,11 @@ impl GridLayout {
         GridLayout {
             padding: Self::PADDING,
             header_height: line + Self::ROW_PADDING * 2.0 + Self::HEADER_GAP,
-            cell_size: (font_size * 2.2).max(28.0),
+            // A floor of 40 rather than 28: an emoji is the content, not
+            // a decoration beside text, so the cell is sized for the
+            // glyph rather than for the theme's line height. At a small
+            // UI font the old floor made a grid of postage stamps.
+            cell_size: (font_size * 2.8).max(40.0),
             spacing: Self::SPACING,
         }
     }
