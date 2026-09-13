@@ -1,25 +1,44 @@
 [package]
 name = "hyprforge-lock"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "An ext-session-lock-v1 lock screen for Hyprland, authenticating against PAM and sharing its look with the greeter."
+repository = "https://github.com/apost/hyprforge"
+documentation = "https://docs.rs/hyprforge-lock"
+readme = "README.md"
+keywords = ["hyprland", "wayland", "lock-screen", "pam", "linux"]
+categories = ["gui", "os::linux-apis", "authentication"]
 
 [[bin]]
 name = "hyprforge-lock"
 path = "src/main.rs"
 
 [dependencies]
-hyprforge-authui.workspace = true
-hyprforge-paths.workspace = true
-hyprforge-look.workspace = true
+# Named as git dependencies, not versions, because the owner has not
+# published to crates.io yet: this manifest has to work unchanged both
+# inside the Hyprforge workspace and as the root of its own standalone
+# repository once `git subtree split` pulls it out. Inside the
+# workspace, the root Cargo.toml's `[patch]` section redirects these
+# straight back to the local `crates/` directories, so nothing here
+# touches the network; standalone, cargo fetches them from git.
+hyprforge-authui = { git = "https://github.com/apost/hyprforge" }
+hyprforge-paths = { git = "https://github.com/apost/hyprforge" }
+hyprforge-look = { git = "https://github.com/apost/hyprforge" }
 # default-features off drops softbuffer: this paints into the buffer the
 # compositor hands over, so it has no use for a windowing backend.
-iced_tiny_skia = { workspace = true, default-features = false, features = ["image"] }
-iced_runtime.workspace = true
-iced_widget = { workspace = true, features = ["image"] }
+iced_tiny_skia = { version = "0.14", default-features = false, features = ["image"] }
+iced_runtime = "0.14"
+iced_widget = { version = "0.14", features = ["image"] }
 tiny-skia = "0.11"
-chrono.workspace = true
-image.workspace = true
+# default-features = false: no serde, no oldtime, no wasm bindings — a
+# lock screen wants the smallest thing that can format a strftime string.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# iced_graphics enables the `image` crate with no format features at
+# all, so without this there is no PNG decoder and every wallpaper
+# fails to load. Cargo unifies features across the dependency graph, so
+# declaring the formats here is what switches them on for iced.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 smithay-client-toolkit = "0.20"
 wayland-client = "0.31"
 # Versions pinned to whatever smithay-client-toolkit 0.20 already pulls
@@ -28,12 +47,13 @@ wayland-client = "0.31"
 calloop = "0.14"
 calloop-wayland-source = "0.4"
 pam-client2 = "0.5"
-# For the logind LockedHint only. A current-thread runtime on a detached
+# Run zbus on tokio rather than its default async-io executor. For the
+# logind LockedHint only. A current-thread runtime on a detached
 # thread, never the event loop: see src/logind.rs.
-zbus.workspace = true
-tokio = { workspace = true, features = ["rt", "time"] }
-thiserror.workspace = true
-clap.workspace = true
+zbus = { version = "5.18", default-features = false, features = ["tokio"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "rt"] }
+thiserror = "2"
+clap = { version = "4.6", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3"
