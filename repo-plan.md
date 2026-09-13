@@ -188,6 +188,44 @@ If the answer is bad, `git subtree add` puts it back. If it is good,
 work up the layers: `tray`, `lock`, `greet`, then `settings` last,
 because it depends on fifteen crates and will be the hardest.
 
+**Judged, and the answers are: cheap, yes, and not yet.**
+
+*Cheap* — the clipboard is still an ordinary workspace member. One
+`cargo test --workspace` still covers it, `check.sh` still builds it, and
+a commit spanning the boundary is mechanically what it was. The `[patch]`
+section adds no friction to editing `hyprforge-paths` and the clipboard
+together.
+
+*`check.sh` proves what it did* — its clipboard steps were traced back to
+the crate's own creation commit, so nothing about the gating changed. But
+it only proves it **here**. `check.sh` does not come along in a split, so
+an extracted repository started life with no automated checking at all —
+which, by this project's own standard, is the extreme form of a check
+that silently never runs. Each split-ready crate now carries its own
+CI workflow for that reason.
+
+*Drift* — none today: across the ten dependencies `hyprforge-clipboard`
+shares with the root table, every version and feature set still matches,
+verified by comparison rather than by eye. But nothing was watching. A
+standalone crate cannot inherit from `[workspace.dependencies]`, so its
+versions are hand-copied, and if the root bumps one nothing fails: cargo
+resolves both, clippy stays silent, the tests stay green, and the suite
+quietly builds two versions of the same dependency. That is "one place to
+fix a shared thing" failing without a symptom, so `check.sh` now compares
+every standalone-ready manifest against the workspace table in tier 1.
+
+*Reversibility, which the plan asserts and nobody had checked* — nothing
+has left this machine; there is still no remote. Undoing it is deleting
+the branches and reverting the rejoin commits. Nothing is irreversible
+until something is pushed and somebody clones it.
+
+**The layer order is looser than it looked.** A git dependency on a crate
+that still inherits from the workspace resolves fine, because cargo
+clones the whole repository and brings the workspace root with it. So a
+crate can be extracted before anything it depends on is prepared — only
+the crate being extracted needs a self-contained manifest. `lock` and
+`greet` needed no changes to `authui`, `look` or `paths` at all.
+
 ## What must stay true
 
 - **Leaf crates stay runtime-free.** `hyprforge-look` depends on no async
@@ -213,3 +251,6 @@ because it depends on fifteen crates and will be the hardest.
 - [x] Independent versions for the publishable crates
 - [ ] First publish
 - [x] First split prepared and verified standalone; not yet pushed
+- [x] Step 4 judged: continue, with drift detection and per-repo CI added
+- [x] `lock` and `greet` prepared and verified standalone; not yet pushed
+- [ ] `tray`, then `settings` last

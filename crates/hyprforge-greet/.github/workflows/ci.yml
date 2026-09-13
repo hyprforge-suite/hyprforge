@@ -1,0 +1,68 @@
+# CI for the standalone hyprforge-greet repository (this file only
+# takes effect at `.github/workflows/ci.yml` — the path `./split.sh`
+# produces once `crates/hyprforge-greet` becomes a repository root).
+#
+# What this checks: that the crate builds, that clippy is silent (a
+# clippy warning is a build failure in Hyprforge — see the upstream
+# CLAUDE.md's "Clippy must be silent" rule), and the unit/integration
+# test suite. Unlike hyprforge-clipboard and hyprforge-lock, this crate
+# has no `#[ignore]`d live tests to skip — there simply are none, so
+# `cargo test` here is not a reduced tier, it is the whole suite.
+#
+# What this deliberately does NOT check, and must never claim to:
+#   - it never runs the `hyprforge-greet` binary, against real greetd or
+#     the fake one. `testing/fake_greetd.py` and `--type-in` (see this
+#     crate's README) are for a human running the real handshake by
+#     hand; nothing here launches either side of that conversation.
+#   - it never touches a compositor. `config/hyprland-greeter.lua` having
+#     no keybinds is a property of that file and of the compositor that
+#     reads it, not something a CI job watching no display could check.
+#   - it says nothing about `INSTALL.md`'s exported-theme directory, the
+#     sysusers/tmpfiles units, or anything about running as the greeter
+#     user. Build and unit-test only.
+#
+# A green run means "the code is internally consistent". It does not
+# mean "this greeter actually greets" — that is exactly the gap the
+# fake-greetd walkthrough in the README exists to close by hand.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: "Build, clippy -D warnings, cargo test (the greeter binary is never run)"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the pinned Rust toolchain (rust-toolchain.toml)
+        # ubuntu-latest ships rustup already; `rustup show` is what
+        # makes it notice rust-toolchain.toml in this directory and
+        # install exactly the channel and components (clippy, rustfmt)
+        # that file pins, rather than whatever `stable` resolves to on
+        # the day the job happens to run.
+        #
+        # No apt-get step here: `cargo tree -p hyprforge-greet --edges
+        # normal` shows every *-sys crate in this crate's graph
+        # (linux-raw-sys, wayland-sys, renderdoc-sys) either pure-Rust
+        # or dlopen-based (xkbcommon-dl, x11-dl) — nothing that links a
+        # system library at build time, unlike hyprforge-lock, which
+        # pulls in the same `iced` stack but also links libpam and, via
+        # smithay-client-toolkit, libxkbcommon directly.
+        run: rustup show
+
+      - name: Cache the cargo registry and build output
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: cargo build
+        run: cargo build --all-targets
+
+      - name: cargo clippy --all-targets -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: "cargo test (the greeter binary is never run)"
+        run: cargo test --all-targets
