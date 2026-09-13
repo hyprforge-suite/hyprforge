@@ -91,6 +91,17 @@ accepting input; a lock screen that stops repainting is indistinguishable
 from one that crashed, and the user's only other option is a hard
 reboot.
 
+## What CI checks, and what it can't
+
+`.github/workflows/ci.yml` builds the crate, runs clippy with warnings
+denied, and runs `cargo test`. That is everything a runner with no PAM
+service, no D-Bus session and no compositor can honestly ask. It never
+launches `hyprforge-lock` itself — not even with `--fake-password` —
+because a runner is not a nested compositor and this is not something
+to relax "just for CI". Proving the screen actually locks, draws and
+unlocks still needs `./testing/nested.sh` and a human watching it, as
+described above.
+
 ## Licence
 
 MIT. See `LICENSE`.

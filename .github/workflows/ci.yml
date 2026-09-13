@@ -1,0 +1,89 @@
+# CI for the standalone hyprforge-lock repository (this file only takes
+# effect at `.github/workflows/ci.yml` — the path `./split.sh` produces
+# once `crates/hyprforge-lock` becomes a repository root).
+#
+# What this checks: that the crate builds, that clippy is silent (a
+# clippy warning is a build failure in Hyprforge — see the upstream
+# CLAUDE.md's "Clippy must be silent" rule), and the tier-1 test suite —
+# the unit and integration tests that need nothing outside this process.
+#
+# What this deliberately does NOT check, and must never claim to:
+#   - it never runs the lock screen binary, under any flag. Not
+#     `--fake-password`, not against a nested compositor, not for a
+#     second. Proving the lock screen actually locks, draws and unlocks
+#     needs `testing/nested.sh` and a human watching a real (disposable)
+#     Wayland session — see this crate's README and the upstream
+#     CLAUDE.md's "Never point the lock screen at the live session."
+#     Nothing in that story is CI-shaped, and pretending otherwise is
+#     exactly the failure this workflow exists to not repeat.
+#   - it never touches PAM. There is no `pam_unix`, no faillock, no
+#     account on this runner to lock — `PamBackend`'s unit tests (see
+#     src/pam.rs) exercise the channel/ping plumbing against a fake
+#     conversation, not a real PAM stack.
+#   - it never touches logind or a real D-Bus session bus for the
+#     `LockedHint` integration in src/logind.rs.
+#
+# A green run means "the code is internally consistent". It does not
+# mean "the code agrees with PAM, logind, or a real compositor" — those
+# are exactly the questions the monorepo's later check.sh tiers exist to
+# ask, each gated on the thing it actually asks rather than shared
+# across an `--ignored` run that would silently never run here.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tier-1:
+    name: "Tier 1 (no PAM, no compositor): build, clippy -D warnings, cargo test"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the system libraries this crate links
+        # libpam0g-dev: `pam-client2 = "0.5"` (Cargo.toml) depends on
+        # pam-sys2, whose build.rs does
+        # `println!("cargo:rustc-link-lib=pam")` unconditionally on
+        # Linux — see pam-sys2's build.rs. Without the dev package the
+        # link step fails looking for libpam.so (the runtime-only
+        # libpam0g package ships libpam.so.0, not the .so symlink a
+        # linker needs for `-lpam`).
+        #
+        # libxkbcommon-dev + pkg-config: two independent things need
+        # this crate. First, `smithay-client-toolkit = "0.20"` enables
+        # its own default "xkbcommon" feature, whose build.rs runs
+        # `pkg_config::Config::new().find("xkbcommon").unwrap()` (see
+        # smithay-client-toolkit's build.rs) — that needs both the
+        # xkbcommon.pc file and the pkg-config binary. Second, this
+        # crate's own transitive dependency on hyprforge-authui /
+        # hyprforge-ui pulls in `iced`, which pulls in `xkbcommon-dl`
+        # (dlopen-based — no dev package needed for that one) but also,
+        # via smithay-client-toolkit's presence in the same graph,
+        # re-confirms the same libxkbcommon-dev requirement above.
+        # `cargo tree -p hyprforge-lock --edges normal` shows no other
+        # *-sys crate performing a build-time system link beyond pam and
+        # xkbcommon.
+        run: sudo apt-get update && sudo apt-get install -y libpam0g-dev libxkbcommon-dev pkg-config
+
+      - name: Install the pinned Rust toolchain (rust-toolchain.toml)
+        # ubuntu-latest ships rustup already; `rustup show` is what
+        # makes it notice rust-toolchain.toml in this directory and
+        # install exactly the channel and components (clippy, rustfmt)
+        # that file pins, rather than whatever `stable` resolves to on
+        # the day the job happens to run.
+        run: rustup show
+
+      - name: Cache the cargo registry and build output
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: cargo build
+        run: cargo build --all-targets
+
+      - name: cargo clippy --all-targets -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: "cargo test (tier 1 only — no PAM, no compositor, the lock screen binary is never run)"
+        run: cargo test --all-targets
