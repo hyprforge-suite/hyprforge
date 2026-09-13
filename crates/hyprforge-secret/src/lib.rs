@@ -39,6 +39,10 @@ use std::fmt;
 pub struct Secret<T>(T);
 
 impl<T> Secret<T> {
+    /// Wraps a value so it can only leave through [`Secret::expose`] or
+    /// [`Secret::into_inner`]. Always safe: wrapping does not expose
+    /// anything, which is why `Secret<T>: From<T>` also exists as a
+    /// shorthand for this.
     pub fn new(value: T) -> Self {
         Secret(value)
     }
@@ -66,9 +70,27 @@ impl<T> Secret<T> {
 /// [`crate::chars`] is: it is only ever used to describe the value, never
 /// to validate it against a byte length, and a non-ASCII password should
 /// report what was typed.
-pub trait SecretLen {
+///
+/// Sealed: this exists to let `Secret<T>`'s `Debug` count characters
+/// without caring what `T` is made of, not as an extension point for
+/// callers outside this crate. A public trait with one method is a
+/// promise about its *whole* shape — adding a second method later would
+/// break every external implementer — and sealing is what keeps that
+/// door shut while still letting `SecretLen` appear in a public bound
+/// (`Secret<T>`'s `Debug` impl requires it).
+pub trait SecretLen: sealed::Sealed {
+    /// How many characters this value would render as, if it were ever
+    /// allowed to render at all.
     fn secret_char_count(&self) -> usize;
 }
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+impl sealed::Sealed for String {}
+impl sealed::Sealed for str {}
+impl<T: sealed::Sealed + ?Sized> sealed::Sealed for &T {}
 
 impl SecretLen for String {
     fn secret_char_count(&self) -> usize {

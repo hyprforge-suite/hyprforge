@@ -50,8 +50,8 @@ license = "MIT"
 # default-features = false so nobody picks up the optional `dbus`
 # (zbus) support by accident; only the settings app and displayctl want it.
 hyprforge-core = { path = "crates/hyprforge-core", default-features = false }
-hyprforge-process = { path = "crates/hyprforge-process" }
-hyprforge-secret = { path = "crates/hyprforge-secret" }
+hyprforge-process = { path = "crates/hyprforge-process", version = "0.1.0" }
+hyprforge-secret = { path = "crates/hyprforge-secret", version = "0.1.0" }
 hyprforge-windowrules = { path = "crates/hyprforge-windowrules" }
 hyprforge-input = { path = "crates/hyprforge-input" }
 hyprforge-appearance = { path = "crates/hyprforge-appearance" }

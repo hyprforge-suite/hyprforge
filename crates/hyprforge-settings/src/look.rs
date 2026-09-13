@@ -145,8 +145,8 @@ fn scale_into(original: &Path, scaled: &Path) -> Option<PathBuf> {
 /// next frame panics — on a lock screen, a machine needing another TTY.
 ///
 /// There is no size guard downstream. `authui`'s check is
-/// `width > 0 && height > 0`, and `Theme::wallpaper_readable` is
-/// `File::open(..).is_ok()`. This is the only place the cap exists.
+/// `width > 0 && height > 0`, and `hyprforge-look` does not look at the
+/// wallpaper's size at all. This is the only place the cap exists.
 fn is_oversized(original: &Path) -> bool {
     let Ok(reader) = image::ImageReader::open(original).and_then(|r| r.with_guessed_format())
     else {

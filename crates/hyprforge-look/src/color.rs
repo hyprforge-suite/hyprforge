@@ -22,19 +22,37 @@ use std::fmt;
 /// A colour, 8 bits per channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Color {
+    /// Red, 0-255.
     pub r: u8,
+    /// Green, 0-255.
     pub g: u8,
+    /// Blue, 0-255.
     pub b: u8,
+    /// Alpha, 0-255. `0xff` is opaque; the auth screen's defaults are
+    /// deliberately all opaque, because a transparent background or text
+    /// colour there renders nothing at all.
     pub a: u8,
 }
 
+/// A string that isn't `rgba(rrggbbaa)` or `rgb(rrggbb)` in hex.
+///
+/// Carries the rejected input rather than just a message, because the
+/// caller decides what to do with a bad colour — a lock screen falls
+/// back to [`Color::BLACK`], a settings form shows the input back to the
+/// user — and both need the string to do it.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("expected rgba(rrggbbaa) or rgb(rrggbb) in hex, got {0:?}")]
 pub struct ColorError(pub String);
 
 impl Color {
+    /// Opaque black. The fallback a caller reaches for when a colour
+    /// fails to parse and something must still be drawn — see the module
+    /// doc's note on leniency living at the call site, not in here.
     pub const BLACK: Color = Color { r: 0, g: 0, b: 0, a: 0xff };
 
+    /// Builds a colour directly from its channels, bypassing
+    /// [`parse`](Self::parse). `const fn` so it can build the default
+    /// palette's constants at compile time.
     pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Color {
         Color { r, g, b, a }
     }
@@ -88,12 +106,6 @@ impl Color {
             g: (v >> 8) as u8,
             b: v as u8,
         }
-    }
-
-    /// Packed `0xAARRGGBB`, which is what a Wayland `Argb8888` shm
-    /// buffer wants.
-    pub fn to_argb(self) -> u32 {
-        (self.a as u32) << 24 | (self.r as u32) << 16 | (self.g as u32) << 8 | self.b as u32
     }
 }
 
@@ -171,14 +183,6 @@ mod tests {
             assert_eq!(parsed.to_string(), original);
             assert_eq!(Color::parse(&parsed.to_string()).unwrap(), parsed);
         }
-    }
-
-    /// What the shm buffer is handed. The lock screen draws with this,
-    /// so a byte-order slip here is a visibly wrong lock screen.
-    #[test]
-    fn packing_for_a_wayland_buffer_is_argb() {
-        assert_eq!(Color::parse("rgba(bd93f9ff)").unwrap().to_argb(), 0xffbd93f9);
-        assert_eq!(Color::BLACK.to_argb(), 0xff00_0000);
     }
 
     #[test]

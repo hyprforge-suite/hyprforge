@@ -4,10 +4,17 @@ use iced::Color;
 /// row, and a dialog all breathe the same amount no matter which app they're
 /// in (vision pillar #2: one shared visual grammar).
 pub mod spacing {
+    /// Tightest gap: between a label and the control right beside it.
     pub const XS: f32 = 4.0;
+    /// Between closely related elements within one row or group.
     pub const SM: f32 = 8.0;
+    /// The default gap between rows and between a card's edge and its
+    /// content — reach for this one unless a specific case argues
+    /// otherwise.
     pub const MD: f32 = 16.0;
+    /// Between distinct sections of a screen.
     pub const LG: f32 = 24.0;
+    /// Between top-level regions — sidebar and content, page margins.
     pub const XL: f32 = 32.0;
 }
 
@@ -27,6 +34,10 @@ impl Default for FontScale {
 }
 
 impl FontScale {
+    /// Scales a logical-pixel size by this factor. `base` is almost
+    /// always [`BASE_TEXT_SIZE`] or a spacing constant, never a value a
+    /// caller already scaled — applying this twice compounds instead of
+    /// replacing.
     pub fn apply(&self, base: f32) -> f32 {
         base * self.0
     }
@@ -131,6 +142,10 @@ fn palette() -> iced::theme::Palette {
     }
 }
 
+/// Builds the `iced::Theme` every window in this process is created
+/// with, from the resolved [`active`] palette rather than an iced
+/// built-in — so a window matches the compositor's own accent instead of
+/// iced's stock dark theme.
 pub fn app_theme() -> iced::Theme {
     iced::Theme::custom("Hyprforge".to_string(), palette())
 }

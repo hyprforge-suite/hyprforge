@@ -58,26 +58,57 @@ pub fn export_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(EXPORT_DIR))
 }
 
+/// What went wrong reading, writing or (de)serialising a [`Theme`].
+///
+/// `#[non_exhaustive]` here and nowhere else in this file: on an enum it
+/// only forces external `match`es to carry a `_` arm, so a fifth failure
+/// mode can be added later without an API break. On a *struct* the same
+/// attribute blocks external construction outright — even
+/// `Theme { accent, ..Default::default() }` fails to compile outside
+/// this crate — which is why `Theme`, `Surfaces` and `Color` do not get
+/// it: callers build those with struct-update syntax today, and freezing
+/// that would break every one of them.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ThemeError {
+    /// The file exists but couldn't be opened or read — permissions, a
+    /// vanished mount, that kind of thing. Not raised for a missing file,
+    /// which [`Theme::load`] treats as the default instead.
     #[error("couldn't read {path}: {source}")]
     Read {
+        /// The path that couldn't be read.
         path: String,
+        /// The underlying I/O failure.
         #[source]
         source: std::io::Error,
     },
+    /// The write itself failed — [`Theme::save`] or [`Theme::export`]
+    /// couldn't create the file, copy the wallpaper, or rename the temp
+    /// file into place.
     #[error("couldn't write {path}: {source}")]
     Write {
+        /// The path that couldn't be written.
         path: String,
+        /// The underlying I/O failure.
         #[source]
         source: std::io::Error,
     },
+    /// The file was read but isn't valid TOML, or its shape doesn't match
+    /// [`Theme`] — a half-written file, most likely, since every field
+    /// defaults and a merely incomplete one parses fine.
     #[error("couldn't parse {path}: {source}")]
     Parse {
+        /// The path whose contents didn't parse.
         path: String,
+        /// The underlying TOML error.
         #[source]
         source: toml::de::Error,
     },
+    /// Turning a [`Theme`] into TOML failed before any write was
+    /// attempted. In practice this shouldn't happen — every field is a
+    /// plain serialisable type — but `toml::to_string_pretty` returns a
+    /// `Result`, so this variant exists to carry that error rather than
+    /// unwrap it.
     #[error("couldn't serialize the theme: {0}")]
     Serialize(#[from] toml::ser::Error),
 }
@@ -104,10 +135,16 @@ pub struct Theme {
     pub accent: Color,
     /// Failure text.
     pub error: Color,
+    /// Font family name, as gsettings reports it. Not a path — the
+    /// renderer resolves it through the system's own font lookup, the
+    /// same as every other app on the desktop.
     pub font: String,
+    /// Base point size before [`Self::font_scale`] is applied.
     pub font_size: f32,
     /// `strftime` format for the clock. Empty hides it.
     pub clock_format: String,
+    /// `strftime` format for the date, shown alongside the clock. Empty
+    /// hides it, same as [`Self::clock_format`].
     pub date_format: String,
     /// Corner radius, so the prompt matches window rounding.
     pub rounding: u32,
@@ -138,12 +175,22 @@ pub struct Theme {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Surfaces {
+    /// The window's own background, behind everything else.
     pub root: Color,
+    /// The navigation panel down the side.
     pub sidebar: Color,
+    /// A raised panel grouping related settings.
     pub card: Color,
+    /// The line around a [`Self::card`], one step lighter so the edge
+    /// reads without needing a shadow.
     pub card_border: Color,
+    /// An individual row inside a card, one step lighter again — the
+    /// step that lets a list read as rows rather than one solid block.
     pub row: Color,
+    /// Primary text on any of the surfaces above.
     pub text: Color,
+    /// De-emphasised text — hints, secondary labels — on the same
+    /// surfaces as [`Self::text`].
     pub text_dim: Color,
 }
 
@@ -217,6 +264,16 @@ impl Theme {
     /// Never returns an error. A greeter has nobody to report one to and
     /// nothing better to do than draw something usable — so a corrupt or
     /// unreadable export degrades to plain rather than to a blank screen.
+    ///
+    /// No current caller: `hyprforge-greet` needs a `--theme-dir`
+    /// override this fixed path doesn't take, so it re-implements the
+    /// same "load theme.toml under this dir, default on failure" inline
+    /// against [`export_dir`] instead of calling this. Kept — the fixed
+    /// path is the right default for any *other* host that only ever
+    /// reads the one export (`hyprforge-authui` consumers besides the
+    /// greeter, should one exist) — but see
+    /// [`load_exported_from`](Self::load_exported_from) for the
+    /// consolidation this invites.
     pub fn load_exported() -> Theme {
         Theme::load_exported_from(&export_dir())
     }
@@ -229,6 +286,15 @@ impl Theme {
     /// stopped being true the moment the greeter was installed on the
     /// machine running the tests — it then failed because the product
     /// was working.
+    ///
+    /// This already takes the directory the greeter needs to vary via
+    /// `--theme-dir` — its inline equivalent in
+    /// `hyprforge-greet/src/main.rs` is `Theme::load(&dir.join("theme.toml"))
+    /// .unwrap_or_default()`, the same two calls this function makes.
+    /// Nothing here currently calls it outside this module's own tests;
+    /// having the greeter call this instead of duplicating it would turn
+    /// dead code into shared code, at the cost of one extra hop through
+    /// this crate for a caller that already has the directory in hand.
     pub fn load_exported_from(dir: &Path) -> Theme {
         Theme::load(&dir.join("theme.toml")).unwrap_or_default()
     }
@@ -293,17 +359,6 @@ impl Theme {
             }
         })?;
         Ok(exported)
-    }
-
-    /// Whether the wallpaper can actually be read right now.
-    ///
-    /// Asked before drawing rather than after: the renderer's fallback is
-    /// a flat colour, and knowing in advance is the difference between a
-    /// deliberate plain background and a flicker.
-    pub fn wallpaper_readable(&self) -> bool {
-        self.wallpaper
-            .as_ref()
-            .is_some_and(|p| std::fs::File::open(p).is_ok())
     }
 }
 
@@ -432,16 +487,6 @@ mod tests {
         assert_eq!(images.len(), 1, "only one wallpaper should remain");
     }
 
-    #[test]
-    fn wallpaper_readability_is_checked_against_the_filesystem() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("w.png");
-        assert!(!theme_with_wallpaper(&path).wallpaper_readable());
-        std::fs::write(&path, b"x").unwrap();
-        assert!(theme_with_wallpaper(&path).wallpaper_readable());
-        assert!(!Theme::default().wallpaper_readable(), "no wallpaper is not readable");
-    }
-
     /// The on-disk spelling is a contract between three programs that
     /// never run at the same time: Settings writes the file, the lock
     /// screen reads it, and the greeter reads an exported copy as a
@@ -494,10 +539,9 @@ mod shared_look {
             ..Theme::default()
         };
 
-        // What the lock screen paints with.
-        assert_eq!(theme.accent.to_argb(), 0xff123456);
-        // What the iced palette is built from. Kept as the same field
-        // rather than a parallel one, which is the whole point.
+        // What both the lock screen and the settings window build their
+        // iced palette from. Kept as the same field rather than a
+        // parallel one, which is the whole point.
         assert_eq!(theme.accent, Color::parse("rgba(123456ff)").unwrap());
 
         // And it survives the file the greeter reads, since that is the
