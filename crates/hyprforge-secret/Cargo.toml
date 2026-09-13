@@ -1,8 +1,13 @@
 [package]
 name = "hyprforge-secret"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+description = "A Secret<T> wrapper whose Debug impl renders only a length, never the wrapped value, so every place a password or passphrase is exposed is a single greppable expose() call."
+repository = "https://github.com/apost/hyprforge"
+documentation = "https://docs.rs/hyprforge-secret"
+keywords = ["secret", "redact", "debug", "password", "hyprland"]
+categories = ["development-tools::debugging", "rust-patterns"]
 
 # Deliberately no dependencies at all, like hyprforge-paths and
 # hyprforge-process. "Never render this" is a rule about a value, not

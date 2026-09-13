@@ -156,7 +156,7 @@ because it depends on fifteen crates and will be the hardest.
 - [x] `notif` merged as a nested workspace — the trial run of the
       mechanism, and proof that a differently-shaped project can share
       the theme without sharing a runtime
-- [ ] Publishing metadata on the foundation crates
-- [ ] Independent versions for the publishable crates
+- [x] Publishing metadata on the foundation crates
+- [x] Independent versions for the publishable crates
 - [ ] First publish
 - [ ] First split
