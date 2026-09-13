@@ -93,6 +93,41 @@ for f in LICENSE README.md; do
     fi
 done
 
+# Every manifest that names the suite's git URL must name the SAME one.
+#
+# This cost a confusing afternoon. A standalone crate that depends on
+# another standalone crate resolves two manifests: its own, and the
+# depended-on crate's as it exists inside the fetched repository. Cargo
+# keys a git source on the URL string, so if those two disagree — even
+# when they point at the same repository — it treats them as two
+# different sources and goes and fetches the second one. The symptom is
+# a build that reaches the network for a repository you thought you had
+# locally, and if that URL does not resolve, `unexpected http status
+# code: 404`.
+#
+# hyprforge-settings is the case that has this shape today: it depends
+# on hyprforge-tray, which is itself standalone-ready and names the URL
+# in its own manifest. The rest do not, which is why this only bites
+# once there are two of them in a chain.
+#
+# So the URL is allowed to change — it just has to change everywhere at
+# once.
+printf '\n%s==> Checking every manifest agrees on the git URL%s\n' "$BOLD" "$OFF"
+urls=$(grep -rhoE 'git = "[^"]+"' --include=Cargo.toml . | sort -u)
+if [[ -z "$urls" ]]; then
+    ok "no git dependencies to disagree about"
+elif [[ $(wc -l <<<"$urls") -eq 1 ]]; then
+    ok "one URL throughout: $(sed 's/git = //; s/"//g' <<<"$urls")"
+else
+    printf '%s\n' "$urls" >&2
+    die "manifests name more than one git URL (above).
+     A standalone crate depending on another standalone crate resolves
+     both its own manifest and the other's from inside the fetched
+     repository; cargo keys a git source on the URL string, so two
+     spellings of the same repository become two sources and the second
+     one gets fetched over the network. Make them identical."
+fi
+
 printf '\n%s==> Splitting %s%s\n' "$BOLD" "$PREFIX" "$OFF"
 git branch -D "$BRANCH" >/dev/null 2>&1 && printf '  %s–%s replaced the existing %s branch\n' "$YELLOW" "$OFF" "$BRANCH"
 
