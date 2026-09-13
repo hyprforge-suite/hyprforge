@@ -253,4 +253,6 @@ the crate being extracted needs a self-contained manifest. `lock` and
 - [x] First split prepared and verified standalone; not yet pushed
 - [x] Step 4 judged: continue, with drift detection and per-repo CI added
 - [x] `lock` and `greet` prepared and verified standalone; not yet pushed
-- [ ] `tray`, then `settings` last
+- [x] `tray` prepared and verified standalone; not yet pushed
+- [ ] `settings` last
+- [ ] Push any of them to a repository someone can actually see
