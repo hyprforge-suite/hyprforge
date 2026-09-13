@@ -1,0 +1,11 @@
+[package]
+name = "hyprforge-process"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Deliberately no dependencies at all, like hyprforge-paths. Running a
+# subprocess with a bound on how long it can take is not Hyprland config
+# machinery, and any app on this desktop — not just the ones that also
+# talk to hyprctl — can need it.
+[dependencies]

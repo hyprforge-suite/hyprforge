@@ -11,9 +11,13 @@ license.workspace = true
 # with "there is no reactor running".
 zbus.workspace = true
 tokio.workspace = true
-# `command::output`'s bounded wait, and nothing else from core. This crate
-# writes no Hyprland config.
-hyprforge-core.workspace = true
+# Bounded subprocess waits, via `output`'s wrapper over `Command::output`.
+# This crate is a client of NetworkManager, not of Hyprland, so it depends
+# on the leaf crate directly rather than on hyprforge-core.
+hyprforge-process.workspace = true
+# `Psk`'s redaction is built on this: one implementation of "never render
+# this" shared with the typed password on the lock screen and greeter.
+hyprforge-secret.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true

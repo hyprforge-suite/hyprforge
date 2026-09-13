@@ -212,12 +212,19 @@ compositor, by hand.
 ## What the layering is for
 
 ```
-hyprforge-paths   no dependencies at all
-hyprforge-look    Color + the runtime Theme; no iced, because the lock screen
-                  and greeter paint into a raw Wayland buffer
-hyprforge-ui      the iced layer; knows nothing about Hyprland
-hyprforge-core    Hyprland config machinery — a new app should never need it
+hyprforge-paths     no dependencies at all
+hyprforge-process   a bounded subprocess wait (Command::output that gives up);
+                    no dependencies at all — a client of NetworkManager, BlueZ
+                    or systemd-logind needs this and nothing Hyprland-shaped
+hyprforge-look      Color + the runtime Theme; no iced, because the lock screen
+                    and greeter paint into a raw Wayland buffer
+hyprforge-ui        the iced layer; knows nothing about Hyprland
+hyprforge-core      Hyprland config machinery — a new app should never need it
 ```
+
+`hyprforge-core` re-exports `hyprforge-process` as `hyprforge_core::command` so
+the ~20 existing call sites did not have to churn when it moved out; new code
+should depend on `hyprforge-process` directly.
 
 `hyprforge-ui` and `hyprforge-look` are **leaves**. Neither may depend on
 `hyprforge-appearance`: `settings -> appearance` already exists, so that edge

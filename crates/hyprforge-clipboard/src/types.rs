@@ -169,14 +169,29 @@ impl Content {
 /// things they would not want in a log — and in an agent session, a
 /// `Debug` of an entry would reach the transcript. The same reasoning as
 /// `Psk` in `hyprforge-network`, for a much wider range of content.
+///
+/// This is deliberately *not* built on `hyprforge_secret::Secret<T>`,
+/// unlike `Psk` and the lock screen's typed password. `Secret` hides a
+/// value entirely because the value itself is the whole risk — there is
+/// nothing about a password worth describing. A clipboard entry is a
+/// domain enum whose `Debug` needs to say *which kind* of thing this is
+/// (`Text` vs. `Image`, and an image's MIME type) even while redacting
+/// its content, and `Secret<T>` has no way to carry that: it is built to
+/// render nothing but a count. Forcing `Content` into it would mean
+/// either losing the variant/MIME information or reaching around the
+/// wrapper to print it anyway, which defeats the point of sharing an
+/// implementation. What *is* shared is the smaller piece both cases
+/// need: rendering "a redacted count" the same way everywhere, via
+/// `hyprforge_secret::chars`/`bytes` rather than a third hand-rolled
+/// `format_args!("<{} ...>", ...)`.
 impl fmt::Debug for Content {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Content::Text(text) => {
-                write!(f, "Text(<{} chars>)", text.chars().count())
+                write!(f, "Text({:?})", hyprforge_secret::chars(text.chars().count()))
             }
             Content::Image { bytes, mime } => {
-                write!(f, "Image({mime}, <{} bytes>)", bytes.len())
+                write!(f, "Image({mime}, {:?})", hyprforge_secret::bytes(bytes.len()))
             }
         }
     }

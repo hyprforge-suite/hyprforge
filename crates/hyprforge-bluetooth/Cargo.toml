@@ -11,9 +11,10 @@ license.workspace = true
 # with "there is no reactor running".
 zbus.workspace = true
 tokio.workspace = true
-# `command::output`'s bounded wait, and nothing else from core. This crate
-# writes no Hyprland config.
-hyprforge-core.workspace = true
+# Bounded subprocess waits, via `output`'s wrapper over `Command::output`.
+# This crate is a client of BlueZ, not of Hyprland, so it depends on the
+# leaf crate directly rather than on hyprforge-core.
+hyprforge-process.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true

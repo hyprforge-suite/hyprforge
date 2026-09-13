@@ -1417,6 +1417,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "hyprforge-look",
+ "hyprforge-secret",
  "hyprforge-ui",
  "iced_runtime",
  "iced_tiny_skia",
@@ -1433,7 +1434,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "hyprforge-core",
+ "hyprforge-process",
  "serde",
  "thiserror 2.0.19",
  "tokio",
@@ -1448,6 +1449,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "hyprforge-paths",
+ "hyprforge-secret",
  "serde",
  "tempfile",
  "thiserror 2.0.19",
@@ -1493,6 +1495,7 @@ version = "0.1.0"
 dependencies = [
  "hyprforge-look",
  "hyprforge-paths",
+ "hyprforge-process",
  "serde",
  "serde_json",
  "tempfile",
@@ -1618,7 +1621,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "hyprforge-core",
+ "hyprforge-process",
+ "hyprforge-secret",
  "serde",
  "thiserror 2.0.19",
  "tokio",
@@ -1639,13 +1643,20 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "hyprforge-core",
  "serde",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
  "zbus",
 ]
+
+[[package]]
+name = "hyprforge-process"
+version = "0.1.0"
+
+[[package]]
+name = "hyprforge-secret"
+version = "0.1.0"
 
 [[package]]
 name = "hyprforge-session"

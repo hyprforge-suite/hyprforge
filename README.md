@@ -20,6 +20,13 @@ Shared by every app in the suite
                             buffer and must be able to use this.
   hyprforge-ui/            the iced layer: spacing scale, palette, widgets.
                             Knows nothing about Hyprland.
+  hyprforge-process/       a subprocess wait with a timeout, for talking to
+                            any program that might not answer (hyprctl,
+                            gsettings, fc-list, ...). No dependencies at all;
+                            used by clients of other daemons (NetworkManager,
+                            BlueZ) that have no Hyprland config to read or
+                            write. hyprforge-core re-exports it as
+                            hyprforge_core::command for compatibility.
 
 Hyprland-facing
   hyprforge-core/          the config machinery: hlconfig (the generic

@@ -13,7 +13,7 @@
 //! Every call is wrapped in a timeout. BlueZ blocks on real radio
 //! hardware: `Connect()` negotiates a link with a remote device that may
 //! be out of range or busy pairing with something else. It is exactly
-//! the class `hyprforge_core::command::output` exists for, one transport
+//! the class `hyprforge_process::output` exists for, one transport
 //! further out.
 
 use crate::backend::BluetoothBackend;

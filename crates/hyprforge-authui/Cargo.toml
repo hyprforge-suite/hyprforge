@@ -7,6 +7,11 @@ license.workspace = true
 [dependencies]
 hyprforge-look.workspace = true
 hyprforge-ui.workspace = true
+# `Conversation::pending` — the second copy of a typed password kept
+# while the backend restarts — is a `Secret<String>`, the same wrapper
+# `hyprforge-network`'s Wi-Fi passphrase uses, rather than a second
+# hand-written "never render this".
+hyprforge-secret.workspace = true
 iced_widget = { workspace = true, features = ["image"] }
 iced_runtime.workspace = true
 chrono.workspace = true

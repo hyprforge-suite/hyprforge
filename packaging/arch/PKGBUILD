@@ -1,0 +1,154 @@
+# Maintainer: Adam Post <apost@intradatech.com>
+#
+# A **split package**: one source tree, one build, several packages.
+#
+# This is the answer to "if someone installs it from the AUR they get
+# everything". They do not have to. `makepkg` builds the workspace once
+# and then packages each component separately, so a person who wants the
+# tray icons and nothing else installs `hyprforge-tray`, and a person who
+# prefers dunst simply never installs the notification daemon.
+#
+# It is also why this project does not need one repository per component.
+# Packaging granularity and repository granularity are different
+# questions, and only the first one decides what a user can install.
+# Debian (one source package, many binary packages), Fedora
+# (`%package -n`) and Nix (several derivations from one flake) all work
+# the same way.
+#
+# `hyprforge` itself is a metapackage: it depends on the others, so
+# `pacman -S hyprforge` still gets the whole suite in one command.
+
+pkgbase=hyprforge
+pkgname=(
+  hyprforge-settings
+  hyprforge-lock
+  hyprforge-greet
+  hyprforge-displayd
+  hyprforge-tray
+  hyprforge-clipboard
+  hyprforge
+)
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Native Hyprland desktop applications"
+arch=(x86_64)
+url="https://github.com/apost/hyprforge"
+license=(MIT)
+makedepends=(cargo git)
+options=(!lto)
+source=()
+
+prepare() {
+  cd "$startdir/../.."
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked
+}
+
+build() {
+  cd "$startdir/../.."
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR="$srcdir/target"
+  # One build for every package below. Splitting the repository would
+  # mean building the shared crates once per component instead.
+  cargo build --release --frozen --workspace
+}
+
+check() {
+  cd "$startdir/../.."
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR="$srcdir/target"
+  # Tier 1 only. The other tiers need a running compositor, NetworkManager,
+  # BlueZ, logind and a bar, none of which exist in a build chroot — see
+  # check.sh's header.
+  cargo test --release --frozen --workspace
+}
+
+_bin() {
+  install -Dm755 "$srcdir/target/release/$1" "$pkgdir/usr/bin/$1"
+}
+
+package_hyprforge-settings() {
+  pkgdesc="Settings application for Hyprland"
+  depends=(wayland libxkbcommon)
+  optdepends=(
+    'hyprforge-displayd: monitor arrangement that remembers your setups'
+    'hyprforge-tray: tray icons for Wi-Fi, Bluetooth, keep awake and night light'
+    'hyprpaper: wallpaper'
+    'hyprsunset: night light'
+    'hypridle: idle timeouts'
+  )
+  cd "$startdir/../.."
+  _bin hyprforge-settings
+  install -Dm644 crates/hyprforge-settings/packaging/hyprforge-settings.desktop \
+    "$pkgdir/usr/share/applications/hyprforge-settings.desktop"
+}
+
+package_hyprforge-lock() {
+  pkgdesc="Lock screen for Hyprland (ext-session-lock-v1)"
+  depends=(wayland libxkbcommon pam)
+  cd "$startdir/../.."
+  _bin hyprforge-lock
+  # Its own PAM stack, deliberately. Borrowing hyprlock's accepts a
+  # correct password and then denies it, because that file declares no
+  # account stack and falls through to `account required pam_deny.so`.
+  install -Dm644 crates/hyprforge-lock/pam/hyprforge-lock \
+    "$pkgdir/etc/pam.d/hyprforge-lock"
+}
+
+package_hyprforge-greet() {
+  pkgdesc="greetd greeter sharing the lock screen's look"
+  depends=(wayland libxkbcommon pam greetd)
+  cd "$startdir/../.."
+  _bin hyprforge-greet
+}
+
+package_hyprforge-displayd() {
+  pkgdesc="Display daemon that remembers monitor layouts"
+  depends=(wayland)
+  cd "$startdir/../.."
+  _bin hyprforge-displayd
+  _bin hyprforge-displayctl
+  install -Dm644 crates/hyprforge-displayd/packaging/hyprforge-displayd.service \
+    "$pkgdir/usr/lib/systemd/user/hyprforge-displayd.service"
+}
+
+package_hyprforge-tray() {
+  pkgdesc="Tray icons for Wi-Fi, Bluetooth, keep awake and night light"
+  # Nothing is required. Each icon needs its own service, and the daemon
+  # reports "NetworkManager isn't running" rather than failing, so the
+  # tray is useful with any subset of them present.
+  optdepends=(
+    'networkmanager: the Wi-Fi icon'
+    'bluez: the Bluetooth icon'
+    'hyprsunset: the night light icon'
+    'hyprforge-settings: the screens its icons open'
+  )
+  cd "$startdir/../.."
+  _bin hyprforge-trayd
+  install -Dm644 crates/hyprforge-tray/packaging/hyprforge-trayd.service \
+    "$pkgdir/usr/lib/systemd/user/hyprforge-trayd.service"
+}
+
+package_hyprforge-clipboard() {
+  pkgdesc="Clipboard history with a popup at the pointer"
+  depends=(wayland libxkbcommon)
+  cd "$startdir/../.."
+  _bin hyprforge-clipd
+  _bin hyprforge-clipmenu
+}
+
+package_hyprforge() {
+  pkgdesc="Native Hyprland desktop applications (everything)"
+  depends=(
+    hyprforge-settings
+    hyprforge-lock
+    hyprforge-displayd
+    hyprforge-tray
+    hyprforge-clipboard
+  )
+  # The greeter is deliberately not here. Installing it is not the
+  # dangerous step — enabling greetd is, because that decides which VT
+  # the machine logs in on. Pulling it in with a metapackage would put it
+  # one `systemctl enable` away from a machine that cannot log in.
+  optdepends=('hyprforge-greet: replace your display manager')
+}

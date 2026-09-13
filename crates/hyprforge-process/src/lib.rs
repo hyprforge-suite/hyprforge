@@ -12,10 +12,18 @@
 //! treating as a category.
 //!
 //! Deliberately not in `hyprforge-paths`, which has no dependencies and
-//! is about where files live, and deliberately not its own crate for
-//! one function. Every caller already depends on this crate; if a
-//! non-Hyprland app ever needs it, that is the moment to move it down a
-//! layer.
+//! is about where files live: this is about talking to another process,
+//! not about the filesystem. It used to live in `hyprforge-core`, on the
+//! theory that every caller already depended on that crate — but
+//! `hyprforge-network`, `hyprforge-bluetooth` and `hyprforge-power` are
+//! clients of other daemons (NetworkManager, BlueZ, systemd-logind) with
+//! no Hyprland config to read or write, and pulling in 4,000+ lines of
+//! `hlconfig`/`hyprlang`/`lua` machinery for a bounded-subprocess helper
+//! made the layering a lie. This crate has no workspace dependencies at
+//! all, same as `hyprforge-paths`, so a non-Hyprland app can use it
+//! without dragging in Hyprland at all. `hyprforge-core` re-exports this
+//! module as `hyprforge_core::command` so existing call sites keep
+//! working; new code should depend on `hyprforge-process` directly.
 
 use std::io;
 use std::process::{Command, Output, Stdio};

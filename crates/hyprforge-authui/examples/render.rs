@@ -72,10 +72,10 @@ fn main() {
     };
     let theme = hyprforge_authui::screen::renderable(theme);
     println!("wallpaper in use: {:?}", theme.wallpaper);
-    shot("auth-asking.png", State::Asking { prompt: Prompt::secret("Password:"), entered: "hunter2!".into() }, &theme);
+    shot("auth-asking.png", State::Asking { prompt: Prompt::secret("Password:"), entered: "hunter2!".to_string().into() }, &theme);
     shot("auth-failed.png", State::Failed { reason: "Incorrect password".into() }, &theme);
     shot("auth-working.png", State::Working, &theme);
     // Caps Lock on, which is the state that otherwise looks like a
     // forgotten password.
-    shot_caps("auth-caps.png", State::Asking { prompt: Prompt::secret("Password:"), entered: "HUNTER2".into() }, &theme);
+    shot_caps("auth-caps.png", State::Asking { prompt: Prompt::secret("Password:"), entered: "HUNTER2".to_string().into() }, &theme);
 }

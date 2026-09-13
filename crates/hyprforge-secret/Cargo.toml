@@ -1,0 +1,12 @@
+[package]
+name = "hyprforge-secret"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Deliberately no dependencies at all, like hyprforge-paths and
+# hyprforge-process. "Never render this" is a rule about a value, not
+# about Hyprland or any particular app, and a wrapper for it should be
+# usable by anything on this desktop that ever reads a password or a
+# passphrase.
+[dependencies]

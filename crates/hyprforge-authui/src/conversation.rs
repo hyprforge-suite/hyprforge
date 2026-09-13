@@ -17,6 +17,7 @@
 //! machine you cannot get into, and one that reports success wrongly is
 //! worse.
 
+use hyprforge_secret::Secret;
 use std::fmt;
 
 /// A question the authenticator is asking.
@@ -61,7 +62,7 @@ pub enum Response {
 #[derive(Clone, PartialEq, Eq)]
 pub enum State {
     /// Waiting for the user to answer `prompt`.
-    Asking { prompt: Prompt, entered: String },
+    Asking { prompt: Prompt, entered: Secret<String> },
     /// Waiting on the backend.
     Working,
     /// Showing a message before continuing.
@@ -166,22 +167,28 @@ pub struct Conversation<B: Backend> {
     /// time. On a stack with `pam_faillock` at three attempts, that is how
     /// a correct password locks an account.
     ///
-    /// Never rendered: [`Conversation`] has a hand-written `Debug` below
-    /// for the same reason `State` does.
-    pending: String,
+    /// Never rendered: a [`Secret`], the same wrapper
+    /// `hyprforge-network`'s Wi-Fi passphrase is built on, so this
+    /// crate does not hand-write its own copy of "never render this".
+    /// [`Conversation`]'s own `Debug` below still gets a hand-written
+    /// impl, but only because it also has to redact `state`.
+    pending: Secret<String>,
 }
 
 /// Renders no part of what was typed.
 ///
 /// `State`'s own `Debug` is hand-written to hide `entered`; this type
 /// holds a second copy of the same characters in `pending`, and a derived
-/// `Debug` here would undo that work.
+/// `Debug` here would undo that work — though for `pending` specifically,
+/// deriving would actually be safe: `Secret<String>`'s own `Debug`
+/// already renders only a count, nested or not. It is `state` that still
+/// needs a hand-written field here.
 impl<B: Backend> fmt::Debug for Conversation<B> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Conversation")
             .field("state", &self.state)
             .field("failures", &self.failures)
-            .field("pending", &format_args!("<{} chars>", self.pending.chars().count()))
+            .field("pending", &self.pending)
             .finish()
     }
 }
@@ -194,7 +201,7 @@ impl<B: Backend> Conversation<B> {
             username: username.into(),
             state: State::Working,
             last_prompt: None,
-            pending: String::new(),
+            pending: Secret::default(),
             failures: 0,
         };
         conversation.backend.start(&conversation.username.clone());
@@ -256,7 +263,7 @@ impl<B: Backend> Conversation<B> {
     /// What the user has typed so far, if anything is being asked.
     pub fn entered(&self) -> &str {
         match &self.state {
-            State::Asking { entered, .. } => entered,
+            State::Asking { entered, .. } => entered.expose(),
             _ => "",
         }
     }
@@ -266,12 +273,12 @@ impl<B: Backend> Conversation<B> {
     /// buffer that is about to be replaced.
     pub fn type_into(&mut self, text: String) {
         match &mut self.state {
-            State::Asking { entered, .. } => *entered = text,
+            State::Asking { entered, .. } => *entered = Secret::new(text),
             // Held until the same question comes back — see `pending`.
             // A backend answers on its own schedule, so there is a real
             // window here, and dropping what is typed in it is what made
             // a correct password look wrong.
-            State::Working => self.pending = text,
+            State::Working => self.pending = Secret::new(text),
             _ => {}
         }
     }
@@ -280,8 +287,8 @@ impl<B: Backend> Conversation<B> {
     /// is working.
     pub fn typed(&self) -> &str {
         match &self.state {
-            State::Asking { entered, .. } => entered,
-            State::Working => &self.pending,
+            State::Asking { entered, .. } => entered.expose(),
+            State::Working => self.pending.expose(),
             _ => "",
         }
     }
@@ -294,7 +301,7 @@ impl<B: Backend> Conversation<B> {
         let State::Asking { entered, .. } = &self.state else {
             return;
         };
-        let answer = entered.clone();
+        let answer = entered.expose().clone();
         self.state = State::Working;
         self.backend.answer(&answer);
         self.pump();
@@ -323,7 +330,7 @@ impl<B: Backend> Conversation<B> {
     /// Clears whatever has been typed without sending it.
     pub fn clear(&mut self) {
         if let State::Asking { entered, .. } = &mut self.state {
-            entered.clear();
+            *entered = Secret::new(String::new());
         }
     }
 
@@ -335,19 +342,19 @@ impl<B: Backend> Conversation<B> {
                 // verification code, say — must never be pre-filled with
                 // the characters of a password.
                 let entered = match self.last_prompt.as_ref() {
-                    Some(previous) if previous == &prompt && !self.pending.is_empty() => {
-                        std::mem::take(&mut self.pending)
+                    Some(previous) if previous == &prompt && !self.pending.expose().is_empty() => {
+                        std::mem::take(&mut self.pending).into_inner()
                     }
                     _ => {
-                        self.pending.clear();
+                        self.pending = Secret::default();
                         String::new()
                     }
                 };
                 self.last_prompt = Some(prompt.clone());
-                State::Asking { prompt, entered }
+                State::Asking { prompt, entered: Secret::new(entered) }
             }
             Response::Tell { text, error } => {
-                self.pending.clear();
+                self.pending = Secret::default();
                 State::Telling { text, error }
             }
             Response::Success => {
@@ -366,11 +373,22 @@ impl fmt::Debug for State {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // What was typed never reaches a log, a panic message or a
         // debug dump. It is a password.
+        //
+        // `entered` stays a plain `String` rather than a `Secret<String>`
+        // here: existing tests construct `State::Asking` with a struct
+        // literal (`entered: Secret::new(String::new())`, `entered: Secret::new("x".into())`), and
+        // changing the field's type would mean editing every one of
+        // them — which the rules for this refactor rule out. So the
+        // *storage* is unchanged, but the *rendering* still goes through
+        // `Secret`'s formatting rather than a second hand-rolled
+        // `format_args!`, by wrapping the reference only for the
+        // instant it takes to print it. That is the one place this
+        // isn't a full migration, and this comment is why.
         match self {
             State::Asking { prompt, entered } => f
                 .debug_struct("Asking")
                 .field("prompt", prompt)
-                .field("entered", &format_args!("<{} chars>", entered.len()))
+                .field("entered", entered)
                 .finish(),
             State::Working => f.write_str("Working"),
             State::Telling { text, error } => f
@@ -607,7 +625,7 @@ mod tests {
         let mut c = Conversation::new(password_then(Response::Success), "apost");
         assert_eq!(
             c.state(),
-            &State::Asking { prompt: Prompt::secret("Password:"), entered: String::new() }
+            &State::Asking { prompt: Prompt::secret("Password:"), entered: Secret::new(String::new()) }
         );
         assert!(c.state().accepts_input());
 
@@ -645,7 +663,7 @@ mod tests {
             State::Asking { prompt, entered } => {
                 assert_eq!(prompt.text, "Verification code:");
                 assert!(!prompt.secret, "a 2FA code is not hidden input");
-                assert!(entered.is_empty(), "the new prompt starts empty");
+                assert!(entered.expose().is_empty(), "the new prompt starts empty");
             }
             other => panic!("expected a second question, got {other:?}"),
         }
@@ -742,7 +760,7 @@ mod tests {
     fn only_authenticated_counts_as_success() {
         for state in [
             State::Working,
-            State::Asking { prompt: Prompt::secret("p"), entered: "x".into() },
+            State::Asking { prompt: Prompt::secret("p"), entered: Secret::new("x".into()) },
             State::Telling { text: "t".into(), error: true },
             State::Failed { reason: "r".into() },
         ] {
@@ -847,7 +865,7 @@ mod tests {
     fn debug_output_never_contains_what_was_typed() {
         let state = State::Asking {
             prompt: Prompt::secret("Password:"),
-            entered: "hunter2".into(),
+            entered: Secret::new("hunter2".into()),
         };
         let rendered = format!("{state:?}");
         assert!(!rendered.contains("hunter2"), "{rendered}");

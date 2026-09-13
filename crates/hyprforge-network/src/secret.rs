@@ -8,36 +8,40 @@
 //! cloned into a settings dictionary, and any `tracing` call or
 //! `#[derive(Debug)]` anywhere along that path would print it.
 //!
-//! So the value is not reachable by accident. There is no `Display`, the
-//! `Debug` is hand-written to render a count, and the one accessor is
-//! called [`Psk::expose`] so that `grep expose` finds every place the
-//! plaintext is actually used.
+//! So the value is not reachable by accident. There is no `Display`, and
+//! the `Debug` and the accessor are built on [`hyprforge_secret::Secret`]
+//! — the same wrapper the lock screen's typed password uses — rather
+//! than a second hand-written copy of the same rule. `Psk` keeps its own
+//! name and its own accessor, [`Psk::expose`], so that `grep expose` in
+//! this crate still finds every place the plaintext is actually used;
+//! `Secret` is what actually withholds it.
 
+use hyprforge_secret::Secret;
 use std::fmt;
 
 /// A Wi-Fi pre-shared key, on its way to NetworkManager and nowhere else.
 #[derive(Clone, PartialEq, Eq)]
-pub struct Psk(String);
+pub struct Psk(Secret<String>);
 
 impl Psk {
     pub fn new(value: impl Into<String>) -> Self {
-        Psk(value.into())
+        Psk(Secret::new(value.into()))
     }
 
     /// The plaintext. Named to be greppable: every caller is a place the
     /// passphrase leaves this type, and there should be exactly one.
     pub fn expose(&self) -> &str {
-        &self.0
+        self.0.expose()
     }
 
     /// Characters, not bytes — this is only ever used to describe the
     /// value, never to validate it against a byte length.
     pub fn len_chars(&self) -> usize {
-        self.0.chars().count()
+        self.expose().chars().count()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.expose().is_empty()
     }
 
     /// Whether this could be a WPA-PSK passphrase at all: 8–63 ASCII
@@ -48,21 +52,19 @@ impl Psk {
     /// activation several seconds later and looks identical to a wrong
     /// password.
     pub fn is_plausible_wpa(&self) -> bool {
-        let raw_key = self.0.len() == 64 && self.0.chars().all(|c| c.is_ascii_hexdigit());
-        let passphrase = (8..=63).contains(&self.0.len());
+        let value = self.expose();
+        let raw_key = value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit());
+        let passphrase = (8..=63).contains(&value.len());
         raw_key || passphrase
     }
 }
 
-/// Renders a count, never the value.
-///
-/// A keysym name *is* the character and a passphrase is no different: the
-/// moment this prints `self.0`, every `tracing::debug!(?settings)` in the
-/// crate writes a Wi-Fi password to the journal, and in an agent session
-/// to the transcript as well.
+/// Renders a count, never the value — delegated to [`Secret`]'s own
+/// `Debug`, wrapped in the type's name so this still reads as `Psk(...)`
+/// rather than a generic `Secret(...)`.
 impl fmt::Debug for Psk {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Psk(<{} chars>)", self.len_chars())
+        write!(f, "Psk({:?})", self.0)
     }
 }
 

@@ -14,7 +14,7 @@
 //! Every call is wrapped in a timeout. NetworkManager blocks on real
 //! radio hardware: a scan waits for the adapter, and an activation waits
 //! for association and then DHCP from a server that may never answer. It
-//! is exactly the class `hyprforge_core::command::output` exists for, one
+//! is exactly the class `hyprforge_process::output` exists for, one
 //! transport further out.
 
 use crate::backend::{NetworkBackend, SavedNetwork, Status};

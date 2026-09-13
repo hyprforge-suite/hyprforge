@@ -367,7 +367,7 @@ fn prompt_label(state: &State) -> String {
 /// How many dots to draw. Never the characters, never a number in words.
 fn dot_count(state: &State) -> usize {
     match state {
-        State::Asking { entered, .. } => entered.chars().count().min(MAX_DOTS),
+        State::Asking { entered, .. } => entered.expose().chars().count().min(MAX_DOTS),
         _ => 0,
     }
 }
@@ -401,7 +401,7 @@ mod tests {
     fn nothing_the_screen_says_ever_contains_what_was_typed() {
         let secret = "hunter2!";
         let states = [
-            State::Asking { prompt: Prompt::secret("Password:"), entered: secret.into() },
+            State::Asking { prompt: Prompt::secret("Password:"), entered: secret.to_string().into() },
             State::Working,
             State::Authenticated,
             State::Failed { reason: "Incorrect password".into() },
@@ -534,22 +534,22 @@ mod tests {
         vec![
             State::Working,
             State::Authenticated,
-            State::Asking { prompt: Prompt::secret("Password:"), entered: "hunter2".into() },
+            State::Asking { prompt: Prompt::secret("Password:"), entered: "hunter2".to_string().into() },
             State::Failed { reason: "Incorrect password".into() },
             // A passphrase far longer than the dot row can show.
-            State::Asking { prompt: Prompt::secret("Password:"), entered: "x".repeat(10_000) },
+            State::Asking { prompt: Prompt::secret("Password:"), entered: "x".repeat(10_000).into() },
             // Scripts that shape and combine, plus an emoji with a
             // zero-width joiner — the kind of thing that has broken text
             // layout engines before.
             State::Asking {
                 prompt: Prompt::visible("رمز المرور:"),
-                entered: "\u{1f9d1}\u{200d}\u{1f680}é\u{200d}\u{915}\u{94d}".repeat(20),
+                entered: "\u{1f9d1}\u{200d}\u{1f680}é\u{200d}\u{915}\u{94d}".repeat(20).into(),
             },
             // Control characters, which the key handler filters but a PAM
             // module's own text is not obliged to.
             State::Telling { text: "line\u{0}one\ttwo\r\n".into(), error: true },
             // Text long enough to need wrapping inside a fixed panel.
-            State::Asking { prompt: Prompt::secret("y".repeat(4_000)), entered: String::new() },
+            State::Asking { prompt: Prompt::secret("y".repeat(4_000)), entered: String::new().into() },
             State::Failed { reason: "z".repeat(4_000) },
         ]
     }
@@ -568,7 +568,7 @@ mod tests {
         let ordinary_size = (771, 906);
         let ordinary_state = State::Asking {
             prompt: Prompt::secret("Password:"),
-            entered: "hunter2".into(),
+            entered: "hunter2".to_string().into(),
         };
         let ordinary_theme = Theme::default();
 
@@ -751,7 +751,7 @@ mod tests {
         let dots = |entered: &str| {
             dot_count(&State::Asking {
                 prompt: Prompt::secret("Password:"),
-                entered: entered.into(),
+                entered: entered.to_string().into(),
             })
         };
         assert_eq!(dots(""), 0);
@@ -776,7 +776,7 @@ mod tests {
     fn the_prompt_is_pams_own_words() {
         let state = State::Asking {
             prompt: Prompt::visible("Verification code:"),
-            entered: String::new(),
+            entered: String::new().into(),
         };
         assert_eq!(prompt_label(&state), "Verification code:");
     }
