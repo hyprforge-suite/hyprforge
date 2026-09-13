@@ -70,6 +70,19 @@ NEXT_LOCK=
 NEXT_SETTINGS=
 NEXT_GREETER=
 
+# One of done / todo / unknown per block above (see "next-step checks"
+# below for what each means) plus, for `unknown`, the reason it could
+# not be determined. Set by each install_* function right after it
+# builds the NEXT_* text, from a live but bounded check of the system —
+# never from anything install_* just did, since --dry-run must report
+# the same states as a real run.
+STATE_DISPLAYD=;  REASON_DISPLAYD=
+STATE_TRAY=;      REASON_TRAY=
+STATE_CLIPBOARD=; REASON_CLIPBOARD=
+STATE_LOCK=;      REASON_LOCK=
+STATE_SETTINGS=;  REASON_SETTINGS=
+STATE_GREETER=;   REASON_GREETER=
+
 # Prints every captured block as one numbered list, ordered by
 # consequence rather than by the order components were installed:
 # services to enable first, then the config the user has to point at
@@ -77,29 +90,232 @@ NEXT_GREETER=
 # consequences (a bad greetd config can leave the machine unable to log
 # in), so it belongs where it gets read most carefully: last, right
 # before the script says it's done.
-print_next_steps() {
-    local labels=(
-        "Display daemon"      "$NEXT_DISPLAYD"
-        "Tray icons"          "$NEXT_TRAY"
-        "Clipboard"           "$NEXT_CLIPBOARD"
-        "Lock"                "$NEXT_LOCK"
-        "Settings app"        "$NEXT_SETTINGS"
-        "Greeter"             "$NEXT_GREETER"
-    )
-    local any=false i
-    for ((i = 1; i < ${#labels[@]}; i += 2)); do
-        [[ -n ${labels[i]} ]] && any=true
-    done
-    $any || return 0
+# ------------------------------------------------------- next-step checks
+#
+# Three states, not two: `done` (verified satisfied — omit the step),
+# `todo` (verified outstanding — print it exactly as before) and
+# `unknown` (the check itself could not run: a missing command, an
+# unreadable file, systemd not answering). Collapsing `unknown` into
+# either neighbour is the same mistake CLAUDE.md calls out for a test
+# that returns early and still prints `ok`: a step nobody could verify
+# must never come out looking finished (the user stops looking for it)
+# or vanish silently (worse — there is then no record it was even
+# checked). It gets its own visible, marked line instead.
+CHECK_STATE=
+CHECK_REASON=
 
-    step "Before this does anything, you need to:"
-    local n=1 label text
-    for ((i = 0; i < ${#labels[@]}; i += 2)); do
-        label=${labels[i]}
-        text=${labels[i+1]}
-        [[ -n $text ]] || continue
-        printf '\n  %s%d. %s%s\n' "$B" "$n" "$label" "$N"
-        printf '%s\n' "$text"
+# service_state --user|--system <unit>
+# Sets CHECK_STATE / CHECK_REASON. Every systemctl call here is wrapped
+# in `timeout` — CLAUDE.md is explicit that nothing here waits on
+# another process without a bound, and `is-enabled` talking to a wedged
+# systemd is exactly that kind of call.
+service_state() {
+    local scope=$1 unit=$2 state rc=0
+    CHECK_REASON=
+    if ! command -v systemctl >/dev/null 2>&1; then
+        CHECK_STATE=unknown; CHECK_REASON="systemctl not found"
+        return
+    fi
+    if [[ $scope == --user ]]; then
+        if state=$(timeout 3 systemctl --user is-enabled "$unit" 2>/dev/null); then rc=0; else rc=$?; fi
+    else
+        if state=$(timeout 3 systemctl is-enabled "$unit" 2>/dev/null); then rc=0; else rc=$?; fi
+    fi
+    # 124 is timeout's own "gave up" exit code; 126/127 mean the command
+    # never even ran. Anything else is systemctl actually answering —
+    # is-enabled exits non-zero for "disabled" and "not-found" too, and
+    # that is a real answer, not a failure to answer.
+    if (( rc == 124 || rc == 126 || rc == 127 )); then
+        CHECK_STATE=unknown
+        CHECK_REASON="systemctl $scope is-enabled $unit did not answer"
+        return
+    fi
+    if [[ $state == enabled ]]; then
+        CHECK_STATE=done
+    else
+        CHECK_STATE=todo
+    fi
+}
+
+# The lock step: is hypridle actually pointed at hyprforge-lock, not
+# just mentioning it?
+#
+# A missing hypridle.conf and a present-but-commented-out one are both
+# `todo`, but they are not the same state, in the same spirit as
+# CLAUDE.md's "file could not be read is not the same as nothing
+# configured": one means hypridle may not even be in use here, the
+# other means it is in use and simply not wired up yet. Keeping the
+# reasons distinct means a future addition of a real "can't tell" case
+# does not get merged back into either by accident.
+#
+# The match is anchored to the start of the line (after whitespace) so
+# that a commented line — "    # lock_cmd = ... hyprforge-lock", which
+# is the literal contents of this machine's hypridle.conf — does NOT
+# match: it starts with '#', not 'l'. A bare substring grep for
+# "hyprforge-lock" anywhere in the file is exactly the trap this step
+# exists to avoid.
+lock_step_state() {
+    local conf="$HOME/.config/hypr/hypridle.conf"
+    CHECK_REASON=
+    if [[ ! -e $conf ]]; then
+        CHECK_STATE=todo
+        CHECK_REASON="no ~/.config/hypr/hypridle.conf yet — hypridle may not be in use"
+        return
+    fi
+    if [[ ! -r $conf ]]; then
+        CHECK_STATE=unknown
+        CHECK_REASON="$conf exists but could not be read"
+        return
+    fi
+    if grep -Eq '^[[:space:]]*lock_cmd[[:space:]]*=.*hyprforge-lock' "$conf"; then
+        CHECK_STATE=done
+    else
+        CHECK_STATE=todo
+    fi
+}
+
+# The clipboard step is really two conditions — the daemon enabled, and
+# the popup bound — and both have to hold before the instruction is
+# moot.
+clipboard_step_state() {
+    service_state --user hyprforge-clipd
+    local svc_state=$CHECK_STATE svc_reason=$CHECK_REASON
+    if [[ $svc_state == unknown ]]; then
+        CHECK_STATE=unknown; CHECK_REASON=$svc_reason
+        return
+    fi
+
+    local binds="$HOME/.config/hypr/hyprforge/keybinds.lua" bind_state
+    if [[ ! -e $binds ]]; then
+        # Same missing-vs-present distinction as hypridle: no
+        # keybinds.lua at all is first-run, not a bind that went
+        # missing. Either way the step is still outstanding, so it
+        # stays `todo` rather than becoming `unknown`.
+        bind_state=todo
+    elif [[ ! -r $binds ]]; then
+        CHECK_STATE=unknown
+        CHECK_REASON="$binds exists but could not be read"
+        return
+    elif grep -q hyprforge-clipmenu "$binds" 2>/dev/null; then
+        bind_state=done
+    else
+        bind_state=todo
+    fi
+
+    if [[ $svc_state == done && $bind_state == done ]]; then
+        CHECK_STATE=done
+    else
+        CHECK_STATE=todo
+    fi
+}
+
+# The greeter step is the one CLAUDE.md's own safety warning is about —
+# a bad greetd config can leave the machine unable to log in — so this
+# is deliberately the most conservative check here. `done` only when
+# greetd is enabled AND this specific session can be confirmed to have
+# come in through it. Enabled-but-unconfirmed, or the check itself
+# failing, both stay `todo`: understating readiness just repeats a
+# warning that was already true, but overstating it hides a warning
+# about the machine's boot target, and only one of those is safe to get
+# wrong.
+greeter_step_state() {
+    service_state --system greetd
+    if [[ $CHECK_STATE == unknown ]]; then
+        return
+    fi
+    if [[ $CHECK_STATE == todo ]]; then
+        # Not enabled at all: the machine has not committed to greetd,
+        # so the full "test on a spare VT" warning must stay exactly as
+        # visible as it is today. Nothing more to add.
+        CHECK_REASON=
+        return
+    fi
+
+    # greetd is enabled — but that alone only means it will be used on
+    # the NEXT login, not that this session came in through it.
+    if ! command -v loginctl >/dev/null 2>&1 || [[ -z ${XDG_SESSION_ID:-} ]]; then
+        CHECK_STATE=unknown
+        CHECK_REASON="greetd is enabled, but could not confirm this session logged in through it (no loginctl or session id)"
+        return
+    fi
+    local service rc=0
+    if service=$(timeout 3 loginctl show-session "$XDG_SESSION_ID" -p Service --value 2>/dev/null); then
+        rc=0
+    else
+        rc=$?
+    fi
+    if (( rc == 124 || rc == 126 || rc == 127 )) || [[ -z $service ]]; then
+        CHECK_STATE=unknown
+        CHECK_REASON="loginctl did not answer about this session's Service"
+        return
+    fi
+    if [[ $service == greetd ]]; then
+        CHECK_STATE=done
+    else
+        # Conservative on purpose — see the function comment.
+        CHECK_STATE=todo
+        CHECK_REASON="greetd is enabled, but this session's Service is '$service', not greetd"
+    fi
+}
+
+print_next_steps() {
+    local labels=("Display daemon" "Tray icons" "Clipboard" "Lock" "Settings app" "Greeter")
+    local texts=("$NEXT_DISPLAYD" "$NEXT_TRAY" "$NEXT_CLIPBOARD" "$NEXT_LOCK" "$NEXT_SETTINGS" "$NEXT_GREETER")
+    local states=("$STATE_DISPLAYD" "$STATE_TRAY" "$STATE_CLIPBOARD" "$STATE_LOCK" "$STATE_SETTINGS" "$STATE_GREETER")
+    local reasons=("$REASON_DISPLAYD" "$REASON_TRAY" "$REASON_CLIPBOARD" "$REASON_LOCK" "$REASON_SETTINGS" "$REASON_GREETER")
+
+    # Steps that are `done` collapse into this count instead of being
+    # read one by one, matching the "N already current" pattern used
+    # for file installs above — the point there and here is the same:
+    # say nothing was missed, then only enumerate what actually needs
+    # attention.
+    local out_labels=() out_texts=() out_states=() out_reasons=()
+    local done_count=0 ran_any=false i
+    for ((i = 0; i < ${#labels[@]}; i++)); do
+        [[ -n ${texts[i]} ]] || continue   # component was not part of this run
+        ran_any=true
+        if [[ ${states[i]} == done ]]; then
+            (( done_count += 1 ))
+            continue
+        fi
+        out_labels+=("${labels[i]}")
+        out_texts+=("${texts[i]}")
+        out_states+=("${states[i]}")
+        out_reasons+=("${reasons[i]}")
+    done
+    $ran_any || return 0
+
+    # The heading has to agree with what follows it. "Before this does
+    # anything, you need to:" above a list of nothing reads as a bug,
+    # and on a machine that is already fully set up that is the common
+    # case rather than the rare one.
+    local plural="steps"
+    (( done_count == 1 )) && plural="step"
+    if (( ${#out_texts[@]} == 0 )); then
+        step "Nothing left to do"
+        (( done_count > 0 )) && skip "$done_count $plural already done"
+    else
+        step "Before this does anything, you need to:"
+        (( done_count > 0 )) && skip "$done_count $plural already done"
+    fi
+
+    if (( ${#out_texts[@]} == 0 )); then
+        # Every step this run touched is verified done, and any check
+        # that could not run would still be sitting in out_texts above
+        # (see the `unknown` branch below) — so an empty list here
+        # really does mean nothing left, not a check that gave up.
+        ok "everything this run set up is already wired in"
+        return 0
+    fi
+
+    local n=1
+    for ((i = 0; i < ${#out_texts[@]}; i++)); do
+        printf '\n  %s%d. %s%s\n' "$B" "$n" "${out_labels[i]}" "$N"
+        if [[ ${out_states[i]} == unknown ]]; then
+            printf '  %s(could not verify whether this is still needed: %s)%s\n' \
+                "$Y" "${out_reasons[i]}" "$N"
+        fi
+        printf '%s\n' "${out_texts[i]}"
         ((n++))
     done
 }
@@ -336,6 +552,8 @@ install_greeter() {
   See crates/hyprforge-greet/INSTALL.md for committing to it properly.
 EOF
 )
+    greeter_step_state
+    STATE_GREETER=$CHECK_STATE; REASON_GREETER=$CHECK_REASON
 }
 
 uninstall_greeter() {
@@ -394,6 +612,8 @@ install_lock() {
   both work once lock_cmd points here.
 EOF
 )
+    lock_step_state
+    STATE_LOCK=$CHECK_STATE; REASON_LOCK=$CHECK_REASON
 }
 
 uninstall_lock() {
@@ -457,6 +677,8 @@ install_displayd() {
     systemctl --user enable --now hyprforge-displayd
 EOF
 )
+    service_state --user hyprforge-displayd
+    STATE_DISPLAYD=$CHECK_STATE; REASON_DISPLAYD=$CHECK_REASON
 }
 
 install_tray() {
@@ -499,6 +721,8 @@ install_tray() {
         systemctl --user restart hyprforge-trayd
 EOF
 )
+    service_state --user hyprforge-trayd
+    STATE_TRAY=$CHECK_STATE; REASON_TRAY=$CHECK_REASON
 }
 
 install_clipboard() {
@@ -538,6 +762,8 @@ install_clipboard() {
     password managers ask not to be remembered.
 EOF
 )
+    clipboard_step_state
+    STATE_CLIPBOARD=$CHECK_STATE; REASON_CLIPBOARD=$CHECK_REASON
 }
 
 uninstall_clipboard() {
@@ -638,6 +864,12 @@ install_settings() {
   Appearance writes the theme and exports a copy the login screen reads.${N}
 EOF
 )
+    # Nothing above is a pending action — it's what to expect once the
+    # app is installed, not a step with a verifiable done/todo state.
+    # Marking it done unconditionally is what keeps it out of the
+    # outstanding list without inventing a check that would not mean
+    # anything.
+    STATE_SETTINGS=done; REASON_SETTINGS=
 }
 
 uninstall_settings() {
