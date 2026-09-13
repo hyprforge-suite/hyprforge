@@ -115,9 +115,17 @@ package_hyprforge-displayd() {
 
 package_hyprforge-tray() {
   pkgdesc="Tray icons for Wi-Fi, Bluetooth, keep awake and night light"
-  # Nothing is required. Each icon needs its own service, and the daemon
-  # reports "NetworkManager isn't running" rather than failing, so the
-  # tray is useful with any subset of them present.
+  # wayland/libxkbcommon: hyprforge-traymenu draws its own right-click
+  # menu (com.canonical.dbusmenu is no longer served — see
+  # hyprforge-tray's own module doc), a layer-shell popup on the same
+  # stack as hyprforge-clipmenu, confirmed with ldd against this same
+  # build rather than assumed from that package's own depends. Nothing
+  # else is required for hyprforge-trayd itself: each icon needs its own
+  # service, and the daemon reports "NetworkManager isn't running" rather
+  # than failing, so the tray is useful with any subset of them present —
+  # and a missing hyprforge-traymenu is the same kind of state, not a
+  # crash: a right click falls back to the icon's primary action.
+  depends=(wayland libxkbcommon)
   optdepends=(
     'networkmanager: the Wi-Fi icon'
     'bluez: the Bluetooth icon'
@@ -126,6 +134,7 @@ package_hyprforge-tray() {
   )
   cd "$startdir/../.."
   _bin hyprforge-trayd
+  _bin hyprforge-traymenu
   install -Dm644 crates/hyprforge-tray/packaging/hyprforge-trayd.service \
     "$pkgdir/usr/lib/systemd/user/hyprforge-trayd.service"
 }

@@ -689,8 +689,15 @@ EOF
 
 install_tray() {
     build hyprforge-tray hyprforge-trayd
+    # The right-click menu's own popup, spawned directly by
+    # hyprforge-trayd rather than served over com.canonical.dbusmenu — see
+    # hyprforge-tray's own module doc. Not a component of its own: nothing
+    # launches it but the daemon, so there is no keybind to document and
+    # no reason a user would install it without --tray.
+    build hyprforge-traymenu
     step "Tray icons"
     install_file target/release/hyprforge-trayd "$PREFIX/hyprforge-trayd" 755
+    install_file target/release/hyprforge-traymenu "$PREFIX/hyprforge-traymenu" 755
 
     # Same rewrite as the display daemon's unit, for the same reason: the
     # packaged ExecStart points at ~/.cargo/bin and this script installs
@@ -725,6 +732,12 @@ install_tray() {
     means a stale binary keeps running long after it was replaced, which
     is how two icons went missing after being switched on:
         systemctl --user restart hyprforge-trayd
+
+    Right-click draws hyprforge-trayd's own menu (hyprforge-traymenu),
+    themed like the rest of the suite, rather than whatever your bar
+    would otherwise draw from com.canonical.dbusmenu. It opens below the
+    icon that was clicked; ~/.config/hyprforge/tray.toml's menu_y_offset
+    tunes how far below to clear your bar if the default doesn't.
 EOF
 )
     service_state --user hyprforge-trayd
@@ -841,6 +854,7 @@ uninstall_tray() {
         }
     fi
     remove_file "$PREFIX/hyprforge-trayd"
+    remove_file "$PREFIX/hyprforge-traymenu"
 }
 
 uninstall_displayd() {
@@ -1010,7 +1024,7 @@ status_summary() {
     local installed=() missing=() stale=()
     local name
     for name in hyprforge-greet hyprforge-lock hyprforge-displayd \
-                hyprforge-trayd hyprforge-clipd hyprforge-clipmenu hyprforge-settings; do
+                hyprforge-trayd hyprforge-traymenu hyprforge-clipd hyprforge-clipmenu hyprforge-settings; do
         if [[ ! -e $PREFIX/$name ]]; then
             missing+=("$name")
         elif [[ -e target/release/$name ]] && ! cmp -s "target/release/$name" "$PREFIX/$name"; then
@@ -1041,6 +1055,7 @@ show_status() {
     status_binary hyprforge-lock
     status_binary hyprforge-displayd
     status_binary hyprforge-trayd
+    status_binary hyprforge-traymenu
     status_binary hyprforge-clipd
     status_binary hyprforge-clipmenu
     status_binary hyprforge-emojimenu

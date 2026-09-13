@@ -1728,6 +1728,7 @@ dependencies = [
  "hyprforge-lua-import",
  "hyprforge-network",
  "hyprforge-paths",
+ "hyprforge-power",
  "hyprforge-session",
  "hyprforge-shortcuts",
  "hyprforge-system",
@@ -1781,6 +1782,7 @@ dependencies = [
  "hyprforge-paths",
  "hyprforge-power",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
@@ -1788,6 +1790,24 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zbus",
+]
+
+[[package]]
+name = "hyprforge-traymenu"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hyprforge-appearance",
+ "hyprforge-look",
+ "hyprforge-popup",
+ "hyprforge-tray",
+ "iced_renderer",
+ "iced_runtime",
+ "iced_tiny_skia",
+ "iced_widget",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

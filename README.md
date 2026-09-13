@@ -55,11 +55,19 @@ Hyprland-facing
                             screen is testable without an adapter.
   hyprforge-bluetooth/     adapters and devices over BlueZ, on the same
                             backend-trait-first shape. Pairing not yet.
-  hyprforge-tray/          the StatusNotifierItem and dbusmenu protocols,
-                            and hyprforge-trayd, which puts a Wi-Fi and a
+  hyprforge-tray/          the StatusNotifierItem protocol, and
+                            hyprforge-trayd, which puts a Wi-Fi and a
                             Bluetooth icon in whatever bar is running. A
                             tray icon is a D-Bus object, not a widget —
-                            which is why it needs no GTK or Qt.
+                            which is why it needs no GTK or Qt. The
+                            right-click menu is hyprforge-traymenu, a
+                            sibling popup this daemon spawns directly
+                            rather than serving com.canonical.dbusmenu for
+                            a bar to draw itself.
+  hyprforge-traymenu/      the tray's own right-click menu, themed like
+                            every other Hyprforge popup and anchored below
+                            the icon that was clicked — a PopupApp
+                            consumer, the same shape as hyprforge-clipmenu.
 
 Apps
   hyprforge-settings/      the iced GUI, hosting the settings modules
@@ -108,7 +116,7 @@ today; the intent is to make them public once they've had more use.
 | [hyprforge-clipboard](https://github.com/adamrpostjr/hyprforge-clipboard) | A Wayland clipboard history library over `wlr-data-control`/`ext-data-control`, plus `hyprforge-clipd`, the daemon that watches the compositor's clipboard and writes its history. |
 | [hyprforge-lock](https://github.com/adamrpostjr/hyprforge-lock) | An `ext-session-lock-v1` lock screen for Hyprland, authenticating against PAM and sharing its look with the greeter. |
 | [hyprforge-greet](https://github.com/adamrpostjr/hyprforge-greet) | A greetd greeter for Hyprland, sharing its look and authentication conversation with the lock screen. |
-| [hyprforge-tray](https://github.com/adamrpostjr/hyprforge-tray) | A StatusNotifierItem/dbusmenu tray library, plus `hyprforge-trayd`, the daemon that puts Wi-Fi, Bluetooth, keep-awake and night-light icons in whatever bar is running. |
+| [hyprforge-tray](https://github.com/adamrpostjr/hyprforge-tray) | A StatusNotifierItem tray library, plus `hyprforge-trayd`, the daemon that puts Wi-Fi, Bluetooth, keep-awake and night-light icons in whatever bar is running, and draws its own right-click menu through `hyprforge-traymenu` rather than `com.canonical.dbusmenu`. |
 | [hyprforge-settings](https://github.com/adamrpostjr/hyprforge-settings) | The Settings app: an iced GUI over Hyprland's config, appearance, displays, network, Bluetooth, shortcuts and more. |
 
 Four of the five are meant to be installed on their own: clone
