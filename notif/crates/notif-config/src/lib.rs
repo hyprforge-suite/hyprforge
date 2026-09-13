@@ -1,0 +1,511 @@
+#![forbid(unsafe_code)]
+
+//! `notif-config` — configuration loading, validation, and file watching for
+//! the notif daemon.
+//!
+//! The pure-data configuration types live in [`notif_types::config`] and are
+//! re-exported here for convenience.
+
+pub use notif_types::config::*;
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use inotify::{Inotify, WatchMask};
+
+/// Errors that can occur while loading or parsing the configuration.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    /// Failed to read the config file from disk.
+    #[error("failed to read config file: {0}")]
+    Io(#[from] std::io::Error),
+    /// The file content is not valid TOML.
+    #[error("failed to parse TOML: {0}")]
+    Parse(#[from] toml::de::Error),
+    /// A field value is out of its valid range.
+    #[error("invalid configuration: {message}")]
+    Validation {
+        /// Human-readable description of the problem.
+        message: String,
+    },
+}
+
+/// Load configuration from `path`.
+///
+/// If the file does not exist, the built-in defaults are returned.
+/// If the file exists but cannot be parsed or validated, an error is returned.
+pub fn load(path: &Path) -> Result<Config, ConfigError> {
+    if !path.exists() {
+        return Ok(Config::default());
+    }
+    let text = std::fs::read_to_string(path)?;
+    let config: Config = toml::from_str(&text)?;
+    validate(&config)?;
+    Ok(config)
+}
+
+/// Validate a [`Config`], returning a descriptive error for out-of-range values.
+pub fn validate(c: &Config) -> Result<(), ConfigError> {
+    if c.font_size <= 0.0 {
+        return Err(ConfigError::Validation {
+            message: format!("font_size must be positive, got {}", c.font_size),
+        });
+    }
+    if c.max_visible == 0 {
+        return Err(ConfigError::Validation {
+            message: "max_visible must be at least 1".to_owned(),
+        });
+    }
+    if c.max_visible > 64 {
+        return Err(ConfigError::Validation {
+            message: format!("max_visible must be at most 64, got {}", c.max_visible),
+        });
+    }
+    if c.max_width == 0 {
+        return Err(ConfigError::Validation {
+            message: "max_width must be at least 1".to_owned(),
+        });
+    }
+    if c.max_width > 8192 {
+        return Err(ConfigError::Validation {
+            message: format!("max_width must be at most 8192, got {}", c.max_width),
+        });
+    }
+    if c.max_height == 0 {
+        return Err(ConfigError::Validation {
+            message: "max_height must be at least 1".to_owned(),
+        });
+    }
+    if c.max_height > 8192 {
+        return Err(ConfigError::Validation {
+            message: format!("max_height must be at most 8192, got {}", c.max_height),
+        });
+    }
+    if c.center_width == 0 {
+        return Err(ConfigError::Validation {
+            message: "center_width must be at least 1".to_owned(),
+        });
+    }
+    if c.center_width > 8192 {
+        return Err(ConfigError::Validation {
+            message: format!("center_width must be at most 8192, got {}", c.center_width),
+        });
+    }
+    if let Some(width) = c.center.width
+        && (width == 0 || width > 8192)
+    {
+        return Err(ConfigError::Validation {
+            message: format!("center.width must be between 1 and 8192, got {width}"),
+        });
+    }
+    if let Some(font_size) = c.center.font_size
+        && font_size <= 0.0
+    {
+        return Err(ConfigError::Validation {
+            message: format!("center.font_size must be positive, got {font_size}"),
+        });
+    }
+    if let Some(max_entries) = c.center.max_entries
+        && (max_entries == 0 || max_entries > 10_000)
+    {
+        return Err(ConfigError::Validation {
+            message: format!("center.max_entries must be between 1 and 10000, got {max_entries}"),
+        });
+    }
+    if let Some(margin_x) = c.center.margin_x
+        && margin_x > 8192
+    {
+        return Err(ConfigError::Validation {
+            message: format!("center.margin_x must be at most 8192, got {margin_x}"),
+        });
+    }
+    if let Some(margin_y) = c.center.margin_y
+        && margin_y > 8192
+    {
+        return Err(ConfigError::Validation {
+            message: format!("center.margin_y must be at most 8192, got {margin_y}"),
+        });
+    }
+    if let Some(border_width) = c.center.border_width
+        && border_width > 512
+    {
+        return Err(ConfigError::Validation {
+            message: format!("center.border_width must be at most 512, got {border_width}"),
+        });
+    }
+    if let Some(corner_radius) = c.center.corner_radius
+        && corner_radius > 512
+    {
+        return Err(ConfigError::Validation {
+            message: format!("center.corner_radius must be at most 512, got {corner_radius}"),
+        });
+    }
+    Ok(())
+}
+
+/// Watch `config_path` for changes and emit a [`notif_types::ConfigEvent`] on `tx`
+/// whenever the file is updated to valid content.
+///
+/// Watches the parent directory for `IN_CLOSE_WRITE` and `IN_MOVED_TO` events so
+/// that editor rename-swap workflows are handled correctly. Invalid reloads are
+/// logged via [`log::warn`] and never sent.
+///
+/// The function returns when `tx` is closed or an unrecoverable inotify error occurs.
+pub async fn watch(config_path: PathBuf, tx: async_channel::Sender<notif_types::ConfigEvent>) {
+    if let Err(e) = watch_impl(config_path, tx).await {
+        log::warn!("config watcher stopped: {e}");
+    }
+}
+
+async fn watch_impl(
+    config_path: PathBuf,
+    tx: async_channel::Sender<notif_types::ConfigEvent>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::fd::AsFd;
+
+    let parent = config_path
+        .parent()
+        .ok_or("config path has no parent directory")?;
+
+    let filename = config_path
+        .file_name()
+        .ok_or("config path has no file name")?
+        .to_owned();
+
+    // The config directory may not exist yet (fresh install with no config
+    // file). Create it so the watch can be established — otherwise hot-reload
+    // would silently never work until the daemon restarts.
+    std::fs::create_dir_all(parent)?;
+
+    let mut inotify = Inotify::init()?;
+    inotify
+        .watches()
+        .add(parent, WatchMask::CLOSE_WRITE | WatchMask::MOVED_TO)?;
+
+    // Wrap the raw fd in async-io's Async for reactor integration.
+    // We duplicate the fd so async-io can own it independently.
+    let raw_fd = inotify.as_fd().try_clone_to_owned()?;
+    let async_fd = async_io::Async::new(raw_fd)?;
+
+    let mut buffer = vec![0u8; 4096];
+
+    loop {
+        if tx.is_closed() {
+            break;
+        }
+
+        // Wait until the fd is readable.
+        async_fd.readable().await?;
+
+        // Read available events synchronously.
+        let events = match inotify.read_events(&mut buffer) {
+            Ok(events) => events,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(e) => {
+                log::warn!("inotify read error: {e}");
+                break;
+            }
+        };
+
+        for event in events {
+            let matches = event
+                .name
+                .map(|n| n == filename.as_os_str())
+                .unwrap_or(false);
+            if matches {
+                match load(&config_path) {
+                    Ok(cfg) => {
+                        let ev = notif_types::ConfigEvent(Arc::new(cfg));
+                        if tx.send(ev).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("failed to reload config {:?}: {e}", config_path);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn test_missing_file_gives_defaults() {
+        let path = PathBuf::from("/nonexistent/path/that/does/not/exist/notif.toml");
+        let config = load(&path).unwrap();
+        assert_eq!(config.anchor, AnchorCorner::TopRight);
+        assert_eq!(config.max_visible, 5);
+        assert_eq!(config.margin_x, 12);
+        assert_eq!(config.margin_y, 12);
+        assert_eq!(config.gap, 8);
+        assert_eq!(config.max_width, 400);
+        assert_eq!(config.max_height, 200);
+        assert_eq!(config.history_limit, 100);
+        assert!(config.body_markup);
+    }
+
+    #[test]
+    fn test_example_config_parses_to_defaults() {
+        let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/config.toml"));
+        let config = load(path).unwrap();
+        // The sample documents the defaults, so it must round-trip to them.
+        let defaults = Config::default();
+        assert_eq!(config.anchor, defaults.anchor);
+        assert_eq!(config.max_visible, defaults.max_visible);
+        assert_eq!(config.font_family, defaults.font_family);
+        assert_eq!(config.normal.border_color, defaults.normal.border_color);
+        assert_eq!(
+            config.critical.default_timeout_ms,
+            defaults.critical.default_timeout_ms
+        );
+        assert_eq!(config.center_width, defaults.center_width);
+        assert_eq!(config.center, defaults.center);
+    }
+
+    #[test]
+    fn test_center_partial_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[center]\nwidth = 320\nbackground = \"#101010\"\n").unwrap();
+        let config = load(&path).unwrap();
+        assert_eq!(config.center.width, Some(320));
+        assert_eq!(config.center.background, Some(Rgba::rgb(0x10, 0x10, 0x10)));
+        assert_eq!(config.center.anchor, None);
+        assert_eq!(config.center.margin_x, None);
+    }
+
+    #[test]
+    fn test_center_invalid_width_rejected() {
+        let cfg = Config {
+            center: CenterConfig {
+                width: Some(9000),
+                ..CenterConfig::default()
+            },
+            ..Config::default()
+        };
+        let result = validate(&cfg);
+        assert!(
+            matches!(&result, Err(ConfigError::Validation { message }) if message.contains("center.width")),
+            "expected validation error mentioning center.width, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_center_invalid_max_entries_rejected() {
+        let cfg = Config {
+            center: CenterConfig {
+                max_entries: Some(0),
+                ..CenterConfig::default()
+            },
+            ..Config::default()
+        };
+        let result = validate(&cfg);
+        assert!(
+            matches!(&result, Err(ConfigError::Validation { message }) if message.contains("center.max_entries"))
+        );
+    }
+
+    #[test]
+    fn test_invalid_toml_gives_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "this is [not valid] toml !!!").unwrap();
+        let result = load(&path);
+        assert!(matches!(result, Err(ConfigError::Parse(_))));
+    }
+
+    #[test]
+    fn test_partial_override_merges_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "max_visible = 3\n").unwrap();
+        let config = load(&path).unwrap();
+        assert_eq!(config.max_visible, 3);
+        assert_eq!(config.anchor, AnchorCorner::TopRight);
+        assert_eq!(config.margin_x, 12);
+    }
+
+    // ── A3: config upper-bound tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_max_width_upper_bound_rejected() {
+        let cfg = Config {
+            max_width: 9000,
+            ..Config::default()
+        };
+        let result = validate(&cfg);
+        assert!(
+            matches!(&result, Err(ConfigError::Validation { message }) if message.contains("8192")),
+            "expected validation error mentioning 8192, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_max_width_boundary_accepted() {
+        let cfg = Config {
+            max_width: 8192,
+            ..Config::default()
+        };
+        assert!(validate(&cfg).is_ok(), "max_width=8192 should be accepted");
+    }
+
+    #[test]
+    fn test_max_height_upper_bound_rejected() {
+        let cfg = Config {
+            max_height: 9000,
+            ..Config::default()
+        };
+        let result = validate(&cfg);
+        assert!(
+            matches!(&result, Err(ConfigError::Validation { message }) if message.contains("8192")),
+            "expected validation error mentioning 8192, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_max_height_boundary_accepted() {
+        let cfg = Config {
+            max_height: 8192,
+            ..Config::default()
+        };
+        assert!(validate(&cfg).is_ok(), "max_height=8192 should be accepted");
+    }
+
+    #[test]
+    fn test_max_visible_upper_bound_rejected() {
+        let cfg = Config {
+            max_visible: 65,
+            ..Config::default()
+        };
+        let result = validate(&cfg);
+        assert!(
+            matches!(&result, Err(ConfigError::Validation { message }) if message.contains("64")),
+            "expected validation error mentioning 64, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_max_visible_boundary_accepted() {
+        let cfg = Config {
+            max_visible: 64,
+            ..Config::default()
+        };
+        assert!(validate(&cfg).is_ok(), "max_visible=64 should be accepted");
+    }
+
+    #[test]
+    fn test_watcher_emits_on_rename_swap() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "max_visible = 1\n").unwrap();
+
+        let (tx, rx) = async_channel::bounded::<notif_types::ConfigEvent>(1);
+
+        let watch_path = config_path.clone();
+        let watch_tx = tx.clone();
+        std::thread::spawn(move || {
+            async_io::block_on(watch(watch_path, watch_tx));
+        });
+
+        // Give the watcher a moment to initialize
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Write a new config to a temp file and rename it over the watched file
+        let tmp_path = dir.path().join("config.toml.tmp");
+        std::fs::write(&tmp_path, "max_visible = 7\n").unwrap();
+        std::fs::rename(&tmp_path, &config_path).unwrap();
+
+        // Wait for the event with a 2-second timeout
+        let result = async_io::block_on(async {
+            use futures_lite::future;
+            let recv = async { rx.recv().await.ok() };
+            let timeout = async {
+                async_io::Timer::after(Duration::from_secs(2)).await;
+                None
+            };
+            future::or(recv, timeout).await
+        });
+
+        let event = result.expect("expected a ConfigEvent but timed out");
+        assert_eq!(event.0.max_visible, 7);
+    }
+
+    #[test]
+    fn test_watcher_creates_missing_config_dir() {
+        // Fresh install: the config directory does not exist yet. The watcher
+        // must create it and still deliver reload events for a config file
+        // written later.
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("notif");
+        let config_path = config_dir.join("config.toml");
+        assert!(!config_dir.exists());
+
+        let (tx, rx) = async_channel::bounded::<notif_types::ConfigEvent>(1);
+
+        let watch_path = config_path.clone();
+        std::thread::spawn(move || {
+            async_io::block_on(watch(watch_path, tx));
+        });
+
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(config_dir.exists(), "watcher should create the config dir");
+
+        let tmp_path = config_dir.join("config.toml.tmp");
+        std::fs::write(&tmp_path, "max_visible = 3\n").unwrap();
+        std::fs::rename(&tmp_path, &config_path).unwrap();
+
+        let result = async_io::block_on(async {
+            use futures_lite::future;
+            let recv = async { rx.recv().await.ok() };
+            let timeout = async {
+                async_io::Timer::after(Duration::from_secs(2)).await;
+                None
+            };
+            future::or(recv, timeout).await
+        });
+
+        let event = result.expect("expected a ConfigEvent but timed out");
+        assert_eq!(event.0.max_visible, 3);
+    }
+
+    #[test]
+    fn test_watcher_no_emit_on_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "max_visible = 1\n").unwrap();
+
+        let (tx, rx) = async_channel::bounded::<notif_types::ConfigEvent>(1);
+
+        let watch_path = config_path.clone();
+        let watch_tx = tx.clone();
+        std::thread::spawn(move || {
+            async_io::block_on(watch(watch_path, watch_tx));
+        });
+
+        // Give the watcher a moment to initialize
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Write invalid TOML and rename it over the watched file
+        let tmp_path = dir.path().join("config.toml.tmp");
+        std::fs::write(&tmp_path, "this = [broken toml\n").unwrap();
+        std::fs::rename(&tmp_path, &config_path).unwrap();
+
+        // Wait 500ms and assert channel is empty
+        async_io::block_on(async {
+            async_io::Timer::after(Duration::from_millis(500)).await;
+        });
+
+        assert!(
+            rx.try_recv().is_err(),
+            "expected no ConfigEvent for invalid TOML"
+        );
+    }
+}
