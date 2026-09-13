@@ -14,11 +14,12 @@ hyprforge-clipboard.workspace = true
 # settings (Hyprland's active border colour, gsettings fonts, …) — see
 # CLAUDE.md: "Never add a colour constant to an app."
 hyprforge-appearance.workspace = true
-# default-features off: this reads `hyprctl` output and needs nothing
-# from the `dbus` feature (that's only displayd/settings talking to the
-# display daemon).
-hyprforge-core = { workspace = true, default-features = false }
 hyprforge-look.workspace = true
+# `command::output`/`TIMEOUT` re-exported by hyprforge-core; depended on
+# directly per CLAUDE.md ("new code should depend on hyprforge-process
+# directly") since this popup has no other use for hyprforge-core's
+# Hyprland config machinery.
+hyprforge-process.workspace = true
 # default-features off drops iced_tiny_skia's own "x11"/"wayland"
 # defaults, which pick a *windowing* backend for `softbuffer` — no use
 # here, since the popup paints straight into the buffer the compositor

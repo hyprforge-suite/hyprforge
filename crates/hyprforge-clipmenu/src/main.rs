@@ -33,6 +33,7 @@ mod thumbnail;
 mod view;
 
 use geometry::{Monitor, Point, Size};
+use hyprforge_process::{output, TIMEOUT};
 use model::{HistoryState, Model};
 use std::process::Command;
 use surface::{ClipMenu, Outcome, Placement};
@@ -51,12 +52,8 @@ const POPUP_HEIGHT: f64 = 420.0;
 /// cursor is", and the caller falls back to the first monitor's origin
 /// rather than guessing at a position.
 fn cursor_position() -> Option<Point> {
-    let output = hyprforge_core::command::output(
-        Command::new("hyprctl").args(["cursorpos", "-j"]),
-        hyprforge_core::command::TIMEOUT,
-    )
-    .ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let result = output(Command::new("hyprctl").args(["cursorpos", "-j"]), TIMEOUT).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&result.stdout).ok()?;
     Some(Point { x: value.get("x")?.as_f64()?, y: value.get("y")?.as_f64()? })
 }
 
@@ -72,13 +69,10 @@ fn cursor_position() -> Option<Point> {
 /// reported as such rather than guessed at; `main` treats it as nowhere
 /// to show the popup.
 fn monitors() -> Vec<Monitor> {
-    let Ok(output) = hyprforge_core::command::output(
-        Command::new("hyprctl").args(["monitors", "-j"]),
-        hyprforge_core::command::TIMEOUT,
-    ) else {
+    let Ok(result) = output(Command::new("hyprctl").args(["monitors", "-j"]), TIMEOUT) else {
         return Vec::new();
     };
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&result.stdout) else {
         return Vec::new();
     };
     value

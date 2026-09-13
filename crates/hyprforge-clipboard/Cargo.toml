@@ -1,8 +1,13 @@
 [package]
 name = "hyprforge-clipboard"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A Wayland clipboard library over wlr-data-control / ext-data-control, plus the hyprforge-clipd daemon that watches the compositor's clipboard and writes its history."
+repository = "https://github.com/apost/hyprforge"
+documentation = "https://docs.rs/hyprforge-clipboard"
+keywords = ["clipboard", "wayland", "wlr-data-control", "hyprland", "linux"]
+categories = ["os::linux-apis", "gui"]
 
 # The library is read side, write side and paste synthesis over the
 # compositor's clipboard protocols — it knows nothing about a popup or a
@@ -17,8 +22,8 @@ path = "src/bin/clipd.rs"
 [dependencies]
 # The compositor is the only source of clipboard content, over
 # wlr-data-control / ext-data-control. No daemon of our own owns it.
-wayland-client.workspace = true
-wayland-protocols-wlr.workspace = true
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 # Not a workspace dependency: nothing else in the workspace speaks
 # ext-data-control-v1 yet. Pinned to the version already in the lock
 # file (a transitive dependency of nothing here before now, pulled in
@@ -37,18 +42,26 @@ wayland-protocols-misc = { version = "0.3", features = ["client"] }
 # (transitively, via the wayland stack); taken directly here because
 # nothing else in the workspace speaks to libxkbcommon yet.
 xkbcommon = "0.8"
-hyprforge-paths.workspace = true
+# Named as a git dependency, not a version, because the owner has not
+# published to crates.io yet: this manifest has to work unchanged both
+# inside the Hyprforge workspace and as the root of its own standalone
+# repository once `git subtree split` pulls it out. Inside the
+# workspace, the root Cargo.toml's `[patch]` section redirects this
+# straight back to the local `crates/hyprforge-paths` and
+# `crates/hyprforge-secret` directories, so nothing here touches the
+# network; standalone, cargo fetches them from git.
+hyprforge-paths = { git = "https://github.com/apost/hyprforge" }
 # For the `chars`/`bytes` "redacted count" formatting `Content`'s `Debug`
 # shares with `hyprforge-network`'s `Psk` and `hyprforge-authui`'s typed
 # password — see `types.rs` for why `Content` is not itself a `Secret<T>`.
-hyprforge-secret.workspace = true
-serde.workspace = true
-toml.workspace = true
-thiserror.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
-blake3.workspace = true
-anyhow.workspace = true
+hyprforge-secret = { git = "https://github.com/apost/hyprforge" }
+serde = { version = "1", features = ["derive"] }
+toml = "1.1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+blake3 = "1.8"
+anyhow = "1"
 # An anonymous, already-unlinked file to hand the compositor a keymap
 # it can `mmap` — see `wayland::keyboard::upload_keymap`. A real
 # (non-dev) dependency because the paste-synthesis code path needs it
@@ -57,10 +70,10 @@ tempfile = "3"
 # `sync` for the `UnboundedReceiver` the watcher trait hands back;
 # `rt-multi-thread` and `macros` for the daemon's `#[tokio::main]`;
 # `time` for its bounded reconnect backoff.
-tokio = { workspace = true, features = ["sync", "rt-multi-thread", "macros", "time"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tokio = { version = "1.53", features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
 
 [features]
 # Exposes `backend::mock::MockBackend` (and `write::mock::MockWriter`,
