@@ -39,6 +39,17 @@ jobs:
   tier-1:
     name: "Tier 1 (no PAM, no compositor): build, clippy -D warnings, cargo test"
     runs-on: ubuntu-latest
+    env:
+      # Cargo fetches git dependencies with libgit2, which does not honour
+      # the `url.<..>.insteadOf` rewrite the step below installs — so the
+      # credential never reaches the clone and the build fails with
+      # "failed to authenticate", even though `git` itself would succeed.
+      # Cargo says as much in that error, and this is the setting it
+      # names: fetch with the git CLI instead, which does honour it.
+      #
+      # Goes with the SUITE_READ step below: when the suite repository
+      # becomes public, both stop being necessary.
+      CARGO_NET_GIT_FETCH_WITH_CLI: true
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
