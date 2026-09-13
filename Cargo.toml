@@ -38,6 +38,10 @@ wayland-protocols-misc = { version = "0.3", features = ["client"] }
 # nothing else in the workspace speaks to libxkbcommon yet.
 xkbcommon = "0.8"
 hyprforge-paths.workspace = true
+# For the `chars`/`bytes` "redacted count" formatting `Content`'s `Debug`
+# shares with `hyprforge-network`'s `Psk` and `hyprforge-authui`'s typed
+# password — see `types.rs` for why `Content` is not itself a `Secret<T>`.
+hyprforge-secret.workspace = true
 serde.workspace = true
 toml.workspace = true
 thiserror.workspace = true
