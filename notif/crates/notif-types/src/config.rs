@@ -2,6 +2,14 @@
 //!
 //! These are plain serde data structures — loading, validation, and file
 //! watching live in `notif-config`.
+//!
+//! Every colour and font here comes from [`hyprforge_look::Theme`]. See
+//! [`Config::from_theme`] for why there are no palette constants left.
+
+/// The shared look, re-exported so nothing downstream has to name
+/// `hyprforge-look` itself just to talk about the theme it is already
+/// being handed.
+pub use hyprforge_look::{Color, Theme};
 
 /// Corner to anchor the notification stack to.
 #[derive(
@@ -37,6 +45,26 @@ impl Rgba {
     /// Construct a fully-opaque color from RGB components.
     pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
         Self { r, g, b, a: 255 }
+    }
+}
+
+/// The suite's colour, in notif's on-disk spelling.
+///
+/// Two types for one concept, deliberately. `hyprforge_look::Color`
+/// writes `rgba(bd93f9ff)`, which is Hyprland's spelling and a contract
+/// between the Settings app, the lock screen and the greeter; `Rgba`
+/// writes `#bd93f9`, which is what every notif config already on a
+/// user's disk contains. Unifying them would silently invalidate one of
+/// the two files, so the conversion is here instead and nobody's config
+/// has to change.
+impl From<hyprforge_look::Color> for Rgba {
+    fn from(c: hyprforge_look::Color) -> Self {
+        Self {
+            r: c.r,
+            g: c.g,
+            b: c.b,
+            a: c.a,
+        }
     }
 }
 
@@ -108,36 +136,63 @@ pub struct UrgencyStyle {
     pub ignore_timeout: bool,
 }
 
-impl Default for UrgencyStyle {
-    fn default() -> Self {
+impl UrgencyStyle {
+    /// The low-urgency style the shared theme implies.
+    ///
+    /// A notification is a small panel floating on the desktop, so it
+    /// takes `surface` — the same shade the lock screen's prompt sits
+    /// on — rather than `background`, which is what shows *behind*
+    /// everything. The border is the card border: present, but not
+    /// asking for attention, which is what "low" means.
+    pub fn low_from_theme(theme: &Theme) -> Self {
         Self {
-            background: Rgba::rgb(0x1e, 0x1e, 0x2e),
-            foreground: Rgba::rgb(0xcd, 0xd6, 0xf4),
-            border_color: Rgba::rgb(0x31, 0x32, 0x44),
+            background: theme.surface.into(),
+            foreground: theme.foreground.into(),
+            border_color: theme.surfaces.card_border.into(),
             border_width: 1,
-            corner_radius: 8,
+            // The same rounding windows have, so a notification does not
+            // read as a different toolkit's idea of a corner.
+            corner_radius: theme.rounding,
             default_timeout_ms: 5000,
             ignore_timeout: false,
         }
     }
-}
 
-fn default_normal_style() -> UrgencyStyle {
-    UrgencyStyle {
-        border_color: Rgba::rgb(0x89, 0xb4, 0xfa),
-        default_timeout_ms: 8000,
-        ..UrgencyStyle::default()
+    /// The normal-urgency style: low, plus the accent on the border.
+    ///
+    /// The accent is Hyprland's `general:col:active_border` — the colour
+    /// the window you are looking at is outlined in. A notification
+    /// wearing it is the same statement.
+    pub fn normal_from_theme(theme: &Theme) -> Self {
+        Self {
+            border_color: theme.accent.into(),
+            default_timeout_ms: 8000,
+            ..Self::low_from_theme(theme)
+        }
+    }
+
+    /// The critical style: the theme's error colour, and no timeout.
+    ///
+    /// `error` rather than `warning`: freedesktop's `Critical` urgency
+    /// is explicitly "something has gone wrong and the user must see
+    /// it", and the suite already has one colour that means exactly
+    /// that. It also never dismisses itself, which is the spec's rule,
+    /// not a style choice.
+    pub fn critical_from_theme(theme: &Theme) -> Self {
+        Self {
+            foreground: theme.error.into(),
+            border_color: theme.error.into(),
+            border_width: 2,
+            default_timeout_ms: 0,
+            ignore_timeout: true,
+            ..Self::low_from_theme(theme)
+        }
     }
 }
 
-fn default_critical_style() -> UrgencyStyle {
-    UrgencyStyle {
-        foreground: Rgba::rgb(0xf3, 0x8b, 0xa8),
-        border_color: Rgba::rgb(0xf3, 0x8b, 0xa8),
-        border_width: 2,
-        default_timeout_ms: 0,
-        ignore_timeout: true,
-        ..UrgencyStyle::default()
+impl Default for UrgencyStyle {
+    fn default() -> Self {
+        Self::low_from_theme(&Theme::default())
     }
 }
 
@@ -273,8 +328,20 @@ pub struct Config {
     pub center: CenterConfig,
 }
 
-impl Default for Config {
-    fn default() -> Self {
+impl Config {
+    /// Every default this daemon has, derived from one shared [`Theme`].
+    ///
+    /// notif used to carry its own palette — a catppuccin one, picked
+    /// before it was part of a suite. Two products from one project is
+    /// the failure `hyprforge-look` exists to prevent, and it had
+    /// already happened here: a notification drew a blue border while
+    /// the window underneath it wore whatever
+    /// `general:col:active_border` was set to.
+    ///
+    /// Nothing about the *layout* comes from the theme. Margins, gaps
+    /// and the stack limit are notif's own question and no other app
+    /// has an opinion on them.
+    pub fn from_theme(theme: &Theme) -> Self {
         Self {
             anchor: AnchorCorner::TopRight,
             margin_x: 12,
@@ -283,11 +350,14 @@ impl Default for Config {
             max_width: 400,
             max_height: 200,
             max_visible: 5,
-            low: UrgencyStyle::default(),
-            normal: default_normal_style(),
-            critical: default_critical_style(),
-            font_family: "sans-serif".to_owned(),
-            font_size: 13.0,
+            low: UrgencyStyle::low_from_theme(theme),
+            normal: UrgencyStyle::normal_from_theme(theme),
+            critical: UrgencyStyle::critical_from_theme(theme),
+            font_family: theme.font.clone(),
+            // `font_scale` is the desktop's accessibility setting, not a
+            // control of ours. A notification that ignored it would be
+            // the one piece of text on the screen that stayed small.
+            font_size: theme.font_size * theme.font_scale,
             icon_size: 48,
             output: None,
             history_limit: 100,
@@ -296,6 +366,18 @@ impl Default for Config {
             center_width: 400,
             center: CenterConfig::default(),
         }
+    }
+}
+
+impl Default for Config {
+    /// The theme's own defaults — *not* whatever is on this machine.
+    ///
+    /// Deliberately pure. `notif_config::load` is what reaches the
+    /// user's published theme; if this read a file, every test in the
+    /// workspace (the golden renders especially) would render
+    /// differently depending on whose machine ran it.
+    fn default() -> Self {
+        Self::from_theme(&Theme::default())
     }
 }
 

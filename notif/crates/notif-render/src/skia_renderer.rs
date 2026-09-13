@@ -381,9 +381,17 @@ struct CenterCacheKey {
 // ── Text shaping helpers (free functions to allow split borrows) ──────────────
 
 /// Map a config font family string to a cosmic-text [`Family`].
+///
+/// `"Sans"` is here because it is what `hyprforge_look::Theme` defaults
+/// to, and it is a fontconfig *alias* rather than a family any system
+/// actually installs. fontdb does no alias resolution, so without this
+/// arm it would arrive as `Family::Name("Sans")`, match nothing, and
+/// fall back — rendering correctly by accident on most machines and in
+/// the wrong font on any machine whose fallback differs. CSS spells the
+/// same alias `sans-serif`; both mean the generic.
 fn family_of(font_family: &str) -> Family<'_> {
     match font_family {
-        "sans-serif" => Family::SansSerif,
+        "sans-serif" | "Sans" => Family::SansSerif,
         "serif" => Family::Serif,
         "monospace" => Family::Monospace,
         name => Family::Name(name),

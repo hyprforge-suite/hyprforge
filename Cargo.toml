@@ -27,6 +27,19 @@ members = [
     "crates/hyprforge-power",
     "crates/hyprforge-settings",
 ]
+# `notif/` is a nested cargo workspace, deliberately kept out of this one.
+#
+# Not tidiness — a feature-unification bug that would only appear at
+# runtime. Cargo unifies features across a workspace, and zbus picks its
+# async runtime with `#[cfg(feature = "tokio")]`: the suite needs
+# `zbus/tokio`, notif builds on `zbus/async-io`. Unified, tokio wins
+# for both, and notif's D-Bus code takes a tokio path with no tokio
+# runtime under it — an immediate panic, with nothing at compile time
+# to see it coming. Excluded, each workspace resolves its own graph.
+#
+# The seam costs one thing: `cargo test --workspace` here does not run
+# notif's tests. check.sh's "notif workspace" step is what covers that.
+exclude = ["notif"]
 
 [workspace.package]
 version = "0.1.0"

@@ -4,7 +4,11 @@
 # Three tiers, and they answer different questions:
 #
 #   1. clippy + unit tests  — does the code do what *this project* thinks?
-#                             No system needed; safe anywhere.
+#                             No system needed; safe anywhere. Run twice:
+#                             once for this workspace, once for the nested
+#                             `notif/` one, which cargo will not reach from
+#                             here (it is `exclude`d, and for a reason —
+#                             see Cargo.toml).
 #   2. live tests           — does Hyprland agree? Every claim the option
 #                             catalogues make is checked against the running
 #                             compositor. Needs Hyprland.
@@ -80,6 +84,35 @@ if grep -q "test result: FAILED" <<<"$output"; then
     grep -E '^(test .* FAILED|failures:)' <<<"$output" | head -20
 else
     ok "$(count_tests <<<"$output") tests passed"
+fi
+
+# Tier 1, and a separate invocation because `notif/` is a separate cargo
+# workspace — excluded from this one on purpose (see `exclude` in
+# Cargo.toml: the suite needs zbus/tokio and notif needs zbus/async-io,
+# and unified they would panic at runtime).
+#
+# The cost of that seam is that `cargo test --workspace` above does not
+# reach a single notif test, and would not say so. A component whose
+# tests silently never run is exactly the failure the HYPRFORGE-SKIP
+# convention exists for, one level up: here there is no marker to grep,
+# because libtest is never asked in the first place. So it gets its own
+# step, and its own count, and the count is what proves it ran.
+#
+# It needs no compositor, no daemon and no bus, so it belongs here with
+# the rest of tier 1 rather than behind the --quick gate.
+step "The notif workspace (its own cargo workspace)"
+if warnings=$(cd notif && cargo clippy --all-targets 2>&1 | grep -cE '^(error|warning)'); then :; fi
+if [[ "$warnings" -eq 0 ]]; then
+    ok "notif clippy: no warnings"
+else
+    bad "notif clippy: $warnings warning(s) — run: (cd notif && cargo clippy --all-targets)"
+fi
+output=$(cd notif && cargo test 2>&1)
+if grep -q "test result: FAILED" <<<"$output"; then
+    bad "$(grep -c 'test result: FAILED' <<<"$output") notif test binary(ies) failed"
+    grep -E '^(test .* FAILED|failures:)' <<<"$output" | head -20
+else
+    ok "$(count_tests <<<"$output") notif tests passed"
 fi
 
 if $QUICK; then
