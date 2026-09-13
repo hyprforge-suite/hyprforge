@@ -1,0 +1,89 @@
+# hyprforge-greet
+
+A [greetd](https://sr.ht/~kennylevinsen/greetd/) greeter for Hyprland —
+the same screen as `hyprforge-lock`, in front of a login instead of an
+unlock. It draws nothing of its own: `hyprforge_authui::screen` is the
+screen and `hyprforge_authui::conversation` is the exchange; this crate
+supplies a window and talks to greetd. That's the whole reason the
+greeter and the lock screen look like one system — not because they
+were styled to match, but because there is one of them.
+
+Part of [Hyprforge](https://github.com/apost/hyprforge), a suite of
+native Hyprland desktop apps — but it runs alone.
+
+## The property this repository must not lose
+
+**The compositor that runs this greeter has no keybinds. Not one.**
+
+`config/hyprland-greeter.lua` is deliberately empty of `bind`s and of any
+`exec_cmd` beyond launching the greeter itself. Whoever is standing at
+the keyboard in front of a login screen is unauthenticated, and every
+keybind that compositor has belongs to them. A greeter compositor with
+the usual `SUPER + Q -> terminal` hands that person a root-adjacent shell
+as the `greeter` user without logging in — the classic way greeters get
+broken into — and nothing inside `hyprforge-greet` itself can prevent
+it, because the bind fires in the compositor, before this program ever
+sees the keypress.
+
+This has been verified live: with the login screen on screen, added
+binds were still reachable. **If you are extending this greeter, do not
+add a "harmless" bind to that config file** — a volume key today is a
+terminal bind added "just for testing" next to it tomorrow. If you need
+a keyboard shortcut on the login screen, it has to be handled inside
+`hyprforge-greet`'s own event loop, where it can be scoped to what the
+greeter itself is doing, never dispatched to the compositor.
+
+## Building
+
+```
+cargo build --release -p hyprforge-greet
+```
+
+It depends on two other Hyprforge crates, `hyprforge-authui` and
+`hyprforge-look`, taken as git dependencies on the main repository
+rather than from crates.io, which is where they will move once they are
+published. Nothing else here is Hyprforge-specific.
+
+## It cannot read your home directory
+
+A greeter runs as its own user, and `$HOME` for a normal account is
+`drwx------` — so the theme and monitor layout it draws with are not
+read from your config. They come from a copy exported to
+`/var/lib/hyprforge/greet`, written by the Settings app (`theme.toml` +
+wallpaper) and by `hyprforge-displayd` (`monitors.lua`) when your own
+session applies them. `INSTALL.md` in this crate covers setting up that
+export directory, the sysusers/tmpfiles units that create it with the
+right group permissions, and the full install sequence — read it in
+full before installing this as your login manager; it is written so
+every step up to the last is reversible from a spare virtual terminal.
+
+## Testing it safely — read this before running the binary
+
+Do **not** try this against a real greetd installation while iterating.
+`testing/fake_greetd.py` is a stand-in: a real `AF_UNIX` socket, the real
+greetd wire framing (native-endian `u32` length + JSON), but scripted
+replies — so a framing bug shows up against the fake, not at an actual
+login prompt.
+
+```
+cd /some/short/scratch/dir
+../../.../testing/fake_greetd.py sock hunter2 &
+GREETD_SOCK=sock ./target/debug/hyprforge-greet --user you --type-in hunter2
+```
+
+Run the fake server from a directory with a short path: `AF_UNIX` caps
+socket paths at roughly 108 bytes, which a deep scratch directory can
+exceed, so bind a short relative name rather than an absolute one. Real
+greetd uses `/run/greetd.sock`; that constraint belongs to the test
+harness alone.
+
+`--type-in` (debug builds only, compiled out of release) is what proves
+the whole handshake end to end, including the final `start_session` —
+there is no other way to exercise that without a keyboard. It never
+appears in a release build, because a flag that submits a password from
+argv puts it in `ps` output, which a login screen must not offer no
+matter how convenient it is while developing.
+
+## Licence
+
+MIT. See `LICENSE`.

@@ -138,19 +138,22 @@ futures-util = "0.3"
 # displayd's `OutputBackend` uses to make its daemon testable.
 async-trait = "0.1"
 
-# `hyprforge-clipboard`'s own Cargo.toml names `hyprforge-paths` and
-# `hyprforge-secret` as git dependencies on this same repository's GitHub
-# URL, not path dependencies — that manifest has to build unchanged both
-# in here and as the root of its own standalone repository after
-# `git subtree split` pulls it out, and a standalone repo has no
-# workspace to path into. Left alone, that would make every build here
-# reach across the network for two crates that are sitting right there
-# in `crates/`. This patch is what stops that: it rewrites those two git
-# dependencies back to the local directories for anyone building inside
-# this workspace, so resolution never leaves disk and `cargo build`
-# keeps working with no network access at all. Do not delete this
-# thinking it is unused just because nothing in `[workspace.dependencies]`
-# names a git URL — it exists entirely for `hyprforge-clipboard`'s sake.
+# `hyprforge-clipboard`, `hyprforge-lock` and `hyprforge-greet` each name
+# their Hyprforge dependencies as git dependencies on this same
+# repository's GitHub URL, not path dependencies — those manifests have
+# to build unchanged both in here and as the root of their own
+# standalone repository after `git subtree split` pulls them out, and a
+# standalone repo has no workspace to path into. Left alone, that would
+# make every build here reach across the network for crates that are
+# sitting right there in `crates/`. This patch is what stops that: it
+# rewrites those git dependencies back to the local directories for
+# anyone building inside this workspace, so resolution never leaves disk
+# and `cargo build` keeps working with no network access at all. Do not
+# delete an entry thinking it is unused just because nothing in
+# `[workspace.dependencies]` names a git URL — each exists entirely for
+# a split crate's sake.
 [patch."https://github.com/apost/hyprforge"]
 hyprforge-paths = { path = "crates/hyprforge-paths" }
 hyprforge-secret = { path = "crates/hyprforge-secret" }
+hyprforge-authui = { path = "crates/hyprforge-authui" }
+hyprforge-look = { path = "crates/hyprforge-look" }
