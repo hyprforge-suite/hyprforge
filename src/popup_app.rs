@@ -69,11 +69,16 @@ pub struct EmojiApp<C: Chooser> {
     model: Model,
     chooser: C,
     shortcut: Shortcut,
+    /// The popup's own width, needed because the grid is centred in it:
+    /// `GridLayout::left_margin` decides where the first column starts,
+    /// and the hit-test has to measure from the same place the drawing
+    /// does. See that function's doc for why this is not an `align_x`.
+    width: f64,
 }
 
 impl<C: Chooser> EmojiApp<C> {
-    pub fn new(model: Model, chooser: C, shortcut: Shortcut) -> EmojiApp<C> {
-        EmojiApp { model, chooser, shortcut }
+    pub fn new(model: Model, chooser: C, shortcut: Shortcut, width: f64) -> EmojiApp<C> {
+        EmojiApp { model, chooser, shortcut, width }
     }
 }
 
@@ -107,7 +112,7 @@ impl<C: Chooser + 'static> hyprforge_popup::PopupApp for EmojiApp<C> {
         let grid = GridLayout::for_font_size(theme.font_size);
         let range = self.model.visible_range();
         let columns = self.model.columns();
-        match grid.cell_at(position, columns, range.len()) {
+        match grid.cell_at(position, self.width, columns, range.len()) {
             Some(local) => {
                 dispatch_action(&mut self.model, &self.chooser, Action::Select(range.start + local));
                 true
@@ -143,7 +148,7 @@ impl<C: Chooser + 'static> hyprforge_popup::PopupApp for EmojiApp<C> {
 
         let range = self.model.visible_range();
         let columns = self.model.columns();
-        let local = grid.cell_at(position, columns, range.len())?;
+        let local = grid.cell_at(position, self.width, columns, range.len())?;
         dispatch_action(&mut self.model, &self.chooser, Action::Select(range.start + local));
         dispatch_action(&mut self.model, &self.chooser, Action::Choose)
     }
@@ -176,7 +181,7 @@ impl<C: Chooser + 'static> hyprforge_popup::PopupApp for EmojiApp<C> {
         let grid = GridLayout::for_font_size(theme.font_size);
         let range = self.model.visible_range();
         let columns = self.model.columns();
-        let Some(local) = grid.cell_at(position, columns, range.len()) else { return false };
+        let Some(local) = grid.cell_at(position, self.width, columns, range.len()) else { return false };
         self.model.select(range.start + local);
         self.model.open_tone_overlay()
     }

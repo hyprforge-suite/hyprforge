@@ -58,7 +58,7 @@ const GLYPH_FILL: f64 = 0.78;
 pub fn view<'a, Message, Renderer>(
     model: &'a Model,
     theme: &'a Theme,
-    _popup_width: f64,
+    popup_width: f64,
 ) -> Element<'a, Message, iced_widget::Theme, Renderer>
 where
     Message: 'a,
@@ -123,7 +123,17 @@ where
         if !current_row.is_empty() {
             rows_vec.push(row(current_row).spacing(grid.spacing as f32).into());
         }
-        column(rows_vec).spacing(grid.spacing as f32).into()
+        // Shifted right by whatever `left_margin` says, so the grid sits
+        // centred rather than pushed against the left edge with the
+        // leftover width pooled on the right. The outer container
+        // already applies `PADDING`, so only the extra slack is added
+        // here — and it is the *same* number `GridLayout::cell_at`
+        // measures from, which is what keeps a click landing on the cell
+        // under the pointer.
+        let indent = (grid.left_margin(popup_width, columns) - GridLayout::PADDING).max(0.0);
+        container(column(rows_vec).spacing(grid.spacing as f32))
+            .padding(Padding { top: 0.0, right: 0.0, bottom: 0.0, left: indent as f32 })
+            .into()
     };
 
     let content: Element<'a, Message, iced_widget::Theme, Renderer> = container(
