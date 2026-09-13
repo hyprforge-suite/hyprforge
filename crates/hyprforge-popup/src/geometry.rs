@@ -39,6 +39,19 @@ pub struct Monitor {
     pub name: String,
     pub origin: Point,
     pub size: Size,
+    /// How many logical pixels a bar (or anything else with an
+    /// exclusive layer-shell zone) has reserved at this monitor's own
+    /// top edge — `hyprctl monitors -j`'s `reserved[1]`. **Not**
+    /// `reserved[0]`: the field order is `[left, top, right, bottom]`,
+    /// confirmed by reading Hyprland's own `src/ipc/s1/Commands.cpp`
+    /// against this machine's live `reserved: [0, 50, 0, 0]` for a
+    /// waybar reserving 50 logical pixels at the top — `reserved[0]`
+    /// (`left`) is `0` here and would place a popup at the monitor's own
+    /// top edge, under the bar, if this picked the wrong index.
+    /// Already logical, unlike `width`/`height`: Hyprland reports
+    /// exclusive-zone extents in the same logical space as `x`/`y`, with
+    /// no `/scale` division needed.
+    pub reserved_top: f64,
 }
 
 impl Monitor {
@@ -204,11 +217,13 @@ mod tests {
             name: "eDP-2".into(),
             origin: Point { x: 0.0, y: 0.0 },
             size: Size { width: 1600.0, height: 1000.0 },
+            reserved_top: 0.0,
         };
         let right = Monitor {
             name: "DP-3".into(),
             origin: Point { x: 1600.0, y: 0.0 },
             size: Size { width: 1920.0, height: 1080.0 },
+            reserved_top: 0.0,
         };
         let monitors = vec![left.clone(), right.clone()];
 
@@ -224,6 +239,7 @@ mod tests {
             name: "eDP-2".into(),
             origin: Point { x: 0.0, y: 0.0 },
             size: Size { width: 1600.0, height: 1000.0 },
+            reserved_top: 0.0,
         }];
         assert_eq!(monitor_at(&monitors, Point { x: 5000.0, y: 5000.0 }), None);
     }

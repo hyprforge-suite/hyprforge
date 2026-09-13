@@ -22,6 +22,15 @@ iced_runtime.workspace = true
 iced_widget.workspace = true
 smithay-client-toolkit = "0.20"
 wayland-client = "0.31"
+# `wp_viewporter` and `wp_fractional_scale_v1` — SCTK 0.20 has no support
+# for either, so this crate binds and dispatches them by hand (see
+# `popup.rs`'s own module doc for why). Not a new dependency to the
+# workspace: already in `Cargo.lock`, pulled in by `hyprforge-clipboard`'s
+# manifest for `ext-data-control-v1` — this is the first *other* crate to
+# use it, for a different pair of protocols out of the same crate.
+# "staging" is what gates `fractional-scale-v1`, which has not graduated
+# to stable; `viewporter` itself is already stable and needs no feature.
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 calloop = "0.14"
 calloop-wayland-source = "0.4"
 tiny-skia = "0.11"

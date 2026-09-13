@@ -70,10 +70,12 @@ fn sane_font_size(theme: &hyprforge_look::Theme) -> f32 {
     }
 }
 
-/// Reads `--x <n> --y <n>` off argv — the anchor point
-/// `hyprforge_tray::launch::show` was given, already including
-/// `Prefs::menu_y_offset`. Nothing else on the command line is
-/// recognised; the menu itself only ever arrives on stdin.
+/// Reads `--x <n> --y <n>` off argv — the icon's own global logical
+/// position, exactly as the host handed it to `ContextMenu`, with no
+/// `Prefs::menu_y_offset` applied to it any more (see `place_below_bar`'s
+/// own doc for why, and for why only `x` actually ends up used for
+/// placement). Nothing else on the command line is recognised; the menu
+/// itself only ever arrives on stdin.
 fn parse_anchor(mut args: impl Iterator<Item = String>) -> Option<Point> {
     let mut x = None;
     let mut y = None;
@@ -139,14 +141,27 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     }
     let popup_size = Size { width: POPUP_WIDTH, height: popup_height };
-    // `place` anchors the popup at this point and prefers opening
-    // down-and-right of it, flipping only when there isn't room — see
-    // `hyprforge_popup::placement::place`'s own doc. The caller
-    // (`hyprforge_tray::launch::show`, via `sni.rs::context_menu`) has
-    // already added `Prefs::menu_y_offset` to the click's own Y, so
-    // "down-and-right of this point" already reads as "below the bar,
-    // aligned to the icon that was clicked".
-    let Some(placement) = hyprforge_popup::place(&monitors, Some(anchor), popup_size) else {
+    // Never collapsed with "menu_y_offset is unreadable" turning into
+    // silence — an unreadable `tray.toml` is already warned about by
+    // `hyprforge-trayd`'s own poll loop every time it changes; this is
+    // just the one other place that needs a number out of it, and the
+    // default is the least surprising thing to use rather than refusing
+    // to open the menu at all.
+    let menu_y_offset = match hyprforge_tray::prefs::load() {
+        Ok(prefs) => prefs.menu_y_offset,
+        Err(e) => {
+            eprintln!("couldn't read tray.toml for the menu's Y offset ({e}) — using the default");
+            hyprforge_tray::prefs::Prefs::default().menu_y_offset
+        }
+    };
+    // Anchored to the bar's own reserved area on Y (so the popup lands
+    // in the same place every time, regardless of where on the icon the
+    // click landed) and to the click on X (so it still visibly belongs
+    // to the icon that opened it) — see
+    // `hyprforge_popup::placement::place_below_bar`'s own doc for why
+    // this replaced `place` here, and for how the click coordinates
+    // `anchor` carries were confirmed to already be logical.
+    let Some(placement) = hyprforge_popup::place_below_bar(&monitors, anchor, menu_y_offset, popup_size) else {
         eprintln!("couldn't work out where to place the menu");
         return std::process::ExitCode::FAILURE;
     };

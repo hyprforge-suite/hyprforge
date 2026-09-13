@@ -120,6 +120,21 @@ impl MenuLayout {
         }
         None
     }
+
+    /// The pixel width left over for a row's own label once the popup's
+    /// outer padding, the row's own horizontal padding, and the
+    /// checkmark column have taken their own space — the same reasoning
+    /// `hyprforge-clipmenu::geometry::RowLayout::preview_width` gives for
+    /// deriving a truncation width from the exact numbers the row is
+    /// drawn with, rather than a flat character count that has no idea
+    /// how wide this popup actually is.
+    ///
+    /// Floors at `0.0` for a degenerate popup, the same "never go
+    /// negative" discipline `preview_width` and `view::corner_radius`
+    /// both already keep.
+    pub fn label_width(&self, popup_width: f64) -> f64 {
+        (popup_width - self.padding * 2.0 - Self::ROW_HPADDING * 2.0 - Self::CHECK_WIDTH).max(0.0)
+    }
 }
 
 #[cfg(test)]
@@ -205,6 +220,23 @@ mod tests {
         let large = MenuLayout::for_font_size(40.0);
         assert!(large.row_height > small.row_height);
         assert_eq!(large.separator_height, small.separator_height);
+    }
+
+    #[test]
+    fn label_width_leaves_room_for_the_checkmark_column_and_both_paddings() {
+        let layout = MenuLayout::for_font_size(15.0);
+        let popup_width = 220.0;
+        let width = layout.label_width(popup_width);
+        let expected = popup_width - layout.padding * 2.0 - MenuLayout::ROW_HPADDING * 2.0 - MenuLayout::CHECK_WIDTH;
+        assert_eq!(width, expected);
+        assert!(width > 0.0 && width < popup_width);
+    }
+
+    #[test]
+    fn label_width_floors_at_zero_for_a_popup_narrower_than_its_own_padding() {
+        let layout = MenuLayout::for_font_size(15.0);
+        assert_eq!(layout.label_width(0.0), 0.0);
+        assert_eq!(layout.label_width(-100.0), 0.0);
     }
 
     #[test]

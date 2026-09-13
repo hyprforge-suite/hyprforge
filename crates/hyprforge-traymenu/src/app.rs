@@ -33,14 +33,14 @@ pub struct TrayMenuApp {
 }
 
 impl TrayMenuApp {
-    /// `popup_width` (fixed, `main.rs`'s own `POPUP_WIDTH`) is not needed
-    /// here: every row draws `Length::Fill` rather than positioning
-    /// anything from the popup's right edge the way
-    /// `hyprforge-clipmenu`'s pin toggle and time label do, so there is
-    /// nothing in this crate that reads it back — unlike
     /// [`hyprforge_popup::PopupApp::pointer_click`]'s own `width`
-    /// parameter, which this still takes and ignores for exactly that
-    /// reason.
+    /// parameter is still taken and ignored: every row still draws
+    /// `Length::Fill` rather than positioning anything from the popup's
+    /// right edge the way `hyprforge-clipmenu`'s pin toggle and time
+    /// label do, so a click never needs it. [`PopupApp::view`]'s `width`
+    /// is different — `view.rs::row_element` now uses it (via
+    /// `MenuLayout::label_width`) to truncate a long label before it
+    /// draws, so that one *is* read.
     pub fn new(rows: Vec<MenuItem>, layout: MenuLayout) -> Self {
         TrayMenuApp { rows, layout, hovered: None }
     }
@@ -53,9 +53,9 @@ impl PopupApp for TrayMenuApp {
         &'a mut self,
         theme: &'a Theme,
         _now: u64,
-        _width: f64,
+        width: f64,
     ) -> Element<'a, Infallible, iced_widget::Theme, iced_tiny_skia::Renderer> {
-        let rows = view::rows(&self.rows, &self.layout, self.hovered, theme);
+        let rows = view::rows(&self.rows, &self.layout, self.hovered, theme, width);
         let popup_border = theme.accent;
         let popup_radius = view::corner_radius(theme);
         let root_background = theme.surfaces.root;

@@ -19,6 +19,46 @@
 //! [`Popup`] itself never names a `Model`, a `RowLayout`, or any other
 //! consumer type; it only calls the trait.
 //!
+//! # Rendering at the output's actual scale
+//!
+//! A layer-shell surface is sized in logical pixels, but the buffer
+//! behind it is real pixels, and on a fractionally-scaled output (this
+//! suite's own reference machine reports `scale: 1.6`) "real pixels"
+//! is not an integer multiple of the logical size. This crate asks the
+//! compositor for the *exact* scale over `wp_fractional_scale_v1` and
+//! renders the buffer at that many physical pixels per logical pixel,
+//! then hands the compositor `wp_viewporter`'s `wp_viewport` to say
+//! "this buffer is my logical size" — the same pair of protocols GTK
+//! and Qt use for the same reason. `smithay-client-toolkit` 0.20 has no
+//! support for either, so both are bound and dispatched by hand here
+//! (see the `Dispatch<WpFractionalScaleV1, _>` impl below); neither is a
+//! new dependency to the workspace — `wayland-protocols` is already in
+//! `Cargo.lock`, brought in by `hyprforge-clipboard`.
+//!
+//! A compositor missing one or both protocols falls back to the
+//! integer scale `CompositorHandler::scale_factor_changed` reports
+//! (legacy per-output `wl_surface` scale, always a whole number) and
+//! `wl_surface.set_buffer_scale`. That path renders at most as crisply
+//! as the compositor's own rounding allows — for a `1.6`-scale output
+//! with no fractional-scale support that is `2`, a supersample rather
+//! than a lie — and is not something this workspace's own compositor
+//! ever exercises, so it is unverified beyond compiling and matching
+//! the protocol's own contract; see this module's own tests and the
+//! doc on [`Popup::draw`] for what *is* verified.
+//!
+//! Everything downstream of the buffer stays in logical pixels
+//! regardless of which path is taken: [`Placement`]'s margins, the
+//! layer surface's own `set_size`, and — critically — the pointer
+//! coordinates [`PointerEvent::position`] reports. Wayland delivers
+//! pointer input in surface-local logical coordinates by contract,
+//! never in buffer pixels, so nothing downstream of an event
+//! (`RowLayout::row_at`, `GridLayout::cell_at`, `MenuLayout::row_at`,
+//! the scrollbar's own thumb) has to know the scale changed at all —
+//! changing what the buffer holds cannot change what coordinate space
+//! the compositor hands back for a click. That invariant is why this
+//! change touches only [`Popup::draw`] and surface setup, not one line
+//! of any consumer's hit-testing.
+//!
 //! [`PopupApp`] bundles three things a consumer might have expected to
 //! find split apart — "how many items fit", "which item is at this
 //! point", and "draw yourself" — behind *one* trait implemented once per
@@ -70,7 +110,12 @@ use smithay_client_toolkit::{
 use calloop_wayland_source::WaylandSource;
 use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface};
-use wayland_client::{Connection, QueueHandle};
+use wayland_client::{Connection, Dispatch, QueueHandle};
+use wayland_protocols::wp::fractional_scale::v1::client::{
+    wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+    wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+};
+use wayland_protocols::wp::viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter};
 
 use hyprforge_look::Theme;
 use iced_runtime::core::{mouse, renderer, Element, Rectangle, Size};
@@ -268,6 +313,32 @@ pub struct Popup<A: PopupApp> {
     layer_shell: LayerShell,
     pool: SlotPool,
 
+    /// Bound once, if the compositor advertises it — `None` on a
+    /// compositor with no fractional-scale support, which is the
+    /// signal [`Self::create_surface`] uses to skip creating a
+    /// per-surface [`WpFractionalScaleV1`] at all.
+    fractional_scale_manager: Option<WpFractionalScaleManagerV1>,
+    /// Bound once, if the compositor advertises it — `None` falls back
+    /// to plain `wl_surface.set_buffer_scale` with no viewport at all,
+    /// which only ever needs an integer scale.
+    viewporter: Option<WpViewporter>,
+    /// This popup's own fractional-scale object, created alongside its
+    /// surface — see [`Self::create_surface`]. Its `preferred_scale`
+    /// event is what keeps [`Self::scale`] exact rather than rounded.
+    fractional_scale: Option<WpFractionalScaleV1>,
+    /// This popup's own viewport, created alongside its surface. Its
+    /// `set_destination` is what lets the buffer be a *different* pixel
+    /// size than the surface's own logical size — the mechanism that
+    /// makes a non-integer scale renderable at all.
+    viewport: Option<WpViewport>,
+    /// Physical pixels per logical pixel, kept exact when
+    /// `fractional_scale` supplies it and otherwise a whole number from
+    /// [`CompositorHandler::scale_factor_changed`]. Starts at `1.0`
+    /// (unscaled) for the handful of frames before either can answer —
+    /// see this module's own doc for why that gap is not worth blocking
+    /// the first frame over.
+    scale: f64,
+
     layer: Option<LayerSurface>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     /// A themed pointer rather than a bare `WlPointer`: this is what
@@ -345,6 +416,13 @@ impl<A: PopupApp + 'static> Popup<A> {
         let shm = Shm::bind(&globals, &qh)?;
         let pool = SlotPool::new(4096, &shm).map_err(|e| PopupError::Buffer(e.to_string()))?;
         let layer_shell = LayerShell::bind(&globals, &qh)?;
+        // Both optional: a compositor that lacks either just gets the
+        // integer-scale fallback this module's own doc describes.
+        // `bind`'s only failure mode here is the global being absent, so
+        // nothing beyond `.ok()` is worth reporting.
+        let viewporter = globals.bind::<WpViewporter, Self, ()>(&qh, 1..=1, ()).ok();
+        let fractional_scale_manager =
+            globals.bind::<WpFractionalScaleManagerV1, Self, ()>(&qh, 1..=1, ()).ok();
 
         let mut popup = Popup {
             registry: RegistryState::new(&globals),
@@ -354,6 +432,11 @@ impl<A: PopupApp + 'static> Popup<A> {
             shm,
             pool,
             layer_shell,
+            fractional_scale_manager,
+            viewporter,
+            fractional_scale: None,
+            viewport: None,
+            scale: 1.0,
             layer: None,
             keyboard: None,
             pointer: None,
@@ -459,6 +542,14 @@ impl<A: PopupApp + 'static> Popup<A> {
         };
 
         let surface = self.compositor.create_surface(qh);
+        // Both created from `&surface` before it is moved into the layer
+        // surface below — a `wp_viewport`/`wp_fractional_scale_v1`
+        // attaches to the `wl_surface` itself, not to whatever role gets
+        // assigned to it afterward, so the order here does not matter to
+        // the protocol; it matters to the borrow checker.
+        self.viewport = self.viewporter.as_ref().map(|v| v.get_viewport(&surface, qh, ()));
+        self.fractional_scale =
+            self.fractional_scale_manager.as_ref().map(|m| m.get_fractional_scale(&surface, qh, ()));
         let layer =
             self.layer_shell.create_layer_surface(qh, surface, Layer::Overlay, Some("hyprforge-popup"), Some(&output));
         layer.set_anchor(Anchor::TOP | Anchor::LEFT);
@@ -472,6 +563,14 @@ impl<A: PopupApp + 'static> Popup<A> {
         self.layer = Some(layer);
     }
 
+    /// Renders this frame and hands the compositor a buffer sized for
+    /// the output's actual scale — see this module's own doc for the
+    /// mechanism. `width`/`height` (from [`Self::size`], set by
+    /// [`LayerShellHandler::configure`]) stay logical throughout: they
+    /// are what the widget tree is built and hit-tested against, and
+    /// what [`Self::viewport`] tells the compositor this surface's own
+    /// size is. Only the buffer itself — its pixel dimensions, and the
+    /// `Viewport` handed to `iced_tiny_skia` — is scaled up from them.
     fn draw(&mut self) {
         self.dirty = false;
         let (width, height) = self.size;
@@ -480,9 +579,22 @@ impl<A: PopupApp + 'static> Popup<A> {
         }
         let Some(layer) = &self.layer else { return };
 
-        let Ok((buffer, canvas)) =
-            self.pool.create_buffer(width as i32, height as i32, width as i32 * 4, wl_shm::Format::Argb8888)
-        else {
+        // A scale of `0` or less cannot come from either source that
+        // sets `self.scale` (a `preferred_scale` of `0` is nonsensical
+        // and `scale_factor_changed`'s `factor` is always positive per
+        // its own protocol), but guarding it here rather than trusting
+        // that costs nothing and turns "divide by zero" into "render at
+        // 1x" if it ever were violated.
+        let scale = if self.scale > 0.0 { self.scale } else { 1.0 };
+        let buffer_width = ((width as f64) * scale).round().max(1.0) as u32;
+        let buffer_height = ((height as f64) * scale).round().max(1.0) as u32;
+
+        let Ok((buffer, canvas)) = self.pool.create_buffer(
+            buffer_width as i32,
+            buffer_height as i32,
+            buffer_width as i32 * 4,
+            wl_shm::Format::Argb8888,
+        ) else {
             // Out of memory for a buffer. Leave the previous frame up —
             // same reasoning as the lock screen: the alternative is a
             // blank surface, which is worse than a stale one.
@@ -492,11 +604,12 @@ impl<A: PopupApp + 'static> Popup<A> {
         // See `hyprforge-lock::surface`'s identical comment and its
         // pinned test: `iced_tiny_skia` writes B, G, R, A on purpose,
         // which is exactly what `Argb8888` wants byte-for-byte. No
-        // swizzle here either.
-        let Some(mut pixels) = tiny_skia::PixmapMut::from_bytes(canvas, width, height) else {
+        // swizzle here either — scaling the buffer up changes nothing
+        // about the channel order it is filled in.
+        let Some(mut pixels) = tiny_skia::PixmapMut::from_bytes(canvas, buffer_width, buffer_height) else {
             return;
         };
-        let Some(mut mask) = tiny_skia::Mask::new(width, height) else {
+        let Some(mut mask) = tiny_skia::Mask::new(buffer_width, buffer_height) else {
             return;
         };
 
@@ -512,6 +625,11 @@ impl<A: PopupApp + 'static> Popup<A> {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
+        // Logical: what the widget tree is built and clipped against.
+        // `Viewport::with_physical_size` below derives its own logical
+        // size back out of `(buffer_width, buffer_height, scale)` — see
+        // this function's own doc for why those two must describe the
+        // same rectangle.
         let size = Size::new(width as f32, height as f32);
         let mut ui = UserInterface::<Infallible, iced_widget::Theme, iced_tiny_skia::Renderer>::build(
             self.app.view(&self.theme, now, width as f64),
@@ -536,7 +654,14 @@ impl<A: PopupApp + 'static> Popup<A> {
         self.renderer.draw(
             &mut pixels,
             &mut mask,
-            &Viewport::with_physical_size(Size::new(width, height), 1.0),
+            // Physical buffer size plus the exact scale that produced
+            // it — `iced_tiny_skia` multiplies every logical coordinate
+            // in the widget tree by this scale before it reaches a
+            // pixel, which is the entire mechanism: the tree above was
+            // built and clipped in logical units (`size`), and this is
+            // what turns that into `buffer_width`x`buffer_height`
+            // physical ones.
+            &Viewport::with_physical_size(Size::new(buffer_width, buffer_height), scale as f32),
             &[Rectangle::with_size(size)],
             // Transparent, not a background colour: the app's own root
             // container paints that itself, rounded to the theme's
@@ -549,7 +674,29 @@ impl<A: PopupApp + 'static> Popup<A> {
         );
 
         let wl_surface = layer.wl_surface();
-        wl_surface.damage_buffer(0, 0, width as i32, height as i32);
+        if let Some(viewport) = &self.viewport {
+            // Tells the compositor this surface is still `width`x`height`
+            // logical pixels regardless of the buffer's own (larger,
+            // scaled-up) pixel size — the half of fractional scaling
+            // that is not "render more pixels", and the reason a
+            // consumer's hit-testing never has to hear about any of
+            // this: the surface's logical size, and therefore every
+            // `PointerEvent::position` the compositor reports against
+            // it, is unchanged by what scale this renders at.
+            viewport.set_destination(width as i32, height as i32);
+        } else if self.fractional_scale.is_none() {
+            // No viewport at all: the only way to tell a compositor a
+            // buffer is scaled is the legacy integer `wl_surface`
+            // scale, which is exactly what produced `self.scale` on
+            // this path (see `scale_factor_changed`) — so it is already
+            // the right number to hand back.
+            wl_surface.set_buffer_scale(scale.round().max(1.0) as i32);
+        }
+        // Buffer-local coordinates (the spec's own distinction from
+        // plain `damage`, which is surface-local): this buffer is
+        // `buffer_width`x`buffer_height` pixels regardless of what
+        // logical size the viewport above declares it maps to.
+        wl_surface.damage_buffer(0, 0, buffer_width as i32, buffer_height as i32);
         if buffer.attach_to(wl_surface).is_ok() {
             wl_surface.commit();
         }
@@ -900,7 +1047,27 @@ impl<A: PopupApp + 'static> PointerHandler for Popup<A> {
 }
 
 impl<A: PopupApp + 'static> CompositorHandler for Popup<A> {
-    fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: i32) {}
+    /// The legacy per-output integer scale — SCTK surfaces this whenever
+    /// the compositor reports it (via `wl_surface.preferred_buffer_scale`
+    /// on newer compositors, or computed from the outputs this surface
+    /// has entered on older ones), regardless of whether
+    /// `wp_fractional_scale_v1` also exists.
+    ///
+    /// Only acted on when `fractional_scale` is absent: that protocol's
+    /// own `preferred_scale` is the more precise number for the same
+    /// question (exact rather than rounded to a whole number), and a
+    /// compositor sending both is not a reason to let whichever fires
+    /// last win — this is the fallback for a compositor that sends only
+    /// this one.
+    fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, factor: i32) {
+        if self.fractional_scale.is_none() {
+            let factor = (factor.max(1)) as f64;
+            if self.scale != factor {
+                self.scale = factor;
+                self.mark_dirty();
+            }
+        }
+    }
 
     fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: wl_output::Transform) {}
 
@@ -938,6 +1105,40 @@ impl<A: PopupApp + 'static> ProvidesRegistryState for Popup<A> {
 
     registry_handlers![OutputState, SeatState];
 }
+
+/// The one event this protocol has — see this module's own doc for why
+/// this crate hand-writes it rather than pulling in a helper crate:
+/// `smithay-client-toolkit` 0.20 has no delegate for it.
+impl<A: PopupApp + 'static> Dispatch<WpFractionalScaleV1, ()> for Popup<A> {
+    fn event(
+        state: &mut Self,
+        _proxy: &WpFractionalScaleV1,
+        event: wp_fractional_scale_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        // "the numerator of a fraction with a denominator of 120" — the
+        // protocol's own wording, and the reason this is exact where
+        // `scale_factor_changed`'s integer `factor` is not: `1.6` arrives
+        // as `192`, not rounded to `2`.
+        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
+            let scale = scale as f64 / 120.0;
+            if scale > 0.0 && state.scale != scale {
+                state.scale = scale;
+                state.mark_dirty();
+            }
+        }
+    }
+}
+
+// Neither of these has any event of its own — `delegate_noop!`'s `ignore`
+// form is exactly the "there is nothing here to react to" this crate's
+// own `SeatHandler`/`OutputHandler` no-op bodies already express for
+// events SCTK itself delivers.
+wayland_client::delegate_noop!(@<A: PopupApp + 'static> Popup<A>: ignore WpViewporter);
+wayland_client::delegate_noop!(@<A: PopupApp + 'static> Popup<A>: ignore WpViewport);
+wayland_client::delegate_noop!(@<A: PopupApp + 'static> Popup<A>: ignore WpFractionalScaleManagerV1);
 
 delegate_compositor!(@<A: PopupApp + 'static> Popup<A>);
 delegate_output!(@<A: PopupApp + 'static> Popup<A>);
