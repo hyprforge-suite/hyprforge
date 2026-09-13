@@ -81,6 +81,8 @@ ${B}Components${N}
   --displayd       The display daemon, as a systemd user service.
   --tray           The tray icons (Wi-Fi, Bluetooth, keep awake, night
                    light), as a systemd user service.
+  --clipboard      Clipboard history: the daemon as a systemd user
+                   service, plus the popup its keybind launches.
   --settings       The Settings app and its launcher entry.
   --all            Every component above.
 
@@ -118,8 +120,9 @@ while [[ $# -gt 0 ]]; do
         --lock)          COMPONENTS+=(lock) ;;
         --displayd)      COMPONENTS+=(displayd) ;;
         --tray)          COMPONENTS+=(tray) ;;
+        --clipboard)     COMPONENTS+=(clipboard) ;;
         --settings)      COMPONENTS+=(settings) ;;
-        --all)           COMPONENTS+=(greeter lock displayd tray settings) ;;
+        --all)           COMPONENTS+=(greeter lock displayd tray clipboard settings) ;;
         --force-cleanup) FORCE_CLEANUP=true ;;
         --dry-run)       DRY_RUN=true ;;
         --yes|-y)        ASSUME_YES=true ;;
@@ -131,7 +134,7 @@ done
 
 [[ -n $ACTION ]] || die "pick one of --install, --uninstall or --status"
 if [[ $ACTION != status && ${#COMPONENTS[@]} -eq 0 ]]; then
-    die "--$ACTION needs at least one component (--greeter, --lock, --displayd, --tray, --settings, --all)"
+    die "--$ACTION needs at least one component (--greeter, --lock, --displayd, --tray, --clipboard, --settings, --all)"
 fi
 
 has_component() {
@@ -422,6 +425,66 @@ install_tray() {
 EOF
 }
 
+install_clipboard() {
+    build hyprforge-clipboard hyprforge-clipd
+    build hyprforge-clipmenu
+    step "Clipboard"
+    install_file target/release/hyprforge-clipd "$PREFIX/hyprforge-clipd" 755
+    install_file target/release/hyprforge-clipmenu "$PREFIX/hyprforge-clipmenu" 755
+
+    local unit_dir="$HOME/.config/systemd/user"
+    local unit=crates/hyprforge-clipboard/packaging/hyprforge-clipd.service
+    local generated
+    generated=$(mktemp)
+    trap 'rm -f "$generated"' RETURN
+    sed "s|^ExecStart=.*|ExecStart=$PREFIX/hyprforge-clipd|" "$unit" > "$generated"
+
+    if $DRY_RUN; then
+        skip "would install $unit_dir/hyprforge-clipd.service (ExecStart=$PREFIX/hyprforge-clipd)"
+    elif [[ -e $unit_dir/hyprforge-clipd.service ]] && cmp -s "$generated" "$unit_dir/hyprforge-clipd.service"; then
+        skip "$unit_dir/hyprforge-clipd.service is current"
+    else
+        install -Dm644 "$generated" "$unit_dir/hyprforge-clipd.service"
+        systemctl --user daemon-reload
+        ok "installed $unit_dir/hyprforge-clipd.service"
+    fi
+
+    step "Clipboard: next steps"
+    cat <<EOF
+    systemctl --user enable --now hyprforge-clipd
+
+    Then bind the popup. Hyprforge owns keybinds.lua, so the binding
+    belongs in Settings -> Shortcuts rather than in a hand-edited file:
+        ${B}hyprforge-clipmenu${N}
+
+    The daemon records; the popup reads. Nothing is recorded from an
+    application that marks its clipboard offer as a secret, which is how
+    password managers ask not to be remembered.
+EOF
+}
+
+uninstall_clipboard() {
+    step "Clipboard: removing"
+    if ! $DRY_RUN && systemctl --user is-enabled hyprforge-clipd >/dev/null 2>&1; then
+        systemctl --user disable --now hyprforge-clipd || true
+        ok "disabled the user service"
+    fi
+    if [[ -e "$HOME/.config/systemd/user/hyprforge-clipd.service" ]]; then
+        $DRY_RUN && skip "would remove the user unit" || {
+            rm -f "$HOME/.config/systemd/user/hyprforge-clipd.service"
+            systemctl --user daemon-reload
+            ok "removed the user unit"
+        }
+    fi
+    remove_file "$PREFIX/hyprforge-clipd"
+    remove_file "$PREFIX/hyprforge-clipmenu"
+    # The history itself is the user's, and is left alone. Say so, because
+    # silently keeping data is as surprising as silently deleting it.
+    if [[ -e "$HOME/.config/hyprforge/clipboard" ]]; then
+        skip "kept your clipboard history in ~/.config/hyprforge/clipboard"
+    fi
+}
+
 uninstall_tray() {
     step "Tray icons: removing"
     if ! $DRY_RUN && systemctl --user is-enabled hyprforge-trayd >/dev/null 2>&1; then
@@ -552,12 +615,85 @@ status_path() {
     fi
 }
 
+# `is-enabled` prints "not-found" *and* exits non-zero for a unit that
+# does not exist, so a bare `|| echo` prints twice. Take the output when
+# there is any, and only substitute when there is none.
+status_service() {
+    local scope=$1 unit=$2 note=$3 state
+    if [[ $scope == --user ]]; then
+        state=$(systemctl --user is-enabled "$unit" 2>/dev/null) || true
+    else
+        state=$(systemctl is-enabled "$unit" 2>/dev/null) || true
+    fi
+    # systemd says "not-found" for a unit that was never installed. That
+    # is its wording for an internal state, not an answer to the question
+    # a person asked, so it is translated here.
+    [[ -n $state && $state != not-found ]] || state="not installed"
+
+    local mark=$D colour=$D
+    case $state in
+        enabled)  mark=$G colour=$N ;;
+        disabled) mark=$Y colour=$N ;;
+    esac
+    printf '  %s●%s %-24s %s%s%s\n' "$mark" "$N" "$unit" "$colour" "$state" "$N"
+
+    case $state in
+        # Worth a line only when it is on: "greetd is not enabled" needs
+        # no explanation, "this machine logs in through it" does.
+        enabled)
+            [[ -n $note ]] && printf '    %s%s%s\n' "$D" "$note" "$N"
+            ;;
+        # Installed but off is the state most likely to be an accident —
+        # the unit is there, so somebody meant to use it.
+        disabled)
+            if [[ $scope == --user ]]; then
+                printf '    %ssystemctl --user enable --now %s%s\n' "$D" "$unit" "$N"
+            else
+                printf '    %ssudo systemctl enable --now %s%s\n' "$D" "$unit" "$N"
+            fi
+            ;;
+    esac
+}
+
+# What is installed, in one line, so `--status` answers the question it
+# was run to answer without being read end to end.
+status_summary() {
+    local installed=() missing=() stale=()
+    local name
+    for name in hyprforge-greet hyprforge-lock hyprforge-displayd \
+                hyprforge-trayd hyprforge-clipd hyprforge-clipmenu hyprforge-settings; do
+        if [[ ! -e $PREFIX/$name ]]; then
+            missing+=("$name")
+        elif [[ -e target/release/$name ]] && ! cmp -s "target/release/$name" "$PREFIX/$name"; then
+            stale+=("$name")
+        else
+            installed+=("$name")
+        fi
+    done
+
+    step "Summary"
+    printf '  %s%d installed%s' "$G" "${#installed[@]}" "$N"
+    (( ${#stale[@]} )) && printf ', %s%d stale%s' "$Y" "${#stale[@]}" "$N"
+    (( ${#missing[@]} )) && printf ', %s%d not installed%s' "$D" "${#missing[@]}" "$N"
+    printf '\n'
+    if (( ${#stale[@]} )); then
+        printf '    %sstale means you rebuilt and did not reinstall: %s%s\n' \
+            "$Y" "${stale[*]}" "$N"
+        printf '    %s./hyprforge --install --all%s\n' "$D" "$N"
+    fi
+    if (( ${#missing[@]} )); then
+        printf '    %snot installed: %s%s\n' "$D" "${missing[*]}" "$N"
+    fi
+}
+
 show_status() {
     step "Binaries in $PREFIX"
     status_binary hyprforge-greet
     status_binary hyprforge-lock
     status_binary hyprforge-displayd
     status_binary hyprforge-trayd
+    status_binary hyprforge-clipd
+    status_binary hyprforge-clipmenu
     status_binary hyprforge-settings
 
     step "Supporting files"
@@ -569,19 +705,10 @@ show_status() {
     status_path "launcher entry"     "$DESKTOP_DIR/hyprforge-settings.desktop"
 
     step "Services"
-    local state
-    # `is-enabled` prints "not-found" *and* exits non-zero for a unit
-    # that does not exist, so a bare `|| echo` prints twice. Take the
-    # output when there is any, and only substitute when there is none.
-    state=$(systemctl is-enabled greetd 2>/dev/null) || true
-    [[ -n $state ]] || state="not installed"
-    printf '  %sgreetd%s                   %s\n' "$B" "$N" "$state"
-    if [[ $state == enabled ]]; then
-        printf '    %sthis machine logs in through the greeter%s\n' "$D" "$N"
-    fi
-    state=$(systemctl --user is-enabled hyprforge-displayd 2>/dev/null) || true
-    [[ -n $state ]] || state="not installed"
-    printf '  %shyprforge-displayd%s       %s\n' "$B" "$N" "$state"
+    status_service --system greetd "this machine logs in through the greeter"
+    status_service --user hyprforge-displayd "monitor layouts are applied and remembered"
+    status_service --user hyprforge-trayd "the tray icons are running"
+    status_service --user hyprforge-clipd "clipboard history is being recorded"
 
     step "Session"
     if command -v loginctl >/dev/null && [[ -n ${XDG_SESSION_ID:-} ]]; then
@@ -591,6 +718,8 @@ show_status() {
     else
         skip "no session to report on"
     fi
+
+    status_summary
 }
 
 # ------------------------------------------------------------------ main
@@ -613,6 +742,7 @@ case $ACTION in
         has_component lock     && install_lock
         has_component displayd && install_displayd
         has_component tray && install_tray
+        has_component clipboard && install_clipboard
         has_component settings && install_settings
         step "Done"
         $DRY_RUN && warn "this was a dry run; nothing changed"
@@ -620,6 +750,7 @@ case $ACTION in
     uninstall)
         has_component greeter  && uninstall_greeter
         has_component lock     && uninstall_lock
+        has_component clipboard && uninstall_clipboard
         has_component tray && uninstall_tray
         has_component displayd && uninstall_displayd
         has_component settings && uninstall_settings

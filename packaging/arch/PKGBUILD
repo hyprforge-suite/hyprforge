@@ -135,6 +135,8 @@ package_hyprforge-clipboard() {
   cd "$startdir/../.."
   _bin hyprforge-clipd
   _bin hyprforge-clipmenu
+  install -Dm644 crates/hyprforge-clipboard/packaging/hyprforge-clipd.service \
+    "$pkgdir/usr/lib/systemd/user/hyprforge-clipd.service"
 }
 
 package_hyprforge() {
