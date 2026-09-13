@@ -87,10 +87,23 @@ jobs:
         # stops being necessary. If CI starts failing with that same
         # authentication error for no apparent reason, the likeliest
         # cause is the token having expired.
+        #
+        # An `extraheader` rather than a credential in the URL. The URL
+        # form was tried first and GitHub answered "Invalid username or
+        # token": credentials reached it and were refused, because
+        # `x-access-token:<pat>` is the shape of a GitHub App
+        # installation token, not of a personal access token. This is
+        # the same basic-auth header `actions/checkout` sets for itself,
+        # which is the one form known to work for both.
+        #
+        # The token arrives as an environment variable rather than being
+        # interpolated into the script, so it is never part of the
+        # command line a failing step would echo.
+        env:
+          SUITE_READ: ${{ secrets.SUITE_READ }}
         run: |
-          git config --global \
-            url."https://x-access-token:${{ secrets.SUITE_READ }}@github.com/".insteadOf \
-            "https://github.com/"
+          git config --global http."https://github.com/".extraheader \
+            "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$SUITE_READ" | base64 -w0)"
 
       - name: Install the pinned Rust toolchain (rust-toolchain.toml)
         # ubuntu-latest ships rustup already; `rustup show` is what
