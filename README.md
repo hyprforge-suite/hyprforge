@@ -62,6 +62,17 @@ systemctl --user enable --now hyprforge-clipd
 that stops recording is exactly as bad as a crash, and shows up as no
 failed unit at all.
 
+## What CI checks, and what it can't
+
+`.github/workflows/ci.yml` builds the crate, runs clippy with warnings
+denied, and runs `cargo test`. That is tier 1 only: the live Wayland
+tests in `tests/live_clipboard.rs` and the pipe test in
+`src/wayland/pipe.rs` are `#[ignore]`d because they need a real
+compositor speaking wlr-data-control / ext-data-control, and no runner
+has one. A green run means the code is internally consistent, not that
+it agrees with a real compositor — run those `--ignored` tests by hand
+against one before trusting a change to the Wayland glue.
+
 ## Licence
 
 MIT. See `LICENSE`.
