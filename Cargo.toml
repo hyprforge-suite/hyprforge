@@ -1,8 +1,14 @@
 [package]
 name = "hyprforge-tray"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A StatusNotifierItem/dbusmenu tray library, plus the hyprforge-trayd daemon that puts Wi-Fi, Bluetooth, keep-awake and night-light icons in whatever bar is running."
+repository = "https://github.com/apost/hyprforge"
+documentation = "https://docs.rs/hyprforge-tray"
+readme = "README.md"
+keywords = ["hyprland", "tray", "statusnotifier", "dbusmenu", "linux"]
+categories = ["os::linux-apis", "gui"]
 
 # The library is the StatusNotifierItem protocol and nothing else — it
 # knows nothing about Wi-Fi or Bluetooth, the same way hyprforge-ui knows
@@ -15,32 +21,48 @@ path = "src/bin/trayd.rs"
 # A tray icon is a D-Bus object, not a toolkit widget. That is the whole
 # reason this is possible at all: the suite forbids GTK and Qt, and every
 # other way to put an icon in a bar drags one of them in.
-zbus.workspace = true
+#
+# Run zbus on tokio rather than its default async-io executor. Without
+# this zbus polls connections on its own thread, so D-Bus method handlers
+# execute outside any tokio runtime and anything they spawn panics with
+# "there is no reactor running".
+zbus = { version = "5.18", default-features = false, features = ["tokio"] }
 # "process" for spawning `hyprforge-settings --screen <name>` on a click,
-# never waited on — see the comment on `handle_clicks` in trayd.rs.
-tokio = { workspace = true, features = ["process"] }
-tracing.workspace = true
-tracing-subscriber.workspace = true
-thiserror.workspace = true
+# never waited on — see the comment on `handle_clicks` in trayd.rs. The
+# rest (rt-multi-thread, macros, sync, time) is the workspace base this
+# crate builds on everywhere else.
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "process"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+toml = "1.1"
+anyhow = "1"
+
+# Named as git dependencies, not versions, because the owner has not
+# published to crates.io yet: this manifest has to work unchanged both
+# inside the Hyprforge workspace and as the root of its own standalone
+# repository once `git subtree split` pulls it out. Inside the
+# workspace, the root Cargo.toml's `[patch]` section redirects these
+# straight back to the local `crates/` directories, so nothing here
+# touches the network; standalone, cargo fetches them from git.
+#
 # Where the preference file lives, and the atomic write that replaces it.
-hyprforge-paths.workspace = true
-serde.workspace = true
-toml.workspace = true
-anyhow.workspace = true
+hyprforge-paths = { git = "https://github.com/apost/hyprforge" }
 
 # Used only by the binary. Cargo has no way to say that for a crate with
 # both, and splitting into two crates to express it would be more
 # ceremony than the fact is worth — hyprforge-displayd carries the same
 # arrangement.
-hyprforge-network.workspace = true
-hyprforge-bluetooth.workspace = true
+hyprforge-network = { git = "https://github.com/apost/hyprforge" }
+hyprforge-bluetooth = { git = "https://github.com/apost/hyprforge" }
 # Keep awake (systemd-logind) and night light (hyprsunset via hyprctl) —
 # same "binary-only" arrangement as network/bluetooth above.
-hyprforge-power.workspace = true
-hyprforge-ecosystem.workspace = true
+hyprforge-power = { git = "https://github.com/apost/hyprforge" }
+hyprforge-ecosystem = { git = "https://github.com/apost/hyprforge" }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }
 tempfile = "3"
-hyprforge-network = { workspace = true, features = ["mock"] }
-hyprforge-bluetooth = { workspace = true, features = ["mock"] }
+hyprforge-network = { git = "https://github.com/apost/hyprforge", features = ["mock"] }
+hyprforge-bluetooth = { git = "https://github.com/apost/hyprforge", features = ["mock"] }
