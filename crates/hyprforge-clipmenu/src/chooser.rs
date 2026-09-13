@@ -9,7 +9,6 @@
 //! crate through [`mock::MockChooser`]. `hyprforge-clipboard`'s write
 //! side landed before this was finished, so [`Wired`] below is the one
 //! place it plugs in — see its doc comment.
-use hyprforge_clipboard::ipc::ClientError;
 use hyprforge_clipboard::{ClipboardWriter, Entry, Shortcut};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -142,11 +141,32 @@ impl Chooser for Wired {
             // as it lives, which is the one-paste behaviour above.
             // `NoRuntimeDir` counts as nobody-to-ask for the same
             // reason `Unreachable` does: there is no socket to try.
-            Err(ClientError::Unreachable(_) | ClientError::NoRuntimeDir) => {}
-            // The daemon answered and said no. That is a real answer and
-            // the caller should hear it rather than have it papered over
-            // by a local fallback that behaves differently.
-            Err(e) => return Err(e.to_string()),
+            //
+            // And so does *any* other answer, which is the part that had
+            // to be learned rather than reasoned out. A daemon left
+            // running from before this command existed replies
+            // "unknown variant `set-clipboard`" — it is listening, it
+            // answers immediately, and it cannot do the one thing being
+            // asked. Treating that as "the daemon said no" and refusing
+            // meant a chosen entry reached the clipboard not at all,
+            // which is strictly worse than the local fallback this arm
+            // was already written to provide. An installed binary is not
+            // a restarted daemon, and version skew across a socket is
+            // normal rather than exceptional.
+            //
+            // This is the opposite call from pinning, deliberately.
+            // There, a refusal means the history could not be saved and
+            // the user has to hear it. Here, falling back costs only
+            // persistence — the selection lives as long as this popup
+            // instead of as long as the daemon — and the user still gets
+            // their paste. Silence about that is wrong too, so the
+            // reason is printed; it just is not a reason to do nothing.
+            Err(reason) => {
+                eprintln!(
+                    "hyprforge-clipd didn't take the clipboard ({reason}); \
+                     holding it here instead, so it will last only until this popup exits"
+                );
+            }
         }
 
         let guard = self
