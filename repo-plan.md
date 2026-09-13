@@ -23,13 +23,30 @@ crates. That is a real thing to want, and it is what this plan is for.
 
 ## The mechanism
 
-`git subtree`, in both directions:
+`git subtree`, in both directions — and `./split.sh` wraps the outbound
+half, because the incantation has one non-obvious flag in it:
 
 ```
 git subtree add   --prefix=notif <repo> <branch>   # bring one in, history intact
 git subtree push  --prefix=notif origin main       # send changes back out
-git subtree split --prefix=notif -b extracted      # take it out again, history intact
+./split.sh hyprforge-clipboard                     # take one out, history intact
 ```
+
+**`--rejoin` is not optional, and this was got wrong first.** A plain
+`git subtree split --prefix=... -b extracted` produces a perfectly good
+branch and records *nothing* in this repository. That works in one
+direction and fails silently in the other: a change made in the
+component repository cannot come back, because `git subtree pull` looks
+for a common ancestor, finds none, and stops with `fatal: refusing to
+merge unrelated histories`. The split commits have the same trees as
+ours and different hashes, and nothing connects the two.
+
+`--rejoin` leaves a merge commit here — `Split 'crates/<crate>/' into
+commit '<sha>'` — recording which commit the split produced, so a later
+pull has an ancestor to find. That merge commit is the entire cost, and
+it is what makes this bidirectional rather than a one-way export. Both
+directions were tested against a local clone before this was written
+down; the failure above is what actually happened.
 
 So a component can live in its own repository *and* in the master
 repository, with changes flowing between them. Development happens in the
@@ -46,8 +63,23 @@ A standalone `hyprforge-clipboard` repository still needs
 somewhere, or the repository is not standalone at all — it is a directory
 that only builds inside the monorepo.
 
-So **the foundation has to be published before any app can leave.** The
-good news is how small it is:
+So **the foundation has to be reachable from outside before any app can
+leave** — which is not the same as published. A git dependency on this
+repository is reachable, builds anywhere, and needs no crates.io account
+at all; `hyprforge-clipboard` uses exactly that today and builds
+standalone. Publishing is still the destination, because a git
+dependency cannot itself be published and pins consumers to a repository
+rather than a version. But it is no longer the gate, and the order below
+is now about *convenience* rather than *possibility*.
+
+The one-manifest problem is solved and worth knowing: the clipboard's
+`Cargo.toml` names the git URL, and the root `Cargo.toml` has a
+`[patch."https://github.com/apost/hyprforge"]` section redirecting those
+two dependencies back to `crates/`. One file, both contexts, no
+divergence for `git subtree push` to conflict on forever, and no network
+access when building here.
+
+The good news is still how small the foundation is:
 
 | crate | public items | lines |
 |---|---|---|
@@ -115,9 +147,30 @@ Once published, a component repository can depend on
 against published crates with nothing vendored and nothing pathed.
 
 ```
-git subtree split --prefix=crates/hyprforge-clipboard -b clipboard-split
-# push that branch to a new repository
+./split.sh hyprforge-clipboard
+git push <new-repo-url> clipboard-split:main
 ```
+
+Done, minus the push. The branch builds standalone: `cargo build`,
+`cargo clippy --all-targets` silent, 53 tests green and
+`hyprforge-clipd` linking, verified in a clone with the git dependencies
+pointed at a local stand-in for GitHub.
+
+Three things only doing it revealed. The `LICENSE` symlink dangled —
+fine for a crate that is only ever a tarball, since `cargo package`
+dereferences it, and broken for one that becomes a repository, since git
+carries a symlink as a symlink and `../../LICENSE` is above the root.
+There was no `.gitignore`, because the root one does not come along. And
+there was no README, which matters most of the three: identity is the
+entire point of splitting, and a repository with no front page has none.
+`split.sh` now refuses to split a crate missing any of them.
+
+**Only the crate leaves, not the product.** The `hyprforge-clipboard`
+*package* installs two binaries, and the second is `hyprforge-clipmenu`,
+which needs `hyprforge-appearance` for `look::resolve()`. So the popup
+stays here for now and the split repository is the clipboard engine plus
+its daemon. Worth being honest that this is a smaller thing than
+"the clipboard has its own repository" sounds.
 
 Then decide whether the master repo keeps it as a subtree or a
 crates.io dependency. The subtree keeps atomic commits; the dependency
@@ -159,4 +212,4 @@ because it depends on fifteen crates and will be the hardest.
 - [x] Publishing metadata on the foundation crates
 - [x] Independent versions for the publishable crates
 - [ ] First publish
-- [ ] First split
+- [x] First split prepared and verified standalone; not yet pushed
