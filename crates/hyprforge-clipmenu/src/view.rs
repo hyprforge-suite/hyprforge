@@ -42,6 +42,12 @@ where
     let layout = RowLayout::for_font_size(theme.font_size);
     let header_text_height = layout.header_height - RowLayout::HEADER_GAP;
 
+    // Copied out by value for the same reason the row's colours are: the
+    // style closure outlives the borrow of `theme` this call holds.
+    let root_background = theme.surfaces.root;
+    let popup_border = theme.surfaces.card_border;
+    let popup_radius = corner_radius(theme);
+
     let header: Element<'a, Message, iced_widget::Theme, Renderer> = if model.filter_text().is_empty()
     {
         text("Type to filter")
@@ -100,10 +106,35 @@ where
     .height(Length::Fill)
     .padding(Padding::from(RowLayout::PADDING as f32))
     .style(move |_: &iced_widget::Theme| container::Style {
-        background: Some(to_iced(theme.surfaces.root).into()),
+        background: Some(to_iced(root_background).into()),
+        // The popup is a floating surface over the desktop, so it draws
+        // its own edge the way a window would — Hyprland rounds and
+        // borders real windows, and a layer-shell surface gets neither
+        // for free. Without this it was a hard-edged rectangle whatever
+        // the theme said.
+        border: iced_runtime::core::Border {
+            radius: popup_radius.into(),
+            width: 1.0,
+            color: to_iced(popup_border),
+        },
         ..Default::default()
     })
     .into()
+}
+
+/// The theme's corner radius, bounded so it cannot describe a shape the
+/// renderer refuses to build.
+///
+/// `hyprforge-authui` clamps the same field for the lock screen and says
+/// why: the geometry ends in `tiny_skia` path builders that return
+/// `None` for degenerate shapes, and iced unwraps those. This popup
+/// reads the theme from the same file, so it inherits the same hazard
+/// and needs the same bound — `main.rs`'s `sane_font_size` covers only
+/// the font, because until rounding was honoured the font was the one
+/// field the fixed layout depended on.
+fn corner_radius(theme: &Theme) -> f32 {
+    const MAX_ROUNDING: u32 = 64;
+    theme.rounding.min(MAX_ROUNDING) as f32
 }
 
 fn message<'a, Message, Renderer>(
@@ -177,8 +208,16 @@ where
     // by `'a`, same as the `Element` it ends up in), and `theme` itself
     // only ever borrows for the length of one `view` call.
     let row_background = to_iced(if selected { theme.surfaces.row } else { theme.surfaces.card });
+    // The accent, not `card_border`: this border only exists when the row
+    // is selected, so it is the selection indicator rather than an edge.
+    // The popup's own outline is the one that takes `card_border`.
     let border_color = to_iced(theme.accent);
     let border_width = if selected { 1.5 } else { 0.0 };
+    // Never more than half the row's height. A radius larger than that
+    // is a degenerate shape, and degenerate shapes are the reason
+    // `hyprforge-authui` bounds this field at all: `tiny_skia`'s path
+    // builders return `None` for them and iced unwraps that.
+    let row_radius = corner_radius(theme).min(layout.row_height as f32 / 2.0);
 
     container(content)
         .width(Length::Fill)
@@ -201,11 +240,41 @@ where
         .style(move |_: &iced_widget::Theme| container::Style {
             background: Some(row_background.into()),
             border: iced_runtime::core::Border {
-                radius: 4.0.into(),
+                radius: row_radius.into(),
                 width: border_width,
                 color: border_color,
             },
             ..Default::default()
         })
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bug this fixes: the radius was the literal `4.0` and the
+    /// popup had no border at all, so a theme saying `rounding = 12`
+    /// drew square rows inside a hard-edged rectangle. Reading the field
+    /// is the whole point, so assert it is actually read.
+    #[test]
+    fn the_corner_radius_comes_from_the_theme_rather_than_a_constant() {
+        let theme = Theme { rounding: 12, ..Theme::default() };
+        assert_eq!(corner_radius(&theme), 12.0);
+        let square = Theme { rounding: 0, ..Theme::default() };
+        assert_eq!(corner_radius(&square), 0.0, "a theme may legitimately ask for square corners");
+    }
+
+    /// `hyprforge-authui` bounds the same field for the lock screen, and
+    /// the reason is not cosmetic: a degenerate radius reaches a
+    /// `tiny_skia` path builder that answers `None`, and iced unwraps
+    /// it. A popup that panics on a hostile theme file is a popup that
+    /// panics on a typo.
+    #[test]
+    fn an_absurd_rounding_is_bounded_rather_than_handed_to_the_renderer() {
+        let theme = Theme { rounding: u32::MAX, ..Theme::default() };
+        let radius = corner_radius(&theme);
+        assert!(radius.is_finite());
+        assert!(radius <= 64.0, "got {radius}");
+    }
 }

@@ -105,8 +105,14 @@ fn monitors() -> Vec<Monitor> {
 /// `iced_tiny_skia`/`cosmic-text` assert a non-zero line height, so a
 /// font size of `0.0` panics on the first frame — the same hazard
 /// `hyprforge_authui::screen::renderable` guards the lock screen's theme
-/// against, applied here to the one theme field this popup's fixed
-/// layout actually depends on.
+/// against.
+///
+/// Deliberately not a call to `renderable` itself: that lives in
+/// `hyprforge-authui`, and a clipboard popup has no business depending
+/// on the authentication screen to clamp a number. `view`'s
+/// `corner_radius` bounds the rounding the same way and says so. If a
+/// third host ever needs these bounds, they belong beside `Theme` in
+/// `hyprforge-look` rather than being copied a third time.
 fn sane_font_size(theme: &hyprforge_look::Theme) -> f32 {
     let size = theme.font_size;
     if size.is_finite() { size.clamp(6.0, 48.0) } else { 15.0 }

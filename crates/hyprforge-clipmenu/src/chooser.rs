@@ -9,7 +9,8 @@
 //! crate through [`mock::MockChooser`]. `hyprforge-clipboard`'s write
 //! side landed before this was finished, so [`Wired`] below is the one
 //! place it plugs in — see its doc comment.
-use hyprforge_clipboard::Entry;
+use hyprforge_clipboard::{ClipboardWriter, Entry};
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// How long [`Wired::choose`] waits, after synthesizing the paste, for
@@ -31,11 +32,42 @@ const SELECTION_WAIT: Duration = Duration::from_secs(2);
 
 /// Whatever it takes to act on a chosen entry: put it on the clipboard
 /// and paste it into whatever had focus before the popup opened.
+///
+/// Two calls, not one, and the order between them is load-bearing. This
+/// popup takes `KeyboardInteractivity::Exclusive` while it is on screen
+/// (see `surface.rs`'s comment on that) — precisely so its own
+/// keystrokes reach it rather than whatever had focus before it opened.
+/// That is exactly backwards for a *synthesized* paste: if
+/// [`Self::finish_paste`] ran right after [`Self::set_clipboard`], the
+/// synthetic Ctrl+V would be delivered back to this still-focused
+/// popup, not to the window the user meant to paste into. So the two
+/// are separate calls, with the popup's own surface torn down (and the
+/// compositor given a chance to actually hand focus back) strictly
+/// between them — see `surface::ClipMenu::run`, the only place that
+/// happens, for why a flush alone is not enough to prove it. Recombining
+/// these into one call reproduces the bug this split exists to close;
+/// `surface.rs`'s
+/// `choosing_sets_the_clipboard_without_synthesizing_the_paste_yet` test
+/// is pinned against exactly that.
 pub trait Chooser {
-    /// `Err` is a message fit to print to stderr — this crate has no UI
-    /// left to show it in by the time the choice has been made, since
-    /// choosing is what ends the popup.
-    fn choose(&self, entry: &Entry) -> Result<(), String>;
+    /// Puts `entry` on the clipboard. `Err` is a message fit to print to
+    /// stderr — this crate has no UI left to show it in by the time the
+    /// choice has been made, since choosing is what ends the popup.
+    ///
+    /// Must not synthesize a paste itself — see this trait's own doc.
+    fn set_clipboard(&self, entry: &Entry) -> Result<(), String>;
+
+    /// Synthesizes the paste and waits (bounded) for the clipboard
+    /// source `set_clipboard` created to be read or superseded.
+    ///
+    /// Call this only after `set_clipboard` returned `Ok`, and only
+    /// after the caller has released whatever kept the popup's own
+    /// surface holding keyboard focus — see this trait's own doc for
+    /// why the order matters. There is nothing left to report as an
+    /// error by this point (a compositor with no virtual-keyboard
+    /// protocol is reported to stderr, not returned, matching the
+    /// original `choose`'s behaviour), so this cannot fail.
+    fn finish_paste(&self);
 }
 
 /// **The seam**: the real implementation, over `hyprforge-clipboard`'s
@@ -59,12 +91,20 @@ pub trait Chooser {
 pub struct Wired {
     writer: hyprforge_clipboard::WaylandWriter,
     paster: hyprforge_clipboard::WaylandPaster,
+    /// The guard `set_clipboard` got back from `set_selection`, held
+    /// here so `finish_paste` — a separate call, on the same `&self` —
+    /// can wait on it. `Mutex` rather than `RefCell` only because
+    /// `Chooser` requires `Send`-friendly interior mutability by
+    /// convention with the rest of this crate's writer types; there is
+    /// never any real contention, since a popup only ever chooses once
+    /// (see `main.rs`'s module doc).
+    guard: Mutex<Option<<hyprforge_clipboard::WaylandWriter as ClipboardWriter>::Guard>>,
 }
 
 impl Wired {
     /// Connects the paste-synthesis side now, once, rather than per
-    /// choice — a popup only ever calls `choose` once before exiting
-    /// (see `main.rs`'s module doc), but constructing early means a
+    /// choice — a popup only ever chooses once before exiting (see
+    /// `main.rs`'s module doc), but constructing early means a
     /// compositor with no virtual-keyboard protocol is discovered
     /// before the user has picked anything, in case that is ever worth
     /// surfacing differently.
@@ -72,20 +112,23 @@ impl Wired {
         Ok(Wired {
             writer: hyprforge_clipboard::WaylandWriter::new(),
             paster: hyprforge_clipboard::WaylandPaster::connect()?,
+            guard: Mutex::new(None),
         })
     }
 }
 
 impl Chooser for Wired {
-    fn choose(&self, entry: &Entry) -> Result<(), String> {
-        use hyprforge_clipboard::{
-            ClipboardWriter, PasteOutcome, PasteSynthesizer, SelectionGuard, SelectionOutcome,
-        };
-
+    fn set_clipboard(&self, entry: &Entry) -> Result<(), String> {
         let guard = self
             .writer
             .set_selection(entry.content.clone())
             .map_err(|e| e.to_string())?;
+        *self.guard.lock().unwrap_or_else(|e| e.into_inner()) = Some(guard);
+        Ok(())
+    }
+
+    fn finish_paste(&self) {
+        use hyprforge_clipboard::{PasteOutcome, PasteSynthesizer, SelectionGuard, SelectionOutcome};
 
         if self.paster.paste() == PasteOutcome::Unavailable {
             eprintln!(
@@ -94,11 +137,23 @@ impl Chooser for Wired {
             );
         }
 
+        // Taken, not just locked and read: this source is only ever
+        // waited on once (`Chooser`'s contract has `finish_paste` called
+        // exactly once per `set_clipboard`), and taking it makes that
+        // true structurally rather than by convention.
+        let Some(guard) = self.guard.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+            // `finish_paste` called without a preceding successful
+            // `set_clipboard` — not a call `Chooser`'s contract allows,
+            // but there is nothing to wait on if it happens anyway
+            // rather than a reason to panic.
+            return;
+        };
+
         // The source `set_selection` created is served by a background
         // thread that dies the instant this process exits — see
         // `hyprforge_clipboard::write`'s module doc. This process must
-        // not return from `choose` (and therefore must not let `main`
-        // exit) until that source has either been read from
+        // not return from `finish_paste` (and therefore must not let
+        // `main` exit) until that source has either been read from
         // (`Served`) or superseded by someone else
         // (`Superseded`), or until a bound on that wait elapses —
         // never wait unboundedly on another compositor client per
@@ -127,7 +182,6 @@ impl Chooser for Wired {
                 );
             }
         }
-        Ok(())
     }
 }
 
@@ -142,22 +196,40 @@ pub mod mock {
     pub struct MockChooser {
         pub calls: RefCell<Vec<EntryId>>,
         pub result: Result<(), String>,
+        /// Every `Chooser` method this mock was actually asked to run,
+        /// in call order — `"set_clipboard"` / `"finish_paste"`. This is
+        /// the property the two-call split exists for: a test can assert
+        /// that `finish_paste` never appears before `set_clipboard`, and
+        /// (see `surface.rs`'s
+        /// `choosing_sets_the_clipboard_without_synthesizing_the_paste_yet`)
+        /// that nothing calls `finish_paste` at all until the caller
+        /// explicitly does so.
+        pub log: RefCell<Vec<&'static str>>,
     }
 
     impl MockChooser {
         pub fn succeeding() -> Self {
-            MockChooser { calls: RefCell::new(Vec::new()), result: Ok(()) }
+            MockChooser { calls: RefCell::new(Vec::new()), result: Ok(()), log: RefCell::new(Vec::new()) }
         }
 
         pub fn failing(message: &str) -> Self {
-            MockChooser { calls: RefCell::new(Vec::new()), result: Err(message.to_string()) }
+            MockChooser {
+                calls: RefCell::new(Vec::new()),
+                result: Err(message.to_string()),
+                log: RefCell::new(Vec::new()),
+            }
         }
     }
 
     impl Chooser for MockChooser {
-        fn choose(&self, entry: &Entry) -> Result<(), String> {
+        fn set_clipboard(&self, entry: &Entry) -> Result<(), String> {
             self.calls.borrow_mut().push(entry.id.clone());
+            self.log.borrow_mut().push("set_clipboard");
             self.result.clone()
+        }
+
+        fn finish_paste(&self) {
+            self.log.borrow_mut().push("finish_paste");
         }
     }
 }
@@ -180,14 +252,32 @@ mod tests {
     fn choosing_an_entry_hands_exactly_that_entry_to_the_chooser() {
         let chooser = MockChooser::succeeding();
         let picked = entry("pick me");
-        chooser.choose(&picked).unwrap();
+        chooser.set_clipboard(&picked).unwrap();
         assert_eq!(chooser.calls.borrow().as_slice(), std::slice::from_ref(&picked.id));
     }
 
     #[test]
     fn a_failing_chooser_reports_its_message() {
         let chooser = MockChooser::failing("no seat");
-        let err = chooser.choose(&entry("x")).unwrap_err();
+        let err = chooser.set_clipboard(&entry("x")).unwrap_err();
         assert_eq!(err, "no seat");
+    }
+
+    /// Pins the order the bug fix depends on: whoever drives a full
+    /// choice (`surface::finish_choice`, in real use) must call
+    /// `set_clipboard` before `finish_paste`, never the reverse and
+    /// never with something else running between the two that isn't
+    /// tearing down the popup's own surface. This test would still pass
+    /// if the two were called back-to-back with nothing in between —
+    /// see `surface.rs`'s
+    /// `choosing_sets_the_clipboard_without_synthesizing_the_paste_yet`
+    /// for the test that catches *that* regression, which this one
+    /// cannot.
+    #[test]
+    fn finishing_a_choice_runs_set_clipboard_before_finish_paste() {
+        let chooser = MockChooser::succeeding();
+        chooser.set_clipboard(&entry("x")).unwrap();
+        chooser.finish_paste();
+        assert_eq!(chooser.log.borrow().as_slice(), &["set_clipboard", "finish_paste"]);
     }
 }

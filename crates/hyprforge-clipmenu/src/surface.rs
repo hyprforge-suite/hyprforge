@@ -54,6 +54,21 @@ fn iced_color(c: hyprforge_look::Color) -> iced_runtime::core::Color {
     iced_runtime::core::Color::from_rgba8(c.r, c.g, c.b, c.a as f32 / 255.0)
 }
 
+/// How long [`finish_choice`] waits for the compositor to confirm it has
+/// processed this popup's own layer-surface teardown before giving up
+/// and synthesizing the paste anyway.
+///
+/// `Connection::roundtrip` itself has no bound — see [`finish_choice`]'s
+/// doc for why a roundtrip is what this needs — and CLAUDE.md is
+/// explicit that nothing here waits on another process (here, the
+/// compositor) without one, so the bound is applied from outside on a
+/// helper thread. A healthy compositor answers a `wl_display.sync`
+/// within microseconds; this is generous well past that while still
+/// being short enough that a popup which, for whatever reason, never
+/// gets an answer does not sit resident (holding a keypress it has not
+/// yet sent) for anything a person would call "stuck".
+const FOCUS_RELEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Why the popup stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -181,6 +196,16 @@ impl<C: Chooser + 'static> ClipMenu<C> {
                 menu.draw();
             }
         }
+
+        // `Action::Choose` (see `dispatch_action`) only put the entry on
+        // the clipboard — it deliberately stops short of synthesizing
+        // the paste. That happens here, now that the event loop this
+        // popup was driving has stopped: see `finish_choice`'s own doc
+        // for why the ordering below is the fix, not an optimisation.
+        if menu.outcome == Some(Outcome::Chosen) {
+            finish_choice(&connection, &mut menu);
+        }
+
         Ok(menu.outcome.unwrap_or(Outcome::Disconnected))
     }
 
@@ -269,12 +294,25 @@ impl<C: Chooser + 'static> ClipMenu<C> {
         );
         self.cache = ui.into_cache();
 
+        // Cleared outright rather than left to the background colour
+        // below to cover it: this buffer comes from a pool and can still
+        // hold the previous frame, and a *transparent* fill blended over
+        // stale pixels changes nothing at all.
+        pixels.fill(tiny_skia::Color::TRANSPARENT);
+
         self.renderer.draw(
             &mut pixels,
             &mut mask,
             &Viewport::with_physical_size(Size::new(width, height), 1.0),
             &[Rectangle::with_size(size)],
-            iced_color(self.theme.surfaces.root),
+            // Transparent, not `surfaces.root`. The root container in
+            // `view` paints that colour itself, rounded to the theme's
+            // corner radius — and if the surface underneath it were
+            // cleared to the same opaque colour, the rounding would be
+            // root-over-root and invisible. The corners are only corners
+            // because what is outside them is nothing. `Argb8888` (see
+            // the buffer above) is what makes that expressible.
+            iced_runtime::core::Color::TRANSPARENT,
         );
 
         let wl_surface = layer.wl_surface();
@@ -341,6 +379,67 @@ impl<C: Chooser + 'static> ClipMenu<C> {
     }
 }
 
+/// Finishes a choice already recorded via `Action::Choose`: tears down
+/// this popup's own layer surface, proves — with a bound — that the
+/// compositor has actually processed that, and only then synthesizes
+/// the paste through [`Chooser::finish_paste`].
+///
+/// # Why the proof, not just a flush
+///
+/// This popup's layer is `KeyboardInteractivity::Exclusive` (see the
+/// comment where [`create_surface`] sets it) for as long as it is on
+/// screen, precisely so its own keystrokes reach it rather than
+/// whatever had focus before it opened. That is exactly backwards for a
+/// *synthesized* paste: sending Ctrl+V while this popup still holds
+/// that focus delivers it back to the popup, not to the window the user
+/// meant to paste into — which was the whole bug this function exists
+/// to close. A `Connection::flush` only proves the destroy request
+/// *left this process*; it says nothing about whether the compositor
+/// has acted on it and handed focus to whatever is next.
+///
+/// # Why a roundtrip proves it
+///
+/// Wayland serializes a single connection's requests in the order the
+/// server receives them, and answers them in that same order. A
+/// `wl_display.sync` sent *after* the surface's destroy requests
+/// (queued when `menu.layer` is dropped below) cannot be answered until
+/// the destroy has already been processed — so `Connection::roundtrip`
+/// returning is the proof this needs, deterministically, with no sleep
+/// and no guessing at a delay. `roundtrip` itself has no bound, though,
+/// so [`FOCUS_RELEASE_TIMEOUT`] is applied from outside on a helper
+/// thread: a compositor that cannot answer a sync within it is not
+/// something this popup — which is still holding the clipboard's
+/// backing thread open — should stay resident waiting on. Pasting
+/// anyway, with a warning, is the lesser failure; see
+/// `chooser::Wired::finish_paste` for what happens if the paste itself
+/// then lands nowhere.
+fn finish_choice<C: Chooser + 'static>(connection: &Connection, menu: &mut ClipMenu<C>) {
+    // Dropping the `LayerSurface` queues its role object's destroy
+    // request (see `smithay_client_toolkit`'s `Drop for
+    // LayerSurfaceInner`) — nothing is sent to the compositor yet,
+    // only queued locally, which is exactly why a flush alone would
+    // not be proof of anything.
+    menu.layer = None;
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let roundtrip_connection = connection.clone();
+    std::thread::spawn(move || {
+        // The result is only a signal that the sync happened at all;
+        // a `roundtrip` failure (a dead connection) leaves nothing
+        // more useful to do than proceed to `finish_paste` anyway, so
+        // it is not inspected.
+        let _ = tx.send(roundtrip_connection.roundtrip());
+    });
+    if rx.recv_timeout(FOCUS_RELEASE_TIMEOUT).is_err() {
+        eprintln!(
+            "the compositor didn't confirm the popup's own surface was torn down within \
+             {FOCUS_RELEASE_TIMEOUT:?} — pasting anyway"
+        );
+    }
+
+    menu.chooser.finish_paste();
+}
+
 /// What the user asked the popup to do, independent of whether a key or a
 /// pointer produced it. The seam that keeps mouse and keyboard handling
 /// from growing two different sets of rules for the same outcome:
@@ -372,11 +471,18 @@ fn dispatch_action<C: Chooser>(model: &mut Model, chooser: &C, action: Action) -
     match action {
         Action::Cancel => Some(Outcome::Cancelled),
         Action::Choose => {
+            // Only puts the entry on the clipboard. Synthesizing the
+            // paste is `Chooser::finish_paste`'s job, called from
+            // `finish_choice` — never from here — once this popup's own
+            // surface has been torn down; see both docs for why the
+            // split exists. `Outcome::Chosen` ends the event loop this
+            // returns into (see `ClipMenu::run`), which is what makes
+            // that ordering possible in the first place.
             let entry = model.selected_entry()?;
-            match chooser.choose(&entry) {
+            match chooser.set_clipboard(&entry) {
                 Ok(()) => Some(Outcome::Chosen),
                 Err(message) => {
-                    eprintln!("couldn't paste the chosen entry: {message}");
+                    eprintln!("couldn't put the chosen entry on the clipboard: {message}");
                     Some(Outcome::Cancelled)
                 }
             }
@@ -765,6 +871,26 @@ mod tests {
         let outcome = dispatch_key(&mut model, &chooser, Keysym::Return, None);
         assert_eq!(outcome, Some(Outcome::Chosen));
         assert_eq!(chooser.calls.borrow().as_slice(), &[EntryId::of(&Content::Text("b".into()))]);
+    }
+
+    /// Regression test for the bug this fix closes. `Action::Choose`
+    /// must only put the entry on the clipboard — synthesizing the
+    /// paste is a separate step (`Chooser::finish_paste`, via
+    /// `finish_choice`) that only runs after this popup's own layer
+    /// surface has been torn down (see `ClipMenu::run`). If this test
+    /// ever sees `"finish_paste"` in the log, `dispatch_key`/
+    /// `dispatch_action` started calling it directly again — which
+    /// welds the two calls back together while this popup still holds
+    /// `KeyboardInteractivity::Exclusive`, delivering the synthesized
+    /// Ctrl+V back to the popup instead of the window the user meant to
+    /// paste into.
+    #[test]
+    fn choosing_sets_the_clipboard_without_synthesizing_the_paste_yet() {
+        let mut model = model_with(&["a"]);
+        let chooser = MockChooser::succeeding();
+        let outcome = dispatch_key(&mut model, &chooser, Keysym::Return, None);
+        assert_eq!(outcome, Some(Outcome::Chosen));
+        assert_eq!(chooser.log.borrow().as_slice(), &["set_clipboard"]);
     }
 
     #[test]
