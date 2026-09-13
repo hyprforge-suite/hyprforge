@@ -157,3 +157,7 @@ hyprforge-paths = { path = "crates/hyprforge-paths" }
 hyprforge-secret = { path = "crates/hyprforge-secret" }
 hyprforge-authui = { path = "crates/hyprforge-authui" }
 hyprforge-look = { path = "crates/hyprforge-look" }
+hyprforge-network = { path = "crates/hyprforge-network" }
+hyprforge-bluetooth = { path = "crates/hyprforge-bluetooth" }
+hyprforge-power = { path = "crates/hyprforge-power" }
+hyprforge-ecosystem = { path = "crates/hyprforge-ecosystem" }
