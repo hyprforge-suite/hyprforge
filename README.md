@@ -70,6 +70,11 @@ Apps
                             conversation model
 ```
 
+Five of these directories — clipboard, lock, greet, tray, settings — are also
+their own repositories, published separately from this one. See "Six
+repositories, one workspace" below for what that means and where a change to
+one of them should actually be made.
+
 ### Why the look is one crate
 
 The Settings app and the lock screen each grew their own palette and drifted
@@ -89,6 +94,51 @@ and exports a copy to `/var/lib/hyprforge/greet`. The export exists because a
 greeter runs as its own user and a home directory is `drwx------`: it cannot
 traverse into `$HOME` at all, so continuity across the login boundary has to be
 an export rather than a shared path.
+
+## Six repositories, one workspace
+
+There is no GitHub organisation for this suite — the name `hyprforge` was
+already taken — so this repository is the only place that says the other five
+exist. Five components have been split out of `crates/` into their own
+repositories with `git subtree`, pushed, and have green CI. They are private
+today; the intent is to make them public once they've had more use.
+
+| Repository | What it is |
+|---|---|
+| [hyprforge-clipboard](https://github.com/adamrpostjr/hyprforge-clipboard) | A Wayland clipboard history library over `wlr-data-control`/`ext-data-control`, plus `hyprforge-clipd`, the daemon that watches the compositor's clipboard and writes its history. |
+| [hyprforge-lock](https://github.com/adamrpostjr/hyprforge-lock) | An `ext-session-lock-v1` lock screen for Hyprland, authenticating against PAM and sharing its look with the greeter. |
+| [hyprforge-greet](https://github.com/adamrpostjr/hyprforge-greet) | A greetd greeter for Hyprland, sharing its look and authentication conversation with the lock screen. |
+| [hyprforge-tray](https://github.com/adamrpostjr/hyprforge-tray) | A StatusNotifierItem/dbusmenu tray library, plus `hyprforge-trayd`, the daemon that puts Wi-Fi, Bluetooth, keep-awake and night-light icons in whatever bar is running. |
+| [hyprforge-settings](https://github.com/adamrpostjr/hyprforge-settings) | The Settings app: an iced GUI over Hyprland's config, appearance, displays, network, Bluetooth, shortcuts and more. |
+
+Four of the five are meant to be installed on their own: clone
+`hyprforge-clipboard` and you get a clipboard daemon and nothing else — no
+Settings app, no tray, no Hyprland config machinery. `hyprforge-settings` is
+the exception and its own README says so: it depends on fifteen other
+Hyprforge crates, which makes it the hub rather than a small standalone thing.
+"Every component runs alone, and is better together" in `CLAUDE.md` is the
+rule this is built around; `repo-plan.md` opens with the owner's own framing
+of why repository identity and installable-alone are worth keeping as separate
+questions, rather than restated here.
+
+Each of these repositories takes its Hyprforge dependencies as **git**
+dependencies on this repository, not as versions from crates.io — nothing in
+this suite is published there yet.
+
+### Where development happens
+
+This repository is the source of truth. A commit here can cross a component
+boundary in one commit, and `./check.sh` tests the whole suite together —
+neither is true once something exists only as a separate clone. `./split.sh`
+produces each component repository from `crates/` with `git subtree split
+--rejoin`, and `git subtree pull` brings a change made in a component
+repository back here, so opening a pull request against a component repository
+directly — `hyprforge-lock`, say — is welcome and works: the maintainer pulls
+it back into this repository the same way changes flow out. `repo-plan.md` has
+the mechanism in full, including why `--rejoin` is not optional.
+
+If you only care about one component, you don't need any of the above: clone
+its repository and `cargo test`.
 
 ## Nothing waits on another process forever
 

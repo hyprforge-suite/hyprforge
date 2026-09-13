@@ -269,4 +269,26 @@ the crate being extracted needs a self-contained manifest. `lock` and
 - [x] `lock` and `greet` prepared and verified standalone; not yet pushed
 - [x] `tray` prepared and verified standalone; not yet pushed
 - [x] `settings` prepared and verified standalone; not yet pushed
-- [ ] Push any of them to a repository someone can actually see
+- [x] All five pushed: clipboard, lock, greet, tray, settings, all green CI
+- [x] Day-2 drift detection (`./sync.sh`)
+
+## Staying in sync after the push
+
+Publishing with `split.sh` and a hand-typed `git push` was step 3's
+answer to *getting a component out the door once*. It has no opinion on
+day 2: nothing re-checks that a published repository still matches what
+the monorepo would produce, so a component repository can fall behind
+silently — it does not error, it just quietly stops being true, which is
+the exact class of failure CLAUDE.md keeps naming.
+
+`./sync.sh` is that check. With no arguments it is read-only: for every
+standalone-ready crate (discovered the same way `check.sh`'s dependency-pin
+step discovers its list) it computes, without pushing anything, the tree
+`git subtree split` would produce right now and compares it against the
+published repository's `main`. `./sync.sh --push` re-splits and pushes
+only the components that have actually drifted, after refusing on a dirty
+tree or a failing `./check.sh --quick` — publishing code that hasn't
+passed tier 1 to five repositories is worse than not publishing. It never
+force-pushes: a component whose published history is not an ancestor of
+the new split has diverged (an outside contributor, a direct push) and is
+left for a human with `git subtree pull`, not resolved automatically.

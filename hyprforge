@@ -44,6 +44,66 @@ skip() { printf '  %s·%s %s%s%s\n' "$D" "$N" "$D" "$*" "$N"; }
 warn() { printf '  %s!%s %s\n' "$Y" "$N" "$*"; }
 die()  { printf '%serror:%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
 
+# "$dst is current" repeats up to a dozen times in a `--install --all` run
+# and buries the handful of lines that actually say something changed.
+# Tally it instead of printing each one, and flush the tally right where
+# the individual lines used to sit — so the count stays exactly as
+# inline as what it replaces; it just stops repeating itself.
+CURRENT_COUNT=0
+mark_current() { (( CURRENT_COUNT += 1 )) || true; }
+flush_current() {
+    (( CURRENT_COUNT > 0 )) || return 0
+    skip "$CURRENT_COUNT already current"
+    CURRENT_COUNT=0
+}
+
+# Every component used to print its own "==> X: next steps" block right
+# where it ran, which meant `--install --all` interleaved six essays into
+# the action log and you could no longer see what the script had actually
+# done by the time it finished. Each component appends its block to one
+# of these instead, and the whole thing is printed once, at the end, in
+# a fixed order rather than install order — see print_next_steps.
+NEXT_DISPLAYD=
+NEXT_TRAY=
+NEXT_CLIPBOARD=
+NEXT_LOCK=
+NEXT_SETTINGS=
+NEXT_GREETER=
+
+# Prints every captured block as one numbered list, ordered by
+# consequence rather than by the order components were installed:
+# services to enable first, then the config the user has to point at
+# Hyprforge, and the greeter's block last — it's the one with real
+# consequences (a bad greetd config can leave the machine unable to log
+# in), so it belongs where it gets read most carefully: last, right
+# before the script says it's done.
+print_next_steps() {
+    local labels=(
+        "Display daemon"      "$NEXT_DISPLAYD"
+        "Tray icons"          "$NEXT_TRAY"
+        "Clipboard"           "$NEXT_CLIPBOARD"
+        "Lock"                "$NEXT_LOCK"
+        "Settings app"        "$NEXT_SETTINGS"
+        "Greeter"             "$NEXT_GREETER"
+    )
+    local any=false i
+    for ((i = 1; i < ${#labels[@]}; i += 2)); do
+        [[ -n ${labels[i]} ]] && any=true
+    done
+    $any || return 0
+
+    step "Before this does anything, you need to:"
+    local n=1 label text
+    for ((i = 0; i < ${#labels[@]}; i += 2)); do
+        label=${labels[i]}
+        text=${labels[i+1]}
+        [[ -n $text ]] || continue
+        printf '\n  %s%d. %s%s\n' "$B" "$n" "$label" "$N"
+        printf '%s\n' "$text"
+        ((n++))
+    done
+}
+
 # Every privileged action goes through here, so --dry-run is honest and
 # there is exactly one place that can touch the system.
 run_root() {
@@ -158,9 +218,12 @@ has_component() {
 build() {
     local package=$1
     local binary=${2:-$1}
+    # The header already says which package, so in a dry run there is
+    # nothing left to add: "would run: cargo build --release -p X" under
+    # a heading reading "Building X" is the same fact twice, and across
+    # seven packages it was fourteen lines saying seven things.
     step "Building $package"
     if $DRY_RUN; then
-        skip "would run: cargo build --release -p $package"
         return 0
     fi
     cargo build --release -p "$package" 2>&1 | grep -vE "^\s*(Compiling|Finished)" || true
@@ -177,7 +240,7 @@ build() {
 install_file() {
     local src=$1 dst=$2 mode=$3
     if [[ -e $dst ]] && cmp -s "$src" "$dst"; then
-        skip "$dst is current"
+        mark_current
         return 0
     fi
     local verb="installed"
@@ -214,6 +277,7 @@ install_greeter() {
         /usr/lib/sysusers.d/hyprforge-greet.conf 644
     install_file crates/hyprforge-greet/config/hyprforge-greet.tmpfiles \
         /usr/lib/tmpfiles.d/hyprforge-greet.conf 644
+    flush_current
     run_root systemd-sysusers
     run_root systemd-tmpfiles --create
     if [[ -d $EXPORT_DIR ]] || $DRY_RUN; then
@@ -236,6 +300,7 @@ install_greeter() {
     install_file target/release/hyprforge-greet "$PREFIX/hyprforge-greet" 755
     install_file crates/hyprforge-greet/config/hyprland-greeter.lua \
         "$GREETD_DIR/hyprland-greeter.lua" 644
+    flush_current
 
     # A template with a placeholder in it is not a config, and the way
     # this fails is a login screen that tries to authenticate a user
@@ -246,8 +311,15 @@ install_greeter() {
         ok "set the greeter's user to $USER in $GREETD_DIR/hyprland-greeter.lua"
     fi
 
-    step "Greeter: next steps"
-    cat <<EOF
+    # Safety-critical, so it still gets a loud pointer right here — the
+    # full explanation and the commands to test it are in the "Before
+    # this does anything" list at the end, where the greeter's block is
+    # deliberately last, but a skim of the action log must not miss this.
+    warn "greetd's own config is deliberately NOT installed (installing it wrong is how"
+    warn "a machine boots to something that cannot take a password) — see the last item"
+    warn "in \"Before this does anything, you need to:\" below before you touch it."
+
+    NEXT_GREETER=$(cat <<EOF
   ${D}greetd's own config is deliberately NOT installed. It decides which VT
   the machine logs in on, so installing it from a script is how you end up
   booting to something that cannot take a password.${N}
@@ -263,6 +335,7 @@ install_greeter() {
 
   See crates/hyprforge-greet/INSTALL.md for committing to it properly.
 EOF
+)
 }
 
 uninstall_greeter() {
@@ -309,9 +382,9 @@ install_lock() {
     # Our own PAM file rather than borrowing hyprlock's, which has no
     # `account` stack and so rejects correct passwords.
     install_file crates/hyprforge-lock/pam/hyprforge-lock /etc/pam.d/hyprforge-lock 644
+    flush_current
 
-    step "Lock: next steps"
-    cat <<EOF
+    NEXT_LOCK=$(cat <<EOF
   ${D}Nothing calls the lock screen on its own. Point your existing config at it:${N}
 
     ~/.config/hypr/hypridle.conf   lock_cmd = pidof hyprforge-lock || hyprforge-lock
@@ -320,6 +393,7 @@ install_lock() {
   hypridle handles logind's Lock signal, so suspend and 'loginctl lock-session'
   both work once lock_cmd points here.
 EOF
+)
 }
 
 uninstall_lock() {
@@ -371,17 +445,18 @@ install_displayd() {
     if $DRY_RUN; then
         skip "would install $unit_dir/hyprforge-displayd.service (ExecStart=$PREFIX/hyprforge-displayd run)"
     elif [[ -e $unit_dir/hyprforge-displayd.service ]] && cmp -s "$generated" "$unit_dir/hyprforge-displayd.service"; then
-        skip "$unit_dir/hyprforge-displayd.service is current"
+        mark_current
     else
         install -Dm644 "$generated" "$unit_dir/hyprforge-displayd.service"
         systemctl --user daemon-reload
         ok "installed $unit_dir/hyprforge-displayd.service"
     fi
+    flush_current
 
-    step "Display daemon: next steps"
-    cat <<EOF
+    NEXT_DISPLAYD=$(cat <<EOF
     systemctl --user enable --now hyprforge-displayd
 EOF
+)
 }
 
 install_tray() {
@@ -403,15 +478,15 @@ install_tray() {
     if $DRY_RUN; then
         skip "would install $unit_dir/hyprforge-trayd.service (ExecStart=$PREFIX/hyprforge-trayd)"
     elif [[ -e $unit_dir/hyprforge-trayd.service ]] && cmp -s "$generated" "$unit_dir/hyprforge-trayd.service"; then
-        skip "$unit_dir/hyprforge-trayd.service is current"
+        mark_current
     else
         install -Dm644 "$generated" "$unit_dir/hyprforge-trayd.service"
         systemctl --user daemon-reload
         ok "installed $unit_dir/hyprforge-trayd.service"
     fi
+    flush_current
 
-    step "Tray icons: next steps"
-    cat <<EOF
+    NEXT_TRAY=$(cat <<EOF
     systemctl --user enable --now hyprforge-trayd
 
     Which icons appear is Settings' business, not this script's:
@@ -423,6 +498,7 @@ install_tray() {
     is how two icons went missing after being switched on:
         systemctl --user restart hyprforge-trayd
 EOF
+)
 }
 
 install_clipboard() {
@@ -442,15 +518,15 @@ install_clipboard() {
     if $DRY_RUN; then
         skip "would install $unit_dir/hyprforge-clipd.service (ExecStart=$PREFIX/hyprforge-clipd)"
     elif [[ -e $unit_dir/hyprforge-clipd.service ]] && cmp -s "$generated" "$unit_dir/hyprforge-clipd.service"; then
-        skip "$unit_dir/hyprforge-clipd.service is current"
+        mark_current
     else
         install -Dm644 "$generated" "$unit_dir/hyprforge-clipd.service"
         systemctl --user daemon-reload
         ok "installed $unit_dir/hyprforge-clipd.service"
     fi
+    flush_current
 
-    step "Clipboard: next steps"
-    cat <<EOF
+    NEXT_CLIPBOARD=$(cat <<EOF
     systemctl --user enable --now hyprforge-clipd
 
     Then bind the popup. Hyprforge owns keybinds.lua, so the binding
@@ -461,6 +537,7 @@ install_clipboard() {
     application that marks its clipboard offer as a secret, which is how
     password managers ask not to be remembered.
 EOF
+)
 }
 
 uninstall_clipboard() {
@@ -542,7 +619,7 @@ install_settings() {
     if $DRY_RUN; then
         skip "would install $dst"
     elif [[ -e $dst ]] && cmp -s "$entry" "$dst"; then
-        skip "$dst is current"
+        mark_current
     else
         install -Dm644 "$entry" "$dst"
         # Not every launcher needs this and it is absent on some systems,
@@ -551,15 +628,16 @@ install_settings() {
             update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
         ok "installed $dst"
     fi
+    flush_current
 
-    step "Settings app: next steps"
-    cat <<EOF
+    NEXT_SETTINGS=$(cat <<EOF
   ${D}It should now appear in rofi as "Hyprforge Settings". If it does not,
   your launcher may cache entries — log out and back in.
 
   The Settings app is also what fills in the greeter's look: one save in
   Appearance writes the theme and exports a copy the login screen reads.${N}
 EOF
+)
 }
 
 uninstall_settings() {
@@ -744,6 +822,7 @@ case $ACTION in
         has_component tray && install_tray
         has_component clipboard && install_clipboard
         has_component settings && install_settings
+        print_next_steps
         step "Done"
         $DRY_RUN && warn "this was a dry run; nothing changed"
         ;;
