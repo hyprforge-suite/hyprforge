@@ -16,7 +16,7 @@
 
 use hyprforge_core::hlconfig::import::Live;
 use hyprforge_core::hlconfig::{Kind, Setting, Settings, Value};
-use hyprforge_ui::theme::{spacing, FontScale};
+use hyprforge_ui::theme::{spacing, FontScale, BASE_TEXT_SIZE};
 use hyprforge_ui::widgets::{danger_button, meta_text, scaled_text};
 use iced::widget::{checkbox, column, container, pick_list, row, text_input};
 use iced::{Element, Length};
@@ -204,7 +204,7 @@ impl<'a, M: Clone + 'static> RowContext<'a, M> {
     ) -> Element<'a, M> {
         let key = setting.key;
         let on_reset = self.on_reset;
-        let mut label_side = column![scaled_text(setting.label, 14.0, scale)].spacing(2);
+        let mut label_side = column![scaled_text(setting.label, BASE_TEXT_SIZE, scale)].spacing(2);
         label_side = label_side.push(meta_text(setting.help, 12.0, scale));
         if let Some(problem) = self.draft_errors.get(key) {
             label_side = label_side.push(scaled_text(problem.clone(), 12.0, scale));

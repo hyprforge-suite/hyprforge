@@ -259,21 +259,19 @@ impl Theme {
         })
     }
 
-    /// Reads the exported theme, falling back to the default.
+    /// Reads the theme exported to [`export_dir`], falling back to the
+    /// default.
     ///
     /// Never returns an error. A greeter has nobody to report one to and
     /// nothing better to do than draw something usable — so a corrupt or
     /// unreadable export degrades to plain rather than to a blank screen.
     ///
-    /// No current caller: `hyprforge-greet` needs a `--theme-dir`
-    /// override this fixed path doesn't take, so it re-implements the
-    /// same "load theme.toml under this dir, default on failure" inline
-    /// against [`export_dir`] instead of calling this. Kept — the fixed
-    /// path is the right default for any *other* host that only ever
-    /// reads the one export (`hyprforge-authui` consumers besides the
-    /// greeter, should one exist) — but see
-    /// [`load_exported_from`](Self::load_exported_from) for the
-    /// consolidation this invites.
+    /// No current caller: `hyprforge-greet` needs the `--theme-dir`
+    /// override that [`load_exported_from`](Self::load_exported_from)
+    /// takes and this fixed path doesn't, so it calls that instead. Kept
+    /// for any *other* host that only ever reads the one export
+    /// (`hyprforge-authui` consumers besides the greeter, should one
+    /// exist).
     pub fn load_exported() -> Theme {
         Theme::load_exported_from(&export_dir())
     }
@@ -281,20 +279,13 @@ impl Theme {
     /// [`load_exported`](Self::load_exported) against a named directory.
     ///
     /// Split out so the degrade-to-default behaviour can be tested
-    /// without reading a real system path. The test that did read one
-    /// asserted the export "won't exist in a test environment", which
-    /// stopped being true the moment the greeter was installed on the
-    /// machine running the tests — it then failed because the product
-    /// was working.
-    ///
-    /// This already takes the directory the greeter needs to vary via
-    /// `--theme-dir` — its inline equivalent in
-    /// `hyprforge-greet/src/main.rs` is `Theme::load(&dir.join("theme.toml"))
-    /// .unwrap_or_default()`, the same two calls this function makes.
-    /// Nothing here currently calls it outside this module's own tests;
-    /// having the greeter call this instead of duplicating it would turn
-    /// dead code into shared code, at the cost of one extra hop through
-    /// this crate for a caller that already has the directory in hand.
+    /// without reading a real system path — and so a caller with its own
+    /// notion of where the export lives, like `hyprforge-greet`'s
+    /// `--theme-dir`, can use it too. The test that read a real path
+    /// instead asserted the export "won't exist in a test environment",
+    /// which stopped being true the moment the greeter was installed on
+    /// the machine running the tests — it then failed because the
+    /// product was working.
     pub fn load_exported_from(dir: &Path) -> Theme {
         Theme::load(&dir.join("theme.toml")).unwrap_or_default()
     }

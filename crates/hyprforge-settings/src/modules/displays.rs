@@ -3,7 +3,7 @@ use hyprforge_core::geometry::{logical_size, nearest_valid_scale};
 use hyprforge_core::displayd_proxy::DisplaydProxy;
 use std::time::Duration;
 use hyprforge_core::lua_setup::{self, HyprConfig, Placement, SetupPlan};
-use hyprforge_ui::theme::{spacing, FontScale};
+use hyprforge_ui::theme::{spacing, FontScale, BASE_TEXT_SIZE};
 use hyprforge_ui::widgets::{
     confirm_dialog, danger_button, divider, meta_text, primary_button, row_field, scaled_text,
     secondary_button, section,
@@ -860,7 +860,7 @@ impl DisplaysModule {
             p.name.clone()
         };
         let info = column![
-            scaled_text(name, 14.0, scale),
+            scaled_text(name, BASE_TEXT_SIZE, scale),
             meta_text(
                 format!("{} head(s) · last used {}", p.head_count, p.last_used),
                 12.0,
@@ -899,7 +899,7 @@ impl DisplaysModule {
     /// display it doesn't recognise.
     fn import_review_view(&self, state: &ImportState, scale: FontScale) -> Element<'_, Message> {
         let ImportState::Ready(review) = state else {
-            return container(scaled_text("Reading your hyprland.lua…", 14.0, scale))
+            return container(scaled_text("Reading your hyprland.lua…", BASE_TEXT_SIZE, scale))
                 .padding(spacing::LG)
                 .into();
         };
@@ -927,7 +927,7 @@ impl DisplaysModule {
             body = body.push(meta_text(
                 "No hand-written hl.monitor() rules found outside Hyprforge's own \
                  generated files.",
-                14.0,
+                BASE_TEXT_SIZE,
                 scale,
             ));
         } else {
@@ -1641,7 +1641,7 @@ impl SettingsModule for DisplaysModule {
                         self.error
                             .clone()
                             .unwrap_or_else(|| "hyprforge-displayd is not running.".to_string()),
-                        14.0,
+                        BASE_TEXT_SIZE,
                         scale,
                     ),
                     meta_text(
@@ -1697,7 +1697,7 @@ impl SettingsModule for DisplaysModule {
                     "Hyprforge hasn't matched a saved profile to this display setup yet — \
                      it will learn one automatically."
                 };
-                content = content.push(section("Current Setup", scale, meta_text(msg, 14.0, scale)));
+                content = content.push(section("Current Setup", scale, meta_text(msg, BASE_TEXT_SIZE, scale)));
             }
         }
 
@@ -1727,7 +1727,7 @@ impl SettingsModule for DisplaysModule {
             if self.profiles.is_empty() {
                 list = list.push(meta_text(
                     "No profiles yet — connect a display configuration and Hyprforge will learn it.",
-                    14.0,
+                    BASE_TEXT_SIZE,
                     scale,
                 ));
             }

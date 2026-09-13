@@ -1,5 +1,5 @@
 use hyprforge_core::lua_setup;
-use hyprforge_ui::theme::{spacing, FontScale};
+use hyprforge_ui::theme::{spacing, FontScale, BASE_TEXT_SIZE};
 use hyprforge_ui::widgets::{
     danger_button, divider, meta_text, primary_button, row_field, scaled_text, secondary_button,
     section, tri_state,
@@ -1273,7 +1273,7 @@ impl SettingsModule for WindowRulesModule {
 
         let mut list = column![].spacing(spacing::SM);
         if self.rules.is_empty() {
-            list = list.push(meta_text("No rules yet.", 14.0, scale));
+            list = list.push(meta_text("No rules yet.", BASE_TEXT_SIZE, scale));
         }
         for (i, rule) in self.rules.iter().enumerate() {
             if i > 0 {
@@ -1286,7 +1286,7 @@ impl SettingsModule for WindowRulesModule {
                 .or_else(|| rule.matcher.title.clone())
                 .unwrap_or_else(|| "(no match)".to_string());
             let info = column![
-                scaled_text(summary, 14.0, scale),
+                scaled_text(summary, BASE_TEXT_SIZE, scale),
                 meta_text(rule.name.clone(), 12.0, scale),
             ]
             .spacing(spacing::XS)
@@ -1353,7 +1353,7 @@ impl WindowRulesModule {
     /// pick up hand-written rules added since the last import.
     fn import_review_view(&self, state: &ImportState, scale: FontScale) -> Element<'_, Message> {
         let ImportState::Ready(review) = state else {
-            return container(scaled_text("Reading your hyprland.lua…", 14.0, scale))
+            return container(scaled_text("Reading your hyprland.lua…", BASE_TEXT_SIZE, scale))
                 .padding(spacing::LG)
                 .into();
         };
@@ -1384,7 +1384,7 @@ impl WindowRulesModule {
         if review.rules.is_empty() && review.workspace_rules.is_empty() {
             body = body.push(meta_text(
                 "No importable window rules or workspace pins found.",
-                14.0,
+                BASE_TEXT_SIZE,
                 scale,
             ));
         }
@@ -1398,7 +1398,7 @@ impl WindowRulesModule {
                     .clone()
                     .or_else(|| candidate.matcher.title.clone())
                     .unwrap_or_else(|| "(no match)".to_string());
-                let mut info = column![scaled_text(summary, 14.0, scale)]
+                let mut info = column![scaled_text(summary, BASE_TEXT_SIZE, scale)]
                     .spacing(spacing::XS)
                     .width(Length::Fill);
                 if candidate.already_imported {
@@ -1424,7 +1424,7 @@ impl WindowRulesModule {
             let mut list = column![].spacing(spacing::SM);
             for (i, candidate) in review.workspace_rules.iter().enumerate() {
                 let mut info =
-                    column![scaled_text(candidate.rule.workspace.clone(), 14.0, scale)]
+                    column![scaled_text(candidate.rule.workspace.clone(), BASE_TEXT_SIZE, scale)]
                         .spacing(spacing::XS)
                         .width(Length::Fill);
                 if candidate.already_imported {

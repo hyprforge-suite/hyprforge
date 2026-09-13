@@ -27,7 +27,7 @@ use hyprforge_appearance::storage::Appearance;
 use hyprforge_core::hlconfig::import::{Discovered, Live};
 use hyprforge_core::hlconfig::{Invalid, Setting, Settings, Value};
 use hyprforge_core::lua_setup;
-use hyprforge_ui::theme::{spacing, FontScale};
+use hyprforge_ui::theme::{spacing, FontScale, BASE_TEXT_SIZE};
 use hyprforge_ui::widgets::{
     danger_button, divider, meta_text, primary_button, scaled_text, secondary_button, section,
 };
@@ -888,7 +888,7 @@ impl AppearanceModule {
                 .into(),
         };
 
-        let mut label_side = column![scaled_text(setting.label, 14.0, scale)].spacing(2);
+        let mut label_side = column![scaled_text(setting.label, BASE_TEXT_SIZE, scale)].spacing(2);
         label_side = label_side.push(meta_text(setting.help, 12.0, scale));
         if let Some(problem) = self.desktop_errors.get(key) {
             label_side = label_side.push(scaled_text(problem.clone(), 12.0, scale));
@@ -1026,7 +1026,7 @@ impl AppearanceModule {
                 .cloned()
                 .unwrap_or_else(|| format!("{}", current.speed));
 
-            let mut label_side = column![scaled_text(leaf.clone(), 14.0, scale)].spacing(2);
+            let mut label_side = column![scaled_text(leaf.clone(), BASE_TEXT_SIZE, scale)].spacing(2);
             if let Some(problem) = self.animation_errors.get(&leaf) {
                 label_side = label_side.push(scaled_text(problem.clone(), 12.0, scale));
             }

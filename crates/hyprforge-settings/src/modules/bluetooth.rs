@@ -8,7 +8,7 @@
 use hyprforge_bluetooth::backend::{for_display, BluetoothBackend};
 use hyprforge_bluetooth::{Address, AdapterState, BluetoothError, Device, PairingPrompt, Passkey, Status};
 use hyprforge_tray::Prefs as TrayPrefs;
-use hyprforge_ui::theme::{self, spacing, FontScale};
+use hyprforge_ui::theme::{self, spacing, FontScale, BASE_TEXT_SIZE};
 use hyprforge_ui::widgets::{divider, meta_text, primary_button, scaled_text, secondary_button, section};
 use iced::widget::{checkbox, column, row};
 use iced::{Alignment, Element, Length, Subscription, Task};
@@ -526,14 +526,14 @@ impl<B: BluetoothBackend + 'static> SettingsModule for BluetoothModule<B> {
             content = content.push(section(
                 "Bluetooth",
                 scale,
-                column![scaled_text(msg.clone(), 14.0, scale), self.tray_row(scale)]
+                column![scaled_text(msg.clone(), BASE_TEXT_SIZE, scale), self.tray_row(scale)]
                     .spacing(spacing::SM),
             ));
             return content.into();
         }
 
         if self.loading {
-            content = content.push(meta_text("Loading…", 14.0, scale));
+            content = content.push(meta_text("Loading…", BASE_TEXT_SIZE, scale));
             return content.into();
         }
 
@@ -599,7 +599,7 @@ impl<B: BluetoothBackend + 'static> BluetoothModule<B> {
             ]
             .spacing(spacing::XS)
             .into(),
-            Some(AdapterState::Changing) => meta_text("Bluetooth is changing…", 14.0, scale).into(),
+            Some(AdapterState::Changing) => meta_text("Bluetooth is changing…", BASE_TEXT_SIZE, scale).into(),
             Some(state) => {
                 let on = state == AdapterState::On;
                 row![
@@ -610,7 +610,7 @@ impl<B: BluetoothBackend + 'static> BluetoothModule<B> {
                 .align_y(Alignment::Center)
                 .into()
             }
-            None => meta_text("Bluetooth status unknown.", 14.0, scale).into(),
+            None => meta_text("Bluetooth status unknown.", BASE_TEXT_SIZE, scale).into(),
         };
         section("Bluetooth", scale, column![body, self.tray_row(scale)].spacing(spacing::SM))
     }
@@ -660,7 +660,7 @@ impl<B: BluetoothBackend + 'static> BluetoothModule<B> {
             return section(
                 "Devices",
                 scale,
-                meta_text("No devices yet. Turn on Scan to look for nearby ones.", 14.0, scale),
+                meta_text("No devices yet. Turn on Scan to look for nearby ones.", BASE_TEXT_SIZE, scale),
             );
         }
         let mut list = column![].spacing(spacing::SM);
@@ -679,9 +679,9 @@ impl<B: BluetoothBackend + 'static> BluetoothModule<B> {
         // plainly that no name is known yet — same reasoning `Device` docs
         // give for keeping `alias` and `name` separate.
         let name: Element<'_, Message> = if device.is_unnamed() {
-            meta_text(format!("Unnamed device ({})", device.address), 14.0, scale).into()
+            meta_text(format!("Unnamed device ({})", device.address), BASE_TEXT_SIZE, scale).into()
         } else {
-            scaled_text(device.alias.clone(), 14.0, scale).into()
+            scaled_text(device.alias.clone(), BASE_TEXT_SIZE, scale).into()
         };
 
         let connection = if device.connected { " \u{b7} Connected" } else { "" };

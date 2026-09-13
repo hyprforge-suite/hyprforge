@@ -19,7 +19,7 @@
 use hyprforge_network::backend::{for_display, NetworkBackend, SavedNetwork, Status};
 use hyprforge_network::{AccessPoint, NetworkError, Psk, RadioState, Security};
 use hyprforge_tray::Prefs as TrayPrefs;
-use hyprforge_ui::theme::{self, spacing, FontScale};
+use hyprforge_ui::theme::{self, spacing, FontScale, BASE_TEXT_SIZE};
 use hyprforge_ui::widgets::{meta_text, primary_button, scaled_text, secondary_button, section};
 use iced::widget::{checkbox, column, row, text_input};
 use iced::{Alignment, Element, Length, Subscription, Task};
@@ -477,14 +477,14 @@ impl<B: NetworkBackend + 'static> SettingsModule for NetworkModule<B> {
             content = content.push(section(
                 "Wi-Fi",
                 scale,
-                column![scaled_text(msg.clone(), 14.0, scale), self.tray_row(scale)]
+                column![scaled_text(msg.clone(), BASE_TEXT_SIZE, scale), self.tray_row(scale)]
                     .spacing(spacing::SM),
             ));
             return content.into();
         }
 
         if self.loading {
-            content = content.push(meta_text("Loading…", 14.0, scale));
+            content = content.push(meta_text("Loading…", BASE_TEXT_SIZE, scale));
             return content.into();
         }
 
@@ -550,7 +550,7 @@ impl<B: NetworkBackend + 'static> NetworkModule<B> {
                 .align_y(Alignment::Center)
                 .into()
             }
-            None => meta_text("Wi-Fi status unknown.", 14.0, scale).into(),
+            None => meta_text("Wi-Fi status unknown.", BASE_TEXT_SIZE, scale).into(),
         };
         section("Wi-Fi", scale, column![body, self.tray_row(scale)].spacing(spacing::SM))
     }
@@ -585,7 +585,7 @@ impl<B: NetworkBackend + 'static> NetworkModule<B> {
             return section(
                 "Networks",
                 scale,
-                meta_text("No networks found nearby yet.", 14.0, scale),
+                meta_text("No networks found nearby yet.", BASE_TEXT_SIZE, scale),
             );
         }
         let connected_ssid = self.status.as_ref().and_then(|s| s.connected_to.as_ref());
@@ -619,7 +619,7 @@ impl<B: NetworkBackend + 'static> NetworkModule<B> {
         // the name here, so the row read "Pretty Fly for a WiFi —
         // Connected ... Connected".
         let mut line = column![
-            scaled_text(ap.ssid.to_display_string(), 14.0, scale),
+            scaled_text(ap.ssid.to_display_string(), BASE_TEXT_SIZE, scale),
             meta_text(format!("{} \u{b7} {} \u{b7} {}%", ap.band(), security_label, ap.strength), 12.0, scale),
         ]
         .spacing(2.0);
@@ -656,7 +656,7 @@ impl<B: NetworkBackend + 'static> NetworkModule<B> {
             }
             list = list.push(
                 row![
-                    scaled_text(saved.ssid.to_display_string(), 14.0, scale).width(Length::Fill),
+                    scaled_text(saved.ssid.to_display_string(), BASE_TEXT_SIZE, scale).width(Length::Fill),
                     secondary_button("Forget").on_press(Message::ForgetPressed(saved.id.clone())),
                 ]
                 .spacing(spacing::SM)

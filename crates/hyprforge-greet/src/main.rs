@@ -241,12 +241,11 @@ fn main() -> iced::Result {
     let dir = args
         .theme_dir
         .unwrap_or_else(hyprforge_look::theme::export_dir);
-    // A greeter that refused to draw because a theme file was missing
-    // would be a machine nobody can log into, so every failure here ends
-    // at the default look.
-    let theme = hyprforge_authui::screen::renderable(
-        Theme::load(&dir.join("theme.toml")).unwrap_or_default(),
-    );
+    // `load_exported_from` is the one that degrades a missing or
+    // unparseable export to the default theme rather than an error — see
+    // its doc for why. `--theme-dir` is why this calls that with a
+    // variable directory instead of the fixed-path `load_exported()`.
+    let theme = hyprforge_authui::screen::renderable(Theme::load_exported_from(&dir));
 
     let command: Vec<String> = args.command.split_whitespace().map(str::to_string).collect();
     let font = hyprforge_authui::screen::font(&theme);
