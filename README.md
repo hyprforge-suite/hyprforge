@@ -84,6 +84,17 @@ appears in a release build, because a flag that submits a password from
 argv puts it in `ps` output, which a login screen must not offer no
 matter how convenient it is while developing.
 
+## What CI checks, and what it can't
+
+`.github/workflows/ci.yml` builds the crate, runs clippy with warnings
+denied, and runs `cargo test`. There are no `#[ignore]`d live tests here
+to skip, so that is the whole suite — but it is still only the code
+talking to itself. It never runs `hyprforge-greet` against real greetd
+or the fake one, and it never touches the compositor that
+`config/hyprland-greeter.lua` configures. Proving the handshake actually
+works still means the `testing/fake_greetd.py` walkthrough above, by
+hand.
+
 ## Licence
 
 MIT. See `LICENSE`.
