@@ -1,5 +1,5 @@
 use hyprforge_core::lua_setup;
-use hyprforge_ui::theme::{spacing, FontScale};
+use hyprforge_ui::theme::{spacing, FontScale, BASE_TEXT_SIZE};
 use hyprforge_ui::widgets::{
     danger_button, divider, meta_text, primary_button, row_field, scaled_text, secondary_button,
     section,
@@ -1186,9 +1186,9 @@ impl SettingsModule for ShortcutsModule {
         let groups = self.grouped();
         let mut list = column![].spacing(spacing::SM);
         if self.shortcuts.is_empty() {
-            list = list.push(meta_text("No shortcuts yet.", 14.0, scale));
+            list = list.push(meta_text("No shortcuts yet.", BASE_TEXT_SIZE, scale));
         } else if groups.is_empty() {
-            list = list.push(meta_text("No shortcuts match that.", 14.0, scale));
+            list = list.push(meta_text("No shortcuts match that.", BASE_TEXT_SIZE, scale));
         }
 
         for (group_index, (category, rows)) in groups.into_iter().enumerate() {
@@ -1209,7 +1209,7 @@ impl SettingsModule for ShortcutsModule {
                     shortcut.description.clone()
                 };
                 let mut info = column![
-                    scaled_text(label, 14.0, scale),
+                    scaled_text(label, BASE_TEXT_SIZE, scale),
                     meta_text(
                         format!("{}  →  {}", shortcut.combo.to_bind_string(), row.action_label()),
                         12.0,
@@ -1302,7 +1302,7 @@ impl ShortcutsModule {
     /// the last import.
     fn import_review_view(&self, state: &ImportState, scale: FontScale) -> Element<'_, Message> {
         let ImportState::Ready(review) = state else {
-            return container(scaled_text("Reading your hyprland.lua…", 14.0, scale))
+            return container(scaled_text("Reading your hyprland.lua…", BASE_TEXT_SIZE, scale))
                 .padding(spacing::LG)
                 .into();
         };
@@ -1327,7 +1327,7 @@ impl ShortcutsModule {
         }
 
         if review.shortcuts.is_empty() {
-            body = body.push(meta_text("No importable shortcuts found.", 14.0, scale));
+            body = body.push(meta_text("No importable shortcuts found.", BASE_TEXT_SIZE, scale));
         } else {
             let mut list = column![].spacing(spacing::SM);
             for (i, candidate) in review.shortcuts.iter().enumerate() {
@@ -1353,7 +1353,7 @@ impl ShortcutsModule {
                     format!("{}  →  {}", candidate.combo.to_bind_string(), action_label)
                 };
                 let mut info = column![
-                    scaled_text(summary, 14.0, scale),
+                    scaled_text(summary, BASE_TEXT_SIZE, scale),
                     meta_text(detail, 12.0, scale),
                 ]
                 .spacing(spacing::XS)
