@@ -1470,12 +1470,11 @@ name = "hyprforge-clipmenu"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "calloop 0.14.4",
- "calloop-wayland-source 0.4.1",
  "clap",
  "hyprforge-appearance",
  "hyprforge-clipboard",
  "hyprforge-look",
+ "hyprforge-popup",
  "hyprforge-process",
  "iced_renderer",
  "iced_runtime",
@@ -1483,11 +1482,8 @@ dependencies = [
  "iced_widget",
  "image",
  "serde_json",
- "smithay-client-toolkit 0.20.0",
  "tempfile",
  "thiserror 2.0.19",
- "tiny-skia",
- "wayland-client",
 ]
 
 [[package]]
@@ -1539,6 +1535,10 @@ dependencies = [
  "thiserror 2.0.19",
  "toml",
 ]
+
+[[package]]
+name = "hyprforge-emoji"
+version = "0.1.0"
 
 [[package]]
 name = "hyprforge-greet"
@@ -1636,6 +1636,25 @@ name = "hyprforge-paths"
 version = "0.1.0"
 dependencies = [
  "tempfile",
+]
+
+[[package]]
+name = "hyprforge-popup"
+version = "0.1.0"
+dependencies = [
+ "calloop 0.14.4",
+ "calloop-wayland-source 0.4.1",
+ "hyprforge-look",
+ "hyprforge-process",
+ "iced_runtime",
+ "iced_tiny_skia",
+ "iced_widget",
+ "serde_json",
+ "smithay-client-toolkit 0.20.0",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tiny-skia",
+ "wayland-client",
 ]
 
 [[package]]

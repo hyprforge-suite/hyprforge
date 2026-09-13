@@ -10,6 +10,12 @@ path = "src/main.rs"
 
 [dependencies]
 hyprforge-clipboard.workspace = true
+# The layer-shell surface, its event loop, pointer/keyboard handling,
+# placement (monitors, cursor, the flip-then-clamp clamp, scale) and the
+# single-instance lock — see that crate's own module doc for why they
+# moved out of this one, and `surface::ClipApp` for the
+# `hyprforge_popup::PopupApp` seam this crate implements against it.
+hyprforge-popup.workspace = true
 # `look::resolve` is the one place a Theme is built from the user's own
 # settings (Hyprland's active border colour, gsettings fonts, …) — see
 # CLAUDE.md: "Never add a colour constant to an app."
@@ -17,9 +23,13 @@ hyprforge-appearance.workspace = true
 hyprforge-look.workspace = true
 # `command::output`/`TIMEOUT` re-exported by hyprforge-core; depended on
 # directly per CLAUDE.md ("new code should depend on hyprforge-process
-# directly") since this popup has no other use for hyprforge-core's
-# Hyprland config machinery.
+# directly") since this crate has no other use for hyprforge-core's
+# Hyprland config machinery. Used by `target.rs`'s own `hyprctl
+# activewindow -j` call — `hyprforge-popup` owns the placement-related
+# `hyprctl` calls, this crate still owns this one, since it is about
+# paste targets, not placement.
 hyprforge-process.workspace = true
+serde_json.workspace = true
 # default-features off drops iced_tiny_skia's own "x11"/"wayland"
 # defaults, which pick a *windowing* backend for `softbuffer` — no use
 # here, since the popup paints straight into the buffer the compositor
@@ -51,17 +61,8 @@ iced_widget = { workspace = true, features = ["image"] }
 # paints through `iced_tiny_skia::Renderer` on its own, exactly as the
 # lock screen does.
 iced_renderer = { version = "0.14", default-features = false, features = ["tiny-skia"] }
-tiny-skia = "0.11"
 image.workspace = true
-smithay-client-toolkit = "0.20"
-wayland-client = "0.31"
-# Pinned to whatever smithay-client-toolkit 0.20 already pulls in, same
-# as hyprforge-lock: the Wayland source and calloop have to come from
-# the same calloop the toolkit uses.
-calloop = "0.14"
-calloop-wayland-source = "0.4"
 clap.workspace = true
-serde_json.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 

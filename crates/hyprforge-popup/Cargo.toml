@@ -1,0 +1,31 @@
+[package]
+name = "hyprforge-popup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# `Theme` is the one thing every consumer draws with — CLAUDE.md: "no
+# app may define its own colour constant."
+hyprforge-look.workspace = true
+# `command::output`/`TIMEOUT`, for the bounded `hyprctl` calls
+# `placement` makes. No `hyprforge-core`: this crate must stay a leaf a
+# new popup can depend on without pulling in Hyprland config machinery,
+# an async runtime, or D-Bus.
+hyprforge-process.workspace = true
+serde_json.workspace = true
+# Same reasoning `hyprforge-clipmenu`'s manifest gives for each of these:
+# a layer-shell popup with no windowing backend of its own, painting
+# straight into the buffer the compositor hands over.
+iced_tiny_skia = { workspace = true, default-features = false, features = ["wayland"] }
+iced_runtime.workspace = true
+iced_widget.workspace = true
+smithay-client-toolkit = "0.20"
+wayland-client = "0.31"
+calloop = "0.14"
+calloop-wayland-source = "0.4"
+tiny-skia = "0.11"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

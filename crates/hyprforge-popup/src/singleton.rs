@@ -1,4 +1,4 @@
-//! Making sure only one popup is ever open at once.
+//! Making sure only one instance of a given popup is ever open at once.
 //!
 //! Pressing the keybind twice must not start a second process — but the
 //! usual ways of checking "is one already running" are exactly the two
@@ -27,6 +27,12 @@
 //! library regardless (glibc, on this suite's one supported platform),
 //! so this adds no new library dependency, only a declaration of a
 //! function that is already there.
+//!
+//! Parameterised by lock *name* rather than one hardcoded file, since
+//! this is shared across every popup this crate serves — `hyprforge-clipmenu`
+//! and a future grid-based picker each need their own lock, not one
+//! shared between the two (opening the emoji picker must not be refused
+//! because the clipboard popup happens to be open, or vice versa).
 
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -40,18 +46,14 @@ extern "C" {
     fn flock(fd: i32, operation: i32) -> i32;
 }
 
-/// The lock file's name, kept short and namespaced under
-/// `$XDG_RUNTIME_DIR` rather than a shared temp directory — the same
-/// place a compositor's own sockets live, and specific to this user.
-const LOCK_FILE_NAME: &str = "hyprforge-clipmenu.lock";
-
-/// Where the lock file lives: `$XDG_RUNTIME_DIR` when it is set (every
-/// real session has one), falling back to the system temp directory
-/// only so this never panics on a machine with neither — a fallback
-/// that is never actually exercised outside a broken environment.
-pub fn lock_path() -> PathBuf {
+/// Where a lock file named `name` (e.g. `"hyprforge-clipmenu.lock"`)
+/// lives: `$XDG_RUNTIME_DIR` when it is set (every real session has one),
+/// falling back to the system temp directory only so this never panics
+/// on a machine with neither — a fallback that is never actually
+/// exercised outside a broken environment.
+pub fn lock_path(name: &str) -> PathBuf {
     let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    base.join(LOCK_FILE_NAME)
+    base.join(name)
 }
 
 /// Holds the exclusive lock for as long as this value lives. Dropping it
@@ -60,7 +62,7 @@ pub fn lock_path() -> PathBuf {
 /// releases the lock — there is deliberately nothing to call by hand.
 pub struct Lock(#[allow(dead_code)] File);
 
-/// Tries to become the one popup allowed to run.
+/// Tries to become the one popup of this kind allowed to run.
 ///
 /// `Ok(Some(lock))`: this process holds the lock and should proceed —
 /// keep `lock` alive for as long as the popup is open. `Ok(None)`: some
@@ -137,8 +139,8 @@ mod tests {
     }
 
     /// Two different lock files never contend with each other — this is
-    /// not a global "only one clipmenu-shaped thing" lock, only "only
-    /// one holder of this exact path".
+    /// not a global "only one popup-shaped thing" lock, only "only one
+    /// holder of this exact path".
     #[test]
     fn locks_on_different_paths_never_contend() {
         let dir = tempfile::tempdir().unwrap();
@@ -153,7 +155,7 @@ mod tests {
     /// acquired" or "lock held by someone else".
     #[test]
     fn a_missing_directory_is_reported_as_an_error_not_a_lock_state() {
-        let path = Path::new("/nonexistent-hyprforge-clipmenu-test-dir/test.lock");
+        let path = Path::new("/nonexistent-hyprforge-popup-test-dir/test.lock");
         assert!(acquire(path).is_err());
     }
 }

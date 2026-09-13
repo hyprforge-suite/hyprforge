@@ -21,7 +21,9 @@ members = [
     "crates/hyprforge-lua-import",
     "crates/hyprforge-bluetooth",
     "crates/hyprforge-clipboard",
+    "crates/hyprforge-popup",
     "crates/hyprforge-clipmenu",
+    "crates/hyprforge-emoji",
     "crates/hyprforge-tray",
     "crates/hyprforge-network",
     "crates/hyprforge-power",
@@ -70,7 +72,9 @@ hyprforge-bluetooth = { path = "crates/hyprforge-bluetooth" }
 hyprforge-power = { path = "crates/hyprforge-power" }
 hyprforge-tray = { path = "crates/hyprforge-tray" }
 hyprforge-clipboard = { path = "crates/hyprforge-clipboard" }
+hyprforge-popup = { path = "crates/hyprforge-popup" }
 hyprforge-clipmenu = { path = "crates/hyprforge-clipmenu" }
+hyprforge-emoji = { path = "crates/hyprforge-emoji", version = "0.1.0" }
 
 # Only hyprforge-lua-import depends on this — evaluating a user's own
 # hyprland.lua (with hl.* stubbed to record calls) to import hand-written

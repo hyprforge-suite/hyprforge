@@ -24,22 +24,25 @@
 //! `crates/hyprforge-clipboard/src/store.rs`) and, on Enter, writes the
 //! chosen entry back out through `chooser::Chooser` — see `chooser::Wired`
 //! for where that plugs into `hyprforge-clipboard`'s write side.
+//!
+//! The layer-shell surface, the event loop, pointer/keyboard handling,
+//! placement and the single-instance lock all live in `hyprforge-popup`
+//! now — see that crate's own module doc for why, and `surface::ClipApp`
+//! for the seam this binary plugs a clipboard history into it through.
 
 mod chooser;
 mod geometry;
 mod model;
 mod pinner;
-mod singleton;
 mod surface;
 mod target;
 mod thumbnail;
 mod view;
 
-use geometry::{Monitor, Point, RowLayout, Size};
-use hyprforge_process::{output, TIMEOUT};
+use geometry::RowLayout;
+use hyprforge_popup::geometry::Size;
 use model::{HistoryState, Model};
-use std::process::Command;
-use surface::{ClipMenu, Outcome, Placement};
+use surface::{ChoiceOutcome, ClipApp};
 
 /// The popup's fixed size in logical pixels. Not configurable yet —
 /// there is nowhere for a setting like this to live until the Settings
@@ -48,60 +51,10 @@ use surface::{ClipMenu, Outcome, Placement};
 const POPUP_WIDTH: f64 = 360.0;
 const POPUP_HEIGHT: f64 = 420.0;
 
-/// `hyprctl cursorpos -j`, in logical global coordinates.
-///
-/// `None` covers every way this can fail to answer: not installed, no
-/// compositor, a malformed reply. All of them mean "don't know where the
-/// cursor is", and the caller falls back to the first monitor's origin
-/// rather than guessing at a position.
-fn cursor_position() -> Option<Point> {
-    let result = output(Command::new("hyprctl").args(["cursorpos", "-j"]), TIMEOUT).ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&result.stdout).ok()?;
-    Some(Point { x: value.get("x")?.as_f64()?, y: value.get("y")?.as_f64()? })
-}
-
-/// `hyprctl monitors -j`, converted to logical rectangles.
-///
-/// `width`/`height` there are **physical** pixels; dividing by `scale`
-/// is what makes them comparable to `x`/`y` and to `cursorpos`, which are
-/// already logical. Verified on this machine: a 2560x1600 monitor at
-/// scale 1.6 reports a logical size of 1600x1000, which is the space
-/// `cursorpos` and this popup's placement both live in.
-///
-/// An empty list (no `hyprctl`, no compositor, unparsable JSON) is
-/// reported as such rather than guessed at; `main` treats it as nowhere
-/// to show the popup.
-fn monitors() -> Vec<Monitor> {
-    let Ok(result) = output(Command::new("hyprctl").args(["monitors", "-j"]), TIMEOUT) else {
-        return Vec::new();
-    };
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&result.stdout) else {
-        return Vec::new();
-    };
-    value
-        .as_array()
-        .map(|list| {
-            list.iter()
-                .filter_map(|m| {
-                    let name = m.get("name")?.as_str()?.to_string();
-                    let x = m.get("x")?.as_f64()?;
-                    let y = m.get("y")?.as_f64()?;
-                    let width = m.get("width")?.as_f64()?;
-                    let height = m.get("height")?.as_f64()?;
-                    // A missing or zero scale would divide by zero;
-                    // falling back to 1.0 treats the monitor as
-                    // unscaled rather than producing an infinite size.
-                    let scale = m.get("scale").and_then(|s| s.as_f64()).filter(|s| *s > 0.0).unwrap_or(1.0);
-                    Some(Monitor {
-                        name,
-                        origin: Point { x, y },
-                        size: Size { width: width / scale, height: height / scale },
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
+/// The name this popup's single-instance lock is filed under — see
+/// `hyprforge_popup::singleton`'s own doc for why a name, not a shared
+/// lock, and why an `flock` rather than a name match or a PID file.
+const LOCK_NAME: &str = "hyprforge-clipmenu.lock";
 
 /// A font size the renderer will not choke on.
 ///
@@ -121,42 +74,12 @@ fn sane_font_size(theme: &hyprforge_look::Theme) -> f32 {
     if size.is_finite() { size.clamp(6.0, 48.0) } else { 15.0 }
 }
 
-fn placement(monitors: &[Monitor], cursor: Option<Point>) -> Option<Placement> {
-    let monitor = match cursor {
-        Some(cursor) => geometry::monitor_at(monitors, cursor).or_else(|| monitors.first()),
-        None => monitors.first(),
-    }?;
-    // The cursor position `hyprctl` reports is global; the layer-shell
-    // margins this popup sets are relative to the output it is anchored
-    // to. Translating into the monitor's own local space is what makes
-    // `clamp_popup` (which only ever sees one monitor's rectangle at a
-    // time) correct for any monitor, not just the one at the origin.
-    let local_cursor = match cursor {
-        Some(cursor) => {
-            Point { x: cursor.x - monitor.origin.x, y: cursor.y - monitor.origin.y }
-        }
-        // No cursor position at all: open in the monitor's corner
-        // rather than not at all.
-        None => Point { x: 0.0, y: 0.0 },
-    };
-    let popup = Size { width: POPUP_WIDTH, height: POPUP_HEIGHT };
-    let placed = geometry::clamp_popup(local_cursor, popup, monitor.size);
-    Some(Placement {
-        output_name: monitor.name.clone(),
-        margin_top: placed.y.round() as i32,
-        margin_left: placed.x.round() as i32,
-        width: popup.width.round() as u32,
-        height: popup.height.round() as u32,
-    })
-}
-
 fn main() -> std::process::ExitCode {
     // Only one popup at a time: a keybind pressed twice while one is
     // already open must leave the first alone and exit quietly, not
-    // start a second process — see `singleton`'s own doc for why this is
-    // an flock rather than a PID file or a process-name match.
-    let lock_path = singleton::lock_path();
-    let _lock = match singleton::acquire(&lock_path) {
+    // start a second process.
+    let lock_path = hyprforge_popup::singleton::lock_path(LOCK_NAME);
+    let _lock = match hyprforge_popup::singleton::acquire(&lock_path) {
         Ok(Some(lock)) => Some(lock),
         // Someone already has it: this is a keybind pressed twice, not
         // an error — silent and successful, exactly as if this process
@@ -170,22 +93,22 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    // Read *before* `ClipMenu::run` ever creates a surface: once this
-    // popup's own layer surface exists and takes
-    // `KeyboardInteractivity::Exclusive`, the focused window *is* this
-    // popup, and asking `hyprctl` afterward would only ever answer that.
-    // See `target::focused_window`'s own doc.
+    // Read *before* this popup's own layer surface ever exists: once it
+    // takes `KeyboardInteractivity::Exclusive`, the focused window *is*
+    // this popup, and asking `hyprctl` afterward would only ever answer
+    // that. See `target::focused_window`'s own doc.
     let focused = target::focused_window();
     let paste_shortcut =
         focused.as_ref().map(|w| target::paste_shortcut(&w.class)).unwrap_or(hyprforge_clipboard::Shortcut::CtrlV);
     let paste_target_label = focused.as_ref().map(|w| target::display_name(&w.class));
 
-    let monitors = monitors();
+    let monitors = hyprforge_popup::monitors();
     if monitors.is_empty() {
         eprintln!("couldn't read any monitors from hyprctl — is Hyprland running?");
         return std::process::ExitCode::FAILURE;
     }
-    let Some(placement) = placement(&monitors, cursor_position()) else {
+    let popup_size = Size { width: POPUP_WIDTH, height: POPUP_HEIGHT };
+    let Some(placement) = hyprforge_popup::place(&monitors, hyprforge_popup::cursor_position(), popup_size) else {
         eprintln!("couldn't work out where to place the popup");
         return std::process::ExitCode::FAILURE;
     };
@@ -207,7 +130,7 @@ fn main() -> std::process::ExitCode {
     // physically fit from ever being three different numbers again.
     model.set_window(RowLayout::for_font_size(theme.font_size).rows_that_fit(POPUP_HEIGHT));
 
-    let connection = match wayland_client::Connection::connect_to_env() {
+    let connection = match hyprforge_popup::Connection::connect_to_env() {
         Ok(connection) => connection,
         Err(e) => {
             eprintln!("couldn't connect to the compositor: {e}");
@@ -228,9 +151,13 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    match ClipMenu::run(connection, placement, model, chooser, pinner::Wired, theme, paste_shortcut) {
-        Ok(Outcome::Chosen | Outcome::Cancelled) => std::process::ExitCode::SUCCESS,
-        Ok(Outcome::Closed | Outcome::Disconnected) => {
+    let app = ClipApp::new(model, chooser, pinner::Wired, paste_shortcut);
+
+    match hyprforge_popup::Popup::run(connection, placement, app, theme) {
+        Ok(hyprforge_popup::Outcome::App(ChoiceOutcome::Chosen | ChoiceOutcome::Cancelled)) => {
+            std::process::ExitCode::SUCCESS
+        }
+        Ok(hyprforge_popup::Outcome::Closed | hyprforge_popup::Outcome::Disconnected) => {
             eprintln!("the popup closed unexpectedly");
             std::process::ExitCode::FAILURE
         }
@@ -244,36 +171,6 @@ fn main() -> std::process::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn monitor(name: &str, x: f64, y: f64, width: f64, height: f64) -> Monitor {
-        Monitor { name: name.into(), origin: Point { x, y }, size: Size { width, height } }
-    }
-
-    #[test]
-    fn the_popup_is_placed_on_the_monitor_the_cursor_is_over() {
-        let monitors = vec![monitor("eDP-2", 0.0, 0.0, 1600.0, 1000.0), monitor("DP-3", 1600.0, 0.0, 1920.0, 1080.0)];
-        let placed = placement(&monitors, Some(Point { x: 1700.0, y: 50.0 })).unwrap();
-        assert_eq!(placed.output_name, "DP-3");
-        // 100 into the second monitor, not 1700 into the first.
-        assert_eq!(placed.margin_left, 100);
-        assert_eq!(placed.margin_top, 50);
-    }
-
-    #[test]
-    fn a_cursor_position_that_could_not_be_read_falls_back_to_the_first_monitor() {
-        let monitors = vec![monitor("eDP-2", 0.0, 0.0, 1600.0, 1000.0)];
-        let placed = placement(&monitors, None).unwrap();
-        assert_eq!(placed.output_name, "eDP-2");
-        assert_eq!((placed.margin_left, placed.margin_top), (0, 0));
-    }
-
-    #[test]
-    fn placement_still_clamps_to_the_monitor_the_cursor_landed_on() {
-        let monitors = vec![monitor("eDP-2", 0.0, 0.0, 1600.0, 1000.0)];
-        let placed = placement(&monitors, Some(Point { x: 1590.0, y: 990.0 })).unwrap();
-        assert!(placed.margin_left as f64 + placed.width as f64 <= 1600.0);
-        assert!(placed.margin_top as f64 + placed.height as f64 <= 1000.0);
-    }
 
     /// The regression test for the bug that started all of this: the
     /// model's row window has to be *derived* from the popup's own fixed

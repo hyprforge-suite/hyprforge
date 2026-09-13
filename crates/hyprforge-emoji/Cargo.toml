@@ -1,0 +1,21 @@
+[package]
+name = "hyprforge-emoji"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "CLDR-ordered emoji data and pure search, generated from Unicode's emoji-test.txt, for building an emoji picker."
+repository = "https://github.com/adamrpostjr/hyprforge"
+documentation = "https://docs.rs/hyprforge-emoji"
+keywords = ["emoji", "unicode", "cldr", "picker", "search"]
+categories = ["internationalization", "data-structures"]
+
+# Deliberately no dependencies at all, like hyprforge-paths and
+# hyprforge-process. This crate is a table plus string matching over it;
+# neither needs anything beyond std. It is also a leaf with no
+# hyprforge-* dependency: a picker UI depends on this, not the other way
+# round, and nothing here is Hyprland-shaped.
+[dependencies]
+
+# The generator (src/bin/generate.rs) that turns data/emoji-test.txt into
+# src/generated.rs is a bin target in this same package, so it needs no
+# dependency either — see that file's doc comment for how to run it.
