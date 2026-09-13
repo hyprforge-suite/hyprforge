@@ -8,7 +8,7 @@ shell, modeled directly on iced's own `update`/`view` split so a screen
 feels like a miniature iced application rather than a bespoke plugin
 API — the modules themselves live under `src/modules/`.
 
-Part of [Hyprforge](https://github.com/apost/hyprforge), a suite of
+Part of [Hyprforge](https://github.com/adamrpostjr/hyprforge), a suite of
 native Hyprland desktop apps.
 
 ## This is the hub, and it is honestly not standalone the way the rest are
