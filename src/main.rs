@@ -106,7 +106,7 @@ fn main() -> std::process::ExitCode {
     // be derived from what actually fits, never a separate hardcoded
     // number that can silently drift out of step with it.
     let grid = GridLayout::for_font_size(theme.font_size);
-    model.set_grid(grid.columns(POPUP_WIDTH), grid.rows_that_fit(POPUP_HEIGHT));
+    model.set_grid(grid.columns(POPUP_WIDTH), grid.viewport_height(POPUP_HEIGHT), grid.row_stride(), grid.spacing);
 
     let connection = match hyprforge_popup::Connection::connect_to_env() {
         Ok(connection) => connection,
@@ -156,12 +156,17 @@ mod tests {
         let rows = grid.rows_that_fit(POPUP_HEIGHT);
 
         let mut model = Model::new(None);
-        model.set_grid(columns, rows);
+        model.set_grid(columns, grid.viewport_height(POPUP_HEIGHT), grid.row_stride(), grid.spacing);
 
+        // At least as many cells as the whole rows that fully fit — a
+        // pixel viewport can now show one further partially-visible row
+        // too (see `Model::visible_range`'s own doc), so this is no
+        // longer required to be an exact upper bound.
         let visible = model.visible_range();
-        assert!(visible.len() <= columns * rows);
+        assert!(visible.len() >= rows.saturating_sub(1) * columns);
 
-        // Every one of those cells has to actually fit inside the popup.
+        // Every whole row `rows_that_fit` claims fits must actually fit
+        // inside the popup.
         let stride = grid.cell_size + grid.spacing;
         let last_row_bottom = grid.padding + grid.header_height + (rows as f64 - 1.0) * stride + grid.cell_size;
         assert!(last_row_bottom <= POPUP_HEIGHT - grid.padding);
