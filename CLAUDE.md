@@ -193,6 +193,41 @@ message and a way out of it. And a connection that failed is never
 cached, because the message telling the user to start the service keeps
 being shown after they do. That one has been got wrong three times.
 
+## Every component runs alone, and is better together
+
+This is a suite, and someone must still be able to install only the
+clipboard. Those pull against each other only if "shared at build time"
+is confused with "required at run time". They are different things.
+
+**Shared at build time** is what makes it a suite. One
+`hyprforge_look::Theme`, one widget vocabulary, one keyboard grammar —
+and one place to fix them, which is why `web-colors` was a single
+`default-features = false` rather than the same edit in five apps.
+
+**Split at install time** is what makes it honest. `packaging/arch`
+builds one source tree into separate packages, so `hyprforge-clipboard`
+installs two binaries and nothing else. Packaging granularity and
+repository granularity are different questions, and only the first
+decides what a user can install.
+
+**So every component has to work with its siblings absent.** That is the
+rule, and it is the one that breaks quietly:
+
+- A missing `appearance.toml` is first-run, not an error. The clipboard
+  popup draws correctly themed on a machine where the Settings app has
+  never been installed, let alone run.
+- A service that is not running is a state with a message, never a
+  failure. The tray says "NetworkManager isn't running" and keeps its
+  other icons.
+- A sibling binary that is not installed is a logged warning. Clicking a
+  tray icon when `hyprforge-settings` is absent fails to spawn and says
+  so; it does not take the daemon down.
+
+The test for a new component is: **install only this package on a clean
+machine. Does it work?** If it needs another Hyprforge component to
+start, that dependency belongs in the package metadata or the need
+belongs in the design — not in a user's surprise.
+
 ## Checking your work
 
 ```
