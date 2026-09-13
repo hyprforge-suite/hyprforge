@@ -60,11 +60,28 @@ pub struct ClipApp<C: Chooser> {
     /// would otherwise need to thread through everywhere.
     pinner: Box<dyn Pinner>,
     shortcut: Shortcut,
+    /// The popup's own fixed width — needed for the scrollbar's track,
+    /// which sits at a fixed offset from the *right* edge (see
+    /// `geometry::RowLayout::scrollbar`), the same reason
+    /// `hyprforge-emojimenu::popup_app::EmojiApp` keeps its own copy.
+    /// [`Self::pointer_drag_start`]/[`Self::pointer_drag_move`] need it
+    /// and are not handed one directly the way [`Self::pointer_click`]
+    /// is (a click can afford the redundancy; a drag's own trait methods
+    /// do not carry a width parameter at all).
+    width: f64,
+    /// The pointer's own y position as of the last drag event — `None`
+    /// whenever no scrollbar-thumb drag is in progress. Set by
+    /// [`Self::pointer_drag_start`], updated by every
+    /// [`Self::pointer_drag_move`], cleared by [`Self::pointer_drag_end`]
+    /// — what turns a drag's *absolute* pointer position into the
+    /// *delta* `hyprforge_popup::Scrollbar::drag_delta_to_offset_delta`
+    /// wants.
+    drag_last_y: Option<f64>,
 }
 
 impl<C: Chooser> ClipApp<C> {
-    pub fn new(model: Model, chooser: C, pinner: impl Pinner + 'static, shortcut: Shortcut) -> ClipApp<C> {
-        ClipApp { model, thumbnails: thumbnail::Cache::new(), chooser, pinner: Box::new(pinner), shortcut }
+    pub fn new(model: Model, chooser: C, pinner: impl Pinner + 'static, shortcut: Shortcut, width: f64) -> ClipApp<C> {
+        ClipApp { model, thumbnails: thumbnail::Cache::new(), chooser, pinner: Box::new(pinner), shortcut, width, drag_last_y: None }
     }
 }
 
@@ -88,7 +105,7 @@ impl<C: Chooser + 'static> hyprforge_popup::PopupApp for ClipApp<C> {
     fn pointer_move(&mut self, theme: &Theme, position: (f64, f64)) -> bool {
         let layout = RowLayout::for_font_size(theme.font_size);
         let range = self.model.visible_range();
-        let row = layout.row_at(position.1, range.len());
+        let row = layout.row_at(position.1, range.len(), self.model.scroll_remainder());
         if let Some(row) = row {
             dispatch_action(&mut self.model, &self.chooser, self.pinner.as_ref(), Action::Select(range.start + row));
         }
@@ -108,7 +125,7 @@ impl<C: Chooser + 'static> hyprforge_popup::PopupApp for ClipApp<C> {
     fn pointer_click(&mut self, theme: &Theme, width: f64, position: (f64, f64)) -> Option<ChoiceOutcome> {
         let layout = RowLayout::for_font_size(theme.font_size);
         let range = self.model.visible_range();
-        let hit = layout.hit_test(width, position, range.len())?;
+        let hit = layout.hit_test(width, position, range.len(), self.model.scroll_remainder())?;
         dispatch_action(&mut self.model, &self.chooser, self.pinner.as_ref(), Action::Select(range.start + hit.row()));
         let action = match hit {
             Hit::Pin(_) => Action::TogglePin,
@@ -117,10 +134,47 @@ impl<C: Chooser + 'static> hyprforge_popup::PopupApp for ClipApp<C> {
         dispatch_action(&mut self.model, &self.chooser, self.pinner.as_ref(), action)
     }
 
-    /// Moved through [`Action::Move`], the same action Up/Down produce,
-    /// so scrolling cannot desync from what the arrow keys do.
+    /// Scrolls the *view*, not the selection — continuous pixels rather
+    /// than snapping the selection (and the window with it) a whole row
+    /// at a time the way this used to route through [`Action::Move`].
+    /// `rows` is already turned into whole notches by
+    /// `hyprforge_popup::scroll_rows`; each notch moves the view by one
+    /// row's own stride, which reads as smooth continuous motion under a
+    /// touchpad's many small notches even though any single notch is
+    /// still row-sized.
     fn pointer_scroll(&mut self, rows: i32) {
-        dispatch_action(&mut self.model, &self.chooser, self.pinner.as_ref(), Action::Move(rows));
+        let stride = self.model.row_stride();
+        self.model.scroll_by(rows as f64 * stride);
+    }
+
+    /// A left-button press landed at `position` — starts a scrollbar-thumb
+    /// drag if it landed on the thumb, otherwise leaves the press to
+    /// resolve as an ordinary click exactly as it always has (this popup
+    /// never opts into long-press detection either).
+    fn pointer_drag_start(&mut self, theme: &Theme, position: (f64, f64)) -> bool {
+        let layout = RowLayout::for_font_size(theme.font_size);
+        let bar = layout.scrollbar(self.width, self.model.viewport_height());
+        let content_height = layout.content_height(self.model.filtered().len());
+        if bar.hit_thumb(position, content_height, self.model.scroll_offset()) {
+            self.drag_last_y = Some(position.1);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn pointer_drag_move(&mut self, theme: &Theme, position: (f64, f64)) {
+        let Some(last_y) = self.drag_last_y else { return };
+        self.drag_last_y = Some(position.1);
+        let layout = RowLayout::for_font_size(theme.font_size);
+        let bar = layout.scrollbar(self.width, self.model.viewport_height());
+        let content_height = layout.content_height(self.model.filtered().len());
+        let delta = bar.drag_delta_to_offset_delta(position.1 - last_y, content_height);
+        self.model.scroll_by(delta);
+    }
+
+    fn pointer_drag_end(&mut self) {
+        self.drag_last_y = None;
     }
 
     fn key(&mut self, keysym: Keysym, utf8: Option<String>) -> Option<ChoiceOutcome> {

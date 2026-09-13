@@ -181,6 +181,34 @@ pub trait PopupApp {
     /// see [`crate::scroll::scroll_rows`].
     fn pointer_scroll(&mut self, rows: i32);
 
+    /// A left-button press landed at `position` — asks whether this is
+    /// the start of a scrollbar-thumb drag rather than an ordinary click.
+    /// `true` tells [`Popup`] to route every following `Motion` to
+    /// [`Self::pointer_drag_move`] instead of [`Self::pointer_move`], and
+    /// the eventual `Release` to [`Self::pointer_drag_end`] instead of
+    /// [`Self::pointer_click`] — the same "gate the whole mechanism on
+    /// one opt-in call" shape [`Self::long_press_duration`] already uses,
+    /// for the same reason: an app with no draggable thumb (or no thumb
+    /// under this particular press) must see *exactly* the click
+    /// behaviour it always has, not a new deferred path it never asked
+    /// for. Default `false`, which is what every consumer gets until it
+    /// has a scrollbar of its own to drag.
+    fn pointer_drag_start(&mut self, _theme: &Theme, _position: (f64, f64)) -> bool {
+        false
+    }
+
+    /// The pointer moved while dragging the thumb this press started —
+    /// called instead of [`Self::pointer_move`] for as long as the drag
+    /// lasts. Never called unless [`Self::pointer_drag_start`] returned
+    /// `true` for the press that is still down.
+    fn pointer_drag_move(&mut self, _theme: &Theme, _position: (f64, f64)) {}
+
+    /// The button that started a thumb drag was released — the drag's
+    /// counterpart to an ordinary click landing, except a drag never
+    /// itself ends the popup (there is no [`Outcome`] a scrollbar drag
+    /// could mean).
+    fn pointer_drag_end(&mut self) {}
+
     /// A key was pressed (or is auto-repeating). `Some` ends the popup
     /// with that outcome.
     fn key(&mut self, keysym: smithay_client_toolkit::seat::keyboard::Keysym, utf8: Option<String>) -> Option<Self::Outcome>;
@@ -290,6 +318,15 @@ pub struct Popup<A: PopupApp> {
     /// `long_press_checked`, to decide whether the eventual release is
     /// still an ordinary click (see `pointer_frame`).
     long_press_fired: bool,
+    /// Whether the button currently held down started a scrollbar-thumb
+    /// drag — set by [`PopupApp::pointer_drag_start`] answering `true` on
+    /// `Press`, cleared on `Release`. While this is `true`, `Motion`
+    /// routes to [`PopupApp::pointer_drag_move`] instead of
+    /// [`PopupApp::pointer_move`], and the eventual `Release` calls
+    /// [`PopupApp::pointer_drag_end`] instead of resolving a click —
+    /// see [`PopupApp::pointer_drag_start`]'s own doc for why this is
+    /// gated the same way long-press detection is.
+    dragging: bool,
 }
 
 impl<A: PopupApp + 'static> Popup<A> {
@@ -335,6 +372,7 @@ impl<A: PopupApp + 'static> Popup<A> {
             pending_press: None,
             long_press_checked: false,
             long_press_fired: false,
+            dragging: false,
         };
 
         // Outputs have to be known before a surface can be pinned to
@@ -775,8 +813,16 @@ impl<A: PopupApp + 'static> PointerHandler for Popup<A> {
         // applied, not just the last.
         for event in events {
             match &event.kind {
-                PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
+                PointerEventKind::Enter { .. } => {
                     self.pointer_move(event.position);
+                }
+                PointerEventKind::Motion { .. } => {
+                    if self.dragging {
+                        self.app.pointer_drag_move(&self.theme, event.position);
+                        self.mark_dirty();
+                    } else {
+                        self.pointer_move(event.position);
+                    }
                 }
                 PointerEventKind::Leave { .. } => {
                     // Nothing to un-highlight: the selection is the same
@@ -786,15 +832,27 @@ impl<A: PopupApp + 'static> PointerHandler for Popup<A> {
                 }
                 PointerEventKind::Press { button, .. } => {
                     if *button == BTN_LEFT {
-                        // Deferring the click to `Release` unconditionally
-                        // would change every existing popup's timing (click
-                        // on mouse-up instead of mouse-down) for no benefit
-                        // to it — long-press detection is the only reason
-                        // to wait at all, so this only defers when the app
-                        // actually opted in (see `PopupApp::long_press_duration`'s
-                        // own doc). `hyprforge-clipmenu` never does, so its
-                        // click still fires right here, exactly as before.
-                        if self.app.long_press_duration().is_some() {
+                        // A thumb drag is checked for first and gates
+                        // everything else the same way long-press
+                        // detection does (see `PopupApp::pointer_drag_start`'s
+                        // own doc): an app with no draggable thumb under
+                        // this press always answers `false`, so its click
+                        // still fires exactly as before.
+                        if self.app.pointer_drag_start(&self.theme, event.position) {
+                            self.dragging = true;
+                            self.mark_dirty();
+                        } else if self.app.long_press_duration().is_some() {
+                            // Deferring the click to `Release`
+                            // unconditionally would change every existing
+                            // popup's timing (click on mouse-up instead of
+                            // mouse-down) for no benefit to it —
+                            // long-press detection is the only reason to
+                            // wait at all, so this only defers when the
+                            // app actually opted in (see
+                            // `PopupApp::long_press_duration`'s own doc).
+                            // `hyprforge-clipmenu` never does, so its
+                            // click still fires right here, exactly as
+                            // before.
                             self.pending_press = Some((event.position, std::time::Instant::now()));
                             self.long_press_checked = false;
                             self.long_press_fired = false;
@@ -805,7 +863,11 @@ impl<A: PopupApp + 'static> PointerHandler for Popup<A> {
                 }
                 PointerEventKind::Release { button, .. } => {
                     if *button == BTN_LEFT {
-                        if let Some((press_position, _)) = self.pending_press.take() {
+                        if self.dragging {
+                            self.dragging = false;
+                            self.app.pointer_drag_end();
+                            self.mark_dirty();
+                        } else if let Some((press_position, _)) = self.pending_press.take() {
                             if self.long_press_fired {
                                 // The long press already changed
                                 // something (opened a tone strip, say);

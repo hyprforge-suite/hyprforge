@@ -15,7 +15,9 @@
 //!
 //! In: the Wayland/iced plumbing ([`popup`]), placement
 //! ([`geometry`], [`placement`]), the single-instance lock
-//! ([`singleton`]), and the pure scroll-wheel arithmetic ([`scroll`]).
+//! ([`singleton`]), the pure scroll-wheel arithmetic ([`scroll`]), and
+//! the pixel-offset scrollbar both popups draw and drag
+//! ([`scrollbar`]).
 //!
 //! Not in: what a popup's content *means* — a clipboard entry, a pin, an
 //! emoji, a search filter's own keybinds. That is `PopupApp`'s job, one
@@ -55,11 +57,13 @@ pub mod geometry;
 pub mod placement;
 pub mod popup;
 pub mod scroll;
+pub mod scrollbar;
 pub mod singleton;
 
 pub use placement::{cursor_position, monitors, place};
 pub use popup::{Outcome, Placement, Popup, PopupApp, PopupError, FOCUS_RELEASE_TIMEOUT};
 pub use scroll::scroll_rows;
+pub use scrollbar::{clamp_offset, scroll_into_view, Scrollbar};
 /// Re-exported so a `PopupApp` implementation never needs its own direct
 /// `smithay-client-toolkit` dependency just to name the type
 /// [`PopupApp::key`] hands it.

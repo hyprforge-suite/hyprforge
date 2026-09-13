@@ -129,10 +129,20 @@ where
         // already applies `PADDING`, so only the extra slack is added
         // here — and it is the *same* number `GridLayout::cell_at`
         // measures from, which is what keeps a click landing on the cell
-        // under the pointer.
+        // under the pointer. The top padding is negative by
+        // `scroll_remainder` — the same shift `GridLayout::cell_at` adds
+        // to a pointer's own `y` before hit-testing (see that method's
+        // own doc) — so whatever this container draws at is exactly what
+        // a click or a hover resolves against. Clipped to a fixed
+        // `viewport_height` is what makes a partially visible row at the
+        // top or bottom look clipped instead of spilling into the header
+        // or past the popup's own edge.
         let indent = (grid.left_margin(popup_width, columns) - GridLayout::PADDING).max(0.0);
         container(column(rows_vec).spacing(grid.spacing as f32))
-            .padding(Padding { top: 0.0, right: 0.0, bottom: 0.0, left: indent as f32 })
+            .padding(Padding { top: -(model.scroll_remainder() as f32), right: 0.0, bottom: 0.0, left: indent as f32 })
+            .width(Length::Fill)
+            .height(Length::Fixed(model.viewport_height() as f32))
+            .clip(true)
             .into()
     };
 
@@ -151,13 +161,51 @@ where
     })
     .into();
 
-    match model.tone_overlay() {
-        Some(cursor) => {
-            let strip = ToneStrip::for_font_size(theme.font_size, &grid);
-            let overlay = tone_overlay(model, cursor, theme, &strip);
-            Stack::with_children([content, overlay]).width(Length::Fill).height(Length::Fill).into()
-        }
-        None => content,
+    // The scrollbar: drawn only when there is more content than the
+    // viewport shows — a scrollbar that cannot scroll is noise.
+    // `grid.scrollbar` is the *one* place this crate computes the
+    // track's geometry (see that method's own doc); reading it here
+    // rather than recomputing the track's rectangle a second way is what
+    // keeps a drawn thumb and a dragged thumb from disagreeing about
+    // where it is.
+    let rows_total = if columns == 0 { 0 } else { filtered.len().div_ceil(columns) };
+    let bar = grid.scrollbar(popup_width, model.viewport_height());
+    let content_height = grid.content_height(rows_total);
+    let mut layers: Vec<Element<'a, Message, iced_widget::Theme, Renderer>> = vec![content];
+    if bar.is_needed(content_height) {
+        let thumb_top = bar.thumb_top(content_height, model.scroll_offset());
+        let thumb_height = bar.thumb_height(content_height);
+        let thumb_color = to_iced(theme.accent);
+        let bar_width = bar.width;
+        layers.push(
+            container(
+                container(Space::new())
+                    .width(Length::Fixed(bar_width as f32))
+                    .height(Length::Fixed(thumb_height as f32))
+                    .style(move |_: &iced_widget::Theme| container::Style {
+                        background: Some(thumb_color.into()),
+                        border: iced_runtime::core::Border {
+                            radius: (bar_width as f32 / 2.0).into(),
+                            width: 0.0,
+                            color: thumb_color,
+                        },
+                        ..Default::default()
+                    }),
+            )
+            .padding(Padding { top: thumb_top as f32, left: bar.track_x as f32, right: 0.0, bottom: 0.0 })
+            .into(),
+        );
+    }
+
+    if let Some(cursor) = model.tone_overlay() {
+        let strip = ToneStrip::for_font_size(theme.font_size, &grid);
+        layers.push(tone_overlay(model, cursor, theme, &strip));
+    }
+
+    if layers.len() > 1 {
+        Stack::with_children(layers).width(Length::Fill).height(Length::Fill).into()
+    } else {
+        layers.into_iter().next().unwrap()
     }
 }
 

@@ -14,7 +14,7 @@ use hyprforge_clipboard::{Content, Entry};
 use hyprforge_look::Theme;
 use iced_runtime::core::text::Wrapping;
 use iced_runtime::core::{Element, Length, Padding};
-use iced_widget::{column, container, row, text, Space};
+use iced_widget::{column, container, row, text, Space, Stack};
 
 fn to_iced(c: hyprforge_look::Color) -> iced_runtime::core::Color {
     iced_runtime::core::Color::from_rgba8(c.r, c.g, c.b, c.a as f32 / 255.0)
@@ -135,12 +135,27 @@ where
                         entry_row(entry, index == selected, theme, &layout, thumbnails, now, popup_width)
                     })
                     .collect::<Vec<_>>();
-                column(rows).spacing(RowLayout::ROW_SPACING as f32).into()
+                // Shifted up by `scroll_remainder` — the same number
+                // `geometry::RowLayout::row_at` adds to a pointer's own
+                // `y` before hit-testing (see that method's own doc), so
+                // whatever this container draws at is exactly what a
+                // click or a hover resolves against. Clipped to a fixed
+                // `viewport_height` (rather than left to grow with
+                // however many rows got built) is what makes a partially
+                // visible row at the top or bottom look clipped instead
+                // of spilling into the header or past the popup's own
+                // edge — continuous scrolling's whole point.
+                container(column(rows).spacing(RowLayout::ROW_SPACING as f32))
+                    .padding(Padding { top: -(model.scroll_remainder() as f32), right: 0.0, bottom: 0.0, left: 0.0 })
+                    .width(Length::Fill)
+                    .height(Length::Fixed(model.viewport_height() as f32))
+                    .clip(true)
+                    .into()
             }
         }
     };
 
-    container(
+    let content: Element<'a, Message, iced_widget::Theme, Renderer> = container(
         column![header, Space::new().height(RowLayout::HEADER_GAP as f32), body]
             .spacing(0)
             .width(Length::Fill),
@@ -162,7 +177,37 @@ where
         },
         ..Default::default()
     })
-    .into()
+    .into();
+
+    // The scrollbar: drawn only when there is more content than the
+    // viewport shows (`Scrollbar::is_needed`) — a scrollbar that cannot
+    // scroll is noise. `layout.scrollbar` is the *one* place this crate
+    // computes the track's geometry (see that method's own doc); reading
+    // it here rather than recomputing the track's rectangle a second way
+    // is what keeps a drawn thumb and a dragged thumb from disagreeing
+    // about where it is.
+    let bar = layout.scrollbar(popup_width, model.viewport_height());
+    let content_height = layout.content_height(model.filtered().len());
+    if !bar.is_needed(content_height) {
+        return content;
+    }
+    let thumb_top = bar.thumb_top(content_height, model.scroll_offset());
+    let thumb_height = bar.thumb_height(content_height);
+    let thumb_color = to_iced(theme.accent);
+    let scrollbar: Element<'a, Message, iced_widget::Theme, Renderer> = container(
+        container(Space::new())
+            .width(Length::Fixed(bar.width as f32))
+            .height(Length::Fixed(thumb_height as f32))
+            .style(move |_: &iced_widget::Theme| container::Style {
+                background: Some(thumb_color.into()),
+                border: iced_runtime::core::Border { radius: (bar.width as f32 / 2.0).into(), width: 0.0, color: thumb_color },
+                ..Default::default()
+            }),
+    )
+    .padding(Padding { top: thumb_top as f32, left: bar.track_x as f32, right: 0.0, bottom: 0.0 })
+    .into();
+
+    Stack::with_children([content, scrollbar]).width(Length::Fill).height(Length::Fill).into()
 }
 
 /// The theme's corner radius, bounded so it cannot describe a shape the

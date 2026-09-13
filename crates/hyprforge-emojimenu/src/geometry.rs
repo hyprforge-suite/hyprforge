@@ -116,6 +116,46 @@ impl GridLayout {
         ((available / stride).floor() as usize).max(1)
     }
 
+    /// One grid row's own stride — a cell's side length plus the spacing
+    /// after it. The pixel unit [`crate::model::Model::set_grid`] scrolls
+    /// in, and what `crate::popup_app::EmojiApp::pointer_scroll` moves
+    /// the view by per wheel notch.
+    pub fn row_stride(&self) -> f64 {
+        self.cell_size + self.spacing
+    }
+
+    /// How tall the popup's own scrollable content area is below the
+    /// header — the same "available" figure [`Self::rows_that_fit`]
+    /// floors to a whole row count, kept raw here because continuous
+    /// scrolling wants the pixel figure: a partially visible row at the
+    /// top or bottom is expected now, not floored away.
+    pub fn viewport_height(&self, popup_height: f64) -> f64 {
+        (popup_height - self.padding * 2.0 - self.header_height).max(0.0)
+    }
+
+    /// The total height of `row_count` rows stacked with their own
+    /// spacing between them (but none trailing the last one) — the
+    /// "content height" half of the scrollbar/offset arithmetic.
+    pub fn content_height(&self, row_count: usize) -> f64 {
+        if row_count == 0 {
+            return 0.0;
+        }
+        row_count as f64 * self.row_stride() - self.spacing
+    }
+
+    /// The scrollbar's own track geometry for a popup `popup_width` wide
+    /// showing a viewport `viewport_height` tall — the **one** place
+    /// this crate computes it, read by both `popup_app.rs` (hit-testing
+    /// a press or a drag against the thumb) and `view.rs` (drawing the
+    /// track and thumb). See `hyprforge-clipmenu::geometry::RowLayout::scrollbar`'s
+    /// identical doc for why this is a single function rather than two
+    /// independently-written copies of "where the scrollbar is".
+    pub fn scrollbar(&self, popup_width: f64, viewport_height: f64) -> hyprforge_popup::Scrollbar {
+        let track_x = popup_width - self.padding - hyprforge_popup::Scrollbar::WIDTH;
+        let track_top = self.padding + self.header_height;
+        hyprforge_popup::Scrollbar::new(track_x, track_top, viewport_height)
+    }
+
     /// The cell index (row-major: `row * columns + col`) under
     /// `position`, among `visible_cells` currently built — the same
     /// "which of the cells actually on screen" scoping
@@ -147,18 +187,26 @@ impl GridLayout {
         self.padding + (slack.max(0.0) / 2.0)
     }
 
+    /// `scroll_remainder` is how many pixels of the first *built* row
+    /// (`Model::scroll_remainder`) sit above the header — added to
+    /// `position`'s own `y` before anything else, the same shift
+    /// `view.rs` draws the rendered rows with (see that module's own
+    /// comment), so this and the drawing can never disagree about where
+    /// row 0 of the built window actually is. Passing `0.0` reproduces
+    /// this method's pre-scrolling behaviour exactly.
     pub fn cell_at(
         &self,
         position: (f64, f64),
         width: f64,
         columns: usize,
         visible_cells: usize,
+        scroll_remainder: f64,
     ) -> Option<usize> {
         if columns == 0 || visible_cells == 0 {
             return None;
         }
         let x = position.0 - self.left_margin(width, columns);
-        let y = position.1 - self.padding - self.header_height;
+        let y = position.1 - self.padding - self.header_height + scroll_remainder;
         if x < 0.0 || y < 0.0 {
             return None;
         }
@@ -356,23 +404,23 @@ mod tests {
 
         // Just inside the first cell hits it; just outside does not.
         let top = layout.padding + layout.header_height;
-        assert_eq!(layout.cell_at((left_edge + 0.01, top), TEST_WIDTH, columns, 20), Some(0));
-        assert_eq!(layout.cell_at((left_edge - 0.01, top), TEST_WIDTH, columns, 20), None);
+        assert_eq!(layout.cell_at((left_edge + 0.01, top), TEST_WIDTH, columns, 20, 0.0), Some(0));
+        assert_eq!(layout.cell_at((left_edge - 0.01, top), TEST_WIDTH, columns, 20, 0.0), None);
     }
 
     #[test]
     fn a_pointer_over_the_header_hits_no_cell() {
         let layout = GridLayout::for_font_size(15.0);
-        assert_eq!(layout.cell_at((left(&layout), 0.0), TEST_WIDTH, 4, 20), None);
+        assert_eq!(layout.cell_at((left(&layout), 0.0), TEST_WIDTH, 4, 20, 0.0), None);
     }
 
     #[test]
     fn the_first_cell_starts_right_after_the_header() {
         let layout = GridLayout::for_font_size(15.0);
         let top = layout.padding + layout.header_height;
-        assert_eq!(layout.cell_at((left(&layout), top), TEST_WIDTH, 4, 20), Some(0));
+        assert_eq!(layout.cell_at((left(&layout), top), TEST_WIDTH, 4, 20, 0.0), Some(0));
         assert_eq!(
-            layout.cell_at((left(&layout) + layout.cell_size - 0.01, top + layout.cell_size - 0.01), TEST_WIDTH, 4, 20),
+            layout.cell_at((left(&layout) + layout.cell_size - 0.01, top + layout.cell_size - 0.01), TEST_WIDTH, 4, 20, 0.0),
             Some(0),
             "must still be cell 0 right up to its own far edge"
         );
@@ -388,7 +436,7 @@ mod tests {
             for col in 0..columns {
                 let x = left(&layout) + col as f64 * stride + layout.cell_size / 2.0;
                 let y = top + row as f64 * stride + layout.cell_size / 2.0;
-                assert_eq!(layout.cell_at((x, y), TEST_WIDTH, columns, 12), Some(row * columns + col));
+                assert_eq!(layout.cell_at((x, y), TEST_WIDTH, columns, 12, 0.0), Some(row * columns + col));
             }
         }
     }
@@ -398,7 +446,7 @@ mod tests {
         let layout = GridLayout::for_font_size(15.0);
         let top = layout.padding + layout.header_height;
         let gap_x = left(&layout) + layout.cell_size + layout.spacing / 2.0;
-        assert_eq!(layout.cell_at((gap_x, top + layout.cell_size / 2.0), TEST_WIDTH, 4, 20), None);
+        assert_eq!(layout.cell_at((gap_x, top + layout.cell_size / 2.0), TEST_WIDTH, 4, 20, 0.0), None);
     }
 
     #[test]
@@ -407,7 +455,7 @@ mod tests {
         let top = layout.padding + layout.header_height;
         let stride = layout.cell_size + layout.spacing;
         let past_last_column = left(&layout) + 4.0 * stride + 1.0;
-        assert_eq!(layout.cell_at((past_last_column, top), TEST_WIDTH, 4, 20), None);
+        assert_eq!(layout.cell_at((past_last_column, top), TEST_WIDTH, 4, 20, 0.0), None);
     }
 
     #[test]
@@ -419,15 +467,55 @@ mod tests {
         // rather than resolving to a cell nothing drew.
         let stride = layout.cell_size + layout.spacing;
         let y = top + 2.0 * stride + layout.cell_size / 2.0;
-        assert_eq!(layout.cell_at((left(&layout), y), TEST_WIDTH, 4, 8), None);
+        assert_eq!(layout.cell_at((left(&layout), y), TEST_WIDTH, 4, 8, 0.0), None);
     }
 
     #[test]
     fn zero_columns_or_zero_visible_cells_hits_nothing_rather_than_dividing_by_zero() {
         let layout = GridLayout::for_font_size(15.0);
         let top = layout.padding + layout.header_height;
-        assert_eq!(layout.cell_at((left(&layout), top), TEST_WIDTH, 0, 20), None);
-        assert_eq!(layout.cell_at((left(&layout), top), TEST_WIDTH, 4, 0), None);
+        assert_eq!(layout.cell_at((left(&layout), top), TEST_WIDTH, 0, 20, 0.0), None);
+        assert_eq!(layout.cell_at((left(&layout), top), TEST_WIDTH, 4, 0, 0.0), None);
+    }
+
+    // --- `cell_at` under a scroll remainder — the same cells shifted up
+    // by whatever pixel amount `view.rs` shifted the rendered rows by, so
+    // a hit-test and a drawing that agree on the offset must still agree
+    // on which cell is where.
+
+    #[test]
+    fn a_positive_scroll_remainder_shifts_which_row_a_position_hits() {
+        let layout = GridLayout::for_font_size(15.0);
+        let stride = layout.row_stride();
+        let top = layout.padding + layout.header_height;
+        // With no scroll, this point is inside row 0 (cell 0).
+        assert_eq!(layout.cell_at((left(&layout), top + 2.0), TEST_WIDTH, 4, 20, 0.0), Some(0));
+        // Scrolled by a whole stride, the same screen position now reads
+        // as one row further into the (scrolled) window.
+        assert_eq!(layout.cell_at((left(&layout), top + 2.0), TEST_WIDTH, 4, 20, stride), Some(4));
+    }
+
+    // --- `content_height`/`viewport_height`: the scrollbar/offset
+    // arithmetic's "how tall" half.
+
+    #[test]
+    fn content_height_matches_the_pixels_view_rs_actually_stacks() {
+        let layout = GridLayout::for_font_size(15.0);
+        let stride = layout.row_stride();
+        assert_eq!(layout.content_height(3), 3.0 * stride - layout.spacing);
+        assert_eq!(layout.content_height(0), 0.0, "no rows is no content, not a negative spacing");
+    }
+
+    #[test]
+    fn viewport_height_is_the_same_available_figure_rows_that_fit_floors() {
+        let layout = GridLayout::for_font_size(15.0);
+        let height = 420.0;
+        let viewport = layout.viewport_height(height);
+        let rows = layout.rows_that_fit(height);
+        assert!(
+            layout.content_height(rows) <= viewport + 0.001,
+            "the rows rows_that_fit claims fit must actually fit inside the raw viewport height"
+        );
     }
 
     // --- ToneStrip: the five-cell overlay a long press opens.

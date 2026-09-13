@@ -136,10 +136,56 @@ impl RowLayout {
         }
     }
 
+    /// How tall the popup's own scrollable content area is below the
+    /// header — the viewport height a [`hyprforge_popup::Scrollbar`] and
+    /// [`hyprforge_popup::clamp_offset`] both need, and the same
+    /// "available" figure [`Self::rows_that_fit`] floors to a whole row
+    /// count. Kept separate from that method because continuous
+    /// scrolling wants the raw pixel figure — a partially visible row at
+    /// the top or bottom is expected now, not floored away.
+    pub fn viewport_height(&self, popup_height: f64) -> f64 {
+        (popup_height - self.padding * 2.0 - self.header_height).max(0.0)
+    }
+
+    /// The total height of `row_count` rows stacked with their own
+    /// spacing between them (but none trailing the last one) — the
+    /// "content height" half of the scrollbar/offset arithmetic, read
+    /// against [`Self::viewport_height`] by both `Model::max_scroll` and
+    /// wherever a caller builds a [`hyprforge_popup::Scrollbar`].
+    pub fn content_height(&self, row_count: usize) -> f64 {
+        if row_count == 0 {
+            return 0.0;
+        }
+        let stride = self.row_height + self.row_spacing;
+        row_count as f64 * stride - self.row_spacing
+    }
+
+    /// The scrollbar's own track geometry for a popup `popup_width` wide
+    /// showing a viewport `viewport_height` tall — the **one** place
+    /// this crate computes it, read by both `surface.rs` (hit-testing a
+    /// press or a drag against the thumb) and `view.rs` (drawing the
+    /// track and thumb). Two independently-written copies of "where the
+    /// scrollbar is" is exactly the class of drift CLAUDE.md's "the
+    /// thing drawn, the thing hit-tested" rule warns about, applied here
+    /// to the scrollbar rather than a row.
+    pub fn scrollbar(&self, popup_width: f64, viewport_height: f64) -> hyprforge_popup::Scrollbar {
+        let track_x = popup_width - self.padding - hyprforge_popup::Scrollbar::WIDTH;
+        let track_top = self.padding + self.header_height;
+        hyprforge_popup::Scrollbar::new(track_x, track_top, viewport_height)
+    }
+
     /// The row index under `local_y` — measured from the popup surface's
     /// own top-left corner, exactly the coordinate space
     /// `PointerEvent::position` reports — among `visible_count` rows
     /// currently built (see `Model::visible_range`).
+    ///
+    /// `scroll_offset` is how many pixels of content sit above the first
+    /// *built* row (`Model::scroll_offset`, converted to "pixels within
+    /// the built window" the same way `Model::window_remainder` does) —
+    /// added to `local_y` before anything else so this and `view.rs`'s
+    /// own vertical shift of the rendered rows can never disagree about
+    /// where row 0 of the window actually is. Passing `0.0` reproduces
+    /// this method's pre-scrolling behaviour exactly.
     ///
     /// `None` covers every way a position is not over a row: above the
     /// first row (still in the header or its padding), in the gap
@@ -170,11 +216,11 @@ impl RowLayout {
         (((available + self.row_spacing) / stride).floor() as usize).max(1)
     }
 
-    pub fn row_at(&self, local_y: f64, visible_count: usize) -> Option<usize> {
+    pub fn row_at(&self, local_y: f64, visible_count: usize, scroll_remainder: f64) -> Option<usize> {
         if visible_count == 0 {
             return None;
         }
-        let y = local_y - self.padding - self.header_height;
+        let y = local_y - self.padding - self.header_height + scroll_remainder;
         if y < 0.0 {
             return None;
         }
@@ -212,8 +258,8 @@ impl RowLayout {
     /// `time_width`, `PIN_GAP`, `pin_size`) for exactly that reason — two
     /// separate arithmetic expressions computing "the same" rectangle
     /// is how the original click-does-nothing bug happened once already.
-    pub fn hit_test(&self, popup_width: f64, position: (f64, f64), visible_count: usize) -> Option<Hit> {
-        let index = self.row_at(position.1, visible_count)?;
+    pub fn hit_test(&self, popup_width: f64, position: (f64, f64), visible_count: usize, scroll_remainder: f64) -> Option<Hit> {
+        let index = self.row_at(position.1, visible_count, scroll_remainder)?;
         let content_right = popup_width - self.padding - Self::ROW_PADDING;
         let time_left = content_right - self.time_width;
         let pin_right = time_left - Self::PIN_GAP;
@@ -275,17 +321,17 @@ mod tests {
     #[test]
     fn a_pointer_over_the_header_hits_no_row() {
         let layout = RowLayout::for_font_size(15.0);
-        assert_eq!(layout.row_at(0.0, 5), None);
-        assert_eq!(layout.row_at(layout.padding, 5), None);
+        assert_eq!(layout.row_at(0.0, 5, 0.0), None);
+        assert_eq!(layout.row_at(layout.padding, 5, 0.0), None);
     }
 
     #[test]
     fn the_first_row_starts_right_after_the_header() {
         let layout = RowLayout::for_font_size(15.0);
         let first_row_top = layout.padding + layout.header_height;
-        assert_eq!(layout.row_at(first_row_top, 5), Some(0));
+        assert_eq!(layout.row_at(first_row_top, 5, 0.0), Some(0));
         assert_eq!(
-            layout.row_at(first_row_top + layout.row_height - 0.01, 5),
+            layout.row_at(first_row_top + layout.row_height - 0.01, 5, 0.0),
             Some(0),
             "must still be row 0 right up to its own bottom edge"
         );
@@ -296,7 +342,7 @@ mod tests {
         let layout = RowLayout::for_font_size(15.0);
         let first_row_top = layout.padding + layout.header_height;
         let gap_middle = first_row_top + layout.row_height + layout.row_spacing / 2.0;
-        assert_eq!(layout.row_at(gap_middle, 5), None);
+        assert_eq!(layout.row_at(gap_middle, 5, 0.0), None);
     }
 
     #[test]
@@ -306,7 +352,7 @@ mod tests {
         let first_row_top = layout.padding + layout.header_height;
         for index in 0..5 {
             let middle = first_row_top + index as f64 * stride + layout.row_height / 2.0;
-            assert_eq!(layout.row_at(middle, 5), Some(index));
+            assert_eq!(layout.row_at(middle, 5, 0.0), Some(index));
         }
     }
 
@@ -316,13 +362,49 @@ mod tests {
         let stride = layout.row_height + layout.row_spacing;
         let first_row_top = layout.padding + layout.header_height;
         let past_the_end = first_row_top + 5.0 * stride;
-        assert_eq!(layout.row_at(past_the_end, 5), None);
+        assert_eq!(layout.row_at(past_the_end, 5, 0.0), None);
     }
 
     #[test]
     fn an_empty_visible_window_hits_nothing_no_matter_where_the_pointer_is() {
         let layout = RowLayout::for_font_size(15.0);
-        assert_eq!(layout.row_at(layout.padding + layout.header_height, 0), None);
+        assert_eq!(layout.row_at(layout.padding + layout.header_height, 0, 0.0), None);
+    }
+
+    // --- `row_at` under a scroll remainder — the same rows shifted up by
+    // whatever pixel amount `view.rs` shifted the rendered rows by, so a
+    // hit-test and a drawing that agree on the offset must still agree on
+    // which row is where.
+
+    #[test]
+    fn a_positive_scroll_remainder_shifts_which_row_a_position_hits() {
+        let layout = RowLayout::for_font_size(15.0);
+        let stride = layout.row_height + layout.row_spacing;
+        let first_row_top = layout.padding + layout.header_height;
+        // With no scroll, this point is inside row 0.
+        assert_eq!(layout.row_at(first_row_top + 2.0, 5, 0.0), Some(0));
+        // Scrolled by a whole stride, the same screen position now reads
+        // as one row further into the (scrolled) window — exactly the
+        // shift `view.rs` draws the rows with.
+        assert_eq!(layout.row_at(first_row_top + 2.0, 5, stride), Some(1));
+    }
+
+    #[test]
+    fn content_height_matches_the_pixels_view_rs_actually_stacks() {
+        let layout = RowLayout::for_font_size(15.0);
+        let stride = layout.row_height + layout.row_spacing;
+        assert_eq!(layout.content_height(3), 3.0 * stride - layout.row_spacing);
+        assert_eq!(layout.content_height(0), 0.0, "no rows is no content, not a negative spacing");
+    }
+
+    #[test]
+    fn viewport_height_is_the_same_available_figure_rows_that_fit_floors() {
+        let layout = RowLayout::for_font_size(15.0);
+        let height = 420.0;
+        let viewport = layout.viewport_height(height);
+        let rows = layout.rows_that_fit(height);
+        let stride = layout.row_height + layout.row_spacing;
+        assert!((rows as f64) * stride - layout.row_spacing <= viewport + 0.001);
     }
 
     #[test]
@@ -355,7 +437,7 @@ mod tests {
         let pin_left = pin_right - layout.pin_size;
         let pin_center_x = (pin_left + pin_right) / 2.0;
         assert_eq!(
-            layout.hit_test(HIT_POPUP_WIDTH, (pin_center_x, row_middle_y), 5),
+            layout.hit_test(HIT_POPUP_WIDTH, (pin_center_x, row_middle_y), 5, 0.0),
             Some(Hit::Pin(0))
         );
     }
@@ -366,7 +448,7 @@ mod tests {
         let first_row_top = layout.padding + layout.header_height;
         let row_middle_y = first_row_top + layout.row_height / 2.0;
         assert_eq!(
-            layout.hit_test(HIT_POPUP_WIDTH, (layout.padding + 4.0, row_middle_y), 5),
+            layout.hit_test(HIT_POPUP_WIDTH, (layout.padding + 4.0, row_middle_y), 5, 0.0),
             Some(Hit::Row(0))
         );
     }
@@ -378,7 +460,7 @@ mod tests {
         let stride = layout.row_height + layout.row_spacing;
         let gap_middle = first_row_top + layout.row_height + layout.row_spacing / 2.0;
         assert!(gap_middle < first_row_top + stride);
-        assert_eq!(layout.hit_test(HIT_POPUP_WIDTH, (layout.padding + 4.0, gap_middle), 5), None);
+        assert_eq!(layout.hit_test(HIT_POPUP_WIDTH, (layout.padding + 4.0, gap_middle), 5, 0.0), None);
     }
 
     #[test]
@@ -387,7 +469,7 @@ mod tests {
         let stride = layout.row_height + layout.row_spacing;
         let first_row_top = layout.padding + layout.header_height;
         let second_row_middle = first_row_top + stride + layout.row_height / 2.0;
-        let hit = layout.hit_test(HIT_POPUP_WIDTH, (layout.padding + 4.0, second_row_middle), 5).unwrap();
+        let hit = layout.hit_test(HIT_POPUP_WIDTH, (layout.padding + 4.0, second_row_middle), 5, 0.0).unwrap();
         assert_eq!(hit.row(), 1);
     }
 

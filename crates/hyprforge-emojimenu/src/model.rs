@@ -6,18 +6,21 @@
 //!
 //! # Scrolling, adapted from rows to a grid
 //!
-//! [`Model::sync_window`], [`clamp_window`] and [`scroll_start`] are the
-//! grid version of exactly the same three pieces in
-//! `hyprforge-clipmenu::model` — moved by the *minimum* amount needed to
-//! keep the selection on screen, never recentred, for the identical
+//! [`Model::sync_scroll`] is the grid version of exactly the same piece
+//! in `hyprforge-clipmenu::model` — moved by the *minimum* amount needed
+//! to keep the selection on screen, never recentred, for the identical
 //! reason that crate's own doc gives: recentring on every hover would
 //! make "the cell under the pointer is already visible" scroll the grid
-//! out from under the cursor. The one adaptation: a clipboard history
-//! scrolls in units of one row per entry, but this grid's selection is a
-//! single linear index into `filtered`, and what actually scrolls is
-//! *rows* of cells (`columns` cells at a time) — so every window
-//! computation here converts the linear `selected` index to a row
-//! (`selected / columns`) before handing it to the same row-windowing
+//! out from under the cursor. The clamping and scroll-into-view
+//! arithmetic itself lives in `hyprforge_popup::scrollbar`
+//! (`clamp_offset`, `scroll_into_view`) rather than being reimplemented
+//! here a second time — the same shared pixel math
+//! `hyprforge-clipmenu::model` now uses. The one adaptation: a clipboard
+//! history scrolls in units of one row per entry, but this grid's
+//! selection is a single linear index into `filtered`, and what actually
+//! scrolls is *rows* of cells (`columns` cells at a time) — so every
+//! offset computation here converts the linear `selected` index to a row
+//! (`selected / columns`) before handing it to the shared row-windowing
 //! arithmetic, then converts the resulting row range back to a cell
 //! range for [`Model::visible_range`].
 
@@ -34,12 +37,32 @@ pub struct Model {
     /// column, exactly the order [`crate::geometry::GridLayout::cell_at`]
     /// returns.
     selected: usize,
-    /// First visible *row* (not cell) — kept as state and only ever
-    /// nudged by [`Model::sync_window`], never recomputed fresh from
-    /// `selected`, for the reason this module's own doc gives.
-    window_start_row: usize,
+    /// How tall (in logical pixels) the popup's own scrollable content
+    /// area is, below the header — the viewport a continuous
+    /// [`Model::scroll_offset`] scrolls within. Set once from
+    /// `geometry::GridLayout` via [`Model::set_grid`].
+    viewport_height: f64,
+    /// One grid row's own stride — a cell's side length plus the spacing
+    /// after it (`geometry::GridLayout::cell_size` + `spacing`), needed
+    /// here to convert a row index to pixels for this module's own
+    /// scroll-into-view arithmetic.
+    row_stride: f64,
+    /// The gap between two rows — `geometry::GridLayout::spacing` — kept
+    /// separate from [`Model::row_stride`] because content height is
+    /// `rows * row_stride - spacing` (no trailing gap after the last
+    /// row), the same accounting `geometry::GridLayout::rows_that_fit`
+    /// and `columns` already use.
+    spacing: f64,
+    /// How far, in pixels, the visible window has scrolled down into the
+    /// grid's own stacked rows — **state**, not a value derived fresh
+    /// from `selected` on every call, for the same reason
+    /// `hyprforge-clipmenu::model`'s own `scroll_offset` field doc gives:
+    /// a hover only ever targets a cell already built into the visible
+    /// window, so recomputing this fresh from `selected` on every call
+    /// would make "the cell already under the pointer is already
+    /// visible" a re-centre instead of a no-op.
+    scroll_offset: f64,
     columns: usize,
-    rows_window: usize,
     /// The user's chosen default tone, `None` for neutral — what
     /// [`Model::display_char`] shows for every tone-capable entry, and
     /// what a tone pick through the overlay updates (see
@@ -56,6 +79,15 @@ pub struct Model {
     paste_target: Option<String>,
 }
 
+/// [`Model::viewport_height`]/[`Model::row_stride`]'s values until
+/// [`Model::set_grid`] is called — big enough that ordinary filtering and
+/// selection tests never have to think about scrolling at all;
+/// `main.rs` always overrides these with the popup's real, theme-derived
+/// geometry before showing anything.
+const DEFAULT_VIEWPORT_HEIGHT: f64 = 1000.0;
+const DEFAULT_ROW_STRIDE: f64 = 44.0;
+const DEFAULT_SPACING: f64 = 4.0;
+
 impl Model {
     /// `tone` is the picker's persisted default, read once at startup —
     /// see `crate::config`.
@@ -64,9 +96,11 @@ impl Model {
             query: String::new(),
             filtered: hyprforge_emoji::search("", hyprforge_emoji::all()),
             selected: 0,
-            window_start_row: 0,
+            viewport_height: DEFAULT_VIEWPORT_HEIGHT,
+            row_stride: DEFAULT_ROW_STRIDE,
+            spacing: DEFAULT_SPACING,
+            scroll_offset: 0.0,
             columns: 1,
-            rows_window: 1,
             tone,
             tone_overlay: None,
             paste_target: None,
@@ -81,21 +115,89 @@ impl Model {
         self.paste_target.as_deref()
     }
 
-    /// Sets the grid's shape — how many columns wide and how many rows
-    /// tall the popup's own fixed size actually has room for. Read once
-    /// from [`crate::geometry::GridLayout`] before the popup opens, the
-    /// same way `hyprforge-clipmenu::main` derives `Model::set_window`
-    /// from `RowLayout::rows_that_fit` — see that crate's own regression
-    /// test for the bug this pattern exists to prevent (a hardcoded
-    /// window that could silently disagree with what actually fits).
-    pub fn set_grid(&mut self, columns: usize, rows_visible: usize) {
+    /// Sets the grid's shape — how many columns wide the popup's own
+    /// fixed size has room for, how tall its scrollable content area is,
+    /// and one row's own stride and spacing — all four read from
+    /// `crate::geometry::GridLayout`, the same "derive it, never
+    /// hardcode it" discipline `hyprforge-clipmenu::main`'s own
+    /// regression test pins for its row viewport (a window that could
+    /// silently disagree with what actually fits).
+    pub fn set_grid(&mut self, columns: usize, viewport_height: f64, row_stride: f64, spacing: f64) {
         self.columns = columns.max(1);
-        self.rows_window = rows_visible.max(1);
-        self.sync_window();
+        self.viewport_height = viewport_height.max(0.0);
+        self.row_stride = row_stride.max(1.0);
+        self.spacing = spacing.max(0.0);
+        self.sync_scroll();
     }
 
     pub fn columns(&self) -> usize {
         self.columns
+    }
+
+    pub fn viewport_height(&self) -> f64 {
+        self.viewport_height
+    }
+
+    /// One grid row's own stride — the pixel unit
+    /// `popup_app::EmojiApp::pointer_scroll` moves the view by per wheel
+    /// notch, mirroring `hyprforge-clipmenu::model::Model::row_stride`.
+    pub fn row_stride(&self) -> f64 {
+        self.row_stride
+    }
+
+    fn total_rows(&self) -> usize {
+        total_rows(self.filtered.len(), self.columns)
+    }
+
+    /// The total height, in pixels, of every filtered row of cells
+    /// stacked with its own spacing — the "content height" half of the
+    /// scrollbar and offset-clamping arithmetic in
+    /// [`hyprforge_popup::scrollbar`].
+    pub fn content_height(&self) -> f64 {
+        let rows = self.total_rows();
+        if rows == 0 {
+            return 0.0;
+        }
+        rows as f64 * self.row_stride - self.spacing
+    }
+
+    /// How far the view has scrolled, in pixels — what
+    /// [`hyprforge_popup::Scrollbar`] positions its thumb from, and what
+    /// `view.rs` shifts the rendered rows up by (via
+    /// [`Model::scroll_remainder`]).
+    pub fn scroll_offset(&self) -> f64 {
+        self.scroll_offset
+    }
+
+    /// Scrolls by `delta` pixels (negative is up) — the wheel's own
+    /// path, and also what a scrollbar-thumb drag applies through (see
+    /// `hyprforge-clipmenu::model::Model::scroll_by`'s identical doc for
+    /// why a drag uses this rather than a second, absolute-offset
+    /// setter). No longer moves the *selection* the way a wheel notch
+    /// used to — scrolling moves the view.
+    pub fn scroll_by(&mut self, delta: f64) {
+        self.scroll_offset = hyprforge_popup::clamp_offset(self.scroll_offset + delta, self.content_height(), self.viewport_height);
+    }
+
+    /// The row index of the first row actually built into a widget right
+    /// now — the single source both this module's own
+    /// [`Model::visible_range`] and `view.rs`'s rendering read.
+    fn first_visible_row(&self) -> usize {
+        if self.row_stride <= 0.0 {
+            return 0;
+        }
+        (self.scroll_offset / self.row_stride).floor().max(0.0) as usize
+    }
+
+    /// How many pixels of the first built row are already scrolled past
+    /// — the amount `view.rs` shifts the rendered rows up by so a
+    /// partially-visible row at the top reads as partially visible
+    /// rather than snapping to a row boundary.
+    /// [`crate::geometry::GridLayout::cell_at`] reads the exact same
+    /// number before hit-testing, which is what keeps drawn and
+    /// hit-tested cells from disagreeing under a scroll offset.
+    pub fn scroll_remainder(&self) -> f64 {
+        self.scroll_offset - self.first_visible_row() as f64 * self.row_stride
     }
 
     pub fn filter_text(&self) -> &str {
@@ -154,8 +256,8 @@ impl Model {
     fn refilter(&mut self) {
         self.filtered = hyprforge_emoji::search(&self.query, hyprforge_emoji::all());
         self.selected = 0;
-        self.window_start_row = 0;
-        self.sync_window();
+        self.scroll_offset = 0.0;
+        self.sync_scroll();
     }
 
     pub fn selected_index(&self) -> usize {
@@ -179,7 +281,7 @@ impl Model {
             return;
         }
         self.selected = index.min(self.filtered.len() - 1);
-        self.sync_window();
+        self.sync_scroll();
     }
 
     /// Moves the linear selection by `delta` cells (negative is back),
@@ -196,7 +298,7 @@ impl Model {
         }
         let current = self.selected.min(len - 1) as i32;
         self.selected = (current + delta).clamp(0, len as i32 - 1) as usize;
-        self.sync_window();
+        self.sync_scroll();
     }
 
     /// Left/Right move the linear selection by one — along a row, the
@@ -222,30 +324,43 @@ impl Model {
         self.move_by(self.columns as i32);
     }
 
-    fn total_rows(&self) -> usize {
-        total_rows(self.filtered.len(), self.columns)
-    }
-
-    fn sync_window(&mut self) {
-        let rows = self.total_rows();
+    /// Moves [`Model::scroll_offset`] the minimum amount needed to bring
+    /// the current selection's own row back inside the viewport — see
+    /// [`hyprforge_popup::scroll_into_view`]'s own doc for the rule.
+    /// Called after anything that can move `selected` or shrink/grow the
+    /// filtered list out from under it.
+    fn sync_scroll(&mut self) {
+        if self.filtered.is_empty() {
+            self.scroll_offset = 0.0;
+            return;
+        }
         let selected_row = self.selected / self.columns;
-        self.window_start_row = scroll_start(rows, self.window_start_row, selected_row, self.rows_window);
+        let item_top = selected_row as f64 * self.row_stride;
+        let item_bottom = item_top + self.row_stride - self.spacing;
+        let offset = hyprforge_popup::scroll_into_view(self.scroll_offset, item_top, item_bottom, self.viewport_height);
+        self.scroll_offset = hyprforge_popup::clamp_offset(offset, self.content_height(), self.viewport_height);
     }
 
-    /// The row range worth building real grid widgets for right now —
-    /// the row-space version of
-    /// `hyprforge-clipmenu::model::Model::visible_range`.
-    fn visible_row_range(&self) -> std::ops::Range<usize> {
-        clamp_window(self.total_rows(), self.window_start_row, self.rows_window)
-    }
-
-    /// The range of `filtered` worth building cells for — every complete
-    /// visible row's worth of cells, clamped to the list's own length so
-    /// a ragged last row never reads past the end.
+    /// The range of `filtered` worth building cells for right now — every
+    /// complete visible row's worth of cells, from
+    /// [`Model::first_visible_row`] through enough further rows to cover
+    /// the viewport (plus a buffer for a partially-visible row at each
+    /// edge under the worst-case [`Model::scroll_remainder`]), clamped to
+    /// the filtered list's own length so a ragged last row never reads
+    /// past the end. `view.rs` builds exactly this range and shifts it up
+    /// by `scroll_remainder` — the same range this module's own doc says
+    /// must never drift from what is drawn.
     pub fn visible_range(&self) -> std::ops::Range<usize> {
-        let rows = self.visible_row_range();
-        let start = rows.start * self.columns;
-        let end = (rows.end * self.columns).min(self.filtered.len());
+        let len = self.filtered.len();
+        if len == 0 {
+            return 0..0;
+        }
+        let total = total_rows(len, self.columns);
+        let start_row = self.first_visible_row().min(total.saturating_sub(1));
+        let rows_needed = if self.row_stride <= 0.0 { 1 } else { (self.viewport_height / self.row_stride).ceil() as usize + 2 };
+        let end_row = (start_row + rows_needed.max(1)).min(total);
+        let start = start_row * self.columns;
+        let end = (end_row * self.columns).min(len);
         start..end
     }
 
@@ -320,38 +435,6 @@ fn total_rows(len: usize, columns: usize) -> usize {
     len.div_ceil(columns)
 }
 
-/// Identical to `hyprforge-clipmenu::model`'s free function of the same
-/// name, operating on rows of a grid instead of rows of a list — see
-/// that module's own doc for the reasoning; duplicated rather than
-/// shared because there is nothing Hyprland- or clipboard-specific in
-/// either copy to share *from*, and each crate's own `Model` is the only
-/// caller.
-fn clamp_window(len: usize, start: usize, window: usize) -> std::ops::Range<usize> {
-    if len == 0 {
-        return 0..0;
-    }
-    let end = (start + window).min(len);
-    let start = end.saturating_sub(window);
-    start..end
-}
-
-/// Identical in spirit to `hyprforge-clipmenu::model::scroll_start` — see
-/// that function's own doc for the full reasoning (moving the window by
-/// the minimum amount needed rather than recentring on every hover).
-fn scroll_start(len: usize, start: usize, selected: usize, window: usize) -> usize {
-    if len == 0 {
-        return 0;
-    }
-    let selected = selected.min(len - 1);
-    let mut start = start;
-    if selected < start {
-        start = selected;
-    } else if selected >= start + window {
-        start = selected + 1 - window;
-    }
-    clamp_window(len, start, window).start
-}
-
 fn tone_index(tone: Tone) -> usize {
     hyprforge_emoji::TONES.iter().position(|&t| t == tone).unwrap_or(2)
 }
@@ -360,9 +443,20 @@ fn tone_index(tone: Tone) -> usize {
 mod tests {
     use super::*;
 
+    /// Matches [`DEFAULT_ROW_STRIDE`]/[`DEFAULT_SPACING`] so a test's own
+    /// arithmetic (a scroll amount, a row's own pixel span) lines up with
+    /// what `model_with_grid` actually configures.
+    const STRIDE: f64 = DEFAULT_ROW_STRIDE;
+    const SPACING: f64 = DEFAULT_SPACING;
+
+    /// `rows` is how many whole rows the viewport is sized to show
+    /// exactly — the pixel equivalent of the old row-count `rows_window`,
+    /// kept as the same two-argument shape every non-scrolling test here
+    /// already calls.
     fn model_with_grid(columns: usize, rows: usize) -> Model {
         let mut model = Model::new(None);
-        model.set_grid(columns, rows);
+        let viewport_height = rows as f64 * STRIDE - SPACING;
+        model.set_grid(columns, viewport_height, STRIDE, SPACING);
         model
     }
 
@@ -460,29 +554,29 @@ mod tests {
 
     #[test]
     fn hovering_an_already_visible_cell_does_not_scroll() {
-        let mut model = model_with_grid(4, 2); // 2 rows visible = 8 cells
-        model.select(5); // still inside rows 0..2
-        let before = model.visible_range();
-        model.select(6);
-        assert_eq!(model.visible_range(), before, "a hover inside the window must not move it");
+        let mut model = model_with_grid(4, 3); // 3 rows visible
+        model.select(9); // row 2, still inside the initial viewport
+        let before = model.scroll_offset();
+        model.select(1); // hover row 0 — already visible
+        assert_eq!(model.scroll_offset(), before, "a hover inside the viewport must not move it");
     }
 
     #[test]
-    fn moving_past_the_bottom_of_the_window_scrolls_by_exactly_one_row() {
-        let mut model = model_with_grid(4, 2); // rows_window = 2
-        model.select(7); // row 1, the window's own last visible row
-        assert_eq!(model.visible_range(), 0..8);
-        model.move_down(); // row 2 — one past the window
-        assert_eq!(model.visible_range(), 4..12, "must scroll down by exactly one row");
+    fn moving_past_the_bottom_of_the_viewport_scrolls_by_exactly_one_rows_worth_of_pixels() {
+        let mut model = model_with_grid(4, 2); // viewport shows exactly 2 rows
+        model.select(7); // row 1, the viewport's own last visible row
+        assert_eq!(model.scroll_offset(), 0.0);
+        model.move_down(); // row 2 — one row past the viewport
+        assert_eq!(model.scroll_offset(), STRIDE, "must scroll down by exactly one row's stride");
     }
 
     #[test]
-    fn moving_above_the_top_of_the_window_scrolls_up_to_meet_it() {
+    fn moving_above_the_top_of_the_viewport_scrolls_up_to_meet_it() {
         let mut model = model_with_grid(4, 2);
-        model.select(9);
-        assert!(model.visible_range().start > 0);
+        model.select(9); // scrolls down first
+        assert!(model.scroll_offset() > 0.0);
         model.select(0);
-        assert_eq!(model.visible_range(), 0..8, "must scroll all the way back to the top");
+        assert_eq!(model.scroll_offset(), 0.0, "must scroll all the way back to the top");
     }
 
     #[test]
@@ -495,6 +589,58 @@ mod tests {
         assert!(len < 4 * 5, "the filtered list must be small enough to exercise the clamp");
         model.select(len.saturating_sub(1));
         assert!(model.visible_range().end <= len);
+    }
+
+    // --- The rest of the pixel-offset arithmetic `Model` itself owns —
+    // the grid analogue of `hyprforge-clipmenu::model`'s own tests for
+    // the same properties.
+
+    #[test]
+    fn set_grid_changes_how_many_cells_are_built() {
+        let mut model = Model::new(None);
+        model.set_grid(4, 50.0, STRIDE, SPACING);
+        let small = model.visible_range().len();
+        model.set_grid(4, 500.0, STRIDE, SPACING);
+        let big = model.visible_range().len();
+        assert!(big > small, "a taller viewport must build more cells ({small} vs {big})");
+    }
+
+    #[test]
+    fn a_zero_height_viewport_still_builds_at_least_one_row_of_cells() {
+        let mut model = Model::new(None);
+        model.set_grid(4, 0.0, STRIDE, SPACING);
+        assert!(!model.visible_range().is_empty());
+    }
+
+    #[test]
+    fn scrolling_up_past_the_top_clamps_at_zero() {
+        let mut model = model_with_grid(4, 3);
+        model.scroll_by(-500.0);
+        assert_eq!(model.scroll_offset(), 0.0);
+    }
+
+    #[test]
+    fn scrolling_down_clamps_at_the_point_the_last_row_reaches_the_bottom() {
+        let mut model = model_with_grid(4, 3);
+        model.scroll_by(1_000_000.0);
+        assert_eq!(model.scroll_offset(), model.content_height() - model.viewport_height());
+    }
+
+    #[test]
+    fn a_short_filtered_list_that_already_fits_cannot_be_scrolled_at_all() {
+        let mut model = model_with_grid(4, 20); // a viewport tall enough for everything
+        for c in "fire".chars() {
+            model.type_char(c);
+        }
+        model.scroll_by(500.0);
+        assert_eq!(model.scroll_offset(), 0.0, "content shorter than the viewport must not scroll at all");
+    }
+
+    #[test]
+    fn scroll_remainder_is_how_far_the_offset_sits_into_the_first_built_row() {
+        let mut model = model_with_grid(4, 3);
+        model.scroll_by(50.0); // one whole stride (44) plus 6px into the next row
+        assert_eq!(model.scroll_remainder(), 6.0);
     }
 
     // --- tone display and the default-tone overlay.
@@ -543,7 +689,7 @@ mod tests {
     #[test]
     fn the_overlay_starts_on_the_currently_saved_default_tone() {
         let mut model = Model::new(Some(Tone::Light));
-        model.set_grid(6, 5);
+        model.set_grid(6, 5.0 * STRIDE - SPACING, STRIDE, SPACING);
         while !model.selected_entry().unwrap().supports_tones() {
             model.move_right();
         }

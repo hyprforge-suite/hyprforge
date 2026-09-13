@@ -74,11 +74,25 @@ pub struct EmojiApp<C: Chooser> {
     /// and the hit-test has to measure from the same place the drawing
     /// does. See that function's doc for why this is not an `align_x`.
     width: f64,
+    /// The pointer's own y position as of the last drag event — `None`
+    /// whenever no scrollbar-thumb drag is in progress. See
+    /// `hyprforge-clipmenu::surface::ClipApp`'s identical field for why
+    /// this, rather than an absolute offset, is what a drag applies
+    /// through.
+    drag_last_y: Option<f64>,
 }
 
 impl<C: Chooser> EmojiApp<C> {
     pub fn new(model: Model, chooser: C, shortcut: Shortcut, width: f64) -> EmojiApp<C> {
-        EmojiApp { model, chooser, shortcut, width }
+        EmojiApp { model, chooser, shortcut, width, drag_last_y: None }
+    }
+
+    /// How many rows the filtered grid needs at its current column
+    /// count — the same `div_ceil` `Model` itself uses internally, read
+    /// here only for the scrollbar's own content height (see
+    /// [`Self::pointer_drag_start`]/[`Self::pointer_drag_move`]).
+    fn total_rows(&self) -> usize {
+        self.model.filtered().len().div_ceil(self.model.columns().max(1))
     }
 }
 
@@ -112,7 +126,7 @@ impl<C: Chooser + 'static> hyprforge_popup::PopupApp for EmojiApp<C> {
         let grid = GridLayout::for_font_size(theme.font_size);
         let range = self.model.visible_range();
         let columns = self.model.columns();
-        match grid.cell_at(position, self.width, columns, range.len()) {
+        match grid.cell_at(position, self.width, columns, range.len(), self.model.scroll_remainder()) {
             Some(local) => {
                 dispatch_action(&mut self.model, &self.chooser, Action::Select(range.start + local));
                 true
@@ -148,22 +162,23 @@ impl<C: Chooser + 'static> hyprforge_popup::PopupApp for EmojiApp<C> {
 
         let range = self.model.visible_range();
         let columns = self.model.columns();
-        let local = grid.cell_at(position, self.width, columns, range.len())?;
+        let local = grid.cell_at(position, self.width, columns, range.len(), self.model.scroll_remainder())?;
         dispatch_action(&mut self.model, &self.chooser, Action::Select(range.start + local));
         dispatch_action(&mut self.model, &self.chooser, Action::Choose)
     }
 
-    /// Moved through the same [`Action::Move`] the arrow keys use, one
-    /// whole grid row (`columns` cells) per notch — a grid scrolls in
-    /// rows, the same unit `Model::move_up`/`move_down` already work in,
-    /// rather than panning the view independently of the selection; see
-    /// `Model`'s own module doc for why the two are the same thing here.
+    /// Scrolls the *view*, not the selection — continuous pixels rather
+    /// than snapping the selection (and the window with it) a whole row
+    /// at a time the way this used to route through `Action::Move`. Each
+    /// wheel notch moves the view by one grid row's own stride, the same
+    /// "notch = one row" mapping `hyprforge-clipmenu` uses for the
+    /// identical reason.
     fn pointer_scroll(&mut self, rows: i32) {
         if self.model.tone_overlay().is_some() {
             return;
         }
-        let columns = self.model.columns() as i32;
-        dispatch_action(&mut self.model, &self.chooser, Action::Move(rows * columns));
+        let stride = self.model.row_stride();
+        self.model.scroll_by(rows as f64 * stride);
     }
 
     fn key(&mut self, keysym: Keysym, utf8: Option<String>) -> Option<ChoiceOutcome> {
@@ -181,9 +196,46 @@ impl<C: Chooser + 'static> hyprforge_popup::PopupApp for EmojiApp<C> {
         let grid = GridLayout::for_font_size(theme.font_size);
         let range = self.model.visible_range();
         let columns = self.model.columns();
-        let Some(local) = grid.cell_at(position, self.width, columns, range.len()) else { return false };
+        let Some(local) = grid.cell_at(position, self.width, columns, range.len(), self.model.scroll_remainder()) else {
+            return false;
+        };
         self.model.select(range.start + local);
         self.model.open_tone_overlay()
+    }
+
+    /// A left-button press landed at `position` — starts a scrollbar-thumb
+    /// drag if it landed on the thumb. Checked before long-press detection
+    /// even gets a chance to defer the press (see `hyprforge_popup::Popup`'s
+    /// own pointer handling): a drag and a long press can never both apply
+    /// to the same press, and the thumb sits outside the grid entirely, so
+    /// there is no cell for a long press to have meant there anyway.
+    fn pointer_drag_start(&mut self, theme: &Theme, position: (f64, f64)) -> bool {
+        if self.model.tone_overlay().is_some() {
+            return false;
+        }
+        let grid = GridLayout::for_font_size(theme.font_size);
+        let bar = grid.scrollbar(self.width, self.model.viewport_height());
+        let content_height = grid.content_height(self.total_rows());
+        if bar.hit_thumb(position, content_height, self.model.scroll_offset()) {
+            self.drag_last_y = Some(position.1);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn pointer_drag_move(&mut self, theme: &Theme, position: (f64, f64)) {
+        let Some(last_y) = self.drag_last_y else { return };
+        self.drag_last_y = Some(position.1);
+        let grid = GridLayout::for_font_size(theme.font_size);
+        let bar = grid.scrollbar(self.width, self.model.viewport_height());
+        let content_height = grid.content_height(self.total_rows());
+        let delta = bar.drag_delta_to_offset_delta(position.1 - last_y, content_height);
+        self.model.scroll_by(delta);
+    }
+
+    fn pointer_drag_end(&mut self) {
+        self.drag_last_y = None;
     }
 
     fn needs_finish(outcome: ChoiceOutcome) -> bool {
@@ -209,14 +261,6 @@ impl<C: Chooser + 'static> hyprforge_popup::PopupApp for EmojiApp<C> {
 /// grid-specific and tone-specific actions this picker needs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Action {
-    /// Move the linear selection by this many cells (negative is back) —
-    /// what the wheel dispatches through, a whole row (`columns` cells)
-    /// at a time. The arrow keys go through
-    /// [`Action::MoveLeft`]/[`Action::MoveRight`]/[`Action::MoveUp`]/
-    /// [`Action::MoveDown`] instead, so each direction's own meaning
-    /// (one cell along a row versus one whole row) lives once, in
-    /// [`Model`] itself, rather than being recomputed here too.
-    Move(i32),
     MoveLeft,
     MoveRight,
     MoveUp,
@@ -295,10 +339,6 @@ fn dispatch_action<C: Chooser>(model: &mut Model, chooser: &C, action: Action) -
                     Some(ChoiceOutcome::Cancelled)
                 }
             }
-        }
-        Action::Move(delta) => {
-            model.move_by(delta);
-            None
         }
         Action::MoveLeft => {
             model.move_left();

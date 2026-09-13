@@ -120,15 +120,18 @@ fn main() -> std::process::ExitCode {
     let mut theme = hyprforge_appearance::look::resolve();
     theme.font_size = sane_font_size(&theme);
 
-    // How many rows the fixed-height popup actually has room for — the
+    // The popup's own scrollable geometry at this theme's font size — the
     // fix for the bug that motivated this: `Model` used to build a
-    // hardcoded 24 rows regardless of `POPUP_HEIGHT`, which laid out
-    // more than twice the popup's own height in rows, so nothing a
-    // pointer touched was where the drawn rows actually were. Deriving
-    // it from `RowLayout::rows_that_fit` — the exact inverse of the hit
-    // test — is what keeps rows drawn, rows hit-tested and rows that
-    // physically fit from ever being three different numbers again.
-    model.set_window(RowLayout::for_font_size(theme.font_size).rows_that_fit(POPUP_HEIGHT));
+    // hardcoded 24 rows regardless of `POPUP_HEIGHT`, which laid out more
+    // than twice the popup's own height in rows, so nothing a pointer
+    // touched was where the drawn rows actually were. Deriving it from
+    // `RowLayout` — the exact inverse of the hit test — is what keeps
+    // rows drawn, rows hit-tested and rows that physically fit from ever
+    // being three different numbers again; now that scrolling is
+    // continuous pixels rather than a row count, the same discipline
+    // applies to the viewport height itself.
+    let layout = RowLayout::for_font_size(theme.font_size);
+    model.set_viewport(layout.viewport_height(POPUP_HEIGHT), layout.row_height, layout.row_spacing);
 
     let connection = match hyprforge_popup::Connection::connect_to_env() {
         Ok(connection) => connection,
@@ -151,7 +154,7 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    let app = ClipApp::new(model, chooser, pinner::Wired, paste_shortcut);
+    let app = ClipApp::new(model, chooser, pinner::Wired, paste_shortcut, POPUP_WIDTH);
 
     match hyprforge_popup::Popup::run(connection, placement, app, theme) {
         Ok(hyprforge_popup::Outcome::App(ChoiceOutcome::Chosen | ChoiceOutcome::Cancelled)) => {
@@ -173,15 +176,22 @@ mod tests {
     use super::*;
 
     /// The regression test for the bug that started all of this: the
-    /// model's row window has to be *derived* from the popup's own fixed
-    /// height, not a separate hardcoded number that can drift out of
-    /// step with it. A history far longer than the window still has to
-    /// build only as many rows as physically fit — `rows_that_fit` and
-    /// `set_window` are exercised exactly the way `main` wires them
-    /// together, against a history long enough that the old hardcoded
-    /// 24 would have shown a different number than this does.
+    /// model's own scrollable viewport has to be *derived* from the
+    /// popup's fixed height, not a separate hardcoded number that can
+    /// drift out of step with it. A history far longer than the viewport
+    /// still has to build only about as many rows as physically fit —
+    /// `RowLayout::viewport_height` and `Model::set_viewport` are
+    /// exercised exactly the way `main` wires them together, against a
+    /// history long enough that a stale hardcoded window would have
+    /// shown a different number than this does.
+    ///
+    /// Continuous scrolling means `visible_range` is no longer required
+    /// to build *exactly* `rows_that_fit` rows — a pixel viewport can
+    /// show one further partially-visible row past the last whole one —
+    /// so this checks a bounded range around that figure rather than
+    /// exact equality.
     #[test]
-    fn the_models_row_window_is_derived_from_the_popups_actual_height() {
+    fn the_models_viewport_is_derived_from_the_popups_actual_height() {
         let layout = RowLayout::for_font_size(15.0);
         let expected_rows = layout.rows_that_fit(POPUP_HEIGHT);
 
@@ -189,17 +199,20 @@ mod tests {
             (0..200).map(|i| test_entry(&format!("entry {i}"))).collect(),
         );
         let mut model = Model::new(history);
-        model.set_window(layout.rows_that_fit(POPUP_HEIGHT));
+        model.set_viewport(layout.viewport_height(POPUP_HEIGHT), layout.row_height, layout.row_spacing);
 
-        assert_eq!(model.visible_range().len(), expected_rows);
-        // And every one of those rows has to actually fit: the same
-        // check `geometry`'s own `fit_tests` module pins for
-        // `rows_that_fit` in isolation, repeated here end to end through
-        // `Model`.
-        let stride = layout.row_height + layout.row_spacing;
-        let last_row_bottom =
-            layout.padding + layout.header_height + (expected_rows as f64 - 1.0) * stride + layout.row_height;
-        assert!(last_row_bottom <= POPUP_HEIGHT - layout.padding);
+        let built = model.visible_range().len();
+        assert!(built >= expected_rows, "must build at least the rows that fully fit ({expected_rows}), got {built}");
+        // And not wildly more either — a history of 200 entries must not
+        // build hundreds of rows just because it has hundreds of
+        // entries: only about the viewport's own rows, plus a small,
+        // bounded buffer for a partially-visible one at each edge under
+        // the worst-case scroll remainder (see `Model::visible_range`'s
+        // own doc).
+        assert!(
+            built <= 2 * expected_rows,
+            "must not build far more rows than the viewport can show: {built} rows built for {expected_rows} that fit"
+        );
     }
 
     fn test_entry(text: &str) -> hyprforge_clipboard::Entry {

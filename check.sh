@@ -545,8 +545,8 @@ else
         output=$(cargo test -p hyprforge-tray --test live_icons \
             -- --ignored --test-threads=1 --nocapture 2>&1)
         if grep -q "test result: FAILED" <<<"$output"; then
-            bad "an icon name resolves to nothing — it would draw a blank gap in the bar"
-            grep -E 'do not resolve in' <<<"$output" | head -5
+            bad "an icon name is missing, non-symbolic among symbolic siblings, or resolves through a different theme than the rest"
+            grep -E 'do not resolve in|break the one-family rule|not carried by any installed theme|resolve through different themes' <<<"$output" | head -10
         else
             ok "$(count_tests <<<"$output") icon check passed"
             while IFS= read -r reason; do

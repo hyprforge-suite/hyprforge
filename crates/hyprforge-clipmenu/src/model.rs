@@ -57,39 +57,38 @@ pub struct Model {
     /// look exactly like that — this field is cleared the moment
     /// anything else happens, not just on the next successful pin.
     pin_notice: Option<String>,
-    /// How many rows either side of the selection are worth building a
-    /// real widget for. Everything else in the filtered list is real
-    /// data the user can scroll to, but nothing is decoded or laid out
-    /// for it until it is.
-    ///
-    /// This used to be a hardcoded 24 regardless of the popup's own
-    /// height: at a 44px row inside a 420px popup that laid out 1104px
-    /// of rows in a surface a quarter that tall, so the drawn rows could
-    /// not possibly be where a pointer's hit-test computed them — the
-    /// popup's own doc on `geometry::RowLayout::rows_that_fit` tells the
-    /// rest of that story. The fix is that this crate has exactly one
-    /// number for "how many rows", derived once in `main.rs` from
-    /// `RowLayout::rows_that_fit(POPUP_HEIGHT)` and threaded in here via
-    /// [`Model::set_window`] — not read back from the popup's actual
-    /// size, and not reinvented as a second constant, either of which
-    /// could drift from what `rows_that_fit` says fits.
-    window: usize,
-    /// The index (into the filtered list) of the first row
-    /// [`Model::visible_range`] builds — **state**, not a value derived
-    /// fresh from `selected` on every call.
-    ///
-    /// This used to *not* exist: `visible_range` recomputed a window
-    /// centred on `selected` every time it was called, which reads fine
-    /// for keyboard movement but is exactly wrong for the mouse —
-    /// hovering a row calls `Model::select` on it (see
+    /// How tall (in logical pixels) the popup's own scrollable content
+    /// area is — the viewport a continuous [`Model::scroll_offset`]
+    /// scrolls within. Set once from `geometry::RowLayout::viewport_height`
+    /// via [`Model::set_viewport`], the same "derive it, never guess it"
+    /// discipline the old row-count `window` field's own doc explained:
+    /// a hardcoded figure here could again silently disagree with what
+    /// the popup's fixed size actually has room for.
+    viewport_height: f64,
+    /// One row's own height — `geometry::RowLayout::row_height` at the
+    /// current theme, needed here (rather than kept purely in `view.rs`
+    /// and `geometry.rs`) so this module can convert "row index" to
+    /// "pixels" for its own scroll-into-view arithmetic.
+    row_height: f64,
+    /// The gap between two rows — `geometry::RowLayout::row_spacing`.
+    row_spacing: f64,
+    /// How far, in pixels, the visible window has scrolled down into the
+    /// filtered list's own stacked rows — **state**, not a value derived
+    /// fresh from `selected` on every call, for the same reason the old
+    /// `window_start` field's doc gave: `visible_range` used to recompute
+    /// a window centred on `selected` every time it was called, which
+    /// reads fine for keyboard movement but is exactly wrong for the
+    /// mouse — hovering a row calls `Model::select` on it (see
     /// `surface::pointer_move`), and a window that recentres on whatever
     /// was just selected puts a *different* row under a pointer that
-    /// never moved, which is indistinguishable from the list scrolling
-    /// on its own. Keeping the window's start as state and only ever
-    /// nudging it just far enough to keep the selection inside (see
-    /// [`scroll_start`]) is what makes "the row already under the
-    /// pointer is already visible" a no-op instead of a re-centre.
-    window_start: usize,
+    /// never moved, which is indistinguishable from the list scrolling on
+    /// its own. Keeping this as state and only ever nudging it just far
+    /// enough to keep the selection inside (see
+    /// [`hyprforge_popup::scroll_into_view`]) is what makes "the row
+    /// already under the pointer is already visible" a no-op instead of a
+    /// re-centre — continuous pixels instead of whole rows, but the same
+    /// rule.
+    scroll_offset: f64,
     /// A short label for where a chosen entry will be pasted — "Ghostty",
     /// say — shown in the header before anything is chosen. Cosmetic
     /// only: nothing here reads this to decide *how* to paste; that
@@ -102,11 +101,15 @@ pub struct Model {
     paste_target: Option<String>,
 }
 
-/// [`Model::window`]'s value until [`Model::set_window`] is called.
-/// Every test in this crate that does not care about window sizing
-/// leaves it at this default; `main.rs` always overrides it with the
-/// popup's real row count before showing anything.
-const DEFAULT_WINDOW: usize = 24;
+/// [`Model::viewport_height`]'s value (and a plausible row size) until
+/// [`Model::set_viewport`] is called. Every test in this crate that does
+/// not care about scrolling leaves it at this default — big enough for
+/// several dozen ordinary rows, so filtering and selection tests never
+/// have to think about a window at all; `main.rs` always overrides it
+/// with the popup's real, theme-derived geometry before showing anything.
+const DEFAULT_VIEWPORT_HEIGHT: f64 = 1000.0;
+const DEFAULT_ROW_HEIGHT: f64 = 40.0;
+const DEFAULT_ROW_SPACING: f64 = 2.0;
 
 impl Model {
     pub fn new(history: HistoryState) -> Model {
@@ -115,26 +118,100 @@ impl Model {
             filter: String::new(),
             selected: 0,
             pin_notice: None,
-            window: DEFAULT_WINDOW,
-            window_start: 0,
+            viewport_height: DEFAULT_VIEWPORT_HEIGHT,
+            row_height: DEFAULT_ROW_HEIGHT,
+            row_spacing: DEFAULT_ROW_SPACING,
+            scroll_offset: 0.0,
             paste_target: None,
         }
     }
 
-    /// Sets how many rows [`Model::visible_range`] builds around the
-    /// selection — see [`Model::window`]'s own doc for why this is a
-    /// field set after construction rather than a constant. Clamped to
-    /// at least one: a window of zero would make `visible_range` unable
-    /// to show anything even when the filtered list is non-empty, which
-    /// is a worse failure than showing one row more than a degenerate
-    /// height technically fit.
+    /// Sets the popup's own scrollable geometry — the viewport height and
+    /// one row's height/spacing at the current theme, all three read from
+    /// `geometry::RowLayout` (`viewport_height`, `row_height`,
+    /// `row_spacing`) rather than guessed here, the same "derive it, never
+    /// duplicate it" discipline the old `window` field's own doc
+    /// described. Floors both height figures at something positive so a
+    /// degenerate popup size cannot leave this dividing by, or scrolling
+    /// through, zero.
     ///
-    /// Re-syncs [`Model::window_start`] afterward: a window that just
+    /// Re-syncs [`Model::scroll_offset`] afterward: a viewport that just
     /// shrank could otherwise leave the selection outside it until the
     /// next unrelated action nudged things back into range.
-    pub fn set_window(&mut self, window: usize) {
-        self.window = window.max(1);
-        self.sync_window();
+    pub fn set_viewport(&mut self, viewport_height: f64, row_height: f64, row_spacing: f64) {
+        self.viewport_height = viewport_height.max(0.0);
+        self.row_height = row_height.max(1.0);
+        self.row_spacing = row_spacing.max(0.0);
+        self.sync_scroll();
+    }
+
+    /// One row's own height plus the spacing after it — the pixel unit
+    /// [`Model::scroll_by`] moves the view by one wheel notch (see
+    /// `surface::ClipApp::pointer_scroll`), and the unit every other
+    /// pixel/row conversion in this module uses.
+    pub fn row_stride(&self) -> f64 {
+        self.row_height + self.row_spacing
+    }
+
+    /// The total height, in pixels, of every filtered row stacked with
+    /// its own spacing — the "content height" half of the scrollbar and
+    /// offset-clamping arithmetic in [`hyprforge_popup::scrollbar`].
+    pub fn content_height(&self) -> f64 {
+        let len = self.filtered().len();
+        if len == 0 {
+            return 0.0;
+        }
+        len as f64 * self.row_stride() - self.row_spacing
+    }
+
+    pub fn viewport_height(&self) -> f64 {
+        self.viewport_height
+    }
+
+    /// How far the view has scrolled, in pixels — what
+    /// [`hyprforge_popup::Scrollbar`] positions its thumb from, and what
+    /// `view.rs` shifts the rendered rows up by (via
+    /// [`Model::scroll_remainder`]).
+    pub fn scroll_offset(&self) -> f64 {
+        self.scroll_offset
+    }
+
+    /// Scrolls by `delta` pixels (negative is up) — the wheel's own
+    /// path, distinct from [`Model::move_selection`]: scrolling moves the
+    /// *view*, not the selection, so a wheel notch no longer snaps the
+    /// selection (and the window) a whole row at a time the way it used
+    /// to.
+    ///
+    /// Also what a scrollbar-thumb drag applies through — `surface.rs`
+    /// turns a drag's pointer motion into an offset *delta* via
+    /// `hyprforge_popup::Scrollbar::drag_delta_to_offset_delta` and hands
+    /// it here the same way a wheel notch does, rather than this module
+    /// needing a second, absolute-offset setter.
+    pub fn scroll_by(&mut self, delta: f64) {
+        self.scroll_offset = hyprforge_popup::clamp_offset(self.scroll_offset + delta, self.content_height(), self.viewport_height);
+    }
+
+    /// The row index (into the filtered list) of the first row actually
+    /// built into a widget right now — the single source both this
+    /// module's own [`Model::visible_range`] and `view.rs`'s rendering
+    /// read, so "which row is first" can never drift between the two.
+    fn first_visible_row(&self) -> usize {
+        let stride = self.row_stride();
+        if stride <= 0.0 {
+            return 0;
+        }
+        (self.scroll_offset / stride).floor().max(0.0) as usize
+    }
+
+    /// How many pixels of the first built row are already scrolled past
+    /// — the amount `view.rs` shifts the rendered rows up by so a
+    /// partially-visible row at the top reads as partially visible
+    /// rather than snapping to a row boundary. [`crate::geometry::RowLayout::row_at`]
+    /// reads the exact same number (as `scroll_remainder`) before
+    /// hit-testing, which is what keeps drawn and hit-tested rows from
+    /// disagreeing under a scroll offset — see that method's own doc.
+    pub fn scroll_remainder(&self) -> f64 {
+        self.scroll_offset - self.first_visible_row() as f64 * self.row_stride()
     }
 
     /// The label [`Model::set_paste_target`] set, if any — see that
@@ -147,14 +224,24 @@ impl Model {
         self.paste_target = target;
     }
 
-    /// Re-clamps [`Model::window_start`] so the current selection is
-    /// inside it — see [`scroll_start`]'s own doc for the rule. Called
-    /// after anything that can move `selected` or shrink/grow the
+    /// Moves [`Model::scroll_offset`] the minimum amount needed to bring
+    /// the current selection back inside the viewport — see
+    /// [`hyprforge_popup::scroll_into_view`]'s own doc for the rule.
+    /// Called after anything that can move `selected` or shrink/grow the
     /// filtered list out from under it: typing, backspace, an explicit
-    /// selection, or a changed window size.
-    fn sync_window(&mut self) {
+    /// selection, or a changed viewport.
+    fn sync_scroll(&mut self) {
         let len = self.filtered().len();
-        self.window_start = scroll_start(len, self.window_start, self.selected, self.window);
+        if len == 0 {
+            self.scroll_offset = 0.0;
+            return;
+        }
+        let selected = self.selected.min(len - 1);
+        let stride = self.row_stride();
+        let item_top = selected as f64 * stride;
+        let item_bottom = item_top + self.row_height;
+        let offset = hyprforge_popup::scroll_into_view(self.scroll_offset, item_top, item_bottom, self.viewport_height);
+        self.scroll_offset = hyprforge_popup::clamp_offset(offset, self.content_height(), self.viewport_height);
     }
 
     /// The entries matching the current filter, newest-first /
@@ -194,13 +281,13 @@ impl Model {
     pub fn type_char(&mut self, c: char) {
         self.filter.push(c);
         self.selected = 0;
-        self.sync_window();
+        self.sync_scroll();
     }
 
     pub fn backspace(&mut self) {
         self.filter.pop();
         self.selected = 0;
-        self.sync_window();
+        self.sync_scroll();
     }
 
     /// Moves the selection by `delta` rows (negative is up), clamped to
@@ -216,7 +303,7 @@ impl Model {
         }
         let current = self.selected.min(len - 1) as i32;
         self.selected = (current + delta).clamp(0, len as i32 - 1) as usize;
-        self.sync_window();
+        self.sync_scroll();
     }
 
     pub fn selected_index(&self) -> usize {
@@ -237,13 +324,13 @@ impl Model {
             return;
         }
         self.selected = index.min(len - 1);
-        // The whole point of `window_start` being persisted state rather
+        // The whole point of `scroll_offset` being persisted state rather
         // than derived from `selected`: a hover that lands on a row
-        // already inside the current window (which every hover does,
+        // already inside the current viewport (which every hover does,
         // since a hover only ever targets a row `view.rs` actually drew)
-        // leaves the window exactly where it was. See `scroll_start`'s
-        // own doc.
-        self.sync_window();
+        // leaves the offset exactly where it was. See `sync_scroll`'s own
+        // doc.
+        self.sync_scroll();
     }
 
     pub fn selected_entry(&self) -> Option<Entry> {
@@ -258,9 +345,24 @@ impl Model {
     /// (see `thumbnail.rs`) until it is actually one of the rows a
     /// person could be looking at — a history of 500 entries must not
     /// mean 500 decode attempts on every keystroke.
+    ///
+    /// Under continuous scrolling this is no longer a fixed-size window:
+    /// it is every row from [`Model::first_visible_row`] through enough
+    /// further rows to cover the viewport (plus one on each end for a
+    /// partially visible row at the top or bottom), clamped to the
+    /// filtered list's own length. `view.rs` builds exactly this range and
+    /// shifts it up by [`Model::scroll_remainder`] — the same range this
+    /// module's own doc says must never drift from what is drawn.
     pub fn visible_range(&self) -> std::ops::Range<usize> {
         let len = self.filtered().len();
-        clamp_window(len, self.window_start, self.window)
+        if len == 0 {
+            return 0..0;
+        }
+        let start = self.first_visible_row().min(len - 1);
+        let stride = self.row_stride();
+        let rows_needed = if stride <= 0.0 { 1 } else { (self.viewport_height / stride).ceil() as usize + 2 };
+        let end = (start + rows_needed.max(1)).min(len);
+        start..end
     }
 
     /// Reflects a pin/unpin the daemon has already confirmed, in this
@@ -285,7 +387,7 @@ impl Model {
         sort_entries(entries);
         if let Some(new_index) = self.filtered().iter().position(|e| &e.id == id) {
             self.selected = new_index;
-            self.sync_window();
+            self.sync_scroll();
         }
     }
 
@@ -315,67 +417,6 @@ fn sort_entries(entries: &mut [Entry]) {
             .then(b.copied_at.cmp(&a.copied_at))
             .then(a.id.cmp(&b.id))
     });
-}
-
-/// Turns a window's `start` into the `start..end` range actually shown,
-/// for a list of length `len` and a window of `window` rows.
-///
-/// Deliberately ignorant of `selected` — see [`scroll_start`] for the
-/// function that decides where `start` itself should be, and this
-/// function's own call site (`Model::visible_range`) for why the two are
-/// split apart. All this does is keep a given `start` valid: never
-/// running past `len`, and — the one adjustment this makes to `start`
-/// itself — pulled back down so the window stays full-sized wherever the
-/// list is long enough to fill it, rather than shrinking once `start`
-/// alone would run it past the end. That shrink-at-the-end behaviour is
-/// the one thing carried over unchanged from this crate's original
-/// (`selected`-centred) windowing rule.
-fn clamp_window(len: usize, start: usize, window: usize) -> std::ops::Range<usize> {
-    if len == 0 {
-        return 0..0;
-    }
-    let end = (start + window).min(len);
-    let start = end.saturating_sub(window);
-    start..end
-}
-
-/// Where the window should start so that `selected` (into a list of
-/// length `len`) falls inside a window of `window` rows beginning at
-/// `start` — moved by the *minimum* amount needed, never recentred.
-///
-/// This is the fix for the popup's own auto-scrolling bug: the previous
-/// rule recomputed `start` fresh from `selected` on every call, centring
-/// the window under whatever was selected — which included the pointer
-/// merely hovering a row (`Model::select`, called from
-/// `surface::pointer_move`), so hovering a row that was already on
-/// screen still recentred the list *under the cursor*, landing a
-/// different row there and reading as the list scrolling on its own.
-/// Keeping `start` as state and only nudging it here — never otherwise —
-/// is what makes "the row under the pointer is already visible" a true
-/// no-op: `selected` already satisfies `start <= selected < start +
-/// window`, so neither branch below fires and `start` is returned
-/// unchanged.
-///
-/// The two branches are keyboard movement's two edges: `selected` above
-/// the window pulls `start` down to meet it exactly (a scroll up by
-/// exactly the overshoot, one row at a time when `move_selection` is
-/// called one row at a time); `selected` at or past the window's far end
-/// pushes `start` up to meet it the same way. [`clamp_window`] (called by
-/// every reader of the resulting `start`, including this function's own
-/// final clamp) is what then keeps the window from running past the
-/// list's own end or shrinking there.
-fn scroll_start(len: usize, start: usize, selected: usize, window: usize) -> usize {
-    if len == 0 {
-        return 0;
-    }
-    let selected = selected.min(len - 1);
-    let mut start = start;
-    if selected < start {
-        start = selected;
-    } else if selected >= start + window {
-        start = selected + 1 - window;
-    }
-    clamp_window(len, start, window).start
 }
 
 #[cfg(test)]
@@ -541,138 +582,131 @@ mod tests {
         assert_eq!(model.pin_notice(), None);
     }
 
-    // --- `clamp_window`: keeping a given `start` valid, independent of
-    // any selection at all.
+    // --- Continuous scrolling. The old `clamp_window`/`scroll_start` free
+    // functions (row-index arithmetic) moved to `hyprforge_popup::scrollbar`
+    // as `clamp_offset`/`scroll_into_view` (pixel arithmetic) and are
+    // pinned by that crate's own tests; what belongs here is that `Model`
+    // actually uses them the way this popup needs — the properties below
+    // are the same ones the old `scroll_start`/`clamp_window` tests pinned,
+    // reshaped from row indices to pixels.
 
-    #[test]
-    fn clamp_window_stays_within_the_lists_bounds() {
-        let range = clamp_window(500, 3, DEFAULT_WINDOW);
-        assert_eq!(range.start, 3);
-        assert!(range.end <= 500);
+    const STRIDE: f64 = DEFAULT_ROW_HEIGHT + DEFAULT_ROW_SPACING; // 42.0
 
-        let range = clamp_window(500, 499, DEFAULT_WINDOW);
-        assert_eq!(range.end, 500);
-        assert!(range.start < range.end, "must still be full-sized, not shrunk to one row");
-
-        let range = clamp_window(3, 1, DEFAULT_WINDOW);
-        assert_eq!(range, 0..3, "a list shorter than the window is shown in full");
+    fn model_with_viewport(texts: &[&str], viewport_height: f64) -> Model {
+        let mut model = model_with(texts);
+        model.set_viewport(viewport_height, DEFAULT_ROW_HEIGHT, DEFAULT_ROW_SPACING);
+        model
     }
 
+    /// The property `main.rs` depends on: telling the model a new
+    /// viewport size actually changes how many rows `visible_range`
+    /// builds, rather than the field being write-only.
     #[test]
-    fn clamp_window_pulls_start_back_so_the_window_stays_full_sized_at_the_end() {
-        // `start` alone would run the window past the list's end; the
-        // window must still show `window` rows, sliding `start` back
-        // rather than shrinking.
-        let range = clamp_window(10, 8, 5);
-        assert_eq!(range, 5..10);
-    }
-
-    // --- `scroll_start`: the fix for the auto-scrolling bug. Moves
-    // `start` by the minimum needed to keep `selected` inside the
-    // window — never recentres.
-
-    #[test]
-    fn scroll_start_leaves_start_untouched_when_selected_is_already_inside_the_window() {
-        assert_eq!(scroll_start(10, 2, 3, 4), 2, "selected 3 is already within [2, 6)");
-        assert_eq!(scroll_start(10, 2, 2, 4), 2, "selected at the window's own top edge is still inside it");
-        assert_eq!(scroll_start(10, 2, 5, 4), 2, "selected at the window's own bottom edge is still inside it");
-    }
-
-    #[test]
-    fn scroll_start_moves_down_by_exactly_the_overshoot_past_the_bottom_edge() {
-        // Window [2, 6); selecting row 6 is one past the edge, so start
-        // must move to exactly 3 — a one-row scroll, not a recentre.
-        assert_eq!(scroll_start(10, 2, 6, 4), 3);
-    }
-
-    #[test]
-    fn scroll_start_moves_up_to_meet_a_selection_above_the_window() {
-        // Window [4, 8); selecting row 2 is above it, so start must jump
-        // exactly to 2, not merely far enough to include it plus slack.
-        assert_eq!(scroll_start(10, 4, 2, 4), 2);
-    }
-
-    #[test]
-    fn scroll_start_never_runs_the_window_past_the_lists_own_end() {
-        assert_eq!(scroll_start(10, 0, 9, 4), 6, "window must end exactly at len, not run past it");
-    }
-
-    /// The property `main.rs` depends on: telling the model a new window
-    /// size actually changes how many rows `visible_range` builds,
-    /// rather than the field being write-only.
-    #[test]
-    fn set_window_changes_how_many_rows_are_built() {
+    fn set_viewport_changes_how_many_rows_are_built() {
         let mut model = model_with(&["a", "b", "c", "d", "e"]);
-        model.set_window(2);
-        assert_eq!(model.visible_range().len(), 2);
-        model.set_window(4);
-        assert_eq!(model.visible_range().len(), 4);
+        model.set_viewport(50.0, DEFAULT_ROW_HEIGHT, DEFAULT_ROW_SPACING);
+        let small = model.visible_range().len();
+        model.set_viewport(500.0, DEFAULT_ROW_HEIGHT, DEFAULT_ROW_SPACING);
+        let big = model.visible_range().len();
+        assert!(big > small, "a taller viewport must build more rows ({small} vs {big})");
     }
 
-    /// A window of zero would leave `visible_range` unable to show
-    /// anything even for a non-empty list — `set_window` floors it at
-    /// one rather than letting a degenerate popup height (or a future
-    /// caller's bug) do that.
+    /// A degenerate (zero-height) viewport must still leave
+    /// `visible_range` able to build at least one row for a non-empty
+    /// list, the pixel-offset version of the old `set_window`'s floor of
+    /// one.
     #[test]
-    fn set_window_floors_at_one_rather_than_showing_nothing() {
+    fn a_zero_height_viewport_still_builds_at_least_one_row() {
         let mut model = model_with(&["a", "b"]);
-        model.set_window(0);
-        assert_eq!(model.visible_range().len(), 1);
+        model.set_viewport(0.0, DEFAULT_ROW_HEIGHT, DEFAULT_ROW_SPACING);
+        assert!(!model.visible_range().is_empty());
     }
 
-    // --- The auto-scroll regression, exercised through `Model` itself
-    // rather than the bare `scroll_start`/`clamp_window` functions above —
-    // these are the properties the owner reported by name.
+    // --- The auto-scroll regression, exercised through `Model` itself —
+    // these are the properties the owner reported by name, now asserted
+    // against `scroll_offset` (continuous pixels) rather than a row-index
+    // window.
 
     /// The bug: hovering a row that is already on screen re-centred the
     /// window under it, since the old rule derived the window fresh from
     /// `selected` on every call. A hover must be a true no-op when the
     /// row it lands on is already visible.
     #[test]
-    fn hovering_a_row_that_is_already_visible_does_not_move_the_window() {
-        let mut model = model_with(&["a", "b", "c", "d", "e"]);
-        model.set_window(3);
-        model.move_selection(2); // selected = 2, still inside the initial window [0, 3)
-        let before = model.visible_range();
+    fn hovering_a_row_that_is_already_visible_does_not_move_the_offset() {
+        let mut model = model_with_viewport(&["a", "b", "c", "d", "e"], 3.0 * STRIDE - DEFAULT_ROW_SPACING);
+        model.move_selection(2); // selected = 2, still inside the initial viewport
+        let before = model.scroll_offset();
         model.select(1); // hover row 1 — already visible
-        assert_eq!(model.visible_range(), before, "hovering an already-visible row must not scroll");
+        assert_eq!(model.scroll_offset(), before, "hovering an already-visible row must not scroll");
     }
 
     #[test]
-    fn moving_past_the_bottom_edge_scrolls_the_window_by_exactly_one_row() {
-        let mut model = model_with(&["a", "b", "c", "d", "e"]);
-        model.set_window(3);
-        model.move_selection(2); // selected = 2, the window's own last visible row
-        assert_eq!(model.visible_range(), 0..3);
-        model.move_selection(1); // selected = 3, one past the window
-        assert_eq!(model.visible_range(), 1..4, "the window must slide down by exactly one row");
+    fn moving_past_the_bottom_edge_scrolls_by_exactly_one_rows_worth_of_pixels() {
+        let mut model = model_with_viewport(&["a", "b", "c", "d", "e"], 3.0 * STRIDE - DEFAULT_ROW_SPACING);
+        model.move_selection(2); // selected = 2, the viewport's own last visible row
+        assert_eq!(model.scroll_offset(), 0.0);
+        model.move_selection(1); // selected = 3, one row past the viewport
+        assert_eq!(model.scroll_offset(), STRIDE, "the viewport must slide down by exactly one row's stride");
     }
 
     #[test]
-    fn moving_past_the_top_edge_scrolls_the_window_by_exactly_one_row() {
-        let mut model = model_with(&["a", "b", "c", "d", "e"]);
-        model.set_window(3);
-        model.select(4); // jump to the end; window becomes [2, 5)
-        assert_eq!(model.visible_range(), 2..5);
-        model.move_selection(-2); // selected = 2, the window's own top edge — not past it yet
-        assert_eq!(model.visible_range(), 2..5, "the window's own top edge is still inside it");
+    fn moving_past_the_top_edge_scrolls_by_exactly_one_rows_worth_of_pixels() {
+        let mut model = model_with_viewport(&["a", "b", "c", "d", "e"], 3.0 * STRIDE - DEFAULT_ROW_SPACING);
+        model.select(4); // jump to the end
+        let scrolled = model.scroll_offset();
+        assert!(scrolled > 0.0);
+        model.move_selection(-2); // selected = 2 — the viewport's own top edge, not past it yet
+        assert_eq!(model.scroll_offset(), scrolled, "the viewport's own top edge is still inside it");
         model.move_selection(-1); // selected = 1, now past the top edge
-        assert_eq!(model.visible_range(), 1..4, "the window must slide up by exactly one row");
+        assert_eq!(model.scroll_offset(), scrolled - STRIDE, "the viewport must slide up by exactly one row's stride");
     }
 
     #[test]
-    fn changing_the_filter_keeps_the_window_valid_for_the_new_shorter_list() {
-        let mut model = model_with(&["aa", "ab", "cc", "dd", "ee"]);
-        model.set_window(3);
-        model.select(4); // jump to the end of the full 5-item list; window becomes [2, 5)
-        assert_eq!(model.visible_range(), 2..5);
-        model.type_char('a'); // filters down to ["aa", "ab"] — 2 rows
+    fn changing_the_filter_keeps_the_offset_valid_for_the_new_shorter_list() {
+        let mut model = model_with_viewport(&["aa", "ab", "cc", "dd", "ee"], 3.0 * STRIDE - DEFAULT_ROW_SPACING);
+        model.select(4); // jump to the end of the full 5-item list — scrolls down
+        assert!(model.scroll_offset() > 0.0);
+        model.type_char('a'); // filters down to ["aa", "ab"] — 2 rows, which fit the viewport whole
         assert_eq!(model.filtered().len(), 2);
         assert_eq!(
-            model.visible_range(),
-            0..2,
-            "a filtered-down list shorter than the window must be shown in full, from the start"
+            model.scroll_offset(),
+            0.0,
+            "a filtered-down list shorter than the viewport must clamp back to the top"
         );
+    }
+
+    // --- The rest of the pixel-offset arithmetic `Model` itself owns:
+    // clamping (never above the top, never past the point where the last
+    // row sits at the bottom of the viewport) and the remainder `view.rs`
+    // and `geometry::RowLayout::row_at` both read to agree on where a
+    // partially-scrolled first row actually is.
+
+    #[test]
+    fn scrolling_up_past_the_top_clamps_at_zero() {
+        let mut model = model_with_viewport(&["a", "b", "c", "d", "e"], 100.0);
+        model.scroll_by(-500.0);
+        assert_eq!(model.scroll_offset(), 0.0);
+    }
+
+    #[test]
+    fn scrolling_down_clamps_at_the_point_the_last_row_reaches_the_bottom() {
+        let mut model = model_with_viewport(&["a", "b", "c", "d", "e"], 100.0);
+        model.scroll_by(1_000_000.0);
+        assert_eq!(model.scroll_offset(), model.content_height() - model.viewport_height());
+    }
+
+    #[test]
+    fn a_short_list_that_already_fits_cannot_be_scrolled_into_empty_space() {
+        let mut model = model_with_viewport(&["a", "b"], 1000.0);
+        model.scroll_by(500.0);
+        assert_eq!(model.scroll_offset(), 0.0, "content shorter than the viewport must not scroll at all");
+    }
+
+    #[test]
+    fn scroll_remainder_is_how_far_the_offset_sits_into_the_first_built_row() {
+        let mut model = model_with_viewport(&["a", "b", "c", "d", "e"], 100.0);
+        model.scroll_by(50.0); // one whole stride (42) plus 8px into the next row
+        assert_eq!(model.scroll_remainder(), 8.0);
     }
 
     // --- `paste_target`: purely cosmetic label state, never consulted
