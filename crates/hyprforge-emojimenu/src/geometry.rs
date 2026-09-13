@@ -125,11 +125,39 @@ impl GridLayout {
     /// first row (still in the header), in a gap between cells, past the
     /// last column, or past the last cell actually built — all of them
     /// "do nothing", the same as an unrecognised key.
-    pub fn cell_at(&self, position: (f64, f64), columns: usize, visible_cells: usize) -> Option<usize> {
+    /// Where the first column starts, horizontally.
+    ///
+    /// Whole cells rarely divide a popup's width exactly, and the
+    /// remainder used to sit entirely on the right — a grid pushed
+    /// against its left edge with a ragged gap down the other side.
+    /// Splitting it centres the grid.
+    ///
+    /// **Both the drawing and the hit-test read this.** That is the
+    /// whole reason it is a function rather than an `align_x` on a
+    /// container: centring the grid visually while `cell_at` still
+    /// measured from the padding would put every click half a gap to
+    /// the left of the cell under the pointer — the same class of
+    /// silent disagreement between what is drawn and what is measured
+    /// that this module exists to prevent.
+    pub fn left_margin(&self, width: f64, columns: usize) -> f64 {
+        let stride = self.cell_size + self.spacing;
+        // The last column needs no spacing after it.
+        let grid_width = columns as f64 * stride - self.spacing;
+        let slack = width - self.padding * 2.0 - grid_width;
+        self.padding + (slack.max(0.0) / 2.0)
+    }
+
+    pub fn cell_at(
+        &self,
+        position: (f64, f64),
+        width: f64,
+        columns: usize,
+        visible_cells: usize,
+    ) -> Option<usize> {
         if columns == 0 || visible_cells == 0 {
             return None;
         }
-        let x = position.0 - self.padding;
+        let x = position.0 - self.left_margin(width, columns);
         let y = position.1 - self.padding - self.header_height;
         if x < 0.0 || y < 0.0 {
             return None;
@@ -243,6 +271,17 @@ impl ToneStrip {
 mod tests {
     use super::*;
 
+    /// A popup width the tests measure against. The grid is centred in
+    /// it, so "where the first column starts" is `left_margin`, not
+    /// `padding` — these tests used to assume the two were the same and
+    /// caught the change the moment centring landed, which is what they
+    /// are for.
+    const TEST_WIDTH: f64 = 360.0;
+
+    fn left(layout: &GridLayout) -> f64 {
+        layout.left_margin(TEST_WIDTH, 4)
+    }
+
     // --- GridLayout::columns / rows_that_fit: the "how many fit" half of
     // the drawn/hit-tested/fit invariant.
 
@@ -291,19 +330,49 @@ mod tests {
 
     // --- GridLayout::cell_at: the "which cell" half.
 
+    /// The grid is centred, so the space left over from whole columns
+    /// is split rather than pooled on the right — and the hit-test has
+    /// to measure from the same edge the drawing starts at, or every
+    /// click lands half a gap out.
+    #[test]
+    fn the_leftover_width_is_split_evenly_and_the_hit_test_agrees() {
+        let layout = GridLayout::for_font_size(15.0);
+        let columns = layout.columns(TEST_WIDTH);
+        let stride = layout.cell_size + layout.spacing;
+        let grid_width = columns as f64 * stride - layout.spacing;
+
+        // Measured from the popup's own edges, both sides: the gap to
+        // the left of the first column and the gap to the right of the
+        // last. Padding is part of both, which is the whole point —
+        // what the eye sees is the total gap, not the slack on top of
+        // the padding.
+        let left_edge = layout.left_margin(TEST_WIDTH, columns);
+        let right_gap = TEST_WIDTH - (left_edge + grid_width);
+        assert!(
+            (left_edge - right_gap).abs() < 0.001,
+            "gap left of the grid is {left_edge}, right is {right_gap}"
+        );
+        assert!(left_edge >= layout.padding, "the grid must never sit inside the padding");
+
+        // Just inside the first cell hits it; just outside does not.
+        let top = layout.padding + layout.header_height;
+        assert_eq!(layout.cell_at((left_edge + 0.01, top), TEST_WIDTH, columns, 20), Some(0));
+        assert_eq!(layout.cell_at((left_edge - 0.01, top), TEST_WIDTH, columns, 20), None);
+    }
+
     #[test]
     fn a_pointer_over_the_header_hits_no_cell() {
         let layout = GridLayout::for_font_size(15.0);
-        assert_eq!(layout.cell_at((layout.padding, 0.0), 4, 20), None);
+        assert_eq!(layout.cell_at((left(&layout), 0.0), TEST_WIDTH, 4, 20), None);
     }
 
     #[test]
     fn the_first_cell_starts_right_after_the_header() {
         let layout = GridLayout::for_font_size(15.0);
         let top = layout.padding + layout.header_height;
-        assert_eq!(layout.cell_at((layout.padding, top), 4, 20), Some(0));
+        assert_eq!(layout.cell_at((left(&layout), top), TEST_WIDTH, 4, 20), Some(0));
         assert_eq!(
-            layout.cell_at((layout.padding + layout.cell_size - 0.01, top + layout.cell_size - 0.01), 4, 20),
+            layout.cell_at((left(&layout) + layout.cell_size - 0.01, top + layout.cell_size - 0.01), TEST_WIDTH, 4, 20),
             Some(0),
             "must still be cell 0 right up to its own far edge"
         );
@@ -317,9 +386,9 @@ mod tests {
         let columns = 4;
         for row in 0..3usize {
             for col in 0..columns {
-                let x = layout.padding + col as f64 * stride + layout.cell_size / 2.0;
+                let x = left(&layout) + col as f64 * stride + layout.cell_size / 2.0;
                 let y = top + row as f64 * stride + layout.cell_size / 2.0;
-                assert_eq!(layout.cell_at((x, y), columns, 12), Some(row * columns + col));
+                assert_eq!(layout.cell_at((x, y), TEST_WIDTH, columns, 12), Some(row * columns + col));
             }
         }
     }
@@ -328,8 +397,8 @@ mod tests {
     fn a_pointer_in_the_gap_between_two_columns_hits_nothing() {
         let layout = GridLayout::for_font_size(15.0);
         let top = layout.padding + layout.header_height;
-        let gap_x = layout.padding + layout.cell_size + layout.spacing / 2.0;
-        assert_eq!(layout.cell_at((gap_x, top + layout.cell_size / 2.0), 4, 20), None);
+        let gap_x = left(&layout) + layout.cell_size + layout.spacing / 2.0;
+        assert_eq!(layout.cell_at((gap_x, top + layout.cell_size / 2.0), TEST_WIDTH, 4, 20), None);
     }
 
     #[test]
@@ -337,8 +406,8 @@ mod tests {
         let layout = GridLayout::for_font_size(15.0);
         let top = layout.padding + layout.header_height;
         let stride = layout.cell_size + layout.spacing;
-        let past_last_column = layout.padding + 4.0 * stride + 1.0;
-        assert_eq!(layout.cell_at((past_last_column, top), 4, 20), None);
+        let past_last_column = left(&layout) + 4.0 * stride + 1.0;
+        assert_eq!(layout.cell_at((past_last_column, top), TEST_WIDTH, 4, 20), None);
     }
 
     #[test]
@@ -350,15 +419,15 @@ mod tests {
         // rather than resolving to a cell nothing drew.
         let stride = layout.cell_size + layout.spacing;
         let y = top + 2.0 * stride + layout.cell_size / 2.0;
-        assert_eq!(layout.cell_at((layout.padding, y), 4, 8), None);
+        assert_eq!(layout.cell_at((left(&layout), y), TEST_WIDTH, 4, 8), None);
     }
 
     #[test]
     fn zero_columns_or_zero_visible_cells_hits_nothing_rather_than_dividing_by_zero() {
         let layout = GridLayout::for_font_size(15.0);
         let top = layout.padding + layout.header_height;
-        assert_eq!(layout.cell_at((layout.padding, top), 0, 20), None);
-        assert_eq!(layout.cell_at((layout.padding, top), 4, 0), None);
+        assert_eq!(layout.cell_at((left(&layout), top), TEST_WIDTH, 0, 20), None);
+        assert_eq!(layout.cell_at((left(&layout), top), TEST_WIDTH, 4, 0), None);
     }
 
     // --- ToneStrip: the five-cell overlay a long press opens.

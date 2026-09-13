@@ -124,7 +124,7 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    let app = EmojiApp::new(model, chooser, paste_shortcut);
+    let app = EmojiApp::new(model, chooser, paste_shortcut, POPUP_WIDTH);
 
     match hyprforge_popup::Popup::run(connection, placement, app, theme) {
         Ok(hyprforge_popup::Outcome::App(ChoiceOutcome::Chosen | ChoiceOutcome::Cancelled)) => {
