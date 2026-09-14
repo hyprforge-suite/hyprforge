@@ -19,7 +19,18 @@ hyprforge-ui.workspace = true
 hyprforge-look.workspace = true
 hyprforge-appearance.workspace = true
 hyprforge-paths.workspace = true
-iced.workspace = true
+# `tokio` on top of the workspace base, the same addition
+# `hyprforge-settings` makes and for the same reason: it selects iced's
+# tokio executor, so the futures a `Task` runs are polled inside a tokio
+# runtime. Without it `Task::perform` runs on a `futures` thread pool
+# with no ambient runtime, and the free function
+# `tokio::task::spawn_blocking()` panics with "there is no reactor
+# running" — the same class of failure the root Cargo.toml's note about
+# zbus and the `notif/` workspace describes. Declaring it here rather
+# than relying on Cargo unifying features from `hyprforge-settings`:
+# that unification only happens when something builds both, so
+# `cargo build -p hyprforge-files` alone would not get it.
+iced = { workspace = true, features = ["tokio"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 serde.workspace = true
 serde_json.workspace = true
