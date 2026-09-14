@@ -1563,6 +1563,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyprforge-fileops"
+version = "0.1.0"
+dependencies = [
+ "hyprforge-paths",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tracing",
+]
+
+[[package]]
+name = "hyprforge-files-core"
+version = "0.1.0"
+dependencies = [
+ "hyprforge-fileops",
+ "hyprforge-paths",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.19",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "hyprforge-greet"
 version = "0.1.0"
 dependencies = [

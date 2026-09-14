@@ -278,6 +278,7 @@ on the thing it actually asks, rather than sharing one `--ignored` run:
 | Live tests against UPower | does **UPower** agree? | upower.service running |
 | Live tests against power-profiles-daemon | does **power-profiles-daemon** agree? | power-profiles-daemon.service running |
 | Live tests against the Wayland clipboard | does the **compositor's clipboard** agree? | a Wayland session (`WAYLAND_DISPLAY` set) |
+| Trash entries written by another implementation | can this crate read the **`.trashinfo` files already on disk**? | a home trash directory with something in it |
 | Icon names against the installed theme | do the tray's icon names resolve in the **installed icon theme**? | an icon theme to ask (via `gsettings`) |
 | Live tests against a tray host | does a real **tray host** accept these icons? | a `StatusNotifierWatcher` running (a bar with a tray) |
 

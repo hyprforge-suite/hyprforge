@@ -1,0 +1,23 @@
+[package]
+name = "hyprforge-fileops"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# No async runtime and no D-Bus: this crate is syscalls and arithmetic.
+# A file operation is not a service call, and a crate that acquires a
+# runtime stops being usable from anything that doesn't have one.
+hyprforge-paths.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+# Exposes the fake `Filesystem` outside `#[cfg(test)]`, so another
+# crate's tests can drive trash placement without a second real mount.
+# Same arrangement as `hyprforge-power`'s own `mock` feature.
+mock = []

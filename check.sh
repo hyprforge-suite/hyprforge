@@ -453,6 +453,31 @@ else
         fi
     fi
 
+    # Gated on a home trash directory existing, and on nothing else.
+    # Not on a compositor, not on a bus: this asks whether the
+    # `.trashinfo` files *another implementation already wrote* are ones
+    # this crate can read, and the only thing that has to be true for
+    # that question to mean anything is that such files exist. A trash
+    # that is empty reports a skip rather than a false green, because
+    # "parsed every one of zero entries" is the shape of check that
+    # CLAUDE.md already caught passing while verifying nothing.
+    step "Trash entries written by another implementation"
+    if [[ ! -d "${XDG_DATA_HOME:-$HOME/.local/share}/Trash/info" ]]; then
+        skip "trash tests" "no home trash directory on this machine"
+    else
+        output=$(cargo test -p hyprforge-fileops --test live_trash \
+            -- --ignored --test-threads=1 --nocapture 2>&1)
+        if grep -q "test result: FAILED" <<<"$output"; then
+            bad "trash tests failed — this crate disagrees with the trash already on disk"
+            grep -E '^test .* FAILED' <<<"$output" | head -20
+        else
+            ok "$(count_tests <<<"$output") trash tests passed"
+            while IFS= read -r reason; do
+                [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
+            done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^(]*\).*/\1/p' <<<"$output" | sort -u)
+        fi
+    fi
+
     # Answers to UPower, not to Hyprland or to logind — its own gate, for
     # the same reason NetworkManager and BlueZ got their own steps: folded
     # into any of the runs above, this would need something that has

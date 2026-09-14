@@ -30,6 +30,8 @@ members = [
     "crates/hyprforge-network",
     "crates/hyprforge-power",
     "crates/hyprforge-settings",
+    "crates/hyprforge-fileops",
+    "crates/hyprforge-files-core",
 ]
 # `notif/` is a nested cargo workspace, deliberately kept out of this one.
 #
@@ -79,6 +81,8 @@ hyprforge-popup = { path = "crates/hyprforge-popup" }
 hyprforge-clipmenu = { path = "crates/hyprforge-clipmenu" }
 hyprforge-emoji = { path = "crates/hyprforge-emoji", version = "0.1.0" }
 hyprforge-emojimenu = { path = "crates/hyprforge-emojimenu" }
+hyprforge-fileops = { path = "crates/hyprforge-fileops" }
+hyprforge-files-core = { path = "crates/hyprforge-files-core" }
 
 # Only hyprforge-lua-import depends on this — evaluating a user's own
 # hyprland.lua (with hl.* stubbed to record calls) to import hand-written

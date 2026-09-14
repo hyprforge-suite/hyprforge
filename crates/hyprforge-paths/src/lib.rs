@@ -30,6 +30,22 @@ pub fn hyprforge_config_dir() -> PathBuf {
     config_home().join("hyprforge")
 }
 
+/// `$XDG_DATA_HOME`, falling back to `~/.local/share` — the XDG base
+/// directory for user-specific data, as opposed to config. Added for
+/// `hyprforge-fileops`, which needs it for the trash spec's home trash
+/// (`$XDG_DATA_HOME/Trash`); mirrors [`config_home`] exactly; per the XDG
+/// spec a relative value is invalid and must be treated as unset.
+pub fn data_home() -> PathBuf {
+    if let Some(dir) = std::env::var_os("XDG_DATA_HOME") {
+        let dir = PathBuf::from(dir);
+        if dir.is_absolute() {
+            return dir;
+        }
+    }
+    let home = std::env::var_os("HOME").expect("HOME must be set");
+    PathBuf::from(home).join(".local").join("share")
+}
+
 /// The lock screen's theme, written by Settings and read by
 /// `hyprforge-lock`. The greeter cannot use this one — it runs as its own
 /// user and a home directory is `drwx------` — so it reads an exported
@@ -61,6 +77,13 @@ pub fn tray_toml_path() -> PathBuf {
 /// tells that apart from a file that exists but will not parse.
 pub fn emojimenu_toml_path() -> PathBuf {
     hyprforge_config_dir().join("emojimenu.toml")
+}
+
+/// The file browser's remembered state — sort order, view mode, whether
+/// the preview pane is on, window size. Same one-file-beside-the-others
+/// convention as `tray.toml`/`emojimenu.toml`.
+pub fn files_toml_path() -> PathBuf {
+    hyprforge_config_dir().join("files.toml")
 }
 
 /// Where the clipboard manager keeps its history. Its own subdirectory,
