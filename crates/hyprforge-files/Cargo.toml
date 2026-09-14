@@ -1,0 +1,31 @@
+[package]
+name = "hyprforge-files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hyprforge-files"
+path = "src/main.rs"
+
+[dependencies]
+# The browser view itself lives in hyprforge-files-core, because the
+# portal's open/save dialog has to render the same one. This crate is
+# the window around it: navigation chrome, the keyboard grammar, and
+# the file operations a dialog deliberately does not have.
+hyprforge-files-core.workspace = true
+hyprforge-fileops.workspace = true
+hyprforge-ui.workspace = true
+hyprforge-look.workspace = true
+hyprforge-appearance.workspace = true
+hyprforge-paths.workspace = true
+iced.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

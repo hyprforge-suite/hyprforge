@@ -5,10 +5,15 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-# No iced yet: phase 1 is the model and the filesystem seam. The browser
-# view lands here in phase 2, which is when hyprforge-ui/-look arrive.
+# The browser view lives here, not in the app, because the portal's
+# open/save dialog must render the *same* view — that is the whole
+# reason this crate is separate from `hyprforge-files`.
+#
 # Deliberately never hyprforge-core — that is Hyprland config machinery
 # and a new app should not need it.
+iced.workspace = true
+hyprforge-ui.workspace = true
+hyprforge-look.workspace = true
 hyprforge-paths.workspace = true
 hyprforge-fileops.workspace = true
 serde.workspace = true

@@ -27,6 +27,7 @@ pkgname=(
   hyprforge-tray
   hyprforge-clipboard
   hyprforge-emojimenu
+  hyprforge-files
   hyprforge
 )
 pkgver=0.1.0
@@ -82,6 +83,23 @@ package_hyprforge-settings() {
   _bin hyprforge-settings
   install -Dm644 crates/hyprforge-settings/packaging/hyprforge-settings.desktop \
     "$pkgdir/usr/share/applications/hyprforge-settings.desktop"
+}
+
+package_hyprforge-files() {
+  pkgdesc="File manager for Hyprland"
+  depends=(wayland libxkbcommon)
+  optdepends=(
+    # Not a hard dependency, deliberately. The file manager installs and
+    # runs without it; what it cannot do is mount an SMB share, and it
+    # says so in the window naming this package rather than failing in a
+    # way the user has to go and diagnose.
+    'gvfs-smb: connecting to Windows/SMB network shares'
+    'xdg-utils: opening a file with the application you have chosen for it'
+  )
+  cd "$startdir/../.."
+  _bin hyprforge-files
+  install -Dm644 crates/hyprforge-files/packaging/hyprforge-files.desktop \
+    "$pkgdir/usr/share/applications/hyprforge-files.desktop"
 }
 
 package_hyprforge-lock() {
@@ -173,6 +191,7 @@ package_hyprforge() {
     hyprforge-tray
     hyprforge-clipboard
     hyprforge-emojimenu
+    hyprforge-files
   )
   # The greeter is deliberately not here. Installing it is not the
   # dangerous step — enabling greetd is, because that decides which VT

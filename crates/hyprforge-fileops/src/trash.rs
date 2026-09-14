@@ -355,7 +355,11 @@ fn split_stem_ext(name: &[u8]) -> (&[u8], Option<&[u8]>) {
 /// starting from `original` and inserting `.2`, `.3`, ... before the
 /// extension on each collision — see the module doc's "Name collisions"
 /// section for why this particular convention.
-fn unique_name(files_dir: &Path, original: &OsStr) -> io::Result<OsString> {
+///
+/// `pub(crate)` rather than private: `ops`'s keep-both collision policy
+/// needs exactly this disambiguation and reuses it rather than growing a
+/// second implementation of the same `stem.N.ext` scheme.
+pub(crate) fn unique_name(files_dir: &Path, original: &OsStr) -> io::Result<OsString> {
     let bytes = original.as_bytes();
     if !files_dir.join(original).exists() {
         return Ok(original.to_os_string());

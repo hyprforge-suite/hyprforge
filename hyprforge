@@ -69,8 +69,11 @@ NEXT_CLIPBOARD=
 COMPONENT_CHANGED=false
 NO_RESTART=false
 NEXT_EMOJI=
+NEXT_FILES=
 STATE_EMOJI=todo
 REASON_EMOJI=
+STATE_FILES=todo
+REASON_FILES=
 NEXT_LOCK=
 NEXT_SETTINGS=
 NEXT_GREETER=
@@ -264,10 +267,14 @@ greeter_step_state() {
 }
 
 print_next_steps() {
-    local labels=("Display daemon" "Tray icons" "Clipboard" "Emoji picker" "Lock" "Settings app" "Greeter")
-    local texts=("$NEXT_DISPLAYD" "$NEXT_TRAY" "$NEXT_CLIPBOARD" "$NEXT_EMOJI" "$NEXT_LOCK" "$NEXT_SETTINGS" "$NEXT_GREETER")
-    local states=("$STATE_DISPLAYD" "$STATE_TRAY" "$STATE_CLIPBOARD" "$STATE_EMOJI" "$STATE_LOCK" "$STATE_SETTINGS" "$STATE_GREETER")
-    local reasons=("$REASON_DISPLAYD" "$REASON_TRAY" "$REASON_CLIPBOARD" "$REASON_EMOJI" "$REASON_LOCK" "$REASON_SETTINGS" "$REASON_GREETER")
+    # Four arrays indexed in lockstep. Adding a component means adding
+    # to all four at the same position — miss one and every entry after
+    # it is labelled with its neighbour's name, which reads as a bug in
+    # whichever component happened to land next to the gap.
+    local labels=("Display daemon" "Tray icons" "Clipboard" "Emoji picker" "File manager" "Lock" "Settings app" "Greeter")
+    local texts=("$NEXT_DISPLAYD" "$NEXT_TRAY" "$NEXT_CLIPBOARD" "$NEXT_EMOJI" "$NEXT_FILES" "$NEXT_LOCK" "$NEXT_SETTINGS" "$NEXT_GREETER")
+    local states=("$STATE_DISPLAYD" "$STATE_TRAY" "$STATE_CLIPBOARD" "$STATE_EMOJI" "$STATE_FILES" "$STATE_LOCK" "$STATE_SETTINGS" "$STATE_GREETER")
+    local reasons=("$REASON_DISPLAYD" "$REASON_TRAY" "$REASON_CLIPBOARD" "$REASON_EMOJI" "$REASON_FILES" "$REASON_LOCK" "$REASON_SETTINGS" "$REASON_GREETER")
 
     # Steps that are `done` collapse into this count instead of being
     # read one by one, matching the "N already current" pattern used
@@ -365,6 +372,7 @@ ${B}Components${N}
   --clipboard      Clipboard history: the daemon as a systemd user
                    service, plus the popup its keybind launches.
   --settings       The Settings app and its launcher entry.
+  --files          The file manager, and its launcher entry.
   --emoji          The emoji picker popup, bound from Settings ->
                    Shortcuts (it has no daemon and no service).
   --all            Every component above.
@@ -408,8 +416,9 @@ while [[ $# -gt 0 ]]; do
         --tray)          COMPONENTS+=(tray) ;;
         --clipboard)     COMPONENTS+=(clipboard) ;;
         --emoji)         COMPONENTS+=(emoji) ;;
+        --files)         COMPONENTS+=(files) ;;
         --settings)      COMPONENTS+=(settings) ;;
-        --all)           COMPONENTS+=(greeter lock displayd tray clipboard emoji settings) ;;
+        --all)           COMPONENTS+=(greeter lock displayd tray clipboard emoji files settings) ;;
         --force-cleanup) FORCE_CLEANUP=true ;;
         --dry-run)       DRY_RUN=true ;;
         --no-restart)    NO_RESTART=true ;;
@@ -873,6 +882,17 @@ EOF
 )
 }
 
+uninstall_files() {
+    step "File manager: removing"
+    remove_file "$PREFIX/hyprforge-files"
+    remove_file "$DESKTOP_DIR/hyprforge-files.desktop"
+    # Nothing else to undo: no service, no config written by the
+    # installer. The user's own files.toml is deliberately left alone —
+    # uninstalling a program is not a reason to throw away the
+    # preferences they set in it, and reinstalling should find them
+    # still there.
+}
+
 uninstall_emoji() {
     step "Emoji picker: removing"
     remove_file "$PREFIX/hyprforge-emojimenu"
@@ -952,6 +972,50 @@ uninstall_displayd() {
 # /usr/share/applications. It names no absolute path and needs no root,
 # and a per-user install is the honest description of what this is.
 readonly DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+
+install_files() {
+    COMPONENT_CHANGED=false
+    build hyprforge-files
+    step "File manager"
+    install_file target/release/hyprforge-files "$PREFIX/hyprforge-files" 755
+
+    local entry=crates/hyprforge-files/packaging/hyprforge-files.desktop
+    local dst="$DESKTOP_DIR/hyprforge-files.desktop"
+    if $DRY_RUN; then
+        skip "would install $dst"
+    elif [[ -e $dst ]] && cmp -s "$entry" "$dst"; then
+        mark_current
+    else
+        install -Dm644 "$entry" "$dst"
+        # Not every launcher needs this and it is absent on some systems,
+        # so its failure is not the install failing. It matters more here
+        # than for the Settings app, though: this entry declares
+        # MimeType=inode/directory, and that association is exactly what
+        # this command rebuilds — without it, "open containing folder"
+        # from another application still goes wherever it went before.
+        command -v update-desktop-database >/dev/null &&
+            update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
+        ok "installed $dst"
+    fi
+    flush_current
+
+    # No service and no daemon: a window that opens when asked and exits
+    # when closed. Unlike the Settings app it takes no single-instance
+    # lock either — two file manager windows onto two directories is how
+    # people move files, and every file manager anyone has used allows
+    # it.
+    NEXT_FILES=$(cat <<EOF
+  ${D}It should appear in rofi as "Hyprforge Files". To make it the
+  handler other applications use for "open containing folder":
+      xdg-mime default hyprforge-files.desktop inode/directory
+
+  Connecting to an SMB share needs one more package. Without it the app
+  runs fine and says so where the share would be, rather than failing in
+  a way you would have to go and diagnose:
+      pacman -S gvfs-smb${N}
+EOF
+)
+}
 
 install_settings() {
     COMPONENT_CHANGED=false
@@ -1175,6 +1239,7 @@ case $ACTION in
         has_component tray && install_tray
         has_component clipboard && install_clipboard
         has_component emoji && install_emoji
+        has_component files && install_files
         has_component settings && install_settings
         print_next_steps
         step "Done"
@@ -1185,6 +1250,7 @@ case $ACTION in
         has_component lock     && uninstall_lock
         has_component clipboard && uninstall_clipboard
         has_component emoji && uninstall_emoji
+        has_component files && uninstall_files
         has_component tray && uninstall_tray
         has_component displayd && uninstall_displayd
         has_component settings && uninstall_settings

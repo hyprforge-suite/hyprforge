@@ -1574,11 +1574,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyprforge-files"
+version = "0.1.0"
+dependencies = [
+ "hyprforge-appearance",
+ "hyprforge-fileops",
+ "hyprforge-files-core",
+ "hyprforge-look",
+ "hyprforge-paths",
+ "hyprforge-ui",
+ "iced",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "hyprforge-files-core"
 version = "0.1.0"
 dependencies = [
  "hyprforge-fileops",
+ "hyprforge-look",
  "hyprforge-paths",
+ "hyprforge-ui",
+ "iced",
  "serde",
  "tempfile",
  "thiserror 2.0.19",
