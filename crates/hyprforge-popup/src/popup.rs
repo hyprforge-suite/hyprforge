@@ -553,6 +553,19 @@ impl<A: PopupApp + 'static> Popup<A> {
         let layer =
             self.layer_shell.create_layer_surface(qh, surface, Layer::Overlay, Some("hyprforge-popup"), Some(&output));
         layer.set_anchor(Anchor::TOP | Anchor::LEFT);
+        // `-1`, not the default `0`. A layer surface whose exclusive zone
+        // is `0` is positioned inside whatever space is *left over* after
+        // every exclusive-zone surface has taken its cut, so a margin is
+        // measured from the bar's bottom edge rather than from the
+        // output's. Every placement this crate computes is in full-output
+        // logical coordinates — a cursor position from `hyprctl`, or a
+        // monitor's own `reserved` top plus the user's offset — so with
+        // the default, the bar's height got counted twice: measured live,
+        // a menu that should have opened at y=50 (a bar occupying 20..50)
+        // opened at y=100. `-1` says "do not move me out of anyone's
+        // way", which makes a margin mean the same thing the placement
+        // code already meant by it.
+        layer.set_exclusive_zone(-1);
         layer.set_margin(self.placement.margin_top, 0, 0, self.placement.margin_left);
         layer.set_size(self.placement.width, self.placement.height);
         // Exclusive: typing has to reach this popup, not whatever had
