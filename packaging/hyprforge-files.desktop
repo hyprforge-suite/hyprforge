@@ -1,0 +1,22 @@
+[Desktop Entry]
+Type=Application
+Name=Hyprforge Files
+GenericName=File Manager
+Comment=Browse, organise and preview your files
+# No absolute path: the installer puts the binary on PATH, and hardcoding
+# a prefix is what makes a .desktop file break when someone installs
+# somewhere else.
+Exec=hyprforge-files %U
+# The name of an icon theme entry, not a file. No icon ships yet, so
+# launchers fall back to a generic one — correct behaviour for a missing
+# icon, and better than pointing at a path that does not exist.
+Icon=system-file-manager
+Terminal=false
+Categories=System;FileTools;FileManager;
+Keywords=files;folder;browse;manager;explorer;finder;
+StartupNotify=true
+# Declaring this is what lets "Open containing folder" in other
+# applications, and `xdg-open` on a directory, reach this program at all.
+# inode/directory is the type a folder has; the two x-scheme handlers are
+# how a file:// or trash:// URI is routed.
+MimeType=inode/directory;x-scheme-handler/file;x-scheme-handler/trash;
