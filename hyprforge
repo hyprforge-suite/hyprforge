@@ -66,6 +66,8 @@ flush_current() {
 NEXT_DISPLAYD=
 NEXT_TRAY=
 NEXT_CLIPBOARD=
+COMPONENT_CHANGED=false
+NO_RESTART=false
 NEXT_EMOJI=
 STATE_EMOJI=todo
 REASON_EMOJI=
@@ -372,6 +374,9 @@ ${B}Options${N}
                    components or holding user data: the exported look,
                    the hyprforge group, /etc/greetd config. Off by
                    default because these are not yours alone.
+  --no-restart     Do not restart a running daemon whose binary changed.
+                   The install still happens; the old process keeps
+                   running until you restart it yourself.
   --dry-run        Print what would happen. Touches nothing.
   --yes            Do not ask for confirmation.
   -h, --help       This.
@@ -407,6 +412,7 @@ while [[ $# -gt 0 ]]; do
         --all)           COMPONENTS+=(greeter lock displayd tray clipboard emoji settings) ;;
         --force-cleanup) FORCE_CLEANUP=true ;;
         --dry-run)       DRY_RUN=true ;;
+        --no-restart)    NO_RESTART=true ;;
         --yes|-y)        ASSUME_YES=true ;;
         -h|--help)       usage; exit 0 ;;
         *)               die "unknown option: $1 (try --help)" ;;
@@ -465,6 +471,12 @@ install_file() {
         mark_current
         return 0
     fi
+    # Something on disk is about to differ from what was there. Recorded
+    # so `restart_if_running` can tell "you installed a new binary" from
+    # "you ran install again and nothing moved" — restarting a daemon
+    # that did not change is a pointless interruption of whatever it was
+    # doing.
+    COMPONENT_CHANGED=true
     local verb="installed"
     [[ -e $dst ]] && verb="updated"
     run_root install -Dm"$mode" "$src" "$dst"
@@ -489,6 +501,7 @@ remove_file() {
 # --------------------------------------------------------------- greeter
 
 install_greeter() {
+    COMPONENT_CHANGED=false
     build hyprforge-greet
 
     step "Greeter: the exported-look directory"
@@ -600,6 +613,7 @@ uninstall_greeter() {
 # ------------------------------------------------------------------ lock
 
 install_lock() {
+    COMPONENT_CHANGED=false
     build hyprforge-lock
     step "Lock: binary and PAM stack"
     install_file target/release/hyprforge-lock "$PREFIX/hyprforge-lock" 755
@@ -643,6 +657,7 @@ uninstall_lock() {
 # -------------------------------------------------------------- displayd
 
 install_displayd() {
+    COMPONENT_CHANGED=false
     build hyprforge-displayd
     step "Display daemon"
     install_file target/release/hyprforge-displayd "$PREFIX/hyprforge-displayd" 755
@@ -685,9 +700,12 @@ EOF
 )
     service_state --user hyprforge-displayd
     STATE_DISPLAYD=$CHECK_STATE; REASON_DISPLAYD=$CHECK_REASON
+
+    restart_if_running hyprforge-displayd "the display daemon"
 }
 
 install_tray() {
+    COMPONENT_CHANGED=false
     build hyprforge-tray hyprforge-trayd
     # The right-click menu's own popup, spawned directly by
     # hyprforge-trayd rather than served over com.canonical.dbusmenu — see
@@ -742,9 +760,53 @@ EOF
 )
     service_state --user hyprforge-trayd
     STATE_TRAY=$CHECK_STATE; REASON_TRAY=$CHECK_REASON
+
+    restart_if_running hyprforge-trayd "the tray icons and their menus"
+}
+
+# Restarts a *running* user service whose binary this run replaced.
+#
+# This exists because the same mistake cost two debugging sessions in one
+# day. An installed binary is not a running daemon: `hyprforge-clipd`
+# kept serving an old socket protocol and answered "unknown variant
+# `set-clipboard`" to a popup built against the new one, which looked
+# like a bug in the clipboard rather than a stale process; and
+# `hyprforge-trayd` kept advertising a menu it no longer served. Both
+# times the install had succeeded and the symptom was somewhere else
+# entirely.
+#
+# Three deliberate limits:
+#
+#   * Only if it is already **running**. Starting a service the user
+#     chose not to enable is not this script's decision to make.
+#   * Only if the binary actually **changed** this run, so re-running the
+#     installer does not interrupt a daemon for nothing.
+#   * **Never greetd.** It is a system service and it is the login
+#     manager: restarting it takes the session down with it. The greeter
+#     component deliberately has no call here, and `crates/hyprforge-greet/INSTALL.md`
+#     covers committing to it by hand, from a spare VT, on purpose.
+restart_if_running() {
+    local unit=$1 label=$2
+    $NO_RESTART && return 0
+    $COMPONENT_CHANGED || return 0
+    timeout 5 systemctl --user is-active --quiet "$unit" || return 0
+
+    if $DRY_RUN; then
+        skip "would restart $unit (it is running and its binary changed)"
+        return 0
+    fi
+    if timeout 20 systemctl --user restart "$unit"; then
+        ok "restarted $unit, so $label is running what was just installed"
+    else
+        # Not fatal: the files are installed and correct, and a restart
+        # the user can do by hand is a smaller problem than an installer
+        # that reports failure for something that did work.
+        warn "couldn't restart $unit — run: systemctl --user restart $unit"
+    fi
 }
 
 install_clipboard() {
+    COMPONENT_CHANGED=false
     build hyprforge-clipboard hyprforge-clipd
     build hyprforge-clipmenu
     step "Clipboard"
@@ -783,9 +845,12 @@ EOF
 )
     clipboard_step_state
     STATE_CLIPBOARD=$CHECK_STATE; REASON_CLIPBOARD=$CHECK_REASON
+
+    restart_if_running hyprforge-clipd "clipboard history"
 }
 
 install_emoji() {
+    COMPONENT_CHANGED=false
     build hyprforge-emojimenu
     step "Emoji picker"
     install_file target/release/hyprforge-emojimenu "$PREFIX/hyprforge-emojimenu" 755
@@ -889,6 +954,7 @@ uninstall_displayd() {
 readonly DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 
 install_settings() {
+    COMPONENT_CHANGED=false
     build hyprforge-settings
     step "Settings app"
     install_file target/release/hyprforge-settings "$PREFIX/hyprforge-settings" 755
