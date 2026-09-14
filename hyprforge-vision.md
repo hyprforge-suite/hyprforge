@@ -60,14 +60,14 @@ with zero GTK/Qt dependency anywhere in the stack.
 
 | Component | Crate(s) | Replaces | Daemon? | Status |
 |---|---|---|---|---|
-| **Settings app** (shell) | `hyprforge-settings` | GNOME/KDE Settings | no (hosts modules that may talk to daemons) | ten working screens (Monitors, Window Rules, Shortcuts, Input, Network, Bluetooth, Appearance, Desktop, Session, System), ~20.9k lines |
+| **Settings app** (shell) | `hyprforge-settings` | GNOME/KDE Settings | no (hosts modules that may talk to daemons) | twelve working screens (Monitors, Window Rules, Shortcuts, Input, Network, Bluetooth, Power, Tray, Appearance, Desktop, Session, System), ~23.2k lines |
 | — Displays module | `hyprforge-displayd` (daemon) | manual `wlr-randr`/GUI fiddling | **yes**, systemd user service, D-Bus API | in progress |
 | — Window Rules module | `hyprforge-windowrules` (lib) | hand-written Lua rules | no | in progress |
 | — Shortcuts module | `hyprforge-shortcuts` (lib) | hand-edited keybinds | no | in progress; TOML storage, Lua codegen, live conflict detection against `hyprctl binds` |
 | — Network module | `hyprforge-network` (lib) | nm-applet/nmtui | no new daemon, talks to NetworkManager D-Bus directly | in progress; model, backend seam, NetworkManager client and the Settings screen (Wi-Fi list, join, forget, radio toggle) are done. Deferred: VPN, 802.1X enterprise, hotspot |
 | — Bluetooth module | `hyprforge-bluetooth` (lib) | blueman | no new daemon, talks to BlueZ D-Bus directly | in progress; adapter power, discovery, device list, connect/disconnect/forget/trust, and a Settings screen. Pairing is now built: `agent::register` implements `org.bluez.Agent1`, `pairing::PairingPrompt` models Confirm/Display/Authorize, and the Settings screen's `subscription()` wires a live `pairing_stream()` that forwards BlueZ's prompts to the screen and sends the answer back |
 | — Audio module | *(planned)* | pavucontrol | talks to PipeWire | not started |
-| — Power module (battery, power-profiles-daemon) | *(planned)* | — | talks to UPower/power-profiles-daemon | not started. A crate named `hyprforge-power` exists, but it is unrelated to this row: it is only the logind `Inhibit` client behind "Tray: keep awake" below — no UPower, no battery, no power profiles. Do not read the crate's existence as this module being done |
+| — Power module (keep awake, battery, power profiles) | `hyprforge-power` (lib) | — | no new daemon, talks to systemd-logind/UPower/power-profiles-daemon directly | in progress; three independent backend traits (`InhibitBackend`, `BatteryBackend`, `PowerProfilesBackend`), each with its own mock and its own live `check.sh` tier, and now a Settings **Power** screen on top — keep-awake toggle plus the other holders of an inhibit, battery percentage/state, and profile switching, each section collapsing on its own if that one daemon is down rather than taking the whole screen with it. the tray's keep-awake icon now opens it (both its left click and its menu row were repointed off the Desktop screen's old `idle` tab, which a trayd test keeps in sync). Not yet done: a tray item for battery or profile |
 | — Desktop module (wallpaper, night light, idle) | `hyprforge-ecosystem` (lib) | hyprpaper/hyprsunset/hypridle config by hand | no (drives the existing daemons) | in progress |
 | — Appearance module | `hyprforge-appearance` (lib) | GNOME/KDE appearance settings | no (writes gsettings via CLI) | in progress |
 | — Input/keyboard module | `hyprforge-input` (lib) | GNOME/KDE keyboard & touchpad settings | no | in progress |
@@ -75,15 +75,16 @@ with zero GTK/Qt dependency anywhere in the stack.
 | — System module (behaviour, shortcuts behaviour, X11, rendering) | `hyprforge-system` (lib) | hand-edited hyprland.lua | no | in progress |
 | — Users/time module | *(planned)* | — | accountsservice/timedated | not started |
 | — Lua import (hand-written config) | `hyprforge-lua-import` (lib) | — | no (sandboxed `mlua` evaluator, the only crate depending on mlua) | in progress; imports hand-written `hl.bind()`/`hl.window_rule()`/`hl.monitor()` calls |
-| **Tray icons** | `hyprforge-tray` (lib + `hyprforge-trayd`) | nm-applet, blueman-tray | **yes**, a small user daemon | in progress; four `org.kde.StatusNotifierItem`s (Wi-Fi, Bluetooth, keep-awake, night light) with `com.canonical.dbusmenu` menus, scanning on menu open, each icon's visibility gated by `hyprforge_tray::prefs` and re-read every poll tick. Deferred: submenus, and an Audio/Power item until those backends exist |
-| — Tray: keep awake | `hyprforge-tray` item, `hyprforge-power` (logind `Inhibit` client) | a hand-run `systemd-inhibit … sleep 8h` | no (logind `Inhibit`) | built; `check.sh` has a live tier, "Live tests against systemd-logind". No Settings screen yet — it has no home in `hyprforge-settings` at all today, only the tray item |
+| **Tray icons** | `hyprforge-tray` (lib + `hyprforge-trayd`), `hyprforge-traymenu` (its menu popup) | nm-applet, blueman-tray | **yes**, a small user daemon | in progress; four `org.kde.StatusNotifierItem`s (Wi-Fi, Bluetooth, keep-awake, night light), scanning on menu open, each icon's visibility gated by `hyprforge_tray::prefs` and re-read every poll tick. No longer serves `com.canonical.dbusmenu` at all: `menu()` now answers no `Menu` property, and a right click spawns `hyprforge-traymenu`, a sibling `PopupApp` built on `hyprforge-popup` that draws the menu itself, themed and anchored like the rest of the suite. The cost, stated plainly: before this, any spec-compliant tray host could draw these menus itself, styled and positioned however it chose; now only `hyprforge-traymenu` can, and a bar with no Hyprforge installed sees no menu at all, just the icon's primary action. Deferred: submenus, and an item for battery/power profiles now that `hyprforge-power` covers them |
+| — Tray: keep awake | `hyprforge-tray` item, `hyprforge-power`'s `InhibitBackend` | a hand-run `systemd-inhibit … sleep 8h` | no (logind `Inhibit`) | built; `check.sh` has a live tier, "Live tests against systemd-logind". Now has a home in Settings — the Power screen's keep-awake toggle and its list of other holders — and the tray icon opens it, having been repointed off the Desktop screen's old `idle` tab stand-in |
 | — Tray: night light | `hyprforge-tray` item, `hyprforge-ecosystem::sunset_control` | redshift/gammastep applets | no (drives hyprsunset via `hyprctl`) | built; `check.sh` has a live tier, "Live tests against hyprsunset". Its Settings home is a tab on the Desktop screen, with no way yet to deep-link the tray icon straight to it |
 | — Tray: displays | `hyprforge-tray` item *(planned)* | — | no (talks to `hyprforge-displayd` over D-Bus) | not started; switch profile on dock, and surface the revert countdown. The first item with a real use for `Status::Passive` — invisible until it has something to say |
 | **Bar** | *(planned)* | waybar | no | not started; would also be the `StatusNotifierHost`, so the tray items already target it |
 | **Clipboard** | `hyprforge-clipboard` (lib + `hyprforge-clipd` daemon), `hyprforge-clipmenu` (popup) | copyq | **yes**, `hyprforge-clipd`, a user daemon over `wlr-data-control`/`ext-data-control` | in progress; history recording, paste synthesis, and a popup that appears at the pointer are built. Built around one rule: `Sensitivity` is checked before an offer's bytes are ever requested, so a secret is never read, hashed, stored or logged, and `Debug` on an entry renders a description rather than content. `hyprforge-clipboard` is deliberately standalone — no settings app, no tray, no Hyprland config machinery — and is one of the five components already split into its own repository (see "Where things stand"). `check.sh` has a live tier, "Live tests against the Wayland clipboard"; the CI in the split repository is tier-1 only, since a compositor-backed test needs a real Wayland session no runner has |
+| **Emoji picker** | `hyprforge-emoji` (data + pure search), `hyprforge-emojimenu` (popup) | the emoji picker GNOME/KDE ship and Hyprland users otherwise go without | no (short-lived, per-invocation process on a keybind, same shape as `hyprforge-clipmenu`) | built; a grid of all 1914 fully-qualified Unicode 17.0 emoji at the pointer, type-to-filter search, skin tones with a long-press for the five variants and a persisted default tone, bound to a key the user sets. `hyprforge-emoji` is pure data and a pure `search` function, no filesystem/network/runtime access at all; `hyprforge-emojimenu` is the popup built on `hyprforge-popup` |
 | **Notifications** | the nested `notif/` workspace: `notif-types`, `notif-config`, `notif-core`, `notif-dbus`, `notif-render`, `notif-wl`, `notif-ipc`, plus the `notifd`/`notifctl` binaries | dunst/mako | **yes**, `notifd`, a user daemon (`org.freedesktop.Notifications` over D-Bus) | built and usable standalone: full D-Bus notification server, layer-shell toasts, a notification-center panel, history, do-not-disturb, hot-reloading config, and `notifctl` for CLI control. Kept as its own nested Cargo workspace on purpose, excluded from the root workspace's `members` — zbus picks its async runtime by feature, the suite needs `zbus/tokio` and notif needs `zbus/async-io`, and unifying the two would give notif's D-Bus code a tokio code path with no tokio runtime under it. `notif-render`'s golden-image tests read the shared `hyprforge_look::Theme` (the same `lock.toml` the lock screen and Settings app read) so notification colours match the rest of the suite without being configured twice. `check.sh`'s "notif workspace" step is what runs its tests, since `cargo test --workspace` at the root does not reach it |
 | **Lock screen** | `hyprforge-lock` (binary), `hyprforge-authui` (conversation model) | hyprlock | no (a client holding `ext-session-lock-v1`) | locks, draws, authenticates against PAM and unlocks, with a look shared with the greeter via `hyprforge-look`; see "The lock screen" in the README for the genuine remaining gaps (no input-method support, password not zeroized, no attempt limiting of its own) |
-| *(shared foundation)* | `hyprforge-paths` (xdg + atomic writes), `hyprforge-look` (colour type + runtime Theme), `hyprforge-ui` (iced widgets and palette) | — | no | in place; every future app builds on these |
+| *(shared foundation)* | `hyprforge-paths` (xdg + atomic writes), `hyprforge-look` (colour type + runtime Theme), `hyprforge-ui` (iced widgets and palette), `hyprforge-popup` (layer-shell popup shell: surface, pointer/keyboard, flip-then-clamp placement, singleton lock, scrollbar, fractional-scale rendering) | — | no | in place; every future app builds on these. `hyprforge-popup` was extracted from `hyprforge-clipmenu` once a second and third popup (`hyprforge-emojimenu`, `hyprforge-traymenu`) needed the same Wayland/iced plumbing rather than copying it; it is listed here rather than as its own inventory component because, like `hyprforge-look`/`hyprforge-ui`, nothing user-facing depends on it alone — it only ever appears through a popup that builds on it |
 | **Greeter / display manager** | `hyprforge-greet`, on `hyprforge-authui` | greetd greeters (gtkgreet/tuigreet) | runs under greetd | ~885 lines; has an installer (`./hyprforge --install --greeter`) and its own `INSTALL.md` |
 | **File Manager** | `hyprforge-files-core` (shared logic), `hyprforge-files` (standalone), `hyprforge-files-portal` (xdg-desktop-portal FileChooser backend) | Nautilus/Dolphin/Thunar | portal backend runs as a D-Bus service | not started |
 | **Photo Viewer** | `hyprforge-photos` | eog/gwenview | no | not started |
@@ -107,7 +108,7 @@ locked spec.
 
 ## Workspace structure
 
-Single Cargo workspace at the repo root, 25 crates under `crates/` plus the
+Single Cargo workspace at the repo root, 29 crates under `crates/` plus the
 `notif/` nested workspace (see "Notifications" above for why that one is
 kept separate). The original intent was for every component above to get
 its own crate(s) under `crates/`, even before it's built — stub/empty
@@ -116,11 +117,11 @@ suite. That convention was not followed in practice: `Cargo.toml`'s
 `members` lists only crates that actually have code in them, and planned
 components with no crate yet (Audio, Users/time, File Manager, Photo
 Viewer, Video Viewer, Process Manager, Service Manager, Disk Utility,
-Notepad, Calculator, Calendar) simply have none. Power is a partial
-exception: `hyprforge-power` exists as a crate, but only for the
-keep-awake Inhibit client — the planned battery/power-profiles module
-this table lists separately still has no crate. Treat the table above,
-not the workspace listing, as the source of truth for what's planned.
+Notepad, Calculator, Calendar) simply have none. Power is no longer an
+exception to that: `hyprforge-power` now covers keep-awake, battery and
+power profiles, matching the module this table lists. Treat the table
+above, not the workspace listing, as the source of truth for what's
+planned.
 
 ```
 hyprforge/
@@ -128,9 +129,10 @@ hyprforge/
   crates/
     hyprforge-paths/            # xdg + atomic writes, no dependencies
     hyprforge-process/           # a bounded subprocess wait, no dependencies
-    hyprforge-secret/            # Secret<T>, zeroizing on drop
+    hyprforge-secret/            # Secret<T>, whose Debug renders a length only
     hyprforge-look/             # Color type + runtime Theme, no iced
     hyprforge-ui/                # the iced layer: widgets, palette, spacing
+    hyprforge-popup/             # shared layer-shell popup shell, no daemon
     hyprforge-core/              # Hyprland config machinery: hlconfig, hyprlang,
                                   # Lua codegen, D-Bus proxy for displayd
     hyprforge-displayd/
@@ -144,10 +146,13 @@ hyprforge/
     hyprforge-lua-import/
     hyprforge-network/
     hyprforge-bluetooth/
-    hyprforge-power/             # logind Inhibit client (keep-awake) only
+    hyprforge-power/             # logind Inhibit, UPower battery, power-profiles-daemon
+    hyprforge-emoji/             # emoji data + pure search
+    hyprforge-emojimenu/         # the emoji picker popup
     hyprforge-clipboard/         # clipboard history lib + hyprforge-clipd daemon
     hyprforge-clipmenu/          # the clipboard popup
     hyprforge-tray/              # lib + hyprforge-trayd
+    hyprforge-traymenu/          # the tray's own right-click menu popup
     hyprforge-settings/          # the Settings app shell + its modules
     hyprforge-authui/            # shared auth conversation model
     hyprforge-lock/
@@ -204,9 +209,9 @@ sign something belongs in `hyprforge-look` instead.
 
 The Settings modules above marked *in progress* are functional; their look
 and feel is deliberately unfinished, functionality first. The Settings app
-itself is ten working screens (Monitors, Window Rules, Shortcuts, Input,
-Network, Bluetooth, Appearance, Desktop, Session, System) at roughly
-20.9k lines.
+itself is twelve working screens (Monitors, Window Rules, Shortcuts, Input,
+Network, Bluetooth, Power, Tray, Appearance, Desktop, Session, System) at
+roughly 23.2k lines.
 
 `hyprforge-lock` locks, draws, authenticates against PAM and unlocks, and
 now has the look: it shares `hyprforge-look`'s runtime `Theme` with the rest
@@ -242,20 +247,62 @@ Authorize shapes BlueZ can ask for, and the Bluetooth Settings screen's
 messages. Adapter power, discovery, device list, connect/disconnect/
 forget/trust and pairing are all in place.
 
-Two Tray items shipped since this section was last written: keep-awake
-(`hyprforge-power`, a logind `Inhibit` client — the crate's only job) and
-night light (driving `hyprsunset` through
-`hyprforge-ecosystem::sunset_control`). Neither has finished its Settings
-integration — keep-awake has no screen at all yet, night light's is a
-Desktop tab with no deep link from the tray icon — but both are
+Two Tray items shipped before this section was last revised: keep-awake
+(`hyprforge-power`'s logind `Inhibit` client) and night light (driving
+`hyprsunset` through `hyprforge-ecosystem::sunset_control`). Both are
 live-tested in `check.sh` against the real service (`systemd-logind`,
-`hyprsunset`).
+`hyprsunset`). Night light's Settings home is still a Desktop tab with no
+deep link from the tray icon; keep-awake's situation changed underneath
+it — see below.
 
-Two components not previously in this document exist and work: the
-clipboard (`hyprforge-clipboard` + `hyprforge-clipd`, with the
-`hyprforge-clipmenu` popup, replacing copyq) and notifications (the
-nested `notif/` workspace, replacing dunst/mako). Both are described in
-the inventory table above.
+`hyprforge-power` grew considerably: it now wraps three independent
+daemons (`systemd-logind`, UPower, `power-profiles-daemon`) behind three
+backend traits, each with its own mock and its own live `check.sh` tier,
+and the Settings app gained a **Power** screen on top of all three —
+keep-awake plus the other holders of an inhibit, battery percentage and
+state, and profile switching, with one daemon being down only collapsing
+its own section. The tray's keep-awake icon has since been repointed at
+it, in both the places that needed it — the left click
+(`TrayItem::activate_screen`) and the menu's own settings row — which a
+trayd test exists to keep in step with each other.
+
+The tray itself gained a Settings screen of its own at the same time
+(`--screen tray`): the four icons' visibility, previously reachable only
+as a "Show in tray" checkbox on whichever screen owned that icon, and
+`menu_y_offset`, previously reachable only by hand-editing `tray.toml`.
+That gave one file three writers inside one process, so every writer now
+goes through `hyprforge_tray::prefs::update`, which reloads immediately
+before setting its one field rather than saving back a copy loaded at
+construction.
+
+The clipboard (`hyprforge-clipboard` + `hyprforge-clipd`, with the
+`hyprforge-clipmenu` popup, replacing copyq) went through a long
+debugging session that ended with paste actually working end to end: a
+missing `event_created_child!` specialization was panicking on the
+compositor's own `data_offer` event the moment a selection changed
+(including the popup's own write), the clipboard was found to die with
+the popup that set it (fixed by outliving the popup rather than the
+selection dying with it), and the synthesized Ctrl+V paste was found to
+be flushed but not delivered — `flush()` puts the key events on the
+socket without waiting for the compositor to read them, measured against
+a window that captured raw bytes (0 bytes exiting immediately after flush,
+109 bytes after waiting). Both the clipboard and emoji popups also gained
+a real pixel-offset scrollbar with a draggable thumb, replacing
+item-at-a-time scrolling with nothing to show position.
+
+Notifications (the nested `notif/` workspace, replacing dunst/mako) are
+unchanged and described in the inventory table above.
+
+Two components not previously in this document exist and work: the emoji
+picker (`hyprforge-emoji` + `hyprforge-emojimenu`, replacing the emoji
+picker Hyprland users otherwise go without) and the tray's own menu
+popup (`hyprforge-traymenu`, replacing the `com.canonical.dbusmenu` menu
+the tray used to serve — see the Tray icons row above for the cost of
+that). Building both surfaced enough shared Wayland/iced plumbing that it
+was pulled out of `hyprforge-clipmenu` into `hyprforge-popup`, a shared
+layer-shell popup shell (surface, pointer/keyboard, placement, singleton
+lock, scrollbar, fractional-scale rendering) all three popups now build
+on rather than each carrying their own copy of it.
 
 The suite also gained tooling to extract a component into its own
 repository while keeping it a workspace member here: `split.sh` (via

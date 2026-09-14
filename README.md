@@ -1,9 +1,11 @@
 # Hyprforge (v1 slice)
 
-Displays daemon + Window Rules, Shortcuts, Input and Appearance libraries
-+ Settings GUI for Hyprland. See `hyprforge-vision.md` for the whole-suite context this
-session's work fits into; this README covers only what's in this workspace
-so far.
+A Displays daemon, the Window Rules/Shortcuts/Input/Appearance config
+libraries, a Settings GUI, a clipboard history, an emoji picker, a
+StatusNotifierItem tray, Network/Bluetooth/power clients, and a shared
+lock screen and greeter — all for Hyprland. See `hyprforge-vision.md` for
+the whole-suite context this session's work fits into; this README covers
+only what's in this workspace so far.
 
 ## Workspace layout
 
@@ -27,6 +29,23 @@ Shared by every app in the suite
                             BlueZ) that have no Hyprland config to read or
                             write. hyprforge-core re-exports it as
                             hyprforge_core::command for compatibility.
+  hyprforge-secret/        Secret<T>, whose Debug renders a length and
+                            nothing else, so every place a password or
+                            passphrase leaves the wrapper is one greppable
+                            expose() call. No dependencies at all.
+  hyprforge-popup/         the shared layer-shell popup shell: surface,
+                            event loop, pointer/keyboard handling,
+                            placement, the single-instance lock, and the
+                            pixel-offset scrollbar. Extracted from
+                            hyprforge-clipmenu once a second and third
+                            popup (hyprforge-emojimenu, hyprforge-traymenu)
+                            needed the same machinery. A leaf: depends
+                            only on hyprforge-look and hyprforge-process,
+                            no async runtime, no D-Bus, no hyprforge-core.
+  hyprforge-emoji/         CLDR-ordered emoji data (generated from
+                            Unicode's emoji-test.txt) and a pure search
+                            function. No dependencies at all; a picker UI
+                            is built on this, not the other way round.
 
 Hyprland-facing
   hyprforge-core/          the config machinery: hlconfig (the generic
@@ -55,19 +74,51 @@ Hyprland-facing
                             screen is testable without an adapter.
   hyprforge-bluetooth/     adapters and devices over BlueZ, on the same
                             backend-trait-first shape. Pairing not yet.
+  hyprforge-power/         keeping the machine awake, battery state and the
+                            active power profile, over systemd-logind,
+                            UPower and power-profiles-daemon — three
+                            independent daemons, each behind its own
+                            backend trait, because one can be down while
+                            the others answer fine.
+  hyprforge-clipboard/     a Wayland clipboard history over
+                            wlr-data-control/ext-data-control: what was
+                            copied and what may be kept. Sensitivity is
+                            checked before an offer's bytes are ever read,
+                            so a password manager's clipboard contents are
+                            never hashed, stored or logged.
+  hyprforge-clipmenu/      the clipboard history popup, launched per
+                            invocation by a keybind rather than run as a
+                            daemon — a short-lived process cannot leak a
+                            stuck layer surface holding exclusive keyboard
+                            focus. A PopupApp consumer of hyprforge-popup.
   hyprforge-tray/          the StatusNotifierItem protocol, and
-                            hyprforge-trayd, which puts a Wi-Fi and a
-                            Bluetooth icon in whatever bar is running. A
-                            tray icon is a D-Bus object, not a widget —
-                            which is why it needs no GTK or Qt. The
-                            right-click menu is hyprforge-traymenu, a
-                            sibling popup this daemon spawns directly
-                            rather than serving com.canonical.dbusmenu for
-                            a bar to draw itself.
+                            hyprforge-trayd, which puts a Wi-Fi, a
+                            Bluetooth, a keep-awake and a night-light icon
+                            in whatever bar is running. A tray icon is a
+                            D-Bus object, not a widget — which is why it
+                            needs no GTK or Qt. The right-click menu is
+                            hyprforge-traymenu, a sibling popup this daemon
+                            spawns directly; the item advertises no `Menu`
+                            property at all, rather than serving
+                            com.canonical.dbusmenu for a bar to draw
+                            itself. The cost is real and stated plainly in
+                            the crate's own module doc: before this, any
+                            spec-compliant tray host could show these
+                            menus, styled however that host chose; now
+                            only hyprforge-traymenu can, and a bar with no
+                            Hyprforge installed sees an icon with no menu
+                            at all, its right-click falling back to the
+                            icon's primary action.
   hyprforge-traymenu/      the tray's own right-click menu, themed like
                             every other Hyprforge popup and anchored below
                             the icon that was clicked — a PopupApp
                             consumer, the same shape as hyprforge-clipmenu.
+  hyprforge-emojimenu/     an emoji picker popup that appears where the
+                            mouse is, filtered by what's typed, built the
+                            same way as hyprforge-clipmenu — a PopupApp
+                            consumer of hyprforge-popup and
+                            hyprforge-emoji, with long-press support for
+                            picking a skin tone.
 
 Apps
   hyprforge-settings/      the iced GUI, hosting the settings modules
@@ -221,6 +272,8 @@ on the thing it actually asks, rather than sharing one `--ignored` run:
 | Live tests against BlueZ | does **BlueZ** agree? | bluetooth.service running |
 | Live tests against hyprsunset | does **hyprsunset** agree? | hyprsunset running |
 | Live tests against systemd-logind | does **logind** agree? | something answering on `org.freedesktop.login1` |
+| Live tests against UPower | does **UPower** agree? | upower.service running |
+| Live tests against power-profiles-daemon | does **power-profiles-daemon** agree? | power-profiles-daemon.service running |
 | Live tests against the Wayland clipboard | does the **compositor's clipboard** agree? | a Wayland session (`WAYLAND_DISPLAY` set) |
 | Icon names against the installed theme | do the tray's icon names resolve in the **installed icon theme**? | an icon theme to ask (via `gsettings`) |
 | Live tests against a tray host | does a real **tray host** accept these icons? | a `StatusNotifierWatcher` running (a bar with a tray) |
@@ -230,10 +283,17 @@ nastier kind: code that is internally consistent and wrong about the system
 it talks to. Every claim the option catalogues make — that an option exists,
 what type it is, what range it accepts — is checked against the running
 compositor, the generated hyprlang files are handed to the daemons
-themselves, and the NetworkManager, BlueZ, hyprsunset, logind, clipboard
-and tray steps are each read-only checks that the real service's interface
-is the shape the corresponding crate claims. Registering with a tray host
-is the one exception to read-only: it really does put an icon in the
+themselves, and the NetworkManager, BlueZ, hyprsunset, logind, UPower,
+power-profiles-daemon, clipboard and tray steps are each read-only checks
+that the real service's interface is the shape the corresponding crate
+claims. UPower and power-profiles-daemon are two separate services with
+independent lifetimes, so they get two separate steps rather than one
+combined "power" step — a machine with UPower masked but
+power-profiles-daemon running should still get the second step's coverage,
+and vice versa; power-profiles-daemon's own step never calls
+`SetActiveProfile`, since changing the active profile changes how loud a
+stranger's fans are out from under them. Registering with a tray host is
+the one exception to read-only: it really does put an icon in the
 user's bar for a fraction of a second, which is the smallest observable
 form of "a host accepted it".
 
@@ -260,8 +320,8 @@ has no skipped state — a test that returns early because a daemon isn't
 installed, or NetworkManager has no Wi-Fi device to ask, prints `ok`
 exactly like one that verified something. Every gated step except live
 tests against Hyprland — parse, NetworkManager, BlueZ, hyprsunset,
-logind, clipboard, icon names and tray — `eprintln!`s an
-`HYPRFORGE-SKIP: <reason>` line before returning early from a check it
+logind, UPower, power-profiles-daemon, clipboard, icon names and tray —
+`eprintln!`s an `HYPRFORGE-SKIP: <reason>` line before returning early from a check it
 couldn't actually run, `check.sh` runs them with `--nocapture` and greps
 for the marker, and each one found is reported separately in yellow even
 on an otherwise green run.
@@ -273,7 +333,9 @@ cargo build --workspace --release
 ```
 
 Binaries land in `target/release/`: `hyprforge-displayd`,
-`hyprforge-displayctl`, `hyprforge-settings`.
+`hyprforge-displayctl`, `hyprforge-settings`, `hyprforge-clipd`,
+`hyprforge-clipmenu`, `hyprforge-emojimenu`, `hyprforge-trayd`,
+`hyprforge-traymenu`, `hyprforge-lock`, `hyprforge-greet`.
 
 ## Config file locations
 
@@ -291,6 +353,10 @@ Binaries land in `target/release/`: `hyprforge-displayd`,
 | `$XDG_CONFIG_HOME/hypr/hyprforge/monitors.lua` | Generated by `hyprforge-displayd` from whatever layout is currently live — **never edit**; regenerated on every settled topology. No canonical TOML of its own; see "Surviving the display daemon not running" below |
 | `$XDG_CONFIG_HOME/hypr/hyprland.lua` | Your own config — Hyprforge touches exactly one line per module in it, see below |
 | `$XDG_CONFIG_HOME/hypr/hyprland.lua.hyprforge.bak` | Backup taken automatically the one time that line is inserted |
+| `$XDG_CONFIG_HOME/hyprforge/lock.toml` | The lock screen's theme, written by Settings, read by `hyprforge-lock` (the greeter reads an exported copy — it runs as its own user and cannot read your home) |
+| `$XDG_CONFIG_HOME/hyprforge/tray.toml` | Which tray icons show and how far below the bar their menu opens, written by Settings' Tray screen and re-read by `hyprforge-trayd` on every poll, so a toggle takes effect without restarting anything |
+| `$XDG_CONFIG_HOME/hyprforge/emojimenu.toml` | The emoji picker's default skin tone |
+| `$XDG_CONFIG_HOME/hyprforge/clipboard/` | The clipboard history: `history.toml` for the index, `images/` for one file per image entry — never image bytes in the index itself |
 
 `$XDG_CONFIG_HOME` falls back to `~/.config` if unset, per the XDG spec.
 

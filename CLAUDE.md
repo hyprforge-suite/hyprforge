@@ -200,6 +200,109 @@ completely different-looking reason than "no secret". The tell is the
 runner's own env dump: GitHub prints `***` for a populated secret, so a bare
 `NAME:` with nothing after it means the value never arrived.
 
+**`flush` is not delivery, and a process that exits after flushing loses the
+work.** Synthesising a paste through a virtual keyboard reported success and
+delivered nothing: `connection.flush()` puts the key events on the socket and
+does not wait for the compositor to read them, so a popup that pastes and
+exits destroys its virtual keyboard while those events are still unread.
+Measured against a window that captures raw bytes — exit immediately: 0
+bytes; wait 500ms: the paste arrives. A round trip is the fix, not a longer
+wait: a compositor cannot answer a sync until it has processed everything
+queued before it, so the reply is proof the keys were taken, where a sleep
+would only be a number tuned until it stopped failing. Bounded on its own
+thread, because `roundtrip` has no timeout and a wedged compositor must not
+hang a popup that already did the useful part of its job. `send_combo` in
+`hyprforge-clipboard/src/wayland/keyboard.rs`.
+
+**Check the instrument before trusting what it says about the thing.** Hours
+went into "the keystroke never arrives," against a capture rig that
+could not capture *real* keystrokes either — the terminal reading it back
+was in canonical mode, so nothing reached `cat` until a newline. Every
+measurement before that discovery was measuring nothing, and it sent the
+paste investigation above through three wrong suspects before landing on the
+actual bug. Validate the measuring apparatus against a known-good input
+first; a result this clean-looking is not evidence until the rig itself has
+been made to fail on purpose.
+
+**An installed binary is not a restarted daemon.** Twice in one day a stale
+daemon produced a symptom that looked like a bug somewhere else —
+`hyprforge-clipd` answering "unknown variant `set-clipboard`" to a popup
+built against a newer socket protocol, which presented as the clipboard
+silently not working, and `hyprforge-trayd` still advertising a menu it no
+longer served. Both installs had genuinely succeeded; version skew across a
+socket after an upgrade is normal, not exceptional, and a component that
+answers but cannot do what is asked is a third case beyond "there" and "not
+there". `./hyprforge --install` now restarts a user service whose binary it
+just replaced, but only if the service was already running (starting
+something the user chose not to enable is not this script's decision) and
+only if the binary actually changed this run (so re-running the installer
+does not interrupt a daemon for nothing) — never greetd, which is the login
+manager and takes the session down with it.
+
+**A property that says "none" is not the same as no property.** The tray
+answered `/` for its `Menu` property, reading the root path as the spec's
+way of saying there is no menu — an object path can't itself be null. waybar
+doesn't read it that way: it saw a property, built a dbusmenu client against
+the path, got no layout back, and drew an empty four-pixel GTK menu at the
+pointer — and, believing it had served the click, never called
+`ContextMenu`, which is the one place this suite's own popup gets launched
+from. Omitting the `Menu` property entirely, which the StatusNotifierItem
+spec allows precisely so an item can say it has none, is what sends a host
+down the fallback path instead. The live test had asserted the property
+equalled `/` and passed — a claim about our own code, sitting in the tier
+whose whole purpose is claims about somebody else's; it now asserts that
+reading the property *errors*, because it isn't declared at all.
+
+**A popup that renders a 1x buffer on a scaled output is blurry, and nothing
+in the code says so.** Every popup drew into a logical-pixel-sized buffer and
+told iced the scale was 1.0; on a 1.6-scale output the compositor stretched
+it, and it looked like a font problem. `wp_fractional_scale_v1` with
+`wp_viewporter` is the fix, because it's the only pairing that matches 1.6
+exactly — integer `set_buffer_scale` rounds it to 2 and is wrong differently.
+The division that keeps this safe: the buffer is physical pixels, but the
+widget tree, the clip rectangle and every hit-test stay logical, because
+Wayland delivers pointer coordinates in logical surface space by contract —
+scaling the buffer cannot move what a click lands on.
+
+**Two icon names that both resolve can still look wrong together.** The tray
+asked for the full-colour `network-wireless-signal-excellent` beside three
+`-symbolic` names, so one colourful icon sat among three monochrome ones —
+every name resolved, so the existing "does this name draw something" test
+passed throughout. Fixing it took checking, not guessing: the instruction to
+use Adwaita as a safe standard was wrong on this machine — the configured
+theme's own `Inherits=` reaches `breeze-dark` and nothing else installed
+here, so Adwaita was unreachable and every suggested name would have
+resolved to nothing. The rule that now catches this class needs no live
+theme at all: every icon name this daemon can emit must be `-symbolic`,
+except a documented two-name allow-list for the one shared fallback state
+that has no symbolic variant anywhere reachable. A second, live-only check
+goes further and confirms a whole set resolves through the *same* installed
+theme rather than merely somewhere in the chain — two names can each resolve
+and still look wrong together if one falls through several levels of
+inheritance to reach hicolor while its sibling is drawn directly.
+
+**A single-instance lock answers "someone already has it" — never "and
+that is fine".** `hyprforge-traymenu` takes an `flock` so a keybind pressed
+twice cannot open two popups, and a second copy that finds the lock held
+exits quietly and successfully. That is right for the same menu asked for
+twice and wrong for a right click on a *different* tray icon: the user is
+asking for the Bluetooth menu while the Wi-Fi one is open, and gets nothing
+at all until they press escape first. Whoever spawns the popup has to decide
+which of those a refusal is, because the lock cannot tell them apart — so
+`hyprforge-trayd` closes the menu it already opened before opening another.
+It keeps the whole `Child` and not a pid, because the lock is released when
+the kernel closes the dead process's descriptors and a zombie nobody waited
+on still holds them; `Child::kill` signals *and* reaps, which is what makes
+the new popup's own `acquire` succeed rather than race.
+
+**An instruction from a human or another agent is not evidence.** Three
+times in one session an agent was told something false — that Adwaita was
+reachable on this machine, a JSON field order that was backwards, a claim
+about how waybar behaves — and caught it only by reading the source instead
+of trusting the brief. That habit is why the rest of this section is
+trustworthy: every entry above was written after checking the claim against
+the repository, not after being told it.
+
 ## Never do this to the machine you are working on
 
 **Never point the lock screen at the live session.** `--fake-password` is
@@ -323,17 +426,28 @@ belongs in the design — not in a user's surprise.
 ./check.sh --quick  # tier 1 only: clippy + unit tests, no compositor
 ```
 
-Clippy must be silent and every test must pass before a commit. Three tiers, and
-the later ones exist because code can be internally consistent and wrong about
-the system it is talking to: tier 2 checks catalogue claims against the running
-compositor, tier 3 hands generated files to the real daemons. Tier 1 now also
-includes the "Standalone crate dependency pins" step, which compares every
-split-ready crate's hand-copied dependency versions against the workspace
-table — see the rule above about drift with no symptom.
+Clippy must be silent and every test must pass before a commit. Eleven gated
+tiers beyond tier 1 now, each answering a different "does the system I'm
+talking to actually agree" question — Hyprland itself, the ecosystem daemons'
+parse tests, NetworkManager, BlueZ, hyprsunset, systemd-logind, UPower,
+power-profiles-daemon, the Wayland clipboard, icon names against the
+installed theme, and a tray host — and each gates on the thing it actually
+asks rather than riding another tier's `--ignored` run, for the reason in the
+rule above about a check that silently never runs. Tier 1 now also includes
+the "Standalone crate dependency pins" step, which compares every split-ready
+crate's hand-copied dependency versions against the workspace table — see the
+rule above about drift with no symptom.
 
 `check.sh` does **not** cover the lock screen's live behaviour. Its unit tests
 run in tier 1, but proving it locks, draws and unlocks needs the nested
 compositor, by hand.
+
+`./hyprforge --install` restarts a running user service whose binary it just
+replaced — see the rule above about an installed binary not being a
+restarted daemon. `--no-restart` opts out for anyone mid-something who wants
+the files now and the restart later; it never touches greetd, which
+`crates/hyprforge-greet/INSTALL.md` covers committing to deliberately, from
+a spare VT.
 
 `./split.sh <crate-name>` extracts one component into a branch that can
 become its own repository, history intact, and refuses to run until the
