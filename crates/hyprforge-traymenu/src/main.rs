@@ -94,9 +94,15 @@ fn main() -> std::process::ExitCode {
     let lock_path = hyprforge_popup::singleton::lock_path(LOCK_NAME);
     let _lock = match hyprforge_popup::singleton::acquire(&lock_path) {
         Ok(Some(lock)) => Some(lock),
-        // Someone already has it — a second right click while one menu
-        // is open, not an error. Exit quietly, printing no action, which
-        // `hyprforge-trayd` reads as "nothing was chosen".
+        // Someone already has it. Not an error — exit quietly, printing
+        // no action, which `hyprforge-trayd` reads as "nothing was
+        // chosen". This is the backstop, not the normal path: the daemon
+        // closes the menu it already opened before spawning another
+        // (`hyprforge_tray::launch::OpenMenu`), precisely because
+        // refusing here is invisible to a user who right-clicked a
+        // *different* icon and is waiting for its menu. What is left for
+        // this branch is a copy started by something other than that
+        // daemon — by hand, or a second daemon.
         Ok(None) => return std::process::ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("couldn't set up the single-instance lock ({e}) — continuing anyway");
