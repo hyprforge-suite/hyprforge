@@ -94,6 +94,22 @@ Hyprland-facing
                             daemon — a short-lived process cannot leak a
                             stuck layer surface holding exclusive keyboard
                             focus. A PopupApp consumer of hyprforge-popup.
+  hyprforge-fileops/       trash, copy, move and rename. The freedesktop
+                            trash spec including the part that bites: a
+                            file cannot be renamed across filesystems, so
+                            a file on another one needs a trash directory
+                            of its own — which is not an external-drive
+                            edge case, since btrfs subvolumes report
+                            different device numbers. No Hyprland, no
+                            async runtime: syscalls and arithmetic.
+  hyprforge-files-core/    the file browser's model, the FsBackend seam,
+                            and the browsing view itself. The view lives
+                            here rather than in the app because the
+                            portal's open/save dialog has to render the
+                            same one — enforced by the type, not by
+                            convention: view() takes a private ViewModel
+                            with no mode field, so it cannot branch on
+                            which host it is in.
   hyprforge-tray/          the StatusNotifierItem protocol, and
                             hyprforge-trayd, which puts a Wi-Fi, a
                             Bluetooth, a keep-awake and a night-light icon
@@ -124,6 +140,10 @@ Hyprland-facing
                             picking a skin tone.
 
 Apps
+  hyprforge-files/         the file manager window: the chrome around the
+                            shared browsing view, plus what a dialog
+                            deliberately does not have — launching what
+                            you double-click, and file operations.
   hyprforge-settings/      the iced GUI, hosting the settings modules
   hyprforge-authui/        the authentication conversation model, shared by
                             the lock screen and the greeter
@@ -337,7 +357,8 @@ cargo build --workspace --release
 ```
 
 Binaries land in `target/release/`: `hyprforge-displayd`,
-`hyprforge-displayctl`, `hyprforge-settings`, `hyprforge-clipd`,
+`hyprforge-displayctl`, `hyprforge-settings`, `hyprforge-files`,
+`hyprforge-clipd`,
 `hyprforge-clipmenu`, `hyprforge-emojimenu`, `hyprforge-trayd`,
 `hyprforge-traymenu`, `hyprforge-lock`, `hyprforge-greet`.
 
@@ -360,6 +381,7 @@ Binaries land in `target/release/`: `hyprforge-displayd`,
 | `$XDG_CONFIG_HOME/hyprforge/lock.toml` | The lock screen's theme, written by Settings, read by `hyprforge-lock` (the greeter reads an exported copy — it runs as its own user and cannot read your home) |
 | `$XDG_CONFIG_HOME/hyprforge/tray.toml` | Which tray icons show, how far below the bar their menu opens, and whether clicking away dismisses it — written by Settings' Tray screen and re-read by `hyprforge-trayd` on every poll (and by `hyprforge-traymenu` on every right click), so a change takes effect without restarting anything |
 | `$XDG_CONFIG_HOME/hyprforge/emojimenu.toml` | The emoji picker's default skin tone |
+| `$XDG_CONFIG_HOME/hyprforge/files.toml` | The file manager's remembered state — sort order, view mode, whether the preview pane is on, window size |
 | `$XDG_CONFIG_HOME/hyprforge/clipboard/` | The clipboard history: `history.toml` for the index, `images/` for one file per image entry — never image bytes in the index itself |
 
 `$XDG_CONFIG_HOME` falls back to `~/.config` if unset, per the XDG spec.

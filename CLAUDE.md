@@ -337,6 +337,19 @@ the kernel closes the dead process's descriptors and a zombie nobody waited
 on still holds them; `Child::kill` signals *and* reaps, which is what makes
 the new popup's own `acquire` succeed rather than race.
 
+**`git add -A` while an agent is working commits someone else's
+half-finished thought under your commit message.** Two agents were
+editing other crates when a commit here swept in six lines of one of
+their in-progress files — a visibility change that was correct and
+needed, but which the commit message said nothing about, because whoever
+wrote that message did not know it was there. The agent noticed and
+reported it; nothing else would have. A commit whose message does not
+describe its contents is the thing this project's whole commit style
+exists to prevent, and `-A` is how it happens by accident. Stage the
+paths you actually wrote (`git add crates/<the one you touched>`), and
+read `git status --short` before committing when anything else is
+running.
+
 **An instruction from a human or another agent is not evidence.** Three
 times in one session an agent was told something false — that Adwaita was
 reachable on this machine, a JSON field order that was backwards, a claim

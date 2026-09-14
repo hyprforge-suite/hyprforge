@@ -86,7 +86,7 @@ with zero GTK/Qt dependency anywhere in the stack.
 | **Lock screen** | `hyprforge-lock` (binary), `hyprforge-authui` (conversation model) | hyprlock | no (a client holding `ext-session-lock-v1`) | locks, draws, authenticates against PAM and unlocks, with a look shared with the greeter via `hyprforge-look`; see "The lock screen" in the README for the genuine remaining gaps (no input-method support, password not zeroized, no attempt limiting of its own) |
 | *(shared foundation)* | `hyprforge-paths` (xdg + atomic writes), `hyprforge-look` (colour type + runtime Theme), `hyprforge-ui` (iced widgets and palette), `hyprforge-popup` (layer-shell popup shell: surface, pointer/keyboard, flip-then-clamp placement, singleton lock, scrollbar, fractional-scale rendering, and the `Dismissal` choice that decides whether a click elsewhere closes the popup or is swallowed by it) | — | no | in place; every future app builds on these. `hyprforge-popup` was extracted from `hyprforge-clipmenu` once a second and third popup (`hyprforge-emojimenu`, `hyprforge-traymenu`) needed the same Wayland/iced plumbing rather than copying it; it is listed here rather than as its own inventory component because, like `hyprforge-look`/`hyprforge-ui`, nothing user-facing depends on it alone — it only ever appears through a popup that builds on it |
 | **Greeter / display manager** | `hyprforge-greet`, on `hyprforge-authui` | greetd greeters (gtkgreet/tuigreet) | runs under greetd | ~885 lines; has an installer (`./hyprforge --install --greeter`) and its own `INSTALL.md` |
-| **File Manager** | `hyprforge-files-core` (shared logic), `hyprforge-files` (standalone), `hyprforge-files-portal` (xdg-desktop-portal FileChooser backend) | Nautilus/Dolphin/Thunar | portal backend runs as a D-Bus service | not started |
+| **File Manager** | `hyprforge-files-core` (the model, the `FsBackend` seam, and the browsing view both hosts render), `hyprforge-fileops` (trash, copy, move), `hyprforge-files` (the app), `hyprforge-files-portal` (xdg-desktop-portal FileChooser backend) *(planned)* | Nautilus/Dolphin/Thunar | portal backend runs as a D-Bus service | in progress; the model, sorting/filtering, remembered prefs, the freedesktop trash spec (including the cross-filesystem `$topdir/.Trash-$uid` case, which is reachable on an ordinary btrfs laptop because subvolumes report different device numbers), copy/move/rename with per-chunk cancellation, and the browsing view — sidebar, path bar, list and grid, search, multi-select, history. The open/save dialog renders that *same* view rather than a reduced copy of it, which is enforced structurally: `view()` takes a private `ViewModel` with no `mode` field, so it cannot branch on which host it is in. Deferred: the portal backend itself, preview and Quick Look, archives, network shares |
 | **Photo Viewer** | `hyprforge-photos` | eog/gwenview | no | not started |
 | **Video Viewer** | `hyprforge-videos` | — (likely thin mpv wrapper; revisit build-vs-wrap) | no | not started |
 | **Process Manager** | `hyprforge-procman` | Windows Task Manager / GNOME System Monitor (Mission Center already covers this well — revisit whether to build vs. skip before starting) | no (reads /proc, polls) | not started |
@@ -108,16 +108,16 @@ locked spec.
 
 ## Workspace structure
 
-Single Cargo workspace at the repo root, 29 crates under `crates/` plus the
+Single Cargo workspace at the repo root, 32 crates under `crates/` plus the
 `notif/` nested workspace (see "Notifications" above for why that one is
 kept separate). The original intent was for every component above to get
 its own crate(s) under `crates/`, even before it's built — stub/empty
 crates as placeholders so the workspace shape reflects the intended full
 suite. That convention was not followed in practice: `Cargo.toml`'s
 `members` lists only crates that actually have code in them, and planned
-components with no crate yet (Audio, Users/time, File Manager, Photo
-Viewer, Video Viewer, Process Manager, Service Manager, Disk Utility,
-Notepad, Calculator, Calendar) simply have none. Power is no longer an
+components with no crate yet (Audio, Users/time, Photo Viewer, Video
+Viewer, Process Manager, Service Manager, Disk Utility, Notepad,
+Calculator, Calendar) simply have none. Power is no longer an
 exception to that: `hyprforge-power` now covers keep-awake, battery and
 power profiles, matching the module this table lists. Treat the table
 above, not the workspace listing, as the source of truth for what's
@@ -149,6 +149,9 @@ hyprforge/
     hyprforge-power/             # logind Inhibit, UPower battery, power-profiles-daemon
     hyprforge-emoji/             # emoji data + pure search
     hyprforge-emojimenu/         # the emoji picker popup
+    hyprforge-fileops/           # trash (freedesktop spec), copy, move, rename
+    hyprforge-files-core/        # the file browser's model and its shared view
+    hyprforge-files/             # the file manager window
     hyprforge-clipboard/         # clipboard history lib + hyprforge-clipd daemon
     hyprforge-clipmenu/          # the clipboard popup
     hyprforge-tray/              # lib + hyprforge-trayd
