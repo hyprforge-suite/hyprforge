@@ -35,8 +35,11 @@ Shared by every app in the suite
                             expose() call. No dependencies at all.
   hyprforge-popup/         the shared layer-shell popup shell: surface,
                             event loop, pointer/keyboard handling,
-                            placement, the single-instance lock, and the
-                            pixel-offset scrollbar. Extracted from
+                            placement, the single-instance lock, the
+                            pixel-offset scrollbar, and the Dismissal
+                            choice — whether a click elsewhere closes the
+                            popup or is swallowed by it, which is the same
+                            question as how it holds the keyboard. Extracted from
                             hyprforge-clipmenu once a second and third
                             popup (hyprforge-emojimenu, hyprforge-traymenu)
                             needed the same machinery. A leaf: depends

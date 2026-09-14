@@ -270,7 +270,7 @@ the crate being extracted needs a self-contained manifest. `lock` and
 - [x] `tray` prepared and verified standalone; not yet pushed
 - [x] `settings` prepared and verified standalone; not yet pushed
 - [x] All five pushed: clipboard, lock, greet, tray, settings, all green CI
-- [x] Day-2 drift detection (`./sync.sh`)
+- [x] Day-2 drift detection (`./sync.sh`), monorepo included
 
 ## Staying in sync after the push
 
@@ -292,3 +292,15 @@ passed tier 1 to five repositories is worse than not publishing. It never
 force-pushes: a component whose published history is not an ancestor of
 the new split has diverged (an outside contributor, a direct push) and is
 left for a human with `git subtree pull`, not resolved automatically.
+
+It checks the monorepo first, and pushes that before any component. Every
+standalone manifest names this repository's URL for every sibling it
+needs — `hyprforge-settings` alone pulls fifteen crates that way — so a
+component published while this repository is behind gets built by its own
+CI against siblings from whenever it was last pushed, and the failure
+names the component rather than the stale dependency it resolved. That
+happened on the first real use of `--push`: three components published,
+five green ticks, and a red build twenty seconds later on a function
+sitting in the diff that had just gone out. Order matters as much as the
+check, because a component's CI starts the moment its push lands and
+resolves its siblings while it runs.

@@ -309,6 +309,20 @@ it lands. `hyprctl layers` is the instrument for any "why is this popup
 *there*" question; it reports the surface the compositor actually
 created, which is the only thing that settles it.
 
+**An icon that asks a host to hide it is a control the user cannot
+reach.** `Status::Passive` is the StatusNotifierItem spec's way of saying
+"nothing to see here", and hosts obey it — so a Wi-Fi icon published
+Passive while the radio was off disappeared at exactly the moment its own
+menu (which offers to switch the radio back on) became useful. Every item
+this daemon builds is one the user switched on in `tray.toml`; a host
+hiding it is a decision nobody asked for. All four are `Active` in every
+state now, with a test asserting it. The related trap: the *icon name* is
+the entire vocabulary for "this is off" — SNI has no opacity and no
+sensitivity flag, nothing a host is obliged to dim — so making a hidden
+state visible means finding it a name of its own. Two states that shared
+one name while one of them was invisible will look identical the moment
+both are shown.
+
 **A single-instance lock answers "someone already has it" — never "and
 that is fine".** `hyprforge-traymenu` takes an `flock` so a keybind pressed
 twice cannot open two popups, and a second copy that finds the lock held
