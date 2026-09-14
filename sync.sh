@@ -171,6 +171,63 @@ if $PUSH; then
     fi
 fi
 
+# The monorepo comes first, and it is not optional.
+#
+# Every standalone manifest names https://github.com/<owner>/hyprforge for
+# every sibling crate it needs — hyprforge-settings alone pulls fifteen of
+# them that way. So a component pushed while this repository is behind
+# gets built by its own CI against whatever siblings were published days
+# ago, and the failure names the *component* (`cannot find function
+# `update` in module `hyprforge_tray::prefs``) rather than the stale
+# dependency it actually resolved. That happened: five components checked,
+# three pushed, and not one word about the repository all five depend on.
+#
+# Pushed before any component, for the same reason: a component's CI
+# starts the moment its push lands, and resolves siblings from here as it
+# runs.
+step "The monorepo every component's manifest points at"
+MONOREPO_URL="https://github.com/$GITHUB_OWNER/hyprforge"
+# The branch this checkout is on, not a hardcoded name: the URL in the
+# manifests carries no branch, so cargo fetches the repository's default,
+# and pushing some other branch would leave the default stale while this
+# script reported success.
+MONOREPO_BRANCH="$(git symbolic-ref --quiet --short HEAD || true)"
+MONOREPO_BEHIND=false
+if [[ -z "$MONOREPO_BRANCH" ]]; then
+    bad "HEAD is detached; cannot tell which branch should be published"
+    FAILURES+=("monorepo")
+elif ! timeout "$NET_TIMEOUT" git fetch --no-tags "$MONOREPO_URL.git" "$MONOREPO_BRANCH" >/dev/null 2>&1; then
+    bad "$MONOREPO_URL is unreachable — every component's manifest depends on it"
+    FAILURES+=("monorepo")
+else
+    monorepo_local=$(git rev-parse HEAD)
+    monorepo_remote=$(git rev-parse FETCH_HEAD)
+    if [[ "$monorepo_local" == "$monorepo_remote" ]]; then
+        ok "in sync ($MONOREPO_BRANCH at ${monorepo_local:0:7})"
+    elif git merge-base --is-ancestor "$monorepo_remote" "$monorepo_local"; then
+        ahead=$(git rev-list --count "$monorepo_remote..$monorepo_local")
+        note "monorepo is behind by $ahead commit(s)" \
+             "every component's CI resolves its siblings from here, so this goes first"
+        MONOREPO_BEHIND=true
+    else
+        bad "$MONOREPO_BRANCH has diverged from $MONOREPO_URL — resolve by hand, never with --force"
+        # Deliberately not added to DIVERGED: that array is declared
+        # (and so emptied) further down, alongside the component pass it
+        # belongs to. FAILURES is declared at the top and is what the
+        # exit status actually reads.
+        FAILURES+=("monorepo")
+    fi
+fi
+
+if $PUSH && $MONOREPO_BEHIND; then
+    if git push "$MONOREPO_URL.git" "HEAD:$MONOREPO_BRANCH"; then
+        ok "pushed $MONOREPO_BRANCH to $MONOREPO_URL"
+    else
+        bad "pushing the monorepo failed — not pushing any component against a stale dependency"
+        die "Fix the push above, then re-run ./sync.sh --push."
+    fi
+fi
+
 # One pass over every component, computing what a split would produce
 # right now and what is actually published, in read-only mode always —
 # --push only decides what happens with the answer, not how it's found.
@@ -244,7 +301,10 @@ printf '  %d in sync, %d behind, %d unpublished, %d unreachable, %d diverged (of
     "${#IN_SYNC[@]}" "${#DRIFTED[@]}" "${#UNPUBLISHED[@]}" "${#UNREACHABLE[@]}" "${#DIVERGED[@]}" "${#CRATES[@]}"
 
 if ! $PUSH; then
-    if [[ ${#DRIFTED[@]} -gt 0 || ${#DIVERGED[@]} -gt 0 ]]; then
+    # `$MONOREPO_BEHIND` counts here even when every component is in
+    # sync, which is exactly the state that hid this problem: five green
+    # ticks and a stale repository underneath all five.
+    if [[ ${#DRIFTED[@]} -gt 0 || ${#DIVERGED[@]} -gt 0 ]] || $MONOREPO_BEHIND; then
         printf '  Re-run with %s--push%s to publish what has drifted.\n' "$BOLD" "$OFF"
     fi
     [[ ${#FAILURES[@]} -eq 0 && ${#DIVERGED[@]} -eq 0 ]]

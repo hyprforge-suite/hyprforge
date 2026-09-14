@@ -281,6 +281,34 @@ theme rather than merely somewhere in the chain — two names can each resolve
 and still look wrong together if one falls through several levels of
 inheritance to reach hicolor while its sibling is drawn directly.
 
+**Publishing the components without publishing the monorepo tests them
+against code nobody has.** Every standalone manifest names the monorepo's
+URL for every sibling it needs — `hyprforge-settings` alone pulls fifteen
+crates that way — so a component pushed while the monorepo is behind gets
+built by its own CI against whatever was published days ago. The failure
+names the component, not the stale dependency: `cannot find function
+`update` in module `hyprforge_tray::prefs`` in a repository whose copy of
+that function is right there in the diff you just pushed. `sync.sh`
+checked five components and said nothing about the repository all five
+depend on; it now checks and pushes the monorepo first, because a
+component's CI starts the moment its push lands and resolves siblings
+from there while it runs.
+
+**A layer surface that leaves its exclusive zone at `0` is positioned in
+what the bar left over, so a margin gets the bar's height added twice.**
+Every placement in `hyprforge-popup` is in full-output logical
+coordinates — a cursor position from `hyprctl`, or a monitor's `reserved`
+top plus the user's own offset — and with the default exclusive zone the
+compositor then measures that margin from the bar's *bottom* edge.
+Measured with `hyprctl layers`: a bar occupying y 20..50 and a menu that
+should open at y=50 opened at y=100. `set_exclusive_zone(-1)` — "do not
+move me out of anyone's way" — makes a margin mean what the placement
+code already meant by it. The clipboard and emoji popups had it too, and
+nobody noticed, because a popup at the pointer looks plausible wherever
+it lands. `hyprctl layers` is the instrument for any "why is this popup
+*there*" question; it reports the surface the compositor actually
+created, which is the only thing that settles it.
+
 **A single-instance lock answers "someone already has it" — never "and
 that is fine".** `hyprforge-traymenu` takes an `flock` so a keybind pressed
 twice cannot open two popups, and a second copy that finds the lock held
