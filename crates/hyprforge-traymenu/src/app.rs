@@ -4,7 +4,7 @@
 //! one `impl PopupApp` rather than three smaller traits.
 
 use hyprforge_look::Theme;
-use hyprforge_popup::{Keysym, PopupApp};
+use hyprforge_popup::{Dismissal, Keysym, PopupApp};
 use hyprforge_tray::menu::MenuItem;
 use iced_runtime::core::{Element, Length, Padding};
 use iced_widget::{column, container};
@@ -30,6 +30,11 @@ pub struct TrayMenuApp {
     rows: Vec<MenuItem>,
     layout: MenuLayout,
     hovered: Option<usize>,
+    /// What a click outside this menu should do — the user's own
+    /// `tray.toml` setting, read once by `main.rs` and handed in here.
+    /// See [`hyprforge_popup::Dismissal`] for why "close on a click
+    /// elsewhere" and "how the keyboard is held" are one choice.
+    dismissal: Dismissal,
 }
 
 impl TrayMenuApp {
@@ -41,13 +46,21 @@ impl TrayMenuApp {
     /// is different — `view.rs::row_element` now uses it (via
     /// `MenuLayout::label_width`) to truncate a long label before it
     /// draws, so that one *is* read.
-    pub fn new(rows: Vec<MenuItem>, layout: MenuLayout) -> Self {
-        TrayMenuApp { rows, layout, hovered: None }
+    pub fn new(rows: Vec<MenuItem>, layout: MenuLayout, dismissal: Dismissal) -> Self {
+        TrayMenuApp { rows, layout, hovered: None, dismissal }
     }
 }
 
 impl PopupApp for TrayMenuApp {
     type Outcome = MenuOutcome;
+
+    /// Unlike the clipboard and emoji popups, nothing here is typed
+    /// into: the rows are chosen with a pointer, and the only keys that
+    /// matter are Escape and the arrows. That is what makes the
+    /// on-demand option available at all — see [`Dismissal`].
+    fn dismissal(&self) -> Dismissal {
+        self.dismissal
+    }
 
     fn view<'a>(
         &'a mut self,
@@ -164,7 +177,7 @@ mod tests {
     #[test]
     fn a_click_on_a_separator_resolves_to_nothing_rather_than_the_nearest_row() {
         let layout = MenuLayout::for_font_size(15.0);
-        let mut app = TrayMenuApp::new(rows(), layout);
+        let mut app = TrayMenuApp::new(rows(), layout, Dismissal::CloseOnFocusLoss);
         let sep_top = layout.padding + layout.row_top(&rows(), 1);
         assert_eq!(
             app.pointer_click(&Theme::default(), 220.0, (10.0, sep_top + 2.0)),
@@ -175,7 +188,7 @@ mod tests {
     #[test]
     fn a_click_on_an_enabled_row_chooses_its_index() {
         let layout = MenuLayout::for_font_size(15.0);
-        let mut app = TrayMenuApp::new(rows(), layout);
+        let mut app = TrayMenuApp::new(rows(), layout, Dismissal::CloseOnFocusLoss);
         let top = layout.padding + layout.row_top(&rows(), 2);
         assert_eq!(
             app.pointer_click(&Theme::default(), 220.0, (10.0, top + 2.0)),
@@ -186,14 +199,14 @@ mod tests {
     #[test]
     fn escape_cancels_regardless_of_hover_state() {
         let layout = MenuLayout::for_font_size(15.0);
-        let mut app = TrayMenuApp::new(rows(), layout);
+        let mut app = TrayMenuApp::new(rows(), layout, Dismissal::CloseOnFocusLoss);
         assert_eq!(app.key(Keysym::Escape, None), Some(MenuOutcome::Cancelled));
     }
 
     #[test]
     fn down_then_enter_chooses_the_first_clickable_row_skipping_the_separator() {
         let layout = MenuLayout::for_font_size(15.0);
-        let mut app = TrayMenuApp::new(rows(), layout);
+        let mut app = TrayMenuApp::new(rows(), layout, Dismissal::CloseOnFocusLoss);
         assert_eq!(app.key(Keysym::Down, None), None);
         assert_eq!(app.hovered, Some(0), "row 0 is the first clickable row");
         assert_eq!(app.key(Keysym::Return, None), Some(MenuOutcome::Chosen(0)));
@@ -202,7 +215,7 @@ mod tests {
     #[test]
     fn down_navigation_skips_the_separator_and_the_disabled_row() {
         let layout = MenuLayout::for_font_size(15.0);
-        let mut app = TrayMenuApp::new(rows(), layout);
+        let mut app = TrayMenuApp::new(rows(), layout, Dismissal::CloseOnFocusLoss);
         app.hovered = Some(0);
         assert_eq!(app.key(Keysym::Down, None), None);
         assert_eq!(app.hovered, Some(2), "index 1 is a separator, so this must land on 2");
@@ -211,7 +224,7 @@ mod tests {
     #[test]
     fn enter_with_nothing_hovered_does_nothing() {
         let layout = MenuLayout::for_font_size(15.0);
-        let mut app = TrayMenuApp::new(rows(), layout);
+        let mut app = TrayMenuApp::new(rows(), layout, Dismissal::CloseOnFocusLoss);
         assert_eq!(app.key(Keysym::Return, None), None);
     }
 }

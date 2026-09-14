@@ -153,12 +153,18 @@ fn main() -> std::process::ExitCode {
     // just the one other place that needs a number out of it, and the
     // default is the least surprising thing to use rather than refusing
     // to open the menu at all.
-    let menu_y_offset = match hyprforge_tray::prefs::load() {
-        Ok(prefs) => prefs.menu_y_offset,
+    let prefs = match hyprforge_tray::prefs::load() {
+        Ok(prefs) => prefs,
         Err(e) => {
-            eprintln!("couldn't read tray.toml for the menu's Y offset ({e}) — using the default");
-            hyprforge_tray::prefs::Prefs::default().menu_y_offset
+            eprintln!("couldn't read tray.toml ({e}) — using the defaults for this menu");
+            hyprforge_tray::prefs::Prefs::default()
         }
+    };
+    let menu_y_offset = prefs.menu_y_offset;
+    let dismissal = if prefs.menu_closes_on_click_outside {
+        hyprforge_popup::Dismissal::CloseOnFocusLoss
+    } else {
+        hyprforge_popup::Dismissal::HoldKeyboard
     };
     // Anchored to the bar's own reserved area on Y (so the popup lands
     // in the same place every time, regardless of where on the icon the
@@ -180,7 +186,7 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    let app = TrayMenuApp::new(rows.clone(), row_layout);
+    let app = TrayMenuApp::new(rows.clone(), row_layout, dismissal);
 
     match hyprforge_popup::Popup::run(connection, placement, app, theme) {
         Ok(hyprforge_popup::Outcome::App(MenuOutcome::Chosen(index))) => {

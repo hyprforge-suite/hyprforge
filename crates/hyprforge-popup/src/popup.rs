@@ -163,6 +163,39 @@ pub enum Outcome<T> {
     Disconnected,
 }
 
+/// How a popup holds the keyboard — and, as a direct consequence, what
+/// happens when the user clicks somewhere that is not this popup.
+///
+/// The two are the same question, which is why this is one enum and not
+/// two independent settings. A layer surface asking for exclusive
+/// keyboard interactivity is telling the compositor "route keys here
+/// until I am gone"; one asking for on-demand is telling it "focus me
+/// while the user is interacting with me, and take it back when they
+/// are not". The second is the only one under which a click elsewhere
+/// is something this process can observe at all — it arrives as
+/// `wl_keyboard.leave`, because the compositor moved focus to whatever
+/// was clicked. There is no event for "a click landed outside your
+/// surface": a Wayland client is not told about input it did not
+/// receive, and the usual workaround (a full-output surface with a
+/// transparent input region) swallows that click instead of letting it
+/// through to whatever the user was actually aiming at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dismissal {
+    /// Holds the keyboard exclusively for as long as the popup is open,
+    /// and closes only when it decides to. What a popup you *type into*
+    /// needs: `hyprforge-clipmenu` and `hyprforge-emojimenu` both filter
+    /// on what is typed, and a keystroke going anywhere else would be a
+    /// character missing from the search and, worse, a character
+    /// delivered to whatever is behind the popup.
+    HoldKeyboard,
+    /// Takes the keyboard on demand and closes as soon as the compositor
+    /// gives focus away. What a *menu* wants: clicking outside it
+    /// dismisses it, the way every other menu on the desktop behaves,
+    /// and — the reason this exists — that click reaches whatever it
+    /// landed on rather than being eaten.
+    CloseOnFocusLoss,
+}
+
 /// Where to place the popup: an anchor of top-left plus the margins that
 /// put its corner at the already-clamped cursor position. Computed by
 /// `crate::placement::place`, so this module never touches `hyprctl`
@@ -257,6 +290,13 @@ pub trait PopupApp {
     /// A key was pressed (or is auto-repeating). `Some` ends the popup
     /// with that outcome.
     fn key(&mut self, keysym: smithay_client_toolkit::seat::keyboard::Keysym, utf8: Option<String>) -> Option<Self::Outcome>;
+
+    /// How this popup holds the keyboard, and therefore what a click
+    /// somewhere else means. Defaults to [`Dismissal::HoldKeyboard`],
+    /// which is what a popup you type into needs.
+    fn dismissal(&self) -> Dismissal {
+        Dismissal::HoldKeyboard
+    }
 
     /// How long the pointer must stay down before a press becomes a
     /// "long press" rather than an ordinary click — `None` (the default)
@@ -568,10 +608,16 @@ impl<A: PopupApp + 'static> Popup<A> {
         layer.set_exclusive_zone(-1);
         layer.set_margin(self.placement.margin_top, 0, 0, self.placement.margin_left);
         layer.set_size(self.placement.width, self.placement.height);
-        // Exclusive: typing has to reach this popup, not whatever had
-        // focus before it opened — the same reasoning `KeyboardInteractivity`'s
-        // own doc gives for a lock screen or a password prompt.
-        layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+        // Exclusive for a popup you type into — typing has to reach this
+        // popup, not whatever had focus before it opened, the same
+        // reasoning `KeyboardInteractivity`'s own doc gives for a lock
+        // screen or a password prompt. On-demand for a menu, which wants
+        // the opposite: see [`Dismissal`] for why those are one choice
+        // rather than two.
+        layer.set_keyboard_interactivity(match self.app.dismissal() {
+            Dismissal::HoldKeyboard => KeyboardInteractivity::Exclusive,
+            Dismissal::CloseOnFocusLoss => KeyboardInteractivity::OnDemand,
+        });
         layer.wl_surface().commit();
         self.layer = Some(layer);
     }
@@ -882,7 +928,17 @@ impl<A: PopupApp + 'static> KeyboardHandler for Popup<A> {
     ) {
     }
 
-    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32) {}
+    /// The compositor took the keyboard away, which for an on-demand
+    /// popup is the only notice it gets that the user clicked something
+    /// else. A popup that holds the keyboard ignores this: it can still
+    /// receive a `leave` for reasons that are not a dismissal (an output
+    /// going away, a session switch), and closing on those would make it
+    /// vanish mid-use.
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32) {
+        if self.app.dismissal() == Dismissal::CloseOnFocusLoss && self.outcome.is_none() {
+            self.outcome = Some(Outcome::Closed);
+        }
+    }
 
     fn press_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, event: KeyEvent) {
         self.key(event.keysym, event.utf8);

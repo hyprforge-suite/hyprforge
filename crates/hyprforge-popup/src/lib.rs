@@ -61,7 +61,7 @@ pub mod scrollbar;
 pub mod singleton;
 
 pub use placement::{cursor_position, monitors, place, place_below_bar};
-pub use popup::{Outcome, Placement, Popup, PopupApp, PopupError, FOCUS_RELEASE_TIMEOUT};
+pub use popup::{Dismissal, Outcome, Placement, Popup, PopupApp, PopupError, FOCUS_RELEASE_TIMEOUT};
 pub use scroll::scroll_rows;
 pub use scrollbar::{clamp_offset, scroll_into_view, Scrollbar};
 /// Re-exported so a `PopupApp` implementation never needs its own direct
