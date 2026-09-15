@@ -359,6 +359,21 @@ lesson is the one about flaky tests generally — "passes alone, fails in
 the suite" is information, and it names concurrency with a sibling
 rather than inviting a re-run.
 
+**`hyprctl` reports logical coordinates; `grim` writes physical pixels.**
+On this machine's 1.6-scale output those differ by more than half a
+window, so cropping a screenshot at the box `hyprctl clients -j` gives
+lands roughly two-thirds of the way up and left of the window you meant —
+which on a tiled desktop is reliably some *other* application, rendered
+convincingly enough to be mistaken for a bug in your own. Several rounds
+of "the icons still look wrong" this session were looking at a terminal.
+Multiply the logical box by the output's `scale` before cropping, and
+check the window is on the *active* workspace first: `hyprctl dispatch
+workspace` silently fails against a Lua config, so a switch may not have
+happened. This is the same logical-versus-physical split
+`hyprforge-popup` documents for buffers and hit-testing, arriving
+through a different door — and it is another instance of the rule about
+checking the instrument before trusting what it says about the thing.
+
 **Never run a regex over source code to delete a block.** A non-greedy
 `(?:[^\n]*\n)*?` looking for a sixteen-space closing brace finds the first
 one anywhere below, and deeply-indented code inside the *next* function
