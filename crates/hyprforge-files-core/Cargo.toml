@@ -20,6 +20,10 @@ serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 toml.workspace = true
+# The design's list view shows a Modified column; formatting an
+# `Entry::modified: Option<SystemTime>` into a calendar date needs a
+# calendar, which `std` deliberately does not carry.
+chrono.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

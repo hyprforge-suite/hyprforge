@@ -106,6 +106,15 @@ pub struct Prefs {
     pub preview_pane: bool,
     pub window_width: u32,
     pub window_height: u32,
+    /// Directories the user pinned to the sidebar's Pinned section, in
+    /// the order they were pinned — `crate::sidebar::build_pinned` turns
+    /// this into what that section actually shows (label, item count).
+    /// An empty `Vec` is a legitimate, common state (nobody has pinned
+    /// anything yet) and needs no separate "has the user ever touched
+    /// this" flag the way `preview_pane` does: unlike a `bool`, a `Vec`'s
+    /// own default *is* the right first-run value, so `#[serde(default)]`
+    /// alone is enough here.
+    pub pinned: Vec<PathBuf>,
     // Per-directory overrides (vision pillar 6: "auto-remember beats
     // onboarding" — a directory sorted by size once should stay sorted
     // by size) are deliberately **not implemented** in this struct. The
@@ -133,6 +142,7 @@ impl Default for Prefs {
             preview_pane: true,
             window_width: 900,
             window_height: 600,
+            pinned: Vec::new(),
         }
     }
 }
@@ -313,6 +323,30 @@ mod tests {
             prefs.preview_pane,
             "a field this file predates must get its own default, not bool's zero value"
         );
+    }
+
+    /// A `files.toml` written before `pinned` existed — same shape as
+    /// the `preview_pane` test above, for the field most recently added.
+    #[test]
+    fn a_file_written_before_pinned_existed_still_parses_and_defaults_to_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("files.toml");
+        std::fs::write(&path, "show_hidden = true\n").unwrap();
+
+        let prefs = load_from(&path).unwrap();
+        assert!(prefs.pinned.is_empty());
+    }
+
+    #[test]
+    fn pinned_paths_round_trip_through_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("files.toml");
+        let prefs = Prefs {
+            pinned: vec![PathBuf::from("/home/alex/Projects"), PathBuf::from("/mnt/data")],
+            ..Prefs::default()
+        };
+        save_to(&path, &prefs).unwrap();
+        assert_eq!(load_from(&path).unwrap().pinned, prefs.pinned);
     }
 
     // --- `update`: the read-modify-write every writer shares -------------

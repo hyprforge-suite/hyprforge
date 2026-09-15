@@ -23,17 +23,18 @@
 //! pins the property that matters: two browsers differing only in `Mode`
 //! feed `render` the exact same data.
 
+use crate::density;
 use crate::filter::{filter_hidden, filter_query};
-use crate::format::human_readable_size;
+use crate::format::{format_modified, human_readable_size};
 use crate::icon::entry_icon;
 use crate::keymap::{self, Direction, Key, KeyAction, Modifiers};
 use crate::prefs::Prefs;
-use crate::sidebar::SidebarItem;
+use crate::sidebar::{self, PinnedItem, SidebarItem};
 use crate::sort::{sort, SortColumn, SortDirection};
 use crate::types::{Entry, EntryKind, FilesError};
 use hyprforge_ui::theme::{spacing, FontScale, BASE_TEXT_SIZE};
-use hyprforge_ui::widgets::{divider, meta_text, primary_button, scaled_text, secondary_button};
-use iced::widget::{column, container, row, scrollable, text_input};
+use hyprforge_ui::widgets::{divider, meta_text, scaled_text, secondary_button};
+use iced::widget::{column, container, row, scrollable, text_input, Id};
 use iced::{Element, Length};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -246,6 +247,11 @@ pub enum Message {
     ToggleShowHidden,
     SetViewMode(crate::prefs::ViewMode),
     Key(Key, Modifiers),
+    /// The Pinned sidebar section's content, computed off the UI thread
+    /// via [`crate::sidebar::build_pinned`] — see that function's own doc
+    /// for why this is a message rather than a `Browser::new` argument
+    /// the way Places is.
+    PinnedLoaded(Vec<PinnedItem>),
 }
 
 /// Exactly what `render` needs, and nothing `Browser` has that it
@@ -261,6 +267,10 @@ struct ViewModel<'a> {
     load_state: &'a LoadState,
     prefs: &'a Prefs,
     sidebar: &'a [SidebarItem],
+    pinned: &'a [PinnedItem],
+    /// The entry list's `scrollable` identity — see
+    /// [`Browser::list_scrollable_id`]'s own doc for why this exists.
+    list_scrollable_id: Id,
     can_go_back: bool,
     can_go_forward: bool,
 }
@@ -285,6 +295,16 @@ pub struct Browser {
     load_state: LoadState,
     prefs: Prefs,
     sidebar: Vec<SidebarItem>,
+    /// The Pinned section's content. Empty until a host delivers
+    /// [`Message::PinnedLoaded`] — see that variant's doc — which is also
+    /// the correct "nobody has pinned anything" state, not a placeholder
+    /// waiting to be filled: [`sidebar_sections`] renders no Pinned
+    /// heading at all for an empty list, exactly like a fresh install.
+    pinned: Vec<PinnedItem>,
+    /// The entry list's `scrollable` identity, generated once and held
+    /// for the life of this `Browser` — see
+    /// [`Self::list_scrollable_id`]'s own doc.
+    list_scrollable_id: Id,
 }
 
 impl Browser {
@@ -305,6 +325,14 @@ impl Browser {
             load_state: LoadState::Loading,
             prefs,
             sidebar,
+            pinned: Vec::new(),
+            // `Id::unique()` — not a per-widget-tree literal — is what
+            // makes this stable across `view()` calls: iced can only
+            // preserve a `scrollable`'s offset across frames if the same
+            // `Id` names it every time, and generating one here rather
+            // than inside `render` (which runs on every `view()` call)
+            // is what guarantees that.
+            list_scrollable_id: Id::unique(),
         };
         (browser, Outcome::ReadDir(start_dir))
     }
@@ -323,6 +351,33 @@ impl Browser {
 
     pub fn selection(&self) -> &Selection {
         &self.selection
+    }
+
+    /// The Pinned sidebar section's content, as last delivered by
+    /// [`Message::PinnedLoaded`]. Empty until a host sends that message —
+    /// see the field's own doc.
+    pub fn pinned(&self) -> &[PinnedItem] {
+        &self.pinned
+    }
+
+    /// The entry list's `scrollable` identity.
+    ///
+    /// Per-`Browser`, not a shared constant: each `Browser` here is one
+    /// tab (a host holds one per open tab, per its own titlebar-tabs
+    /// design), and a shared `Id` across tabs would make every tab's
+    /// list resolve to the *same* scroll position rather than each
+    /// tab keeping its own — iced keys scroll state by `Id`, so two
+    /// widgets sharing one `Id` are, as far as that state is concerned,
+    /// one widget. Generated once in [`Self::new`] and never regenerated
+    /// — see that field's own doc for why regenerating it per `view()`
+    /// call would defeat the point. A host tracks a scroll offset per
+    /// tab keyed by this `Id` (it is already `Clone + PartialEq + Eq +
+    /// Hash`) and issues `scrollable::scroll_to` with it on tab switch;
+    /// restoring the offset itself is the host's job, not this crate's —
+    /// `Browser` only has to keep the identity stable for iced to have
+    /// something to restore *to*.
+    pub fn list_scrollable_id(&self) -> Id {
+        self.list_scrollable_id.clone()
     }
 
     /// The currently shown entries, sorted and filtered — what `view`
@@ -390,6 +445,10 @@ impl Browser {
                 Outcome::PrefsChanged(self.prefs.clone())
             }
             Message::Key(key, mods) => self.handle_key(key, mods),
+            Message::PinnedLoaded(items) => {
+                self.pinned = items;
+                Outcome::None
+            }
         }
     }
 
@@ -534,6 +593,8 @@ impl Browser {
             load_state: &self.load_state,
             prefs: &self.prefs,
             sidebar: &self.sidebar,
+            pinned: &self.pinned,
+            list_scrollable_id: self.list_scrollable_id.clone(),
             can_go_back: !self.back_stack.is_empty(),
             can_go_forward: !self.forward_stack.is_empty(),
         }
@@ -581,14 +642,22 @@ fn kind_label(kind: EntryKind) -> &'static str {
 /// method on [`Browser`] — see the module doc for why that's the point.
 fn render<'a>(vm: ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     let sidebar = sidebar_view(&vm, scale);
-    let toolbar = row![
-        secondary_button("\u{2190}").on_press_maybe(vm.can_go_back.then_some(Message::GoBack)),
-        secondary_button("\u{2192}").on_press_maybe(vm.can_go_forward.then_some(Message::GoForward)),
-        secondary_button("\u{2191}").on_press(Message::GoUp),
-        path_bar(vm.current_dir, scale),
-    ]
-    .spacing(spacing::SM)
-    .align_y(iced::Alignment::Center);
+    let toolbar = container(
+        row![
+            secondary_button("\u{2190}").on_press_maybe(vm.can_go_back.then_some(Message::GoBack)),
+            secondary_button("\u{2192}").on_press_maybe(vm.can_go_forward.then_some(Message::GoForward)),
+            secondary_button("\u{2191}").on_press(Message::GoUp),
+            path_bar(vm.current_dir, scale),
+        ]
+        .spacing(spacing::SM)
+        .align_y(iced::Alignment::Center),
+    )
+    // The design's 40px header band, derived rather than hardcoded —
+    // see `density`'s own doc. `height` rather than `center_y` alone
+    // still needs the fixed length; the vertical centering keeps the
+    // toolbar's buttons/text mid-band at any scale.
+    .height(Length::Fixed(density::header_height(scale)))
+    .center_y(Length::Fixed(density::header_height(scale)));
 
     let search = text_input("Search this folder", vm.search_query)
         .on_input(Message::SearchChanged)
@@ -605,24 +674,130 @@ fn render<'a>(vm: ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     row![sidebar, content].into()
 }
 
+/// One heading and its rows in the sidebar — Places, Pinned or Trash.
+///
+/// Plain data, not an `Element`, so [`sidebar_sections`] is testable
+/// without building a window: the property the brief cares about
+/// ("Tags with nothing under it reads as broken; no heading reads as
+/// not-yet", generalised to every section) is "a section with no rows is
+/// absent from this `Vec` entirely", which is a fact about data a test
+/// can just look at, rather than a fact about a widget tree that would
+/// need one built to inspect.
+#[derive(Debug, Clone, PartialEq)]
+struct SidebarSection {
+    title: &'static str,
+    rows: Vec<SidebarRow>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SidebarRow {
+    label: String,
+    path: PathBuf,
+    /// Shown right-aligned after the label — Pinned's item count. `None`
+    /// for Places and Trash, which have nothing to count.
+    meta: Option<String>,
+}
+
+/// Builds every section the sidebar could show, **already filtered** to
+/// the ones with content — see [`SidebarSection`]'s own doc. Places and
+/// Trash always have at least one row (Home always exists; Trash is a
+/// fixed path, not something that can fail to "have" rows), so in
+/// practice only Pinned can ever be absent, but the filter is applied
+/// uniformly rather than special-cased to Pinned: Tags and Remote will
+/// land here the same way once they exist, and neither should need this
+/// function taught a new special case to stay empty-safe.
+fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
+    let places = SidebarSection {
+        title: "Places",
+        rows: vm
+            .sidebar
+            .iter()
+            .map(|item| SidebarRow { label: item.label.clone(), path: item.path.clone(), meta: None })
+            .collect(),
+    };
+    let pinned = SidebarSection {
+        title: "Pinned",
+        rows: vm
+            .pinned
+            .iter()
+            .map(|item| SidebarRow {
+                label: item.label.clone(),
+                path: item.path.clone(),
+                meta: Some(match item.item_count {
+                    Some(n) => n.to_string(),
+                    // An unreadable pin still gets its own row — removing
+                    // it silently would look like the user's own pin
+                    // vanished — but the count reads as unknown, never 0.
+                    None => "\u{2014}".to_string(),
+                }),
+            })
+            .collect(),
+    };
+    let trash = SidebarSection {
+        title: "Trash",
+        rows: vec![SidebarRow { label: "Trash".to_string(), path: sidebar::trash_path(), meta: None }],
+    };
+    [places, pinned, trash].into_iter().filter(|s| !s.rows.is_empty()).collect()
+}
+
 fn sidebar_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
-    let mut list = column![].spacing(spacing::XS).width(Length::Fixed(180.0));
-    for item in vm.sidebar {
-        let is_current = item.path == vm.current_dir;
-        let label = scaled_text(item.label.clone(), BASE_TEXT_SIZE, scale);
-        let button = if is_current {
-            primary_button(item.label.clone()).width(Length::Fill)
-        } else {
-            secondary_button(item.label.clone()).width(Length::Fill)
-        };
-        let _ = label; // the button already carries the label text
-        list = list.push(button.on_press(Message::Navigate(item.path.clone())));
+    let mut list = column![].spacing(spacing::MD).width(Length::Fixed(180.0));
+    for section in sidebar_sections(vm) {
+        let mut group = column![meta_text(section.title.to_uppercase(), 12.0, scale)].spacing(spacing::XS);
+        for row_item in section.rows {
+            let is_current = row_item.path == vm.current_dir;
+            let content: Element<'a, Message> = match row_item.meta {
+                Some(meta) => row![
+                    scaled_text(row_item.label.clone(), density::ROW_TEXT_BASE, scale).width(Length::Fill),
+                    meta_text(meta, density::META_TEXT_BASE, scale),
+                ]
+                .spacing(spacing::XS)
+                .into(),
+                None => scaled_text(row_item.label.clone(), density::ROW_TEXT_BASE, scale).into(),
+            };
+            // Built with the raw `button` widget rather than
+            // `primary_button`/`secondary_button` — those two only
+            // accept a text fragment, and a Pinned row needs a label
+            // plus a right-aligned count in the same clickable area, the
+            // same reason `entry_row` below goes straight to `button`
+            // instead of wrapping one of the two helpers.
+            let button = iced::widget::button(content)
+                .width(Length::Fill)
+                .on_press(Message::Navigate(row_item.path))
+                .style(move |t: &iced::Theme, status| sidebar_row_style(t, status, is_current));
+            group = group.push(button);
+        }
+        list = list.push(group);
     }
     container(scrollable(list))
         .padding(spacing::SM)
         .width(Length::Fixed(200.0))
         .height(Length::Fill)
         .into()
+}
+
+/// A sidebar row's look: the current location uses `accent` and nothing
+/// else does, matching [`entry_row_style`]'s own rule for the entry
+/// list — "purple is the only selection colour" applies to *every*
+/// selection-shaped state in this app, not just the file list's.
+fn sidebar_row_style(theme: &iced::Theme, status: iced::widget::button::Status, is_current: bool) -> iced::widget::button::Style {
+    use iced::widget::button;
+    use iced::{Background, Border};
+    let palette = theme.extended_palette();
+    let background = if is_current {
+        Some(Background::Color(palette.primary.weak.color))
+    } else {
+        match status {
+            button::Status::Hovered => Some(Background::Color(hyprforge_ui::theme::surface::row())),
+            _ => None,
+        }
+    };
+    button::Style {
+        background,
+        text_color: hyprforge_ui::theme::text(),
+        border: Border { radius: density::inner_radius().into(), ..Border::default() },
+        ..button::Style::default()
+    }
 }
 
 fn path_bar<'a>(current_dir: &Path, scale: FontScale) -> Element<'a, Message> {
@@ -676,16 +851,22 @@ fn body_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
 }
 
 fn entry_row<'a>(index: usize, entry: &'a Entry, selected: bool, scale: FontScale) -> Element<'a, Message> {
-    let meta = if entry.is_dir {
+    let size = if entry.is_dir {
         String::new()
     } else {
         human_readable_size(entry.size)
     };
+    // Name, size, modified, kind — the design's list-view columns. Git's
+    // `M`/`A` badges are deliberately not a fifth column here: DESIGN.md
+    // defers git entirely, and a column with nothing to put in it yet is
+    // exactly the "reads as broken, not as not-yet" trap the sidebar
+    // section rule below is written to avoid.
     let row_content = row![
         entry_icon(entry.kind, 20.0, scale),
-        scaled_text(entry.name.clone(), BASE_TEXT_SIZE, scale).width(Length::FillPortion(3)),
-        meta_text(meta, 13.0, scale).width(Length::FillPortion(1)),
-        meta_text(kind_label(entry.kind), 13.0, scale).width(Length::FillPortion(1)),
+        scaled_text(entry.name.clone(), density::ROW_TEXT_BASE, scale).width(Length::FillPortion(3)),
+        meta_text(size, density::META_TEXT_BASE, scale).width(Length::FillPortion(1)),
+        meta_text(format_modified(entry.modified), density::META_TEXT_BASE, scale).width(Length::FillPortion(2)),
+        meta_text(kind_label(entry.kind), density::META_TEXT_BASE, scale).width(Length::FillPortion(1)),
     ]
     .spacing(spacing::SM)
     .align_y(iced::Alignment::Center);
@@ -697,10 +878,21 @@ fn entry_row<'a>(index: usize, entry: &'a Entry, selected: bool, scale: FontScal
     let styled = iced::widget::button(row_content)
         .on_press(Message::EntryClicked { index, ctrl: false, shift: false })
         .width(Length::Fill)
+        // The design's 28px row, derived — see `density`'s own doc — so
+        // it grows with `FontScale` instead of clipping `row_content`'s
+        // text past 100%.
+        .height(Length::Fixed(density::row_height(scale)))
         .style(move |t: &iced::Theme, status| entry_row_style(t, status, selected));
     styled.into()
 }
 
+/// A list/grid row's look. **Selection is the only place `accent`
+/// appears in this file** — a hovered-but-not-selected row uses
+/// `surface::row()`, a plain grey elevation distinct from both the
+/// unselected default (no background at all) and the selected state, so
+/// "this row is the selection" is never ambiguous with "the pointer
+/// happens to be over it". [`tests::only_the_selected_row_ever_uses_the_accent_colour`]
+/// pins this.
 fn entry_row_style(theme: &iced::Theme, status: iced::widget::button::Status, selected: bool) -> iced::widget::button::Style {
     use iced::widget::button;
     use iced::{Background, Border};
@@ -716,7 +908,9 @@ fn entry_row_style(theme: &iced::Theme, status: iced::widget::button::Status, se
     button::Style {
         background,
         text_color: hyprforge_ui::theme::text(),
-        border: Border { radius: 6.0.into(), ..Border::default() },
+        // The design's 6px inner radius, taken from the Theme — see
+        // `density::inner_radius`'s doc.
+        border: Border { radius: density::inner_radius().into(), ..Border::default() },
         ..button::Style::default()
     }
 }
@@ -729,7 +923,12 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         }
         list = list.push(entry_row(index, entry, vm.selection.is_selected(index), scale));
     }
-    scrollable(list).height(Length::Fill).into()
+    // `.id(..)` is what lets a host restore this list's scroll position
+    // across a tab switch — see `Browser::list_scrollable_id`'s own doc.
+    // Without a stable `Id`, iced cannot tell "the same list, redrawn"
+    // from "a different scrollable that happens to be in the same spot",
+    // and drops the offset.
+    scrollable(list).height(Length::Fill).id(vm.list_scrollable_id.clone()).into()
 }
 
 fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
@@ -980,17 +1179,143 @@ mod tests {
             Browser::new(Mode::Dialog(DialogKind::Open), Prefs::default(), PathBuf::from("/dir"), vec![]);
 
         let entries = vec![entry("a.txt", false), entry("sub", true)];
+        let pinned = vec![PinnedItem { label: "Projects".to_string(), path: PathBuf::from("/pin"), item_count: Some(3) }];
         for browser in [&mut app, &mut dialog] {
             browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(entries.clone())));
             browser.update(Message::SearchChanged("a".to_string()));
             browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+            // Pinned is a later addition to `ViewModel`; feeding it
+            // through here too keeps the Mode-seam test honest about
+            // every field, not just the ones that existed when it was
+            // first written.
+            browser.update(Message::PinnedLoaded(pinned.clone()));
         }
 
         assert_ne!(app.mode(), dialog.mode(), "the test is vacuous unless the modes actually differ");
+
+        // `list_scrollable_id` is a widget-identity concern, not model
+        // data — it is deliberately unique *per `Browser`* (see that
+        // field's own doc: two tabs must not share a scroll position),
+        // so two independently-constructed browsers differ there by
+        // design even though nothing about `Mode` caused it. Neutralised
+        // before the equality check below, which is about `Mode`
+        // specifically.
+        dialog.list_scrollable_id = app.list_scrollable_id.clone();
+
         assert_eq!(
             app.view_model(),
             dialog.view_model(),
             "render()'s input must be identical regardless of Mode"
         );
+    }
+
+    // --- selection colour ----------------------------------------------------
+
+    /// The design reserves purple for exactly one meaning: the current
+    /// selection. A hovered-but-unselected row using the same colour
+    /// would make "is this selected?" ambiguous the instant the pointer
+    /// moved, so hover has to read as a plainly different colour — this
+    /// pins that the accent (`palette.primary.weak.color`, what
+    /// `entry_row_style` selects on) never appears for any non-selected
+    /// status, hover included.
+    #[test]
+    fn only_the_selected_row_ever_uses_the_accent_colour() {
+        use iced::widget::button::Status;
+        let theme = hyprforge_ui::theme::app_theme();
+        let accent_bg = theme.extended_palette().primary.weak.color;
+
+        let selected = entry_row_style(&theme, Status::Active, true);
+        assert_eq!(selected.background, Some(iced::Background::Color(accent_bg)));
+
+        for status in [Status::Active, Status::Hovered, Status::Pressed, Status::Disabled] {
+            let unselected = entry_row_style(&theme, status, false);
+            assert_ne!(
+                unselected.background,
+                Some(iced::Background::Color(accent_bg)),
+                "a non-selected row must never render the accent colour ({status:?})"
+            );
+        }
+    }
+
+    /// Hover has to be visibly different from *both* "plain" and
+    /// "selected" — a hover that read the same as selection would make a
+    /// row the user is merely pointing at look like one they picked.
+    #[test]
+    fn hover_is_a_distinct_elevation_from_both_plain_and_selected() {
+        use iced::widget::button::Status;
+        let theme = hyprforge_ui::theme::app_theme();
+        let plain = entry_row_style(&theme, Status::Active, false);
+        let hovered = entry_row_style(&theme, Status::Hovered, false);
+        let selected = entry_row_style(&theme, Status::Active, true);
+        assert_ne!(plain.background, hovered.background);
+        assert_ne!(hovered.background, selected.background);
+    }
+
+    // --- sidebar sections ------------------------------------------------
+
+    /// A hand-built `ViewModel` rather than a full `Browser`, so a test
+    /// can vary just `sidebar`/`pinned` without a directory read to set
+    /// up first — `sidebar_sections` is a pure function of these fields
+    /// alone. Takes the `Selection`/`Prefs` it borrows as parameters
+    /// rather than defaulting them internally, since a `ViewModel`
+    /// borrows rather than owns and the caller has to keep those alive.
+    fn view_model_with<'a>(
+        sidebar: &'a [SidebarItem],
+        pinned: &'a [PinnedItem],
+        current_dir: &'a Path,
+        selection: &'a Selection,
+        prefs: &'a Prefs,
+        load_state: &'a LoadState,
+    ) -> ViewModel<'a> {
+        ViewModel {
+            current_dir,
+            view_entries: &[],
+            selection,
+            search_query: "",
+            load_state,
+            prefs,
+            sidebar,
+            pinned,
+            list_scrollable_id: Id::unique(),
+            can_go_back: false,
+            can_go_forward: false,
+        }
+    }
+
+    /// Places always has Home, so this pins the general rule with the
+    /// one section that is genuinely conditional on user data: an empty
+    /// Pinned list must not appear in the sections at all — no "Pinned"
+    /// heading with nothing under it, per DESIGN.md's own reasoning
+    /// about why that reads as broken rather than as not-yet.
+    #[test]
+    fn an_empty_pinned_list_produces_no_pinned_section_at_all() {
+        let places = vec![SidebarItem { label: "Home".to_string(), path: PathBuf::from("/home/alex") }];
+        let (selection, prefs, load_state) = (Selection::default(), Prefs::default(), LoadState::Loaded);
+        let vm = view_model_with(&places, &[], Path::new("/home/alex"), &selection, &prefs, &load_state);
+        let sections = sidebar_sections(&vm);
+        assert!(!sections.iter().any(|s| s.title == "Pinned"), "an empty section must render nothing at all");
+        assert!(sections.iter().any(|s| s.title == "Places"));
+        assert!(sections.iter().any(|s| s.title == "Trash"), "Trash is fixed and always present");
+    }
+
+    #[test]
+    fn a_non_empty_pinned_list_appears_with_its_item_counts() {
+        let places = vec![SidebarItem { label: "Home".to_string(), path: PathBuf::from("/home/alex") }];
+        let pinned = vec![PinnedItem { label: "Projects".to_string(), path: PathBuf::from("/pin"), item_count: Some(7) }];
+        let (selection, prefs, load_state) = (Selection::default(), Prefs::default(), LoadState::Loaded);
+        let vm = view_model_with(&places, &pinned, Path::new("/home/alex"), &selection, &prefs, &load_state);
+        let sections = sidebar_sections(&vm);
+        let pinned_section = sections.iter().find(|s| s.title == "Pinned").expect("a non-empty Pinned list must appear");
+        assert_eq!(pinned_section.rows[0].label, "Projects");
+        assert_eq!(pinned_section.rows[0].meta.as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn trash_always_points_at_sidebar_trash_path() {
+        let (selection, prefs, load_state) = (Selection::default(), Prefs::default(), LoadState::Loaded);
+        let vm = view_model_with(&[], &[], Path::new("/x"), &selection, &prefs, &load_state);
+        let sections = sidebar_sections(&vm);
+        let trash = sections.iter().find(|s| s.title == "Trash").unwrap();
+        assert_eq!(trash.rows[0].path, sidebar::trash_path());
     }
 }

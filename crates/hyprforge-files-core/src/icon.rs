@@ -124,14 +124,22 @@ mod tests {
 
     #[test]
     fn badge_color_never_hardcodes_a_colour_it_reads_the_active_theme() {
-        // Install a theme with a distinctive accent and confirm the
-        // badge for a folder actually reads it, rather than a constant
-        // baked in here.
+        // Try to install a theme with a distinctive accent. `theme::init`
+        // is backed by a `OnceLock` that accepts only the *first* call in
+        // the whole test binary — CLAUDE.md's own note on this — and
+        // this crate now has more than one test that can reach
+        // `theme::active()` (the browser's selection-colour tests do,
+        // through `entry_row_style`), so this call is not guaranteed to
+        // win the race. Asserting against `theme::active().accent`
+        // instead of a literal `0x010203` keeps the test proving the
+        // property that actually matters — "badge_color reads whatever
+        // the active theme says, not a constant" — regardless of which
+        // test happened to set that theme first.
         let theme = hyprforge_look::Theme {
             accent: Color::rgba(0x01, 0x02, 0x03, 0xff),
             ..hyprforge_look::Theme::default()
         };
         theme::init(theme);
-        assert_eq!(badge_color(EntryKind::Folder), Color::rgba(0x01, 0x02, 0x03, 0xff));
+        assert_eq!(badge_color(EntryKind::Folder), theme::active().accent);
     }
 }

@@ -11,6 +11,7 @@
 
 pub mod backend;
 pub mod browser;
+pub mod density;
 pub mod filter;
 pub mod format;
 pub mod icon;
@@ -25,5 +26,5 @@ pub use backend::{FsBackend, StdBackend};
 pub use browser::{Browser, DialogKind, DirError, DirErrorKind, LoadState, Message, Mode, Outcome, Selection};
 pub use format::human_readable_size;
 pub use prefs::Prefs;
-pub use sidebar::{build as build_sidebar, SidebarItem};
+pub use sidebar::{build as build_sidebar, build_pinned, trash_path, PinnedItem, SidebarItem};
 pub use types::{Entry, EntryKind, FilesError};

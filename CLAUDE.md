@@ -345,6 +345,18 @@ the kernel closes the dead process's descriptors and a zombie nobody waited
 on still holds them; `Child::kill` signals *and* reaps, which is what makes
 the new popup's own `acquire` succeed rather than race.
 
+**Never run a regex over source code to delete a block.** A non-greedy
+`(?:[^\n]*\n)*?` looking for a sixteen-space closing brace finds the first
+one anywhere below, and deeply-indented code inside the *next* function
+matches long before the end of the block you meant. Deleting one dead match
+arm this way silently took `view`, `title`, `theme` and `tabs_bar` with it,
+and the brace count stayed off by only one, so the damage read as trivial
+when half an `impl` was gone. Delete a block by matching its exact text, or
+by slicing between two unambiguous markers you have actually read — and when
+the code is uncommitted work you did not write, read `git status` and ask
+whoever wrote it for the verbatim text rather than reconstructing behaviour
+from inference.
+
 **`git add -A` while an agent is working commits someone else's
 half-finished thought under your commit message.** Two agents were
 editing other crates when a commit here swept in six lines of one of

@@ -1,9 +1,12 @@
-//! Turning a byte count into something a person reads at a glance.
+//! Turning a byte count, or a modification time, into something a person
+//! reads at a glance.
 //!
 //! Pure, and kept separate from [`crate::types::Entry`] itself so the
 //! boundary math (where "999 B" becomes "1.0 KiB") is one function with
 //! its own tests, rather than an inline `format!` call duplicated once
 //! for the list view and once for the grid view.
+
+use std::time::SystemTime;
 
 /// The binary unit ladder, `1024` a step — matching what `stat`, `du`
 /// and every mainstream file manager actually compute with, even where
@@ -33,9 +36,44 @@ pub fn human_readable_size(bytes: u64) -> String {
     format!("{value:.1} {}", UNITS[unit])
 }
 
+/// Formats a modification time the way the design's list view shows it:
+/// local time, a fixed short calendar form so a column of these lines up
+/// rather than each row producing a differently-shaped string.
+///
+/// `None` — [`crate::types::Entry::modified`]'s own state for "the
+/// filesystem wouldn't say" — renders as an em dash rather than an empty
+/// cell, so a missing timestamp reads as "unknown" and not as a blank
+/// the eye skips over.
+pub fn format_modified(modified: Option<SystemTime>) -> String {
+    match modified {
+        Some(t) => chrono::DateTime::<chrono::Local>::from(t)
+            .format("%b %-d, %Y %H:%M")
+            .to_string(),
+        None => "\u{2014}".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_modified_time_is_an_em_dash_not_a_blank_cell() {
+        assert_eq!(format_modified(None), "\u{2014}");
+    }
+
+    #[test]
+    fn a_known_time_formats_as_a_fixed_short_calendar_form() {
+        // 2024-01-05T09:03:00Z, chosen because a single-digit day and
+        // hour exercise the zero-padding decisions in the format string.
+        let t = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1704445380);
+        let formatted = format_modified(Some(t));
+        // The exact clock reading depends on the local timezone this
+        // test runs in, but the *shape* — "Mon D, YYYY HH:MM" — must not
+        // depend on it, so only the shape is pinned here.
+        assert!(formatted.contains("2024"), "{formatted}");
+        assert_eq!(formatted.matches(':').count(), 1, "{formatted}");
+    }
 
     #[test]
     fn nine_hundred_ninety_nine_bytes_has_no_unit_change() {
