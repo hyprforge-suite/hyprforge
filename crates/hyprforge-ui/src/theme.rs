@@ -126,6 +126,17 @@ pub fn warning() -> Color {
     crate::color::to_iced(active().warning)
 }
 
+/// Somewhere that is not this machine — a remote host, a mounted share.
+///
+/// Reach for this only for that meaning. It is a state colour, and the
+/// point of a state colour is that seeing it tells you something; using
+/// it as a second accent because it looks nice would make it stop
+/// meaning anything, which is the failure the whole reserved-colour
+/// scheme exists to prevent.
+pub fn info() -> Color {
+    crate::color::to_iced(active().info)
+}
+
 fn palette() -> iced::theme::Palette {
     let theme = active();
     iced::theme::Palette {

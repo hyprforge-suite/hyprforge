@@ -160,6 +160,21 @@ pub struct Theme {
     pub warning: Color,
     /// Confirmation that something applied.
     pub success: Color,
+    /// "This is somewhere else" — a remote host, a mounted share, a
+    /// network location.
+    ///
+    /// Not a fifth shade of warning. It sits alongside
+    /// [`Self::warning`], [`Self::success`] and [`Self::error`] as a
+    /// *state* colour, and it exists because the file manager's design
+    /// reserves colour so that colour always means something: green for
+    /// good, orange for attention, red for danger, and this for
+    /// not-local. Without it a mounted share would have to borrow one
+    /// of the other three and quietly stop meaning what it says.
+    ///
+    /// Dracula's own cyan, unadjusted — the same choice
+    /// [`Self::accent`] and [`Self::error`] already make, and it holds
+    /// contrast against all four surfaces in the ramp.
+    pub info: Color,
     /// The elevation ramp the window apps are built from. The auth
     /// screen only needs `background` and `surface`; a settings window
     /// needs the steps in between.
@@ -234,6 +249,7 @@ impl Default for Theme {
             font_scale: 1.0,
             warning: Color::rgba(0xf5, 0xb9, 0x42, 0xff),
             success: Color::rgba(0x3e, 0xcf, 0x8e, 0xff),
+            info: Color::rgba(0x8b, 0xe9, 0xfd, 0xff),
             surfaces: Surfaces::default(),
         }
     }
@@ -539,5 +555,42 @@ mod shared_look {
         // one hop where a mismatch would be invisible until login.
         let round_tripped: Theme = toml::from_str(&toml::to_string(&theme).unwrap()).unwrap();
         assert_eq!(round_tripped.accent, theme.accent);
+    }
+}
+
+#[cfg(test)]
+mod info_role {
+    use super::*;
+
+    /// A `lock.toml` written before `info` existed must still parse and
+    /// get the default, rather than failing and taking the lock screen
+    /// with it. Same property `#[serde(default)]` exists to guarantee
+    /// for every other field here, pinned for the one most recently
+    /// added — that is the one a future change is most likely to break.
+    #[test]
+    fn a_theme_file_written_before_info_existed_still_parses() {
+        let older = r#"
+            background = "rgba(16161eff)"
+            accent = "rgba(bd93f9ff)"
+            font_size = 15.0
+        "#;
+        let theme: Theme = toml::from_str(older).expect("an older theme file must still load");
+        assert_eq!(theme.accent, Color::rgba(0xbd, 0x93, 0xf9, 0xff), "what it did say is kept");
+        assert_eq!(theme.info, Theme::default().info, "what it did not say gets the default");
+    }
+
+    /// `info` is a state colour, and a state colour that equals another
+    /// one conveys nothing. The design's whole premise is that colour
+    /// means something; two roles sharing a value silently breaks that
+    /// without any test noticing.
+    #[test]
+    fn every_state_colour_is_distinguishable_from_the_others() {
+        let t = Theme::default();
+        let states = [("accent", t.accent), ("error", t.error), ("warning", t.warning), ("success", t.success), ("info", t.info)];
+        for (i, (name_a, a)) in states.iter().enumerate() {
+            for (name_b, b) in &states[i + 1..] {
+                assert_ne!(a, b, "{name_a} and {name_b} are the same colour, so neither means anything");
+            }
+        }
     }
 }
