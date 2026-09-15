@@ -46,17 +46,16 @@
 
 use hyprforge_files_core::backend::{FsBackend, StdBackend};
 use hyprforge_files_core::browser::Message as BrowserMessage;
-use hyprforge_files_core::prefs::ViewMode;
-use hyprforge_files_core::sort::{SortColumn, SortDirection};
+use hyprforge_files_core::sidebar::SidebarItem;
 use hyprforge_files_core::{
     keymap, sidebar, xdg_user_dirs, Browser, DirError, DirErrorKind, Entry, EntryKind, Mode,
     Outcome, Prefs,
 };
 use hyprforge_ui::theme::{app_theme, spacing, FontScale, BASE_TEXT_SIZE};
-use hyprforge_ui::widgets::{primary_button, scaled_text, secondary_button};
+use hyprforge_ui::widgets::{scaled_text, secondary_button};
 use iced::keyboard::{self, key, Key};
-use iced::widget::{column, container, row};
-use iced::{window, Element, Length, Size, Subscription, Task, Theme};
+use iced::widget::{button, column, container, row};
+use iced::{window, Background, Border, Color, Element, Length, Size, Subscription, Task, Theme};
 use std::path::{Path, PathBuf};
 
 /// This window's application id (X11 `WM_CLASS` / Wayland `app_id`).
@@ -120,11 +119,22 @@ fn main() -> iced::Result {
     );
     let last_window_size = (prefs.window_width, prefs.window_height);
 
-    let (browser, outcome) = Browser::new(Mode::App, prefs, start_dir, sidebar_items);
+    // Tab restoration (re-opening the tabs that were open last time) is
+    // deferred: it needs a field on `Prefs`, and another agent is working
+    // on `hyprforge-files-core::prefs` at the same time this crate was
+    // built — see this crate's task report for why that edit was left
+    // for reconciliation rather than made here. So the window always
+    // starts with exactly one tab, at `start_dir`, same as before tabs
+    // existed.
+    let (browser, outcome) = Browser::new(Mode::App, prefs.clone(), start_dir, sidebar_items.clone());
     let mut app = App {
-        browser,
+        tabs: vec![Tab::new(0, browser)],
+        active: 0,
+        next_tab_id: 1,
+        sidebar_items,
+        home_dir: backend.home_dir(),
+        last_prefs: prefs,
         font_scale: FontScale(hyprforge_ui::theme::active().font_scale),
-        read_generation: 0,
         status: prefs_status,
         last_window_size,
     };
@@ -132,7 +142,7 @@ fn main() -> iced::Result {
     // otherwise the window opens showing nothing at all, forever, for
     // the same reason CLAUDE.md's "a five-second gap" rule exists: an
     // outcome nobody satisfies is silent, not merely slow.
-    let boot_task = app.handle_outcome(outcome);
+    let boot_task = app.handle_outcome(0, outcome);
 
     // `iced::application` calls this closure exactly once; a `RefCell`
     // lets `main` build the real starting state above (which needs I/O)
@@ -403,25 +413,126 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> Option<i64> {
 // The window
 // ---------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum Message {
     Browser(BrowserMessage),
     BrowserKey(keymap::Key, keymap::Modifiers),
-    /// The generation this read was issued under, the directory it was
-    /// for, and what came back — see the module doc's note on
-    /// `read_generation`.
-    DirLoaded(u64, PathBuf, Result<Vec<Entry>, DirError>),
+    /// The tab a directory read was issued for, the generation it was
+    /// issued under, the directory it was for, and what came back — see
+    /// the module doc's note on `read_generation`, and [`Tab`]'s own doc
+    /// for why the guard is per-tab rather than per-window now that a
+    /// window can have several reads in flight at once, one per tab.
+    DirLoaded(u64, u64, PathBuf, Result<Vec<Entry>, DirError>),
     DeleteSelected,
-    TrashDone(PathBuf, Vec<String>),
+    /// The tab a trash operation was started from, the directory to
+    /// refresh, and what (if anything) failed.
+    TrashDone(u64, PathBuf, Vec<String>),
     PrefsSaved(Result<Prefs, String>),
     WindowResized(Size),
     DismissStatus,
+    /// `Ctrl+T`, or the titlebar's `+`.
+    NewTab,
+    /// `Ctrl+W`, or a tab's own close affordance — by position in
+    /// `App::tabs` at the moment the message was produced (view and
+    /// update run on the same state between one click and the next, the
+    /// same assumption every other index-carrying message in this file
+    /// already makes).
+    CloseTab(usize),
+    SwitchTab(usize),
+    /// `Ctrl+Tab` (`+1`) / `Ctrl+Shift+Tab` (`-1`).
+    CycleTab(i32),
+    /// `Ctrl+1`..`Ctrl+9`, zero-based. Silently does nothing past the
+    /// last tab — see [`App::jump_to_tab`].
+    JumpToTab(usize),
+}
+
+/// One open directory tree view, with the state that makes it a tab
+/// rather than a window-wide value someone reopens by accident: its own
+/// [`Browser`] (directory, selection, back/forward history all live
+/// inside that), and its own read-generation counter.
+///
+/// `id` is a value distinct from this tab's position in `App::tabs` —
+/// closing an earlier tab shifts every later one's position, and an
+/// async `DirLoaded`/`TrashDone` result must still find the *same* tab
+/// it was issued for, not whatever now sits at the index it remembers.
+/// See [`App::tab_index`].
+struct Tab {
+    id: u64,
+    browser: Browser,
+    /// Stamped on every read this tab issues, and checked against on
+    /// return — the same generation guard the window used to keep for
+    /// itself, now kept per tab so a slow read racing a fast one in tab 2
+    /// cannot land in tab 1, or vice versa: each tab's counter only ever
+    /// advances for reads *that tab* asked for.
+    read_generation: u64,
+}
+
+impl Tab {
+    fn new(id: u64, browser: Browser) -> Tab {
+        Tab { id, browser, read_generation: 0 }
+    }
+}
+
+/// Where "close the tab at `closed_index`" leaves things, decided as
+/// plain data so the choice of neighbour is one function tests can pin
+/// directly — not a fact only visible by inspecting an `iced::Task`,
+/// which carries no equality of its own to assert against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TabCloseOutcome {
+    /// That was the last tab; the host should close the window.
+    WindowShouldClose,
+    /// Tabs remain; this position is the sensible one to select next —
+    /// the tab that slid into the closed one's place, or the new last
+    /// tab if the closed one was rightmost.
+    Activate(usize),
+    /// `closed_index` named no open tab (already closed, or never
+    /// existed) — nothing to do.
+    NoSuchTab,
+}
+
+/// The decision [`App::close_tab`] applies. A free function, not a
+/// method, so it can be pinned by tests without building an `App` (which
+/// needs a real `Browser`, which needs a starting directory) — see
+/// [`tests::closing_a_tab_activates_a_sensible_neighbour`] and its
+/// siblings.
+fn neighbour_after_close(tab_count_before: usize, closed_index: usize) -> TabCloseOutcome {
+    if closed_index >= tab_count_before {
+        return TabCloseOutcome::NoSuchTab;
+    }
+    let remaining = tab_count_before - 1;
+    if remaining == 0 {
+        return TabCloseOutcome::WindowShouldClose;
+    }
+    // The tab that slid into `closed_index`'s slot, unless the closed
+    // tab was the rightmost — then there is no such slot and the new
+    // last tab (what used to be its left neighbour) is the sensible pick.
+    TabCloseOutcome::Activate(closed_index.min(remaining - 1))
 }
 
 struct App {
-    browser: Browser,
+    tabs: Vec<Tab>,
+    /// Index into `tabs` of the one currently drawn and receiving
+    /// keyboard input. Never out of bounds while `tabs` is non-empty —
+    /// closing the window is how `tabs` becomes empty, and that happens
+    /// in the same step that would otherwise leave `active` dangling.
+    active: usize,
+    /// Monotonic, never reused — see [`Tab::id`]'s own doc for why a
+    /// tab needs an identity independent of its position.
+    next_tab_id: u64,
+    /// Built once at startup (real filesystem `stat`s — see `main`'s own
+    /// comment on why that's acceptable there) and cloned into every new
+    /// tab's `Browser`; the XDG user directories it lists don't change
+    /// while this window is open.
+    sidebar_items: Vec<SidebarItem>,
+    /// Where `Ctrl+T` and the titlebar `+` open a new tab.
+    home_dir: PathBuf,
+    /// The most recently loaded-or-saved `Prefs`, used as the starting
+    /// point for a newly opened tab so it doesn't revert to defaults —
+    /// each tab's `Browser` carries its own copy from here on, per the
+    /// brief's scope (Phase A asks for per-tab directory/selection/
+    /// history, not per-tab view preferences).
+    last_prefs: Prefs,
     font_scale: FontScale,
-    read_generation: u64,
     /// One line shown at the bottom of the window: what
     /// `launch::open`/trashing/saving preferences said, if anything did.
     /// Pillar 3 — every error reaching the user is a sentence here, never
@@ -431,21 +542,41 @@ struct App {
 }
 
 impl App {
-    fn spawn_read_dir(&mut self, path: PathBuf) -> Task<Message> {
-        self.read_generation += 1;
-        let generation = self.read_generation;
+    fn active_tab(&self) -> &Tab {
+        &self.tabs[self.active]
+    }
+
+    fn active_tab_mut(&mut self) -> &mut Tab {
+        &mut self.tabs[self.active]
+    }
+
+    /// The position of the tab with this id, if it's still open. `None`
+    /// for a `DirLoaded`/`TrashDone` that outlived the tab that asked for
+    /// it — a real case, not a defensive-only branch: closing a tab
+    /// doesn't cancel a read already in flight for it.
+    fn tab_index(&self, id: u64) -> Option<usize> {
+        self.tabs.iter().position(|t| t.id == id)
+    }
+
+    fn spawn_read_dir(&mut self, tab_index: usize, path: PathBuf) -> Task<Message> {
+        let tab = &mut self.tabs[tab_index];
+        tab.read_generation += 1;
+        let generation = tab.read_generation;
+        let tab_id = tab.id;
         Task::perform(read_dir_task(path.clone()), move |result| {
-            Message::DirLoaded(generation, path.clone(), result)
+            Message::DirLoaded(tab_id, generation, path.clone(), result)
         })
     }
 
     /// Carries out everything `Browser::update`/`handle_key` handed back
     /// but could not do itself — see `hyprforge_files_core::browser::Outcome`'s
-    /// own doc for why each of these belongs to the host.
-    fn handle_outcome(&mut self, outcome: Outcome) -> Task<Message> {
+    /// own doc for why each of these belongs to the host. `tab_index` is
+    /// which tab produced the outcome, needed only for `ReadDir` (every
+    /// other variant is window-wide: opening a file, or saving prefs).
+    fn handle_outcome(&mut self, tab_index: usize, outcome: Outcome) -> Task<Message> {
         match outcome {
             Outcome::None => Task::none(),
-            Outcome::ReadDir(path) => self.spawn_read_dir(path),
+            Outcome::ReadDir(path) => self.spawn_read_dir(tab_index, path),
             Outcome::Activated(path) => {
                 let opened = hyprforge_files::launch::open(&path);
                 self.status = opened.message(&path);
@@ -457,56 +588,135 @@ impl App {
         }
     }
 
+    /// Opens a new tab at `start_dir` and makes it active — `Ctrl+T` and
+    /// the titlebar `+` both funnel here.
+    fn open_tab(&mut self, start_dir: PathBuf) -> Task<Message> {
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        let (browser, outcome) =
+            Browser::new(Mode::App, self.last_prefs.clone(), start_dir, self.sidebar_items.clone());
+        self.tabs.push(Tab::new(id, browser));
+        self.active = self.tabs.len() - 1;
+        let index = self.active;
+        self.handle_outcome(index, outcome)
+    }
+
+    /// `Ctrl+W`, or a tab's own close button. See [`neighbour_after_close`]
+    /// for the "which neighbour" decision this applies.
+    fn close_tab(&mut self, index: usize) -> Task<Message> {
+        match neighbour_after_close(self.tabs.len(), index) {
+            TabCloseOutcome::NoSuchTab => Task::none(),
+            TabCloseOutcome::WindowShouldClose => {
+                self.tabs.clear();
+                // A one-window process: closing its only tab closes the
+                // window by closing the whole application, same as the
+                // titlebar's own close button would.
+                iced::exit()
+            }
+            TabCloseOutcome::Activate(next) => {
+                self.tabs.remove(index);
+                self.active = next;
+                Task::none()
+            }
+        }
+    }
+
+    /// `Ctrl+Tab` (`delta = 1`) / `Ctrl+Shift+Tab` (`delta = -1`), wrapping
+    /// at either end rather than stopping — the grammar every tabbed
+    /// editor and browser already uses.
+    fn cycle_tab(&mut self, delta: i32) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        let len = self.tabs.len() as i32;
+        let next = (self.active as i32 + delta).rem_euclid(len);
+        self.active = next as usize;
+    }
+
+    /// `Ctrl+1`..`Ctrl+9`. Beyond the number of open tabs this is
+    /// silently a no-op — the brief's own wording — never a panicking
+    /// index, because nothing about a keybind guarantees the tab count
+    /// it was written against.
+    fn jump_to_tab(&mut self, index: usize) {
+        if index < self.tabs.len() {
+            self.active = index;
+        }
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Browser(msg) => {
-                let outcome = self.browser.update(msg);
-                self.handle_outcome(outcome)
+                let outcome = self.active_tab_mut().browser.update(msg);
+                self.handle_outcome(self.active, outcome)
             }
             Message::BrowserKey(key, mods) => {
-                let outcome = self.browser.handle_key(key, mods);
-                self.handle_outcome(outcome)
+                let outcome = self.active_tab_mut().browser.handle_key(key, mods);
+                self.handle_outcome(self.active, outcome)
             }
-            Message::DirLoaded(generation, path, result) => {
-                // Stale: a newer read has already been issued for
-                // *some* directory (possibly this same one — see the
-                // module doc) since this one went out. Dropping it here
-                // means `Browser` never even sees it, which is stronger
-                // than relying on `Browser::apply_dir_loaded`'s own
-                // path-based staleness check alone.
-                if generation != self.read_generation {
+            Message::DirLoaded(tab_id, generation, path, result) => {
+                let Some(index) = self.tab_index(tab_id) else {
+                    // The tab that asked for this closed before the read
+                    // came back. Not an error — see `Tab::id`'s doc.
+                    return Task::none();
+                };
+                // Stale: a newer read has already been issued for *this
+                // tab* (possibly for the same directory — see the module
+                // doc) since this one went out. Dropping it here means
+                // `Browser` never even sees it, which is stronger than
+                // relying on `Browser::apply_dir_loaded`'s own path-based
+                // staleness check alone — and, critically, it is keyed on
+                // this tab's own counter, so a slow read for a different
+                // tab can never be mistaken for stale or fresh against
+                // the wrong tab's generation.
+                if generation != self.tabs[index].read_generation {
                     return Task::none();
                 }
-                let outcome = self.browser.update(BrowserMessage::DirLoaded(path, result));
-                self.handle_outcome(outcome)
+                let outcome = self.tabs[index].browser.update(BrowserMessage::DirLoaded(path, result));
+                self.handle_outcome(index, outcome)
             }
             Message::DeleteSelected => {
-                let paths: Vec<PathBuf> = self
+                let tab = self.active_tab();
+                let paths: Vec<PathBuf> = tab
                     .browser
                     .selection()
                     .selected_indices()
                     .iter()
-                    .filter_map(|&i| self.browser.view_entries().get(i).map(|e| e.path.clone()))
+                    .filter_map(|&i| tab.browser.view_entries().get(i).map(|e| e.path.clone()))
                     .collect();
                 if paths.is_empty() {
                     return Task::none();
                 }
-                let dir = self.browser.current_dir().to_path_buf();
-                Task::perform(trash_many(paths), move |errors| Message::TrashDone(dir.clone(), errors))
+                let dir = tab.browser.current_dir().to_path_buf();
+                let tab_id = tab.id;
+                Task::perform(trash_many(paths), move |errors| {
+                    Message::TrashDone(tab_id, dir.clone(), errors)
+                })
             }
-            Message::TrashDone(dir, errors) => {
+            Message::TrashDone(tab_id, dir, errors) => {
                 if !errors.is_empty() {
                     self.status =
                         Some(format!("Couldn't move everything to Trash: {}", errors.join("; ")));
                 }
+                let Some(index) = self.tab_index(tab_id) else {
+                    // The tab this delete was started from has since
+                    // closed. The files are already trashed either way;
+                    // there is simply no listing left to refresh.
+                    return Task::none();
+                };
                 // Refresh regardless of whether anything failed, so what
                 // did succeed disappears from the listing. Safe even if
-                // the user has since navigated elsewhere: this issues a
-                // plain read (not a navigation), and `Browser` ignores a
-                // `DirLoaded` for a directory that is no longer current.
-                self.spawn_read_dir(dir)
+                // the user has since navigated elsewhere within this tab:
+                // this issues a plain read (not a navigation), and
+                // `Browser` ignores a `DirLoaded` for a directory that is
+                // no longer current.
+                self.spawn_read_dir(index, dir)
             }
-            Message::PrefsSaved(Ok(_)) => Task::none(),
+            Message::PrefsSaved(Ok(prefs)) => {
+                // Feeds the next `Ctrl+T`/`+` — see `last_prefs`'s own
+                // doc.
+                self.last_prefs = prefs;
+                Task::none()
+            }
             Message::PrefsSaved(Err(e)) => {
                 self.status = Some(format!("Couldn't save your Files settings: {e}"));
                 Task::none()
@@ -529,6 +739,22 @@ impl App {
                 self.status = None;
                 Task::none()
             }
+            Message::NewTab => self.open_tab(self.home_dir.clone()),
+            Message::CloseTab(index) => self.close_tab(index),
+            Message::SwitchTab(index) => {
+                if index < self.tabs.len() {
+                    self.active = index;
+                }
+                Task::none()
+            }
+            Message::CycleTab(delta) => {
+                self.cycle_tab(delta);
+                Task::none()
+            }
+            Message::JumpToTab(index) => {
+                self.jump_to_tab(index);
+                Task::none()
+            }
         }
     }
 
@@ -537,53 +763,54 @@ impl App {
     }
 
     fn title(&self) -> String {
-        let dir = self.browser.current_dir();
-        let name = dir
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| dir.display().to_string());
+        let name = tab_display_name(self.active_tab().browser.current_dir());
         format!("{name} \u{2014} Hyprforge Files")
+    }
+
+    /// The titlebar's row of tabs — a coloured dot (accent for the active
+    /// tab, muted for the rest: the design's "coloured dot" made to mean
+    /// something rather than decorate, per CLAUDE.md's rule that a state
+    /// colour stops meaning anything the moment it's reused for looks),
+    /// the directory's name, a close affordance, and a trailing `+`.
+    fn tabs_bar(&self, scale: FontScale) -> Element<'_, Message> {
+        let mut bar = row![].spacing(spacing::SM).align_y(iced::Alignment::Center).padding(spacing::SM);
+        for (index, tab) in self.tabs.iter().enumerate() {
+            bar = bar.push(tab_widget(index, tab, index == self.active, scale));
+        }
+        bar = bar.push(secondary_button("+").on_press(Message::NewTab));
+        container(bar).width(Length::Fill).into()
     }
 
     fn view(&self) -> Element<'_, Message> {
         let scale = self.font_scale;
-        let prefs = self.browser.prefs();
+        let tab = self.active_tab();
 
-        // The chrome `Browser::view` does not draw itself — back/forward/
-        // up, the path bar and the search field are already inside it
-        // (see `browser::render`); a sort order and a view mode are
-        // preferences `Browser::update` handles but nothing in its own
-        // `render` emits a control for, so the host adds one.
-        let sort_button = |column: SortColumn, label: &'static str| {
-            let active = prefs.sort_column() == column;
-            let button = if active { primary_button(label) } else { secondary_button(label) };
-            button.on_press(Message::Browser(BrowserMessage::SortBy(column)))
-        };
-        let direction_label = match prefs.sort_direction() {
-            SortDirection::Ascending => "Sort \u{2191}",
-            SortDirection::Descending => "Sort \u{2193}",
-        };
-        let hidden_label = if prefs.show_hidden { "Hide hidden" } else { "Show hidden" };
-        let (view_label, view_target) = match prefs.view_mode {
-            ViewMode::List => ("Grid view", ViewMode::Grid),
-            ViewMode::Grid => ("List view", ViewMode::List),
-        };
+        let tabs_row = self.tabs_bar(scale);
 
-        let controls = row![
-            sort_button(SortColumn::Name, "Name"),
-            sort_button(SortColumn::Size, "Size"),
-            sort_button(SortColumn::Modified, "Modified"),
-            sort_button(SortColumn::Kind, "Kind"),
-            secondary_button(direction_label).on_press(Message::Browser(BrowserMessage::ToggleSortDirection)),
-            secondary_button(hidden_label).on_press(Message::Browser(BrowserMessage::ToggleShowHidden)),
-            secondary_button(view_label).on_press(Message::Browser(BrowserMessage::SetViewMode(view_target))),
-        ]
-        .spacing(spacing::SM)
-        .padding(spacing::SM);
+        // No toolbar here, deliberately.
+        //
+        // This host used to draw its own row of List/Grid/Columns
+        // buttons and a "…" overflow carrying sort and hidden-files.
+        // That was a mistake with a visible cost: `browser::render`
+        // already drew back/forward/up, the path bar and the search
+        // field, so the window ended up with three stacked bands of
+        // chrome where the design has one, and the view toggles sat
+        // above the path bar instead of beside it.
+        //
+        // The deeper reason it was wrong is that none of those controls
+        // are *this crate's* state. View mode is `Prefs::view_mode`,
+        // sort is `Prefs::sort_column`, hidden files are
+        // `Prefs::show_hidden` — all browser state, all with a
+        // `browser::Message` variant already. Drawing them here meant
+        // the open/save dialog, which renders the same `Browser` through
+        // a different host, would never have had them at all.
+        //
+        // So the whole toolbar belongs to `hyprforge-files-core`, and
+        // what is left here is what genuinely is the window's own: tabs,
+        // and the status bar below.
+        let mut content = column![tabs_row].width(Length::Fill).height(Length::Fill);
 
-        let mut content = column![controls, self.browser.view(scale).map(Message::Browser)]
-            .width(Length::Fill)
-            .height(Length::Fill);
+        content = content.push(tab.browser.view(scale).map(Message::Browser));
 
         if let Some(status) = &self.status {
             let bar = row![
@@ -596,19 +823,37 @@ impl App {
             content = content.push(container(bar).width(Length::Fill));
         }
 
-        content.into()
+        // The floating window frame: DESIGN.md's 12px outer radius, taken
+        // from `Theme::rounding` (the same value hyprforge-look already
+        // resolved from Hyprland's own `decoration:rounding`) rather than
+        // hardcoded — see DESIGN.md's note on density being ratios, not
+        // constants.
+        container(content).width(Length::Fill).height(Length::Fill).style(window_frame_style).into()
     }
 
     /// The keyboard grammar: everything `keymap::resolve` gives meaning
     /// to is forwarded to `Browser::handle_key` (see that module's own
-    /// doc — this is the host wiring it names), plus Delete, which
-    /// `Browser`'s own keymap has no notion of because trashing is this
-    /// app's own concern, never the shared browsing view's or the
-    /// portal dialog's.
+    /// doc — this is the host wiring it names), plus Delete (trashing is
+    /// this app's own concern, never the shared browsing view's or the
+    /// portal dialog's) and the tab shortcuts below (same reasoning: a
+    /// dialog has no tabs, so this grammar belongs to the window, not to
+    /// `Browser`).
     fn subscription(&self) -> Subscription<Message> {
-        let keys = keyboard::listen().filter_map(|event| {
-            if let keyboard::Event::KeyPressed { key: Key::Named(key::Named::Delete), .. } = &event {
+        // `Subscription::filter_map`/`map` require a non-capturing (zero-
+        // sized) closure — `with` is iced's own way to thread state like
+        // `self.active` into one anyway, as a tuple element instead of a
+        // capture.
+        let keys = keyboard::listen().with(self.active).filter_map(|(active, event)| {
+            let keyboard::Event::KeyPressed { key, modifiers, .. } = &event else {
+                return None;
+            };
+            if let Key::Named(key::Named::Delete) = key {
                 return Some(Message::DeleteSelected);
+            }
+            if modifiers.control() {
+                if let Some(msg) = tab_shortcut(key, modifiers.shift(), active) {
+                    return Some(msg);
+                }
             }
             to_browser_key(&event).map(|(k, m)| Message::BrowserKey(k, m))
         });
@@ -617,6 +862,110 @@ impl App {
             window::resize_events().map(|(_, size)| Message::WindowResized(size)),
         ])
     }
+}
+
+/// A tab's display name: its directory's own name, or the full path for
+/// a directory with none (`/`).
+fn tab_display_name(dir: &Path) -> String {
+    dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| dir.display().to_string())
+}
+
+/// The Ctrl-held keys the titlebar's tab strip gives meaning to — new,
+/// close, cycle, jump — kept separate from `to_browser_key`'s browsing
+/// grammar so, for instance, Ctrl+T can never be misread as "type T into
+/// the search box" (`keymap::resolve` already refuses a Ctrl-held
+/// character for exactly that reason; this is the window-level analogue
+/// of the same rule for keys `Browser` has no notion of at all).
+fn tab_shortcut(key: &Key, shift: bool, active: usize) -> Option<Message> {
+    match key.as_ref() {
+        Key::Character("t") => Some(Message::NewTab),
+        Key::Character("w") => Some(Message::CloseTab(active)),
+        Key::Named(key::Named::Tab) => Some(Message::CycleTab(if shift { -1 } else { 1 })),
+        Key::Character(c) => {
+            let mut chars = c.chars();
+            match (chars.next(), chars.next()) {
+                (Some(d), None) if d.is_ascii_digit() && d != '0' => {
+                    Some(Message::JumpToTab(d.to_digit(10).unwrap() as usize - 1))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn tab_dot_color(is_active: bool) -> Color {
+    if is_active {
+        // The active tab's dot is `accent` — the same purple the mockup
+        // reserves for selection — because "which tab is this" is
+        // exactly that kind of state. Reusing a role for a second,
+        // decorative meaning (an arbitrary hue per tab) is the failure
+        // CLAUDE.md's colour-role rule exists to prevent, so the inactive
+        // dot is plain muted text instead of inventing one.
+        hyprforge_ui::color::to_iced(hyprforge_ui::theme::active().accent)
+    } else {
+        hyprforge_ui::theme::text_dim()
+    }
+}
+
+fn tab_button_style(_theme: &Theme, status: button::Status, is_active: bool) -> button::Style {
+    let base = button::Style {
+        background: Some(Background::Color(if is_active {
+            hyprforge_ui::theme::surface::card()
+        } else {
+            hyprforge_ui::theme::surface::sidebar()
+        })),
+        text_color: hyprforge_ui::theme::text(),
+        border: Border { radius: 6.0.into(), width: 0.0, color: Color::TRANSPARENT },
+        ..button::Style::default()
+    };
+    match status {
+        button::Status::Hovered if !is_active => {
+            button::Style { background: Some(Background::Color(hyprforge_ui::theme::surface::row())), ..base }
+        }
+        _ => base,
+    }
+}
+
+
+/// The floating window's outer chrome: background at the root surface,
+/// corners rounded to the compositor's own `decoration:rounding` (via
+/// `Theme::rounding`) rather than a value this app invented.
+fn window_frame_style(_theme: &Theme) -> container::Style {
+    let radius = hyprforge_ui::theme::active().rounding as f32;
+    container::Style {
+        background: Some(Background::Color(hyprforge_ui::theme::surface::root())),
+        border: Border { radius: radius.into(), width: 0.0, color: Color::TRANSPARENT },
+        ..container::Style::default()
+    }
+}
+
+/// One tab's widget: a coloured dot + name (switches to this tab) beside
+/// a close button — two siblings, not a button nested in a button (iced
+/// doesn't allow that), so the close affordance gets its own click target
+/// distinct from the switch one.
+fn tab_widget(index: usize, tab: &Tab, is_active: bool, scale: FontScale) -> Element<'_, Message> {
+    let dot = container(column![])
+        .width(Length::Fixed(8.0))
+        .height(Length::Fixed(8.0))
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(Background::Color(tab_dot_color(is_active))),
+            border: Border { radius: 4.0.into(), ..Border::default() },
+            ..container::Style::default()
+        });
+    let name = tab_display_name(tab.browser.current_dir());
+    let label = row![dot, scaled_text(name, BASE_TEXT_SIZE, scale)]
+        .spacing(spacing::XS)
+        .align_y(iced::Alignment::Center);
+    let select = button(label)
+        .on_press(Message::SwitchTab(index))
+        .style(move |t: &Theme, status| tab_button_style(t, status, is_active));
+    // "\u{00d7}" — a plain multiplication sign, the close-affordance glyph
+    // every one of these tab strips uses; not a character a keystroke
+    // could produce, so it needs no `scaled_text`/FontScale route of its
+    // own beyond what `secondary_button` already gives every label.
+    let close = secondary_button("\u{00d7}").on_press(Message::CloseTab(index));
+    row![select, close].spacing(2.0).align_y(iced::Alignment::Center).into()
 }
 
 /// Maps one iced key press to this browser's own [`keymap::Key`], or
@@ -679,7 +1028,6 @@ async fn save_prefs(mutate: impl FnOnce(&mut Prefs) + Send + 'static) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyprforge_files_core::sidebar::SidebarItem;
 
     // --- CLI argument / start-path resolution -----------------------------
 
@@ -779,15 +1127,43 @@ mod tests {
         assert!(is_error, "expected an Error load state, browser debug: {browser:?}");
     }
 
-    // --- stale DirLoaded, at the App/generation level ---------------------
+    // --- tabs: per-tab state, generation guard, close/cycle/jump ----------
 
-    fn app_for_test(browser: Browser) -> App {
+    fn browser_at(dir: &str) -> Browser {
+        let (browser, _) = Browser::new(Mode::App, Prefs::default(), PathBuf::from(dir), vec![]);
+        browser
+    }
+
+    /// One tab per given directory, ids `0..n`, `next_tab_id` past the
+    /// last one — the shape `main()` builds, minus the real I/O.
+    fn app_for_test(dirs: &[&str]) -> App {
+        let tabs: Vec<Tab> =
+            dirs.iter().enumerate().map(|(id, dir)| Tab::new(id as u64, browser_at(dir))).collect();
+        let next_tab_id = tabs.len() as u64;
         App {
-            browser,
-            font_scale: FontScale::default(),
-            read_generation: 0,
+            tabs,
+            active: 0,
+            next_tab_id,
+            sidebar_items: vec![],
+            home_dir: PathBuf::from("/home/alex"),
+            last_prefs: Prefs::default(),
+                font_scale: FontScale::default(),
             status: None,
             last_window_size: (900, 600),
+        }
+    }
+
+    fn entry_named(name: &str) -> Entry {
+        Entry {
+            name: name.to_string(),
+            path: PathBuf::from("/dir").join(name),
+            is_dir: false,
+            size: 1,
+            modified: None,
+            is_symlink: false,
+            link_broken: false,
+            hidden: false,
+            kind: EntryKind::Other,
         }
     }
 
@@ -798,44 +1174,24 @@ mod tests {
     /// still matches `current_dir`.
     #[test]
     fn a_stale_dir_loaded_result_is_ignored() {
-        let (browser, _) = Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
-        let mut app = app_for_test(browser);
+        let mut app = app_for_test(&["/dir"]);
+        let tab_id = app.tabs[0].id;
 
         // Simulate two reads having been issued for /dir: generation 1
         // (slow — about to arrive) and generation 2 (fast — arrives
         // first, below).
-        app.read_generation = 2;
+        app.tabs[0].read_generation = 2;
 
-        let fresh = vec![Entry {
-            name: "fresh.txt".to_string(),
-            path: PathBuf::from("/dir/fresh.txt"),
-            is_dir: false,
-            size: 1,
-            modified: None,
-            is_symlink: false,
-            link_broken: false,
-            hidden: false,
-            kind: EntryKind::Other,
-        }];
-        let _ = app.update(Message::DirLoaded(2, PathBuf::from("/dir"), Ok(fresh.clone())));
-        assert_eq!(app.browser.view_entries(), fresh.as_slice());
+        let fresh = vec![entry_named("fresh.txt")];
+        let _ = app.update(Message::DirLoaded(tab_id, 2, PathBuf::from("/dir"), Ok(fresh.clone())));
+        assert_eq!(app.tabs[0].browser.view_entries(), fresh.as_slice());
 
         // The stale generation-1 result now arrives, for the same path.
-        let stale = vec![Entry {
-            name: "stale.txt".to_string(),
-            path: PathBuf::from("/dir/stale.txt"),
-            is_dir: false,
-            size: 1,
-            modified: None,
-            is_symlink: false,
-            link_broken: false,
-            hidden: false,
-            kind: EntryKind::Other,
-        }];
-        let _ = app.update(Message::DirLoaded(1, PathBuf::from("/dir"), Ok(stale)));
+        let stale = vec![entry_named("stale.txt")];
+        let _ = app.update(Message::DirLoaded(tab_id, 1, PathBuf::from("/dir"), Ok(stale)));
 
         assert_eq!(
-            app.browser.view_entries(),
+            app.tabs[0].browser.view_entries(),
             fresh.as_slice(),
             "the stale generation-1 result must not have overwritten the fresh listing"
         );
@@ -843,23 +1199,176 @@ mod tests {
 
     #[test]
     fn a_matching_generation_is_applied() {
-        let (browser, _) = Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
-        let mut app = app_for_test(browser);
-        app.read_generation = 1;
+        let mut app = app_for_test(&["/dir"]);
+        let tab_id = app.tabs[0].id;
+        app.tabs[0].read_generation = 1;
 
-        let entries = vec![Entry {
-            name: "a.txt".to_string(),
-            path: PathBuf::from("/dir/a.txt"),
-            is_dir: false,
-            size: 1,
-            modified: None,
-            is_symlink: false,
-            link_broken: false,
-            hidden: false,
-            kind: EntryKind::Other,
-        }];
-        let _ = app.update(Message::DirLoaded(1, PathBuf::from("/dir"), Ok(entries.clone())));
-        assert_eq!(app.browser.view_entries(), entries.as_slice());
+        let entries = vec![entry_named("a.txt")];
+        let _ = app.update(Message::DirLoaded(tab_id, 1, PathBuf::from("/dir"), Ok(entries.clone())));
+        assert_eq!(app.tabs[0].browser.view_entries(), entries.as_slice());
+    }
+
+    /// The bug the brief names as the one "most likely to exist and
+    /// hardest to see by hand": tab 2's slow read must land in tab 2 even
+    /// after the user has switched back to tab 1 and tab 1 is what's on
+    /// screen when the result finally arrives.
+    #[test]
+    fn a_read_that_completes_after_switching_tabs_lands_in_the_tab_that_asked_for_it() {
+        let mut app = app_for_test(&["/one", "/two"]);
+        let tab_two_id = app.tabs[1].id;
+
+        // Tab 2 issues a read (its generation becomes 1) while it's the
+        // active tab...
+        app.active = 1;
+        let _ = app.spawn_read_dir(1, PathBuf::from("/two"));
+        assert_eq!(app.tabs[1].read_generation, 1);
+
+        // ...then the user switches back to tab 1 before it comes back.
+        app.active = 0;
+
+        let two_entries = vec![entry_named("from-tab-two.txt")];
+        let _ = app.update(Message::DirLoaded(tab_two_id, 1, PathBuf::from("/two"), Ok(two_entries.clone())));
+
+        assert_eq!(
+            app.tabs[1].browser.view_entries(),
+            two_entries.as_slice(),
+            "the result must still reach tab 2, even though it is no longer visible"
+        );
+        assert!(
+            app.tabs[0].browser.view_entries().is_empty(),
+            "tab 1, the one actually on screen, must not have received tab 2's listing"
+        );
+    }
+
+    /// A `DirLoaded`/`TrashDone` for a tab that has since closed must be
+    /// a silent no-op, not a panic on a stale index — the same "the read
+    /// outlived what asked for it" case as the generation guard, but at
+    /// the level of the tab itself having gone away entirely.
+    #[test]
+    fn a_dir_loaded_for_a_since_closed_tab_is_ignored_without_panicking() {
+        let mut app = app_for_test(&["/one", "/two"]);
+        let closed_id = app.tabs[1].id;
+        let _ = app.close_tab(1);
+        assert_eq!(app.tabs.len(), 1, "the tab must actually be gone");
+
+        let _ = app.update(Message::DirLoaded(closed_id, 1, PathBuf::from("/two"), Ok(vec![])));
+        // No panic reaching here is most of what this test checks; the
+        // rest is that the surviving tab was left alone.
+        assert_eq!(app.tabs[0].browser.current_dir(), Path::new("/one"));
+    }
+
+    // --- tabs: switching keeps each tab's own directory and history -------
+
+    #[test]
+    fn each_tab_keeps_its_own_directory_and_history_across_a_switch() {
+        let mut app = app_for_test(&["/one", "/two"]);
+
+        // Navigate tab 1 somewhere else, then switch to tab 2 and
+        // navigate it somewhere else too.
+        let _ = app.update(Message::Browser(BrowserMessage::Navigate(PathBuf::from("/one/sub"))));
+        assert_eq!(app.tabs[0].browser.current_dir(), Path::new("/one/sub"));
+
+        app.active = 1;
+        let _ = app.update(Message::Browser(BrowserMessage::Navigate(PathBuf::from("/two/sub"))));
+        assert_eq!(app.tabs[1].browser.current_dir(), Path::new("/two/sub"));
+
+        // Switching back to tab 1 must not have disturbed where it was,
+        // nor its back-history (built by the `Navigate` above).
+        app.active = 0;
+        assert_eq!(
+            app.tabs[0].browser.current_dir(),
+            Path::new("/one/sub"),
+            "tab 1 must still be where it was navigated, unaffected by tab 2's own navigation"
+        );
+        let outcome = app.tabs[0].browser.update(BrowserMessage::GoBack);
+        assert_eq!(
+            outcome,
+            Outcome::ReadDir(PathBuf::from("/one")),
+            "tab 1's own back-history, recorded before the switch, must still be there"
+        );
+    }
+
+    // --- tabs: closing ------------------------------------------------------
+
+    #[test]
+    fn closing_a_middle_tab_activates_the_one_that_slides_into_its_place() {
+        let mut app = app_for_test(&["/a", "/b", "/c"]);
+        app.active = 2; // doesn't matter which tab is active for this
+        let _ = app.close_tab(1);
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active, 1, "the tab that slid into slot 1 (originally /c) is the sensible neighbour");
+        assert_eq!(app.tabs[app.active].browser.current_dir(), Path::new("/c"));
+    }
+
+    #[test]
+    fn closing_the_rightmost_tab_activates_the_new_last_tab() {
+        let mut app = app_for_test(&["/a", "/b", "/c"]);
+        let _ = app.close_tab(2);
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active, 1, "there is no slot to slide into past the end; the new last tab is picked");
+    }
+
+    #[test]
+    fn closing_the_last_tab_signals_the_window_should_close() {
+        let mut app = app_for_test(&["/only"]);
+        let _ = app.close_tab(0);
+        assert!(app.tabs.is_empty(), "the tab list must actually be emptied so a later message can't reach a phantom tab");
+    }
+
+    #[test]
+    fn closing_a_tab_index_that_no_longer_exists_does_nothing() {
+        let mut app = app_for_test(&["/a"]);
+        let _ = app.close_tab(5);
+        assert_eq!(app.tabs.len(), 1, "an out-of-range close must be a no-op, not a panic");
+    }
+
+    /// [`neighbour_after_close`] pinned directly, independent of `App` —
+    /// the decision `App::close_tab` above applies.
+    #[test]
+    fn neighbour_after_close_picks_the_slid_in_tab_or_the_new_last_one() {
+        assert_eq!(neighbour_after_close(3, 0), TabCloseOutcome::Activate(0));
+        assert_eq!(neighbour_after_close(3, 1), TabCloseOutcome::Activate(1));
+        assert_eq!(neighbour_after_close(3, 2), TabCloseOutcome::Activate(1));
+        assert_eq!(neighbour_after_close(1, 0), TabCloseOutcome::WindowShouldClose);
+        assert_eq!(neighbour_after_close(3, 9), TabCloseOutcome::NoSuchTab);
+    }
+
+    // --- tabs: cycling and jumping ------------------------------------------
+
+    #[test]
+    fn ctrl_tab_cycles_forward_and_wraps() {
+        let mut app = app_for_test(&["/a", "/b", "/c"]);
+        app.cycle_tab(1);
+        assert_eq!(app.active, 1);
+        app.cycle_tab(1);
+        assert_eq!(app.active, 2);
+        app.cycle_tab(1);
+        assert_eq!(app.active, 0, "cycling past the last tab wraps to the first");
+    }
+
+    #[test]
+    fn ctrl_shift_tab_cycles_backward_and_wraps() {
+        let mut app = app_for_test(&["/a", "/b", "/c"]);
+        app.cycle_tab(-1);
+        assert_eq!(app.active, 2, "cycling back from the first tab wraps to the last");
+    }
+
+    #[test]
+    fn ctrl_1_through_9_beyond_the_tab_count_does_nothing() {
+        let mut app = app_for_test(&["/a", "/b"]);
+        app.jump_to_tab(8); // Ctrl+9, zero-based — no ninth tab exists
+        assert_eq!(app.active, 0, "an out-of-range jump must leave the active tab exactly where it was");
+        app.jump_to_tab(1); // Ctrl+2, in range
+        assert_eq!(app.active, 1);
+    }
+
+    #[test]
+    fn tab_shortcut_reads_ctrl_1_through_9_as_zero_based_indices() {
+        assert_eq!(tab_shortcut(&Key::Character("1".into()), false, 0), Some(Message::JumpToTab(0)));
+        assert_eq!(tab_shortcut(&Key::Character("9".into()), false, 0), Some(Message::JumpToTab(8)));
+        assert_eq!(tab_shortcut(&Key::Character("0".into()), false, 0), None, "there is no tab 0");
+        assert_eq!(tab_shortcut(&Key::Character("t".into()), false, 0), Some(Message::NewTab));
+        assert_eq!(tab_shortcut(&Key::Character("w".into()), false, 3), Some(Message::CloseTab(3)));
     }
 
     // --- the Trash sidebar item -------------------------------------------
