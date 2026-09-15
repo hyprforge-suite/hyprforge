@@ -232,12 +232,27 @@ pub enum Outcome {
     /// `crate::prefs::update`, off the UI thread, the same as any other
     /// file write.
     PrefsChanged(Prefs),
+    /// Count what is inside each of these directories, off the UI
+    /// thread, and feed the answers back as [`Message::CountsLoaded`].
+    ///
+    /// A second pass rather than part of the listing itself, and that is
+    /// the whole design: counting means one `read_dir` per subdirectory,
+    /// so folding it into the first read would make a directory of two
+    /// hundred folders take two hundred times as long *before anything
+    /// appeared*. The names arrive immediately and the counts fill in
+    /// behind them, which is what every file manager that shows this
+    /// column does.
+    CountFolders(Vec<PathBuf>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
     Navigate(PathBuf),
     DirLoaded(PathBuf, Result<Vec<Entry>, DirError>),
+    /// Answers to [`Outcome::CountFolders`]. `None` for a directory that
+    /// could not be read — never `Some(0)`, which would claim it is
+    /// empty.
+    CountsLoaded(Vec<(PathBuf, Option<usize>)>),
     GoBack,
     GoForward,
     GoUp,
@@ -272,6 +287,7 @@ struct ViewModel<'a> {
     prefs: &'a Prefs,
     sidebar: &'a [SidebarItem],
     pinned: &'a [PinnedItem],
+    counts: &'a std::collections::HashMap<PathBuf, Option<usize>>,
     /// The entry list's `scrollable` identity — see
     /// [`Browser::list_scrollable_id`]'s own doc for why this exists.
     list_scrollable_id: Id,
@@ -305,6 +321,14 @@ pub struct Browser {
     /// waiting to be filled: [`sidebar_sections`] renders no Pinned
     /// heading at all for an empty list, exactly like a fresh install.
     pinned: Vec<PinnedItem>,
+    /// How many entries each listed directory holds, once the second
+    /// pass has answered — see [`Outcome::CountFolders`].
+    ///
+    /// Keyed by path rather than by row index, so a count that arrives
+    /// after the listing was re-sorted still lands on the right folder.
+    /// Cleared on every navigation: a stale count is worse than none,
+    /// because a number is read as current.
+    counts: std::collections::HashMap<PathBuf, Option<usize>>,
     /// The entry list's `scrollable` identity, generated once and held
     /// for the life of this `Browser` — see
     /// [`Self::list_scrollable_id`]'s own doc.
@@ -318,6 +342,7 @@ impl Browser {
     /// the host must fulfil to show anything at all.
     pub fn new(mode: Mode, prefs: Prefs, start_dir: PathBuf, sidebar: Vec<SidebarItem>) -> (Browser, Outcome) {
         let browser = Browser {
+            counts: std::collections::HashMap::new(),
             mode,
             current_dir: start_dir.clone(),
             entries: Vec::new(),
@@ -394,6 +419,15 @@ impl Browser {
         match message {
             Message::Navigate(path) => self.go_to(path, true),
             Message::DirLoaded(path, result) => self.apply_dir_loaded(path, result),
+            Message::CountsLoaded(counts) => {
+                // No staleness guard needed: `apply_dir_loaded` clears
+                // the map on every navigation, and these are keyed by
+                // path — a count for a folder that is no longer listed
+                // simply sits in the map unread rather than showing up
+                // against the wrong row.
+                self.counts.extend(counts);
+                Outcome::None
+            }
             Message::GoBack => self.go_back(),
             Message::GoForward => self.go_forward(),
             Message::GoUp => self.go_up(),
@@ -497,6 +531,11 @@ impl Browser {
         if path != self.current_dir {
             return Outcome::None;
         }
+        // Counts from wherever we were before are about other folders.
+        // Dropping them is not an optimisation — a number left over from
+        // the previous directory would be read as this one's.
+        self.counts.clear();
+
         match result {
             Ok(entries) => {
                 self.entries = entries;
@@ -509,7 +548,14 @@ impl Browser {
         }
         self.selection.clear();
         self.refresh_view();
-        Outcome::None
+
+        let folders: Vec<PathBuf> =
+            self.entries.iter().filter(|e| e.is_dir).map(|e| e.path.clone()).collect();
+        if folders.is_empty() {
+            Outcome::None
+        } else {
+            Outcome::CountFolders(folders)
+        }
     }
 
     fn refresh_view(&mut self) {
@@ -598,6 +644,7 @@ impl Browser {
             prefs: &self.prefs,
             sidebar: &self.sidebar,
             pinned: &self.pinned,
+            counts: &self.counts,
             list_scrollable_id: self.list_scrollable_id.clone(),
             can_go_back: !self.back_stack.is_empty(),
             can_go_forward: !self.forward_stack.is_empty(),
@@ -1438,9 +1485,26 @@ fn body_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     }
 }
 
-fn entry_row<'a>(index: usize, entry: &'a Entry, selected: bool, scale: FontScale) -> Element<'a, Message> {
+fn entry_row<'a>(
+    index: usize,
+    entry: &'a Entry,
+    selected: bool,
+    count: Option<Option<usize>>,
+    scale: FontScale,
+) -> Element<'a, Message> {
+    // A directory's Size cell holds how many things are in it, not a
+    // byte total — see `Entry::size`'s own doc for why this crate never
+    // sums a tree. Three states, and they are deliberately different:
+    // nothing yet (the count is still being read), a number, or an em
+    // dash for a directory that could not be read. A folder you have no
+    // permission to open must not read as "0 items".
     let size = if entry.is_dir {
-        String::new()
+        match count {
+            None => String::new(),
+            Some(Some(1)) => "1 item".to_string(),
+            Some(Some(n)) => format!("{n} items"),
+            Some(None) => "\u{2014}".to_string(),
+        }
     } else {
         human_readable_size(entry.size)
     };
@@ -1593,8 +1657,30 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // selected row for the eye. Rows are told apart by their own
     // spacing and by the hover elevation, which is enough.
     let mut list = column![].spacing(1.0);
+    let mut seen_file = false;
     for (index, entry) in vm.view_entries.iter().enumerate() {
-        list = list.push(entry_row(index, entry, vm.selection.is_selected(index), scale));
+        // One rule, where the directories end and the files begin.
+        //
+        // The only divider in the listing — there used to be one under
+        // every row, which at this density was a stripe pattern that
+        // fought the selected row for the eye. This one marks a boundary
+        // that actually exists, and only when `directories_first` put it
+        // there: without that setting the two are interleaved and a line
+        // partway down would be marking nothing.
+        if vm.prefs.directories_first && !entry.is_dir && !seen_file && index > 0 {
+            list = list.push(container(divider()).padding([spacing::XS as u16, spacing::SM as u16]));
+        }
+        if !entry.is_dir {
+            seen_file = true;
+        }
+        // `.copied()` and *not* `.flatten()`: the two levels mean
+        // different things. Absent from the map is "not counted yet"
+        // and renders blank; present-but-`None` is "could not be read"
+        // and renders an em dash. Flattening collapses those into one,
+        // which would show every folder as unreadable for the moment
+        // before its count arrives.
+        let count = vm.counts.get(&entry.path).copied();
+        list = list.push(entry_row(index, entry, vm.selection.is_selected(index), count, scale));
     }
     // `.id(..)` is what lets a host restore this list's scroll position
     // across a tab switch — see `Browser::list_scrollable_id`'s own doc.
@@ -1836,6 +1922,55 @@ mod tests {
         assert_eq!(browser.view_entries().len(), 2);
     }
 
+    // --- folder counts ---------------------------------------------------------
+
+    /// A listing asks for its folders to be counted, so the Size column
+    /// has something to say about a directory — but only *after* the
+    /// names are on screen, which is why it is a second pass.
+    #[test]
+    fn loading_a_directory_asks_for_its_folders_to_be_counted() {
+        let (mut browser, _) =
+            Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
+        let entries = vec![entry("sub", true), entry("a.txt", false), entry("other", true)];
+        let outcome =
+            browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(entries)));
+        match outcome {
+            Outcome::CountFolders(folders) => {
+                assert_eq!(folders.len(), 2, "both directories, and neither file");
+                assert!(folders.iter().all(|p| p.to_string_lossy().contains("sub")
+                    || p.to_string_lossy().contains("other")));
+            }
+            other => panic!("expected a count request, got {other:?}"),
+        }
+    }
+
+    /// A directory of nothing but files asks for nothing. Sending an
+    /// empty request would spawn a background task to count zero things.
+    #[test]
+    fn a_listing_with_no_folders_asks_for_no_counts() {
+        let (mut browser, _) =
+            Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
+        let entries = vec![entry("a.txt", false), entry("b.txt", false)];
+        let outcome = browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(entries)));
+        assert!(matches!(outcome, Outcome::None));
+    }
+
+    /// Counts from the previous directory are dropped on navigation. A
+    /// number left over from somewhere else is worse than no number,
+    /// because a number is read as current.
+    #[test]
+    fn navigating_away_forgets_the_counts_it_had() {
+        let (mut browser, _) =
+            Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
+        browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(vec![entry("sub", true)])));
+        browser.update(Message::CountsLoaded(vec![(PathBuf::from("/dir/sub"), Some(18))]));
+        assert_eq!(browser.counts.get(Path::new("/dir/sub")), Some(&Some(18)));
+
+        browser.update(Message::Navigate(PathBuf::from("/elsewhere")));
+        browser.update(Message::DirLoaded(PathBuf::from("/elsewhere"), Ok(vec![])));
+        assert!(browser.counts.is_empty(), "a count for a folder we have left must not survive");
+    }
+
     // --- breadcrumb ------------------------------------------------------------
 
     /// The design shows `~ / projects / hyprsuite / src`, not
@@ -2037,11 +2172,16 @@ mod tests {
         prefs: &'a Prefs,
         load_state: &'a LoadState,
     ) -> ViewModel<'a> {
+        // A shared empty map so this helper can hand out a `&'a` to one
+        // — a local would not outlive the call.
+        static EMPTY_COUNTS: std::sync::OnceLock<std::collections::HashMap<PathBuf, Option<usize>>> =
+            std::sync::OnceLock::new();
         ViewModel {
             current_dir,
             view_entries: &[],
             selection,
             search_query: "",
+            counts: EMPTY_COUNTS.get_or_init(std::collections::HashMap::new),
             load_state,
             prefs,
             sidebar,

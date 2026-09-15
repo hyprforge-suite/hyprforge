@@ -585,6 +585,9 @@ impl App {
             Outcome::PrefsChanged(prefs) => {
                 Task::perform(save_prefs(move |p: &mut Prefs| *p = prefs.clone()), Message::PrefsSaved)
             }
+            Outcome::CountFolders(folders) => Task::perform(count_folders(folders), |counts| {
+                Message::Browser(BrowserMessage::CountsLoaded(counts))
+            }),
         }
     }
 
@@ -1118,6 +1121,38 @@ async fn trash_many(paths: Vec<PathBuf>) -> Vec<String> {
 /// function's own doc for why a read-modify-write beats saving a copy
 /// loaded earlier (two processes, the app and the portal dialog, can
 /// each have their own idea of what the file last said).
+/// Counts what is inside each directory, off the UI thread.
+///
+/// One `read_dir` per folder, which is why this is a second pass rather
+/// than part of the listing — see `Outcome::CountFolders`'s own doc.
+///
+/// Bounded by `COUNT_BUDGET`. A directory of ten thousand subdirectories
+/// would otherwise spend ten thousand `read_dir` calls filling in a
+/// column nobody has scrolled to, on a machine the user is trying to do
+/// something else with. Past the budget the rest simply stay blank,
+/// which is a state the Size cell already renders — the alternative,
+/// counting forever, is invisible until it is someone's fan spinning up.
+async fn count_folders(folders: Vec<PathBuf>) -> Vec<(PathBuf, Option<usize>)> {
+    tokio::task::spawn_blocking(move || {
+        folders
+            .into_iter()
+            .take(COUNT_BUDGET)
+            .map(|path| {
+                // `None` rather than `Some(0)` when the read fails: a
+                // folder you have no permission to open is not an empty
+                // one, and the cell says so with an em dash.
+                let count = std::fs::read_dir(&path).ok().map(|entries| entries.count());
+                (path, count)
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// How many folders one listing will count before giving up.
+const COUNT_BUDGET: usize = 400;
+
 async fn save_prefs(mutate: impl FnOnce(&mut Prefs) + Send + 'static) -> Result<Prefs, String> {
     match tokio::task::spawn_blocking(move || hyprforge_files_core::prefs::update(mutate)).await {
         Ok(Ok(prefs)) => Ok(prefs),
