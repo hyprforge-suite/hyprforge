@@ -71,6 +71,14 @@ was flagged will not catch this, so assert the generated value too.
 appears in that shell's own command line. It kills the shell and exits 144. Use
 `pkill -x <name>` or a literal PID.
 
+`pgrep -f` has the identical problem and is easier to miss, because it looks
+like the safe half of the pair — it only *reads*. But
+`for p in $(pgrep -f "http.server 8731"); do kill "$p"; done` puts the pattern
+in the command line of the very shell running the substitution, so the loop
+kills that shell: still exit 144, now with the search and the kill in different
+words. When the process is a server, ask the port instead of the process table:
+`ss -lptnH 'sport = :8731'` names the pid without any pattern to match against.
+
 And `pkill -x`/`pgrep -x` is not the safe fallback it looks like: a process name
 longer than **15 characters** is truncated in `/proc/<pid>/comm`, so
 `pgrep -x hyprforge-settings` matches *nothing at all* and reports success doing
