@@ -47,10 +47,14 @@ pub fn badge_color(kind: EntryKind) -> Color {
     let t = theme::active();
     match kind {
         EntryKind::Folder => t.accent,
-        EntryKind::Image => t.success,
-        EntryKind::Document => t.surfaces.text_dim,
+        // `info` is the "somewhere else" role, and a document is not
+        // somewhere else — these take the roles whose *meaning* is
+        // nearest, and where nothing fits, the dim text colour rather
+        // than borrowing a state colour that would then mean two things.
+        EntryKind::Image => t.error,
+        EntryKind::Document => t.info,
         EntryKind::Archive => t.warning,
-        EntryKind::Code => t.accent,
+        EntryKind::Code => t.warning,
         EntryKind::Audio => t.success,
         EntryKind::Video => t.error,
         EntryKind::Other => t.surfaces.text_dim,
@@ -82,36 +86,49 @@ pub fn entry_icon<'a, Message: 'a>(kind: EntryKind, size: f32, scale: FontScale)
     // kind's colour, inside a lighter field of the same hue. Two
     // elevations of one colour, which is the design's own idiom, and
     // every pixel of it comes from the theme.
-    let mark_side = side * MARK_FRACTION;
-    let mark = container(iced::widget::Space::new())
-        .width(Length::Fixed(mark_side))
-        .height(Length::Fixed(mark_side))
-        .style(move |_theme: &IcedTheme| container::Style {
-            background: Some(Background::Color(color)),
-            border: Border { radius: (mark_side * 0.28).into(), width: 0.0, color },
-            ..container::Style::default()
-        });
+    // Folders are filled; files are outlined.
+    //
+    // The strongest cue in a listing is not the colour, it is this: a
+    // directory of thirty folders and three files should show you the
+    // three at a glance, and fill-versus-outline does that before you
+    // have read a single name. The design draws exactly this
+    // distinction, and it is the one that survives at a size where a
+    // hue is barely legible.
+    let filled = kind == EntryKind::Folder;
 
-    container(mark)
-        .center(Length::Fixed(side))
-        .style(move |_theme: &IcedTheme| container::Style {
-            background: Some(Background::Color(iced::Color { a: 0.18, ..color })),
-            border: {
-                // Scaled with the badge rather than fixed, so it stays a
-                // rounded square at 200% instead of a square with a
-                // decorative nick in each corner.
-                Border { radius: (side * 0.28).into(), width: 0.0, color }
-            },
-            ..container::Style::default()
-        })
-        .into()
+    if filled {
+        container(iced::widget::Space::new())
+            .width(Length::Fixed(side))
+            .height(Length::Fixed(side))
+            .style(move |_theme: &IcedTheme| container::Style {
+                background: Some(Background::Color(color)),
+                // Radius scaled with the badge rather than fixed, so it
+                // stays a rounded square at 200% instead of a square
+                // with a decorative nick in each corner.
+                border: Border { radius: (side * 0.28).into(), width: 0.0, color },
+                ..container::Style::default()
+            })
+            .into()
+    } else {
+        container(iced::widget::Space::new())
+            .width(Length::Fixed(side))
+            .height(Length::Fixed(side))
+            .style(move |_theme: &IcedTheme| container::Style {
+                // A whisper of fill inside the outline, so the shape
+                // reads as an object rather than as a hole in the row.
+                background: Some(Background::Color(iced::Color { a: 0.12, ..color })),
+                border: Border { radius: (side * 0.28).into(), width: OUTLINE_WIDTH, color },
+                ..container::Style::default()
+            })
+            .into()
+    }
 }
 
-/// How much of the badge the inner mark fills.
-///
-/// Small enough that the ring of lighter colour around it reads as a
-/// deliberate field rather than as a border that failed to render.
-const MARK_FRACTION: f32 = 0.5;
+/// The outline on a file's badge. Thin enough to read as a drawn edge
+/// rather than as a second filled square.
+const OUTLINE_WIDTH: f32 = 1.5;
+
+
 
 #[cfg(test)]
 mod tests {

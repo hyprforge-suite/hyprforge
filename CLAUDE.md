@@ -345,6 +345,20 @@ the kernel closes the dead process's descriptors and a zombie nobody waited
 on still holds them; `Child::kill` signals *and* reaps, which is what makes
 the new popup's own `acquire` succeed rather than race.
 
+**A test that writes an executable and then runs it races every other
+test that forks.** Three tests here write a stand-in script and exec it,
+and they failed about one run in six of the whole crate while passing 25
+times out of 25 on their own — which is the signature of a race with a
+*sibling* test rather than a bug in the test. The cause is `ETXTBSY` and
+it is a plain Unix rule, not anything specific to this code: while one
+thread holds an executable open for writing, a fork in another thread
+gives the child a copy of that write descriptor, and exec of that file
+then fails with "text file busy". Serialising write-then-exec across
+those tests fixes it; a retry loop would only hide it. The general
+lesson is the one about flaky tests generally — "passes alone, fails in
+the suite" is information, and it names concurrency with a sibling
+rather than inviting a re-run.
+
 **Never run a regex over source code to delete a block.** A non-greedy
 `(?:[^\n]*\n)*?` looking for a sixteen-space closing brace finds the first
 one anywhere below, and deeply-indented code inside the *next* function

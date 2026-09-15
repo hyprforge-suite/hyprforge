@@ -45,11 +45,42 @@ pub fn human_readable_size(bytes: u64) -> String {
 /// cell, so a missing timestamp reads as "unknown" and not as a blank
 /// the eye skips over.
 pub fn format_modified(modified: Option<SystemTime>) -> String {
-    match modified {
-        Some(t) => chrono::DateTime::<chrono::Local>::from(t)
-            .format("%b %-d, %Y %H:%M")
-            .to_string(),
-        None => "\u{2014}".to_string(),
+    format_modified_at(modified, chrono::Local::now())
+}
+
+/// [`format_modified`] with "now" passed in, so the relative forms below
+/// can be tested against a fixed clock rather than whatever today is.
+pub fn format_modified_at(
+    modified: Option<SystemTime>,
+    now: chrono::DateTime<chrono::Local>,
+) -> String {
+    let Some(t) = modified else {
+        return "\u{2014}".to_string();
+    };
+    let t = chrono::DateTime::<chrono::Local>::from(t);
+
+    // Relative near the present, absolute further back — what the design
+    // shows, and what every file manager does, because the question a
+    // date column answers changes with distance. For something touched
+    // this afternoon you want the *time*; for last week, the day; for
+    // last year, the year. One absolute format answers none of them
+    // well: "Dec 28, 2025 12:35" is nine characters of noise when the
+    // answer is "an hour ago".
+    use chrono::Datelike;
+    let days = now.date_naive().signed_duration_since(t.date_naive()).num_days();
+    match days {
+        0 => format!("Today {}", t.format("%H:%M")),
+        1 => "Yesterday".to_string(),
+        // Inside the last week the weekday is more use than the date —
+        // "Mon 09:15" locates it in a way "Sep 8" does not.
+        2..=6 => t.format("%a %H:%M").to_string(),
+        // A date in the future: a clock skew or a file copied with a
+        // preserved timestamp from a machine set wrong. Fall through to
+        // the absolute form rather than saying "in 3 days", which reads
+        // as a bug in us rather than in the timestamp.
+        _ if days < 0 => t.format("%b %-d, %Y").to_string(),
+        _ if t.year() == now.year() => t.format("%-d %b").to_string(),
+        _ => t.format("%b %-d, %Y").to_string(),
     }
 }
 
@@ -62,17 +93,62 @@ mod tests {
         assert_eq!(format_modified(None), "\u{2014}");
     }
 
+    /// A fixed "now" so the relative forms below are about the code and
+    /// not about what day the suite happens to be tested on.
+    fn at(now: &str) -> chrono::DateTime<chrono::Local> {
+        use chrono::TimeZone as _;
+        let naive = chrono::NaiveDateTime::parse_from_str(now, "%Y-%m-%d %H:%M:%S").expect("a valid fixture time");
+        chrono::Local.from_local_datetime(&naive).single().expect("an unambiguous local time")
+    }
+
+    /// Converts a fixture time to the `SystemTime` the real API takes.
+    fn as_system_time(when: &str) -> SystemTime {
+        let local = at(when);
+        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(local.timestamp() as u64)
+    }
+
     #[test]
-    fn a_known_time_formats_as_a_fixed_short_calendar_form() {
-        // 2024-01-05T09:03:00Z, chosen because a single-digit day and
-        // hour exercise the zero-padding decisions in the format string.
-        let t = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1704445380);
-        let formatted = format_modified(Some(t));
-        // The exact clock reading depends on the local timezone this
-        // test runs in, but the *shape* — "Mon D, YYYY HH:MM" — must not
-        // depend on it, so only the shape is pinned here.
-        assert!(formatted.contains("2024"), "{formatted}");
-        assert_eq!(formatted.matches(':').count(), 1, "{formatted}");
+    fn something_touched_today_shows_the_time_because_that_is_the_question() {
+        let now = at("2026-09-15 14:00:00");
+        assert_eq!(format_modified_at(Some(as_system_time("2026-09-15 09:03:00")), now), "Today 09:03");
+    }
+
+    #[test]
+    fn yesterday_is_named_rather_than_dated() {
+        let now = at("2026-09-15 14:00:00");
+        // Note this is 23 hours earlier, not 24: "yesterday" is a
+        // calendar day apart, not a duration. Subtracting hours is the
+        // obvious implementation and gets this wrong every evening.
+        assert_eq!(format_modified_at(Some(as_system_time("2026-09-14 15:00:00")), now), "Yesterday");
+    }
+
+    #[test]
+    fn inside_the_last_week_the_weekday_locates_it_better_than_a_date() {
+        let now = at("2026-09-15 14:00:00");
+        let formatted = format_modified_at(Some(as_system_time("2026-09-11 09:15:00")), now);
+        assert_eq!(formatted, "Fri 09:15");
+    }
+
+    #[test]
+    fn earlier_this_year_drops_the_year_that_is_already_implied() {
+        let now = at("2026-09-15 14:00:00");
+        assert_eq!(format_modified_at(Some(as_system_time("2026-08-12 10:00:00")), now), "12 Aug");
+    }
+
+    #[test]
+    fn a_previous_year_is_spelled_out_in_full() {
+        let now = at("2026-09-15 14:00:00");
+        assert_eq!(format_modified_at(Some(as_system_time("2024-01-05 09:03:00")), now), "Jan 5, 2024");
+    }
+
+    /// A file whose timestamp is in the future — a clock skew, or a copy
+    /// that preserved a timestamp from a machine set wrong. It must not
+    /// read as "in 3 days", which looks like a bug in us rather than in
+    /// the timestamp.
+    #[test]
+    fn a_timestamp_from_the_future_falls_back_to_an_absolute_date() {
+        let now = at("2026-09-15 14:00:00");
+        assert_eq!(format_modified_at(Some(as_system_time("2027-03-01 09:00:00")), now), "Mar 1, 2027");
     }
 
     #[test]

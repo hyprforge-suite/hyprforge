@@ -36,7 +36,7 @@ use crate::types::{Entry, FilesError};
 // column is gone — imported there rather than here so the lib build
 // does not carry an unused import.
 use hyprforge_ui::theme::{spacing, FontScale, BASE_TEXT_SIZE};
-use hyprforge_ui::widgets::{divider, meta_text, primary_button, scaled_text, secondary_button};
+use hyprforge_ui::widgets::{divider, meta_text, scaled_text};
 use iced::widget::{column, container, row, scrollable, text_input, Id};
 use iced::{Element, Length};
 use std::collections::HashSet;
@@ -693,12 +693,12 @@ fn render<'a>(vm: ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // had them at all.
     let toolbar = container(
         row![
-            secondary_button("\u{2190}").on_press_maybe(vm.can_go_back.then_some(Message::GoBack)),
-            secondary_button("\u{2192}").on_press_maybe(vm.can_go_forward.then_some(Message::GoForward)),
-            secondary_button("\u{2191}").on_press(Message::GoUp),
+            nav_button("\u{2039}", vm.can_go_back.then_some(Message::GoBack), scale),
+            nav_button("\u{203A}", vm.can_go_forward.then_some(Message::GoForward), scale),
+            nav_button("\u{2191}", Some(Message::GoUp), scale),
             path_bar(vm.current_dir, scale),
             search_field(vm.search_query, scale),
-            view_mode_toggle(vm.prefs),
+            view_mode_toggle(vm.prefs, scale),
         ]
         .spacing(spacing::SM)
         .align_y(iced::Alignment::Center),
@@ -721,6 +721,48 @@ fn render<'a>(vm: ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     row![sidebar, content].into()
 }
 
+/// Back, forward and up.
+///
+/// Deliberately quieter than `secondary_button`: three outlined buttons
+/// at the head of the toolbar drew the eye before the path did, and the
+/// path is the thing a person is actually reading. No border, no fill
+/// until hovered, and a fixed square so the three read as one cluster
+/// rather than three differently-sized pills.
+///
+/// A disabled direction (no history to go back to) is dimmed rather than
+/// removed: a button that vanishes makes the row reflow and the other
+/// two move under the pointer.
+fn nav_button<'a>(
+    glyph: &'a str,
+    message: Option<Message>,
+    scale: FontScale,
+) -> Element<'a, Message> {
+    let enabled = message.is_some();
+    let side = density::header_height(scale) * 0.7;
+    iced::widget::button(
+        container(scaled_text(glyph, density::ROW_TEXT_BASE, scale))
+            .center_x(Length::Fill)
+            .center_y(Length::Fill),
+    )
+    .width(Length::Fixed(side))
+    .height(Length::Fixed(side))
+    .on_press_maybe(message)
+    .style(move |_t: &iced::Theme, status| {
+        let hovered = matches!(status, iced::widget::button::Status::Hovered);
+        iced::widget::button::Style {
+            background: hovered.then(|| iced::Background::Color(hyprforge_ui::theme::surface::row())),
+            text_color: if enabled {
+                hyprforge_ui::theme::text()
+            } else {
+                hyprforge_ui::theme::text_dim()
+            },
+            border: iced::Border { radius: density::inner_radius().into(), ..iced::Border::default() },
+            ..iced::widget::button::Style::default()
+        }
+    })
+    .into()
+}
+
 /// The search field, sized to the space left over rather than to the
 /// whole row.
 ///
@@ -729,34 +771,135 @@ fn render<'a>(vm: ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
 /// nowhere to go. Two-to-one matches the design, where the path is the
 /// wider of the two.
 fn search_field<'a>(query: &str, scale: FontScale) -> Element<'a, Message> {
-    text_input("Search", query)
-        .on_input(Message::SearchChanged)
-        .size(scale.apply(density::ROW_TEXT_BASE))
-        .width(Length::FillPortion(1))
-        .into()
+    // The magnifier is a sibling widget rather than the input's own
+    // `icon`, because iced's `text_input::Icon` wants a `Font` to take
+    // the glyph from and this suite does not ship one — the theme's font
+    // is whatever the desktop chose, and it may have no magnifier at
+    // all. A container beside the input always draws.
+    let icon = meta_text("\u{25CB}", density::META_TEXT_BASE, scale);
+
+    container(
+        row![
+            icon,
+            text_input("Search", query)
+                .on_input(Message::SearchChanged)
+                .size(scale.apply(density::ROW_TEXT_BASE))
+                .style(|_t: &iced::Theme, _status| iced::widget::text_input::Style {
+                    // Transparent: the bordered container around this row
+                    // is the field. An input drawing its own background
+                    // inside it would show as a box within a box.
+                    background: iced::Background::Color(iced::Color::TRANSPARENT),
+                    border: iced::Border::default(),
+                    icon: hyprforge_ui::theme::text_dim(),
+                    placeholder: hyprforge_ui::theme::text_dim(),
+                    value: hyprforge_ui::theme::text(),
+                    selection: _t.extended_palette().primary.weak.color,
+                })
+                .width(Length::Fill),
+        ]
+        .spacing(spacing::XS)
+        .align_y(iced::Alignment::Center),
+    )
+    // A floor, not a share.
+    //
+    // As a `FillPortion` beside the path this clipped its own
+    // placeholder to "Searc" on a narrow window: three-to-one of not
+    // much is not much. The path is what should absorb a wide window,
+    // and the search field only needs to be wide enough to read — so
+    // the path fills and this takes a fixed width derived from the text
+    // size, which keeps it legible at any scale.
+    .width(Length::Fixed(scale.apply(SEARCH_WIDTH_BASE)))
+    .padding([4, spacing::SM as u16])
+    .style(|_t: &iced::Theme| container::Style {
+        background: Some(iced::Background::Color(hyprforge_ui::theme::surface::card())),
+        border: iced::Border {
+            radius: density::inner_radius().into(),
+            width: 1.0,
+            color: hyprforge_ui::theme::surface::card_border(),
+        },
+        ..container::Style::default()
+    })
+    .into()
 }
 
-/// Grid / List / Columns, at the right end of the toolbar.
+/// The search field's width at 100% scale: enough for its placeholder
+/// and a short query, and no more. Scaled with the font so it does not
+/// clip at 125%.
+const SEARCH_WIDTH_BASE: f32 = 150.0;
+
+/// List / Grid / Columns, at the right end of the toolbar.
 ///
-/// Columns is drawn with no `on_press`, which iced renders as disabled:
-/// column view is a later phase, and a button that appears from nowhere
-/// later is a worse surprise than one that was visibly waiting.
-fn view_mode_toggle<'a>(prefs: &Prefs) -> Element<'a, Message> {
-    let button = |label: &'static str, mode: ViewMode| {
-        let styled = if prefs.view_mode == mode {
-            primary_button(label)
-        } else {
-            secondary_button(label)
-        };
-        styled.on_press(Message::SetViewMode(mode))
+/// Icons in one grouped strip, not three text buttons. The design shows
+/// a compact segmented control, and the reason is width: "List Grid
+/// Columns" spelled out is most of what a narrow window has left after
+/// the path and the search field, and it is the least-read control on
+/// the row — you set a view and then stop thinking about it.
+///
+/// Monochrome symbols, not emoji: these take the text colour like any
+/// other glyph, which is exactly what the file-type badges could not do
+/// and why those had to be drawn instead.
+///
+/// Columns has no `on_press`, which iced renders as disabled — column
+/// view is a later phase, and a control that appears from nowhere later
+/// is a worse surprise than one that was visibly waiting.
+fn view_mode_toggle<'a>(prefs: &Prefs, scale: FontScale) -> Element<'a, Message> {
+    let side = density::header_height(scale) * 0.7;
+    let segment = |glyph: &'a str, mode: Option<ViewMode>| {
+        let active = mode.is_some_and(|m| prefs.view_mode == m);
+        iced::widget::button(
+            container(scaled_text(glyph, density::ROW_TEXT_BASE, scale))
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+        )
+        .width(Length::Fixed(side))
+        .height(Length::Fixed(side))
+        .on_press_maybe(mode.map(Message::SetViewMode))
+        .style(move |t: &iced::Theme, status| {
+            let hovered = matches!(status, iced::widget::button::Status::Hovered);
+            // Through the palette, the same route the selected row takes
+            // — one source for "this is the accent", so the active view
+            // segment and the selected row can never drift apart.
+            let accent = t.extended_palette().primary.weak.color;
+            iced::widget::button::Style {
+                background: if active {
+                    Some(iced::Background::Color(accent))
+                } else if hovered {
+                    Some(iced::Background::Color(hyprforge_ui::theme::surface::row()))
+                } else {
+                    None
+                },
+                text_color: match (active, mode.is_some()) {
+                    // On the accent fill, text has to read against the
+                    // accent rather than against the surface behind it.
+                    (true, _) => hyprforge_ui::theme::surface::root(),
+                    (false, true) => hyprforge_ui::theme::text(),
+                    (false, false) => hyprforge_ui::theme::text_dim(),
+                },
+                border: iced::Border { radius: density::inner_radius().into(), ..iced::Border::default() },
+                ..iced::widget::button::Style::default()
+            }
+        })
     };
-    row![
-        button("List", ViewMode::List),
-        button("Grid", ViewMode::Grid),
-        secondary_button("Columns"),
-    ]
-    .spacing(spacing::XS)
-    .align_y(iced::Alignment::Center)
+
+    container(
+        row![
+            segment("\u{2630}", Some(ViewMode::List)),
+            segment("\u{229E}", Some(ViewMode::Grid)),
+            segment("\u{2016}", None),
+        ]
+        .spacing(2.0)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding(2.0)
+    .style(|_t: &iced::Theme| container::Style {
+        background: Some(iced::Background::Color(hyprforge_ui::theme::surface::card())),
+        border: iced::Border {
+            radius: density::inner_radius().into(),
+            width: 1.0,
+            color: hyprforge_ui::theme::surface::card_border(),
+        },
+        ..container::Style::default()
+    })
     .into()
 }
 
@@ -892,29 +1035,79 @@ fn path_bar<'a>(current_dir: &Path, scale: FontScale) -> Element<'a, Message> {
     let last = segments.len().saturating_sub(1);
     for (i, (label, path)) in segments.into_iter().enumerate() {
         if i > 0 {
-            crumbs = crumbs.push(meta_text("/", BASE_TEXT_SIZE, scale));
+            crumbs = crumbs.push(meta_text("/", density::META_TEXT_BASE, scale));
         }
         if i == last {
-            crumbs = crumbs.push(scaled_text(label, BASE_TEXT_SIZE, scale));
+            // The folder you are actually in, as a filled chip rather
+            // than plain text. In a path of five segments the last one
+            // is the answer to "where am I", and without the chip it is
+            // the least distinguishable word on the row.
+            crumbs = crumbs.push(
+                container(scaled_text(label, density::ROW_TEXT_BASE, scale))
+                    .padding([2, 6])
+                    .style(|_t: &iced::Theme| container::Style {
+                        background: Some(iced::Background::Color(hyprforge_ui::theme::surface::row())),
+                        border: iced::Border {
+                            radius: density::inner_radius().into(),
+                            ..iced::Border::default()
+                        },
+                        ..container::Style::default()
+                    }),
+            );
         } else {
-            crumbs = crumbs.push(secondary_button(label).on_press(Message::Navigate(path)));
+            crumbs = crumbs.push(crumb_button(label, path, scale));
         }
     }
-    // `FillPortion`, not `Fill`.
+
+    // One field, not a bare row of buttons.
     //
-    // `Fill` and `FillPortion` are not interchangeable when they share a
-    // row: `Fill` claims the whole remainder, so the search field beside
-    // this ended up drawn on top of the last crumb — "Documents" and
-    // "Search" overlapping in the same pixels. Two portions of the same
-    // row divide it instead of competing for it, and the path gets the
-    // larger share because a directory name is the longer thing.
-    container(crumbs).width(Length::FillPortion(PATH_PORTION)).into()
+    // The design draws the whole path inside a single bordered box the
+    // width of the toolbar's middle — it reads as the address field it
+    // is, and it is the thing the eye should land on first. Loose
+    // buttons on the toolbar's own background read as three more
+    // controls beside the navigation ones.
+    container(crumbs)
+        .width(Length::Fill)
+        .padding([4, spacing::SM as u16])
+        .style(|_t: &iced::Theme| container::Style {
+            background: Some(iced::Background::Color(hyprforge_ui::theme::surface::card())),
+            border: iced::Border {
+                radius: density::inner_radius().into(),
+                width: 1.0,
+                color: hyprforge_ui::theme::surface::card_border(),
+            },
+            ..container::Style::default()
+        })
+        .into()
 }
 
-/// How the toolbar's middle divides between the path and the search
-/// field. Two-to-one, matching the design, where the path bar is
-/// visibly the wider of the two.
-const PATH_PORTION: u16 = 2;
+/// One ancestor in the path, clickable but drawn as text.
+///
+/// No button chrome: inside the path field, an outlined button per
+/// segment would make a five-deep path look like a row of five
+/// controls. It highlights on hover, which is where "this is clickable"
+/// belongs.
+fn crumb_button<'a>(label: String, path: PathBuf, scale: FontScale) -> Element<'a, Message> {
+    iced::widget::button(meta_text(label, density::ROW_TEXT_BASE, scale))
+        .on_press(Message::Navigate(path))
+        .padding([2, 4])
+        .style(|_t: &iced::Theme, status| {
+            let hovered = matches!(status, iced::widget::button::Status::Hovered);
+            iced::widget::button::Style {
+                background: hovered.then(|| iced::Background::Color(hyprforge_ui::theme::surface::row())),
+                text_color: if hovered {
+                    hyprforge_ui::theme::text()
+                } else {
+                    hyprforge_ui::theme::text_dim()
+                },
+                border: iced::Border { radius: density::inner_radius().into(), ..iced::Border::default() },
+                ..iced::widget::button::Style::default()
+            }
+        })
+        .into()
+}
+
+
 
 fn body_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     match vm.load_state {
@@ -1096,11 +1289,15 @@ fn header_button_style(
 }
 
 fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
-    let mut list = column![].spacing(2.0);
+    // No rule between rows.
+    //
+    // The design draws none, and a line under every row is what made
+    // ours read as a table of data rather than a list of things: at 28px
+    // a separator every 28px is a stripe pattern, and it fights the
+    // selected row for the eye. Rows are told apart by their own
+    // spacing and by the hover elevation, which is enough.
+    let mut list = column![].spacing(1.0);
     for (index, entry) in vm.view_entries.iter().enumerate() {
-        if index > 0 {
-            list = list.push(divider());
-        }
         list = list.push(entry_row(index, entry, vm.selection.is_selected(index), scale));
     }
     // `.id(..)` is what lets a host restore this list's scroll position
