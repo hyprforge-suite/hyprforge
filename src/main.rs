@@ -1488,6 +1488,10 @@ mod tests {
     // --- sanity: unused-import guard for SidebarItem in future tests ----
     #[test]
     fn sidebar_item_type_is_reachable_from_this_crate() {
-        let _ = SidebarItem { label: "Home".to_string(), path: PathBuf::from("/home") };
+        let _ = SidebarItem {
+            label: "Home".to_string(),
+            path: PathBuf::from("/home"),
+            tint: hyprforge_files_core::sidebar::Tint::Accent,
+        };
     }
 }
