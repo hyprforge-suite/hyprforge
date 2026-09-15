@@ -12,3 +12,4 @@
 //! you double-click, and file operations.
 
 pub mod launch;
+pub mod tabstrip;

@@ -30,7 +30,11 @@ hyprforge-paths.workspace = true
 # than relying on Cargo unifying features from `hyprforge-settings`:
 # that unification only happens when something builds both, so
 # `cargo build -p hyprforge-files` alone would not get it.
-iced = { workspace = true, features = ["tokio"] }
+# `canvas` alongside `tokio`. The active tab's outline runs up one side,
+# across the top and down the other, and stops — iced's `Border` has a
+# single width for all four sides, so the open bottom edge that makes a
+# tab a tab rather than a floating pill has to be a drawn path.
+iced = { workspace = true, features = ["tokio", "canvas"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 serde.workspace = true
 serde_json.workspace = true

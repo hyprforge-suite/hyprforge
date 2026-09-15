@@ -773,12 +773,52 @@ impl App {
     /// colour stops meaning anything the moment it's reused for looks),
     /// the directory's name, a close affordance, and a trailing `+`.
     fn tabs_bar(&self, scale: FontScale) -> Element<'_, Message> {
-        let mut bar = row![].spacing(spacing::SM).align_y(iced::Alignment::Center).padding(spacing::SM);
+        use hyprforge_files::tabstrip;
+
+        // Bottom-aligned, not centred. This is the mechanic the strip
+        // depends on: tabs of different heights then share a baseline
+        // with the pane below and grow *upward*, so the active one rises
+        // out of the content. Centred, they float in the middle of the
+        // strip with a gap beneath and the taller one grows both ways,
+        // which reads as a toolbar of pills rather than as tabs.
+        let mut bar = row![].spacing(2.0).align_y(tabstrip::STRIP_ALIGNMENT);
         for (index, tab) in self.tabs.iter().enumerate() {
             bar = bar.push(tab_widget(index, tab, index == self.active, scale));
         }
-        bar = bar.push(secondary_button("+").on_press(Message::NewTab));
-        container(bar).width(Length::Fill).into()
+
+        let plus = tabstrip::new_tab_size();
+        bar = bar.push(
+            // Present but unpainted, the same treatment an inactive tab
+            // gets, and the same height so it shares their baseline.
+            button(
+                container(scaled_text("+", BASE_TEXT_SIZE, scale).color(hyprforge_ui::theme::text_dim()))
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill),
+            )
+            .width(Length::Fixed(scale.apply(plus.width)))
+            .height(Length::Fixed(scale.apply(plus.height)))
+            .padding(0)
+            .on_press(Message::NewTab)
+            .style(|_t: &Theme, status| button::Style {
+                background: matches!(status, button::Status::Hovered)
+                    .then(|| Background::Color(hyprforge_ui::theme::surface::row())),
+                text_color: hyprforge_ui::theme::text_dim(),
+                border: Border { radius: iced::border::top(TAB_RADIUS), ..Border::default() },
+                ..button::Style::default()
+            }),
+        );
+
+        container(bar)
+            .width(Length::Fill)
+            .height(Length::Fixed(scale.apply(tabstrip::STRIP_HEIGHT)))
+            .padding([0, spacing::SM as u16])
+            .style(|_t: &Theme| container::Style {
+                // The strip and the header below it are one piece of
+                // chrome; the active tab is the card lifted out of it.
+                background: Some(Background::Color(hyprforge_ui::theme::surface::sidebar())),
+                ..container::Style::default()
+            })
+            .into()
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -908,24 +948,41 @@ fn tab_dot_color(is_active: bool) -> Color {
     }
 }
 
-fn tab_button_style(_theme: &Theme, status: button::Status, is_active: bool) -> button::Style {
-    let base = button::Style {
-        background: Some(Background::Color(if is_active {
-            hyprforge_ui::theme::surface::card()
-        } else {
-            hyprforge_ui::theme::surface::sidebar()
-        })),
+/// The clickable layer over a tab's drawn shape.
+///
+/// Transparent when active, because the canvas below has already painted
+/// the fill and the outline; painting again here would double the fill
+/// over the stroke and eat the open bottom edge. An inactive tab is
+/// unpainted until hovered, and then gets only a fill — no outline, so
+/// hovering never looks like activating.
+fn tab_button_style(status: button::Status, is_active: bool) -> button::Style {
+    let hovered = matches!(status, button::Status::Hovered);
+    button::Style {
+        // The active tab's fill lives here rather than in the canvas
+        // above it, because the canvas draws on top now and a fill there
+        // would cover the label.
+        //
+        // Hovering an inactive tab shows the same fill the active one
+        // has — a preview of what clicking would do, which is what makes
+        // the strip feel like it is made of targets. The active tab's
+        // outline and its extra height are what still tell the two
+        // apart, so the shared fill does not make them ambiguous.
+        background: (is_active || hovered)
+            .then(|| Background::Color(hyprforge_ui::theme::surface::row())),
         text_color: hyprforge_ui::theme::text(),
-        border: Border { radius: 6.0.into(), width: 0.0, color: Color::TRANSPARENT },
+        border: Border {
+            // Top corners only. A tab meets the pane below it; it does
+            // not sit on it.
+            radius: iced::border::top(TAB_RADIUS),
+            width: 0.0,
+            color: Color::TRANSPARENT,
+        },
         ..button::Style::default()
-    };
-    match status {
-        button::Status::Hovered if !is_active => {
-            button::Style { background: Some(Background::Color(hyprforge_ui::theme::surface::row())), ..base }
-        }
-        _ => base,
     }
 }
+
+/// Matches `tabstrip`'s own corner radius — the two draw the same tab.
+const TAB_RADIUS: f32 = 8.0;
 
 
 /// The floating window's outer chrome: background at the root surface,
@@ -945,28 +1002,68 @@ fn window_frame_style(_theme: &Theme) -> container::Style {
 /// doesn't allow that), so the close affordance gets its own click target
 /// distinct from the switch one.
 fn tab_widget(index: usize, tab: &Tab, is_active: bool, scale: FontScale) -> Element<'_, Message> {
-    let dot = container(column![])
-        .width(Length::Fixed(8.0))
-        .height(Length::Fixed(8.0))
-        .style(move |_theme: &Theme| container::Style {
-            background: Some(Background::Color(tab_dot_color(is_active))),
-            border: Border { radius: 4.0.into(), ..Border::default() },
-            ..container::Style::default()
-        });
+    let height = scale.apply(hyprforge_files::tabstrip::height(is_active));
+    let mark = hyprforge_files::tabstrip::identity_mark(tab_dot_color(is_active), false, scale);
     let name = tab_display_name(tab.browser.current_dir());
-    let label = row![dot, scaled_text(name, BASE_TEXT_SIZE, scale)]
-        .spacing(spacing::XS)
-        .align_y(iced::Alignment::Center);
-    let select = button(label)
-        .on_press(Message::SwitchTab(index))
-        .style(move |t: &Theme, status| tab_button_style(t, status, is_active));
-    // "\u{00d7}" — a plain multiplication sign, the close-affordance glyph
-    // every one of these tab strips uses; not a character a keystroke
-    // could produce, so it needs no `scaled_text`/FontScale route of its
-    // own beyond what `secondary_button` already gives every label.
-    let close = secondary_button("\u{00d7}").on_press(Message::CloseTab(index));
-    row![select, close].spacing(2.0).align_y(iced::Alignment::Center).into()
+
+    // Dim text on an inactive tab, full brightness on the active one.
+    // The identity mark above keeps its colour either way — see
+    // `tabstrip`'s own doc for why that asymmetry is deliberate.
+    let label = scaled_text(name, BASE_TEXT_SIZE, scale)
+        .color(if is_active {
+            hyprforge_ui::theme::text()
+        } else {
+            hyprforge_ui::theme::text_dim()
+        })
+        // One line, clipped at the tab's edge. A name too long for a
+        // fixed-width tab has to lose its tail somewhere, and wrapping
+        // it would make the tab grow — which is exactly what a fixed
+        // width exists to prevent.
+        .wrapping(iced::widget::text::Wrapping::None)
+        .width(Length::Fill);
+
+    let mut content = row![mark, label].spacing(spacing::XS).align_y(iced::Alignment::Center);
+
+    // The close affordance exists only on the active tab. On an inactive
+    // one it would be a control for a thing you are not looking at, and
+    // three of them across the strip is three chances to close the wrong
+    // window.
+    if is_active {
+        content = content.push(
+            button(scaled_text("\u{00d7}", BASE_TEXT_SIZE, scale).color(hyprforge_ui::theme::text_dim()))
+                .on_press(Message::CloseTab(index))
+                .padding(0)
+                .style(|_t: &Theme, _status| button::Style {
+                    background: None,
+                    text_color: hyprforge_ui::theme::text_dim(),
+                    ..button::Style::default()
+                }),
+        );
+    }
+
+    // The drawn shape underneath, the contents on top. `stack` rather
+    // than a styled container because the active tab's outline is open
+    // at the bottom, which iced's `Border` cannot express — see
+    // `tabstrip`'s module doc.
+    // The button first, so the stack sizes to the label rather than
+    // stretching across the strip — see `tabstrip::outline`'s own doc.
+    let width = scale.apply(hyprforge_files::tabstrip::TAB_WIDTH);
+    iced::widget::stack![
+        button(container(content).center_y(Length::Fill).padding([0, TAB_PADDING_X]))
+            .on_press(Message::SwitchTab(index))
+            .width(Length::Fixed(width))
+            .height(Length::Fixed(height))
+            .padding(0)
+            .style(move |_t: &Theme, status| tab_button_style(status, is_active)),
+        hyprforge_files::tabstrip::outline(is_active, width, height),
+    ]
+    .into()
 }
+
+/// A tab's horizontal padding. Declared for inactive tabs too, even
+/// though nothing paints their background, so activating one makes a
+/// fill appear in exactly the right shape with no reflow.
+const TAB_PADDING_X: u16 = 14;
 
 /// Maps one iced key press to this browser's own [`keymap::Key`], or
 /// `None` if it means nothing here (Delete is handled by the caller
