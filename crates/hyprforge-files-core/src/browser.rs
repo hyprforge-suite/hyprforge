@@ -1297,12 +1297,14 @@ fn path_bar<'a>(current_dir: &Path, scale: FontScale) -> Element<'a, Message> {
     let mut crumbs = row![].spacing(spacing::XS).align_y(iced::Alignment::Center);
     let segments = elide(breadcrumb(current_dir));
     let last = segments.len().saturating_sub(1);
+    let mut previous: Option<String> = None;
     for (i, (label, path)) in segments.into_iter().enumerate() {
-        if i > 0 {
+        if previous.as_deref().is_some_and(separates_from) {
             crumbs = crumbs.push(
                 meta_text("/", density::META_TEXT_BASE, scale).font(iced::Font::MONOSPACE),
             );
         }
+        previous = Some(label.clone());
         if i == last {
             // The folder you are actually in, as a filled chip.
             //
@@ -1358,6 +1360,18 @@ fn path_bar<'a>(current_dir: &Path, scale: FontScale) -> Element<'a, Message> {
         .padding([0, spacing::SM as u16])
         .style(inset_field_style)
         .into()
+}
+
+/// Whether a separator belongs *after* the crumb labelled `previous`.
+///
+/// Every crumb is followed by a `/` except the root, because the root's
+/// own label already is one. Without this the bar opened `/ / … /` —
+/// two slashes and then a third — for anything outside the home
+/// directory, which reads as a stutter rather than as a path. Under
+/// home the head crumb is `~` and the question never came up, which is
+/// why it went unnoticed until a path in `/tmp` was looked at.
+fn separates_from(previous: &str) -> bool {
+    previous != "/"
 }
 
 /// Drops the middle of a path too deep to fit, keeping the ends.
@@ -2067,6 +2081,38 @@ mod tests {
         let labels: Vec<&str> = segments.iter().map(|(l, _)| l.as_str()).collect();
         assert_eq!(labels, vec!["/", "home", "alex", "Documents"]);
         assert_eq!(segments[2].1, PathBuf::from("/home/alex"));
+    }
+
+    /// The root crumb is already a slash, so nothing follows it. Pinned
+    /// against the way the path bar read on screen before this existed:
+    /// `/ / … / countdemo`, three slashes deep before the first name.
+    #[test]
+    fn the_root_crumb_is_not_followed_by_another_slash() {
+        assert!(!separates_from("/"));
+        assert!(separates_from("~"));
+        assert!(separates_from("home"));
+    }
+
+    /// The same path, spelled out as the bar draws it — every crumb
+    /// joined by the separators the rule above decides on. Under home
+    /// this was always right; from the root it was not.
+    #[test]
+    fn a_path_from_the_root_is_drawn_with_one_slash_between_names() {
+        let drawn = |path: &str| {
+            let segments = breadcrumb_from(Path::new(path), Some(Path::new("/home/alex")));
+            let mut out = String::new();
+            let mut previous: Option<String> = None;
+            for (label, _) in segments {
+                if previous.as_deref().is_some_and(separates_from) {
+                    out.push('/');
+                }
+                out.push_str(&label);
+                previous = Some(label);
+            }
+            out
+        };
+        assert_eq!(drawn("/tmp/work"), "/tmp/work");
+        assert_eq!(drawn("/home/alex/Documents"), "~/Documents");
     }
 
     // --- the Mode seam ------------------------------------------------------
