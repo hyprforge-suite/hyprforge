@@ -28,12 +28,15 @@ use crate::filter::{filter_hidden, filter_query};
 use crate::format::{format_modified, human_readable_size};
 use crate::icon::entry_icon;
 use crate::keymap::{self, Direction, Key, KeyAction, Modifiers};
-use crate::prefs::Prefs;
+use crate::prefs::{Prefs, ViewMode};
 use crate::sidebar::{self, PinnedItem, SidebarItem};
 use crate::sort::{sort, SortColumn, SortDirection};
-use crate::types::{Entry, EntryKind, FilesError};
+use crate::types::{Entry, FilesError};
+// `EntryKind` is used only by this module's tests now that the Kind
+// column is gone — imported there rather than here so the lib build
+// does not carry an unused import.
 use hyprforge_ui::theme::{spacing, FontScale, BASE_TEXT_SIZE};
-use hyprforge_ui::widgets::{divider, meta_text, scaled_text, secondary_button};
+use hyprforge_ui::widgets::{divider, meta_text, primary_button, scaled_text, secondary_button};
 use iced::widget::{column, container, row, scrollable, text_input, Id};
 use iced::{Element, Length};
 use std::collections::HashSet;
@@ -609,6 +612,49 @@ impl Browser {
 /// navigates to — root first. Pure and free of iced, so the path bar's
 /// own logic is testable without building a window.
 fn breadcrumb(path: &Path) -> Vec<(String, PathBuf)> {
+    breadcrumb_from(path, home_dir().as_deref())
+}
+
+/// The user's home, or `None` when `$HOME` is unset or relative.
+///
+/// A relative `$HOME` is rejected rather than joined against the current
+/// directory: a path is abbreviated by *prefix comparison* below, and a
+/// relative prefix would either match nothing or match something the
+/// user did not mean.
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from).filter(|p| p.is_absolute())
+}
+
+/// [`breadcrumb`] with the home directory passed in, so a test can set
+/// one without touching the process's environment — which every other
+/// test in this binary shares.
+fn breadcrumb_from(path: &Path, home: Option<&Path>) -> Vec<(String, PathBuf)> {
+    // A path inside the home directory starts at `~` rather than
+    // spelling out `/home/<user>/`. That is what the design shows, and
+    // the reason is width: the interesting end of a path is its tail,
+    // and on this machine the head costs twelve characters of a bar
+    // that has to fit a directory name, a search field and the view
+    // toggles beside it.
+    //
+    // `~` is a real crumb, not decoration — clicking it navigates home,
+    // exactly as clicking any other segment navigates there.
+    if let Some(home) = home {
+        if let Ok(rest) = path.strip_prefix(home) {
+            let mut result = vec![("~".to_string(), home.to_path_buf())];
+            let mut accum = home.to_path_buf();
+            for component in rest.components() {
+                accum.push(component);
+                if let std::path::Component::Normal(s) = component {
+                    result.push((s.to_string_lossy().into_owned(), accum.clone()));
+                }
+            }
+            return result;
+        }
+    }
+
+    // Not under home — an absolute path from `/`, as before. A file
+    // manager reaches `/etc` and `/mnt` too, and abbreviating those
+    // would be a lie.
     let mut result = Vec::new();
     let mut accum = PathBuf::new();
     for component in path.components() {
@@ -625,29 +671,34 @@ fn breadcrumb(path: &Path) -> Vec<(String, PathBuf)> {
     result
 }
 
-fn kind_label(kind: EntryKind) -> &'static str {
-    match kind {
-        EntryKind::Folder => "Folder",
-        EntryKind::Image => "Image",
-        EntryKind::Document => "Document",
-        EntryKind::Archive => "Archive",
-        EntryKind::Code => "Code",
-        EntryKind::Audio => "Audio",
-        EntryKind::Video => "Video",
-        EntryKind::Other => "File",
-    }
-}
-
 /// Renders `vm`. A free function taking [`ViewModel`] rather than a
 /// method on [`Browser`] — see the module doc for why that's the point.
 fn render<'a>(vm: ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     let sidebar = sidebar_view(&vm, scale);
+
+    // One band, not three.
+    //
+    // Navigation, where you are, what you are looking for and how it is
+    // shown all belong on the same row — that is what the design does,
+    // and the alternative was found out the hard way: the window drew
+    // its own strip of view toggles above this one while the search
+    // field sat below it, and three stacked bands of chrome ate a
+    // quarter of a small window before a single file was listed.
+    //
+    // The view toggles live *here*, in the shared view, rather than in
+    // the window that hosts it. They switch `Prefs::view_mode`, which is
+    // browser state with a `Message` variant already; putting their
+    // controls in the window meant the portal's open/save dialog, which
+    // renders this same view through a different host, would never have
+    // had them at all.
     let toolbar = container(
         row![
             secondary_button("\u{2190}").on_press_maybe(vm.can_go_back.then_some(Message::GoBack)),
             secondary_button("\u{2192}").on_press_maybe(vm.can_go_forward.then_some(Message::GoForward)),
             secondary_button("\u{2191}").on_press(Message::GoUp),
             path_bar(vm.current_dir, scale),
+            search_field(vm.search_query, scale),
+            view_mode_toggle(vm.prefs),
         ]
         .spacing(spacing::SM)
         .align_y(iced::Alignment::Center),
@@ -659,19 +710,54 @@ fn render<'a>(vm: ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     .height(Length::Fixed(density::header_height(scale)))
     .center_y(Length::Fixed(density::header_height(scale)));
 
-    let search = text_input("Search this folder", vm.search_query)
-        .on_input(Message::SearchChanged)
-        .width(Length::Fill);
-
     let body = body_view(&vm, scale);
 
-    let content = column![toolbar, search, body]
-        .spacing(spacing::MD)
+    let content = column![toolbar, body]
+        .spacing(spacing::SM)
         .padding(spacing::MD)
         .width(Length::Fill)
         .height(Length::Fill);
 
     row![sidebar, content].into()
+}
+
+/// The search field, sized to the space left over rather than to the
+/// whole row.
+///
+/// `Length::FillPortion` rather than `Fill`: the path bar and this share
+/// the middle of the toolbar, and an equal split would give a long path
+/// nowhere to go. Two-to-one matches the design, where the path is the
+/// wider of the two.
+fn search_field<'a>(query: &str, scale: FontScale) -> Element<'a, Message> {
+    text_input("Search", query)
+        .on_input(Message::SearchChanged)
+        .size(scale.apply(density::ROW_TEXT_BASE))
+        .width(Length::FillPortion(1))
+        .into()
+}
+
+/// Grid / List / Columns, at the right end of the toolbar.
+///
+/// Columns is drawn with no `on_press`, which iced renders as disabled:
+/// column view is a later phase, and a button that appears from nowhere
+/// later is a worse surprise than one that was visibly waiting.
+fn view_mode_toggle<'a>(prefs: &Prefs) -> Element<'a, Message> {
+    let button = |label: &'static str, mode: ViewMode| {
+        let styled = if prefs.view_mode == mode {
+            primary_button(label)
+        } else {
+            secondary_button(label)
+        };
+        styled.on_press(Message::SetViewMode(mode))
+    };
+    row![
+        button("List", ViewMode::List),
+        button("Grid", ViewMode::Grid),
+        secondary_button("Columns"),
+    ]
+    .spacing(spacing::XS)
+    .align_y(iced::Alignment::Center)
+    .into()
 }
 
 /// One heading and its rows in the sidebar — Places, Pinned or Trash.
@@ -814,8 +900,21 @@ fn path_bar<'a>(current_dir: &Path, scale: FontScale) -> Element<'a, Message> {
             crumbs = crumbs.push(secondary_button(label).on_press(Message::Navigate(path)));
         }
     }
-    container(crumbs).width(Length::Fill).into()
+    // `FillPortion`, not `Fill`.
+    //
+    // `Fill` and `FillPortion` are not interchangeable when they share a
+    // row: `Fill` claims the whole remainder, so the search field beside
+    // this ended up drawn on top of the last crumb — "Documents" and
+    // "Search" overlapping in the same pixels. Two portions of the same
+    // row divide it instead of competing for it, and the path gets the
+    // larger share because a directory name is the longer thing.
+    container(crumbs).width(Length::FillPortion(PATH_PORTION)).into()
 }
+
+/// How the toolbar's middle divides between the path and the search
+/// field. Two-to-one, matching the design, where the path bar is
+/// visibly the wider of the two.
+const PATH_PORTION: u16 = 2;
 
 fn body_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     match vm.load_state {
@@ -856,17 +955,23 @@ fn entry_row<'a>(index: usize, entry: &'a Entry, selected: bool, scale: FontScal
     } else {
         human_readable_size(entry.size)
     };
-    // Name, size, modified, kind — the design's list-view columns. Git's
-    // `M`/`A` badges are deliberately not a fifth column here: DESIGN.md
-    // defers git entirely, and a column with nothing to put in it yet is
-    // exactly the "reads as broken, not as not-yet" trap the sidebar
-    // section rule below is written to avoid.
+    // Name, size, modified — the design's three columns, and no more.
+    //
+    // There was a fourth, Kind, and it had to go: in a directory of
+    // folders it reads "Folder" forty times down the screen, which is
+    // noise dressed as information. The icon already says what kind a
+    // row is, in the same glance that reads the name.
+    //
+    // Git's `M`/`A` badges are deliberately not a column here either:
+    // DESIGN.md defers git entirely, and a column with nothing to put in
+    // it is exactly the "reads as broken, not as not-yet" trap the
+    // sidebar section rule below is written to avoid.
     let row_content = row![
         entry_icon(entry.kind, 20.0, scale),
-        scaled_text(entry.name.clone(), density::ROW_TEXT_BASE, scale).width(Length::FillPortion(3)),
-        meta_text(size, density::META_TEXT_BASE, scale).width(Length::FillPortion(1)),
-        meta_text(format_modified(entry.modified), density::META_TEXT_BASE, scale).width(Length::FillPortion(2)),
-        meta_text(kind_label(entry.kind), density::META_TEXT_BASE, scale).width(Length::FillPortion(1)),
+        scaled_text(entry.name.clone(), density::ROW_TEXT_BASE, scale).width(Length::FillPortion(NAME_PORTION)),
+        meta_text(size, density::META_TEXT_BASE, scale).width(Length::FillPortion(SIZE_PORTION)),
+        meta_text(format_modified(entry.modified), density::META_TEXT_BASE, scale)
+            .width(Length::FillPortion(MODIFIED_PORTION)),
     ]
     .spacing(spacing::SM)
     .align_y(iced::Alignment::Center);
@@ -915,6 +1020,81 @@ fn entry_row_style(theme: &iced::Theme, status: iced::widget::button::Status, se
     }
 }
 
+/// The list's column widths, shared by the header and every row.
+///
+/// Named constants rather than repeated literals because a header that
+/// does not line up with the rows beneath it is the most obvious
+/// possible bug and the easiest to introduce: change one `FillPortion`
+/// and the columns silently drift apart.
+const NAME_PORTION: u16 = 3;
+const SIZE_PORTION: u16 = 1;
+const MODIFIED_PORTION: u16 = 2;
+
+/// The clickable column headers.
+///
+/// Sorting lives here rather than behind an overflow menu because this
+/// is where a person already expects it: clicking a header sorts by it
+/// and clicking again reverses, which is what every file manager anyone
+/// has used does. That also removes the need for a separate sort
+/// control entirely.
+fn list_header<'a>(prefs: &Prefs, scale: FontScale) -> Element<'a, Message> {
+    let heading = |label: &'static str, column: SortColumn, portion: u16| {
+        let active = prefs.sort_column() == column;
+        // The arrow marks the sorted column *and* its direction, so the
+        // header is the whole answer to "how is this list ordered" — no
+        // second indicator anywhere else to fall out of step with it.
+        let text = if active {
+            let arrow = match prefs.sort_direction() {
+                SortDirection::Ascending => "\u{2191}",
+                SortDirection::Descending => "\u{2193}",
+            };
+            format!("{label} {arrow}")
+        } else {
+            label.to_string()
+        };
+        let content = if active {
+            scaled_text(text, density::META_TEXT_BASE, scale)
+        } else {
+            meta_text(text, density::META_TEXT_BASE, scale)
+        };
+        iced::widget::button(content)
+            .on_press(Message::SortBy(column))
+            .width(Length::FillPortion(portion))
+            .style(header_button_style)
+    };
+
+    row![
+        // An empty cell the width of a row's icon, so "Name" starts
+        // above the names rather than above the icons.
+        iced::widget::Space::new().width(Length::Fixed(scale.apply(20.0))),
+        heading("Name", SortColumn::Name, NAME_PORTION),
+        heading("Size", SortColumn::Size, SIZE_PORTION),
+        heading("Modified", SortColumn::Modified, MODIFIED_PORTION),
+    ]
+    .spacing(spacing::SM)
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
+/// A header is a control, but it is not a button-shaped one: no fill, no
+/// border, just text that responds to the pointer. Anything more would
+/// put four button outlines across the top of every listing.
+fn header_button_style(
+    _theme: &iced::Theme,
+    status: iced::widget::button::Status,
+) -> iced::widget::button::Style {
+    let hovered = matches!(status, iced::widget::button::Status::Hovered);
+    iced::widget::button::Style {
+        background: hovered.then(|| iced::Background::Color(hyprforge_ui::theme::surface::row())),
+        text_color: hyprforge_ui::theme::text(),
+        border: iced::Border {
+            radius: density::inner_radius().into(),
+            ..iced::Border::default()
+        },
+        ..iced::widget::button::Style::default()
+    }
+}
+
 fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     let mut list = column![].spacing(2.0);
     for (index, entry) in vm.view_entries.iter().enumerate() {
@@ -928,7 +1108,15 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // Without a stable `Id`, iced cannot tell "the same list, redrawn"
     // from "a different scrollable that happens to be in the same spot",
     // and drops the offset.
-    scrollable(list).height(Length::Fill).id(vm.list_scrollable_id.clone()).into()
+    // The header sits outside the `scrollable`, so it stays put while
+    // the rows move under it.
+    column![
+        list_header(vm.prefs, scale),
+        divider(),
+        scrollable(list).height(Length::Fill).id(vm.list_scrollable_id.clone()),
+    ]
+    .spacing(spacing::XS)
+    .into()
 }
 
 fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
@@ -960,6 +1148,7 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::EntryKind;
     use std::time::SystemTime;
 
     fn entry(name: &str, is_dir: bool) -> Entry {
@@ -1155,6 +1344,64 @@ mod tests {
     }
 
     // --- breadcrumb ------------------------------------------------------------
+
+    /// The design shows `~ / projects / hyprsuite / src`, not
+    /// `/ home / apost / projects / ...`. The head of a path under home
+    /// is twelve characters of a bar that also has to fit a search field
+    /// and the view toggles.
+    #[test]
+    fn a_path_under_home_starts_at_a_tilde() {
+        let home = Path::new("/home/apost");
+        let segments = breadcrumb_from(Path::new("/home/apost/Documents/Projects"), Some(home));
+        let labels: Vec<&str> = segments.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, vec!["~", "Documents", "Projects"]);
+    }
+
+    /// `~` is a crumb, not a label: clicking it goes home, the same as
+    /// clicking any other segment goes there.
+    #[test]
+    fn the_tilde_crumb_navigates_to_the_home_directory() {
+        let home = Path::new("/home/apost");
+        let segments = breadcrumb_from(Path::new("/home/apost/Documents"), Some(home));
+        assert_eq!(segments[0].1, home, "the ~ crumb's path is home itself");
+    }
+
+    #[test]
+    fn the_home_directory_itself_is_just_a_tilde() {
+        let home = Path::new("/home/apost");
+        let segments = breadcrumb_from(home, Some(home));
+        let labels: Vec<&str> = segments.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, vec!["~"]);
+    }
+
+    /// A file manager reaches `/etc` and `/mnt` too, and abbreviating
+    /// those would be a lie about where you are.
+    #[test]
+    fn a_path_outside_home_still_spells_itself_out_from_the_root() {
+        let segments = breadcrumb_from(Path::new("/etc/systemd"), Some(Path::new("/home/apost")));
+        let labels: Vec<&str> = segments.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, vec!["/", "etc", "systemd"]);
+    }
+
+    /// A directory whose name merely *starts* with the home directory's
+    /// path is not inside it. `strip_prefix` compares whole components,
+    /// which is what makes this right — a string comparison would turn
+    /// `/home/apostrophe` into `~trophe`.
+    #[test]
+    fn a_sibling_directory_sharing_a_name_prefix_is_not_abbreviated() {
+        let segments = breadcrumb_from(Path::new("/home/apostrophe/notes"), Some(Path::new("/home/apost")));
+        let labels: Vec<&str> = segments.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, vec!["/", "home", "apostrophe", "notes"]);
+    }
+
+    /// With no `$HOME` to compare against, every path spells itself out
+    /// rather than the abbreviation silently applying to nothing.
+    #[test]
+    fn with_no_home_known_nothing_is_abbreviated() {
+        let segments = breadcrumb_from(Path::new("/home/apost/Documents"), None);
+        let labels: Vec<&str> = segments.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, vec!["/", "home", "apost", "Documents"]);
+    }
 
     #[test]
     fn breadcrumb_lists_every_ancestor_with_its_own_full_path() {

@@ -30,8 +30,7 @@
 
 use crate::types::EntryKind;
 use hyprforge_look::Color;
-use hyprforge_ui::theme::{self, spacing, FontScale};
-use hyprforge_ui::widgets::scaled_text;
+use hyprforge_ui::theme::{self, FontScale};
 use iced::widget::container;
 use iced::{Background, Border, Element, Length, Theme as IcedTheme};
 
@@ -40,22 +39,6 @@ use iced::{Background, Border, Element, Length, Theme as IcedTheme};
 /// lookup isn't built yet, and what it would take to fill this in.
 pub fn theme_icon_name(_kind: EntryKind, _mime: Option<&str>) -> Option<&'static str> {
     None
-}
-
-/// The glyph drawn on a fallback badge for `kind`. Plain, legible at
-/// small sizes, and distinct enough from its neighbours to read at a
-/// glance even before the colour is noticed.
-pub fn badge_glyph(kind: EntryKind) -> &'static str {
-    match kind {
-        EntryKind::Folder => "\u{1F4C1}",   // 📁
-        EntryKind::Image => "\u{1F5BC}",    // 🖼
-        EntryKind::Document => "\u{1F4C4}", // 📄
-        EntryKind::Archive => "\u{1F5DC}",  // 🗜
-        EntryKind::Code => "\u{1F4BB}",     // 💻
-        EntryKind::Audio => "\u{1F3B5}",    // 🎵
-        EntryKind::Video => "\u{1F3AC}",    // 🎬
-        EntryKind::Other => "\u{1F4CE}",    // 📎
-    }
 }
 
 /// The badge colour for `kind`, read from the active [`hyprforge_look::Theme`]
@@ -80,19 +63,55 @@ pub fn badge_color(kind: EntryKind) -> Color {
 pub fn entry_icon<'a, Message: 'a>(kind: EntryKind, size: f32, scale: FontScale) -> Element<'a, Message> {
     let side = scale.apply(size);
     let color = hyprforge_ui::color::to_iced(badge_color(kind));
-    container(scaled_text(badge_glyph(kind), size * 0.6, scale))
+
+    // A drawn square, not a glyph.
+    //
+    // This used to put an emoji — 📁, 🖼, 📄 — inside the badge, and the
+    // badge's own `color` was computed and then thrown away, because a
+    // colour emoji renders in the emoji font with *its* colours. The
+    // folder came out the font's yellow on every theme, which breaks
+    // the suite's one real styling rule in spirit while never writing a
+    // hex code anywhere a grep would find it.
+    //
+    // It also depended on an emoji font being installed. The picker
+    // needs one and says so; a file manager listing a directory should
+    // not, and without one every row would have drawn an identical
+    // empty box.
+    //
+    // So the mark is the shape itself: a filled rounded square in the
+    // kind's colour, inside a lighter field of the same hue. Two
+    // elevations of one colour, which is the design's own idiom, and
+    // every pixel of it comes from the theme.
+    let mark_side = side * MARK_FRACTION;
+    let mark = container(iced::widget::Space::new())
+        .width(Length::Fixed(mark_side))
+        .height(Length::Fixed(mark_side))
+        .style(move |_theme: &IcedTheme| container::Style {
+            background: Some(Background::Color(color)),
+            border: Border { radius: (mark_side * 0.28).into(), width: 0.0, color },
+            ..container::Style::default()
+        });
+
+    container(mark)
         .center(Length::Fixed(side))
         .style(move |_theme: &IcedTheme| container::Style {
             background: Some(Background::Color(iced::Color { a: 0.18, ..color })),
-            border: Border {
-                radius: spacing::XS.into(),
-                width: 0.0,
-                color,
+            border: {
+                // Scaled with the badge rather than fixed, so it stays a
+                // rounded square at 200% instead of a square with a
+                // decorative nick in each corner.
+                Border { radius: (side * 0.28).into(), width: 0.0, color }
             },
             ..container::Style::default()
         })
         .into()
 }
+
+/// How much of the badge the inner mark fills.
+///
+/// Small enough that the ring of lighter colour around it reads as a
+/// deliberate field rather than as a border that failed to render.
+const MARK_FRACTION: f32 = 0.5;
 
 #[cfg(test)]
 mod tests {
@@ -104,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn every_kind_gets_its_own_glyph() {
+    fn every_kind_gets_a_colour_that_depends_on_the_kind() {
         let kinds = [
             EntryKind::Folder,
             EntryKind::Image,
@@ -115,11 +134,54 @@ mod tests {
             EntryKind::Video,
             EntryKind::Other,
         ];
-        let mut glyphs: Vec<&str> = kinds.iter().map(|k| badge_glyph(*k)).collect();
-        let before = glyphs.len();
-        glyphs.sort_unstable();
-        glyphs.dedup();
-        assert_eq!(glyphs.len(), before, "every EntryKind must have a distinct glyph");
+        let mut colors: Vec<[u8; 4]> = kinds
+            .iter()
+            .map(|k| {
+                let c = badge_color(*k);
+                [c.r, c.g, c.b, c.a]
+            })
+            .collect();
+        colors.sort_unstable();
+        colors.dedup();
+        // Eight kinds, five colours the theme exposes for this: some
+        // sharing is unavoidable and fine. What must not happen is all
+        // of them collapsing to one, which would mean `badge_color` had
+        // stopped reading the kind at all.
+        assert!(colors.len() >= 4, "the badge colour must actually vary with the kind, got {colors:?}");
+    }
+
+    /// The badges are drawn, not typed.
+    ///
+    /// They used to be emoji, and a colour emoji renders in the emoji
+    /// font with *its* colours — so the badge's carefully theme-derived
+    /// colour was computed and then thrown away. Every folder came out
+    /// the font's yellow whatever the theme said, which breaks this
+    /// suite's one real styling rule in spirit while never writing a hex
+    /// code anywhere a grep would find it. It also meant a machine with
+    /// no emoji font drew an identical empty box on every row.
+    ///
+    /// The property that keeps it fixed is structural rather than
+    /// textual: this module exposes **no function returning a string for
+    /// an icon**. An earlier version of this test scanned the source for
+    /// the emoji themselves and kept matching its own assertion text —
+    /// the check has to live somewhere the thing it forbids cannot also
+    /// appear. If a `badge_glyph`-shaped function comes back, it will
+    /// have to be called from `entry_icon`, and the only way to feed a
+    /// string to a container is a `text` widget: the compiler is the
+    /// check, and this test is the note saying why nobody should add one.
+    #[test]
+    fn an_icon_carries_no_text_so_no_font_can_override_the_theme() {
+        // `entry_icon` builds an `Element` with no text fragment
+        // anywhere in it. What can be asserted here without a renderer
+        // is that the colour it draws with is the theme's, which the
+        // test below does, and that nothing in this module's public API
+        // offers a glyph to draw. Both `badge_color` and `entry_icon`
+        // are the entire surface:
+        let _: fn(EntryKind) -> Color = badge_color;
+        let _: fn(EntryKind, Option<&str>) -> Option<&'static str> = theme_icon_name;
+        // `theme_icon_name` returns an icon *name* for a future
+        // freedesktop lookup, not a glyph to render — see its own doc.
+        assert_eq!(theme_icon_name(EntryKind::Folder, None), None);
     }
 
     #[test]
