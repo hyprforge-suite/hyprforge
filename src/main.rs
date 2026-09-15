@@ -811,7 +811,11 @@ impl App {
         container(bar)
             .width(Length::Fill)
             .height(Length::Fixed(scale.apply(tabstrip::STRIP_HEIGHT)))
-            .padding([0, spacing::SM as u16])
+            // Horizontal only. The space *above* the tabs comes from the
+            // strip being taller than its tallest tab, not from padding
+            // here — padding would push the tabs off the strip's bottom
+            // edge too, and that edge is where they meet the pane.
+            .padding([0, spacing::MD as u16])
             .style(|_t: &Theme| container::Style {
                 // The strip and the header below it are one piece of
                 // chrome; the active tab is the card lifted out of it.

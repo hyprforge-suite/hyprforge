@@ -28,9 +28,22 @@ use hyprforge_ui::theme::FontScale;
 use iced::widget::canvas;
 use iced::{mouse, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
-/// The strip's own height. Tabs are shorter than this and sit on its
-/// bottom edge — see [`STRIP_ALIGNMENT`].
-pub const STRIP_HEIGHT: f32 = 42.0;
+/// Clear space above the tallest tab, between it and the window's own
+/// edge.
+///
+/// Without it the active tab's top corners land against the window
+/// frame and the two rounded edges read as one shape — the tab stops
+/// looking like something sitting *in* the window and starts looking
+/// like part of its border. The gap is what separates the two.
+///
+/// It is also why the strip is taller than the tallest tab rather than
+/// exactly as tall: this space is the difference, so the two cannot
+/// drift apart when either number changes.
+pub const STRIP_TOP_PAD: f32 = 12.0;
+
+/// The strip's own height: the tallest tab, plus the clear space above
+/// it. Tabs sit on the strip's bottom edge — see [`STRIP_ALIGNMENT`].
+pub const STRIP_HEIGHT: f32 = ACTIVE_HEIGHT + STRIP_TOP_PAD;
 
 /// An active tab's height; four taller than an inactive one, which is
 /// one of the four things that mark it.
@@ -209,11 +222,21 @@ mod tests {
     }
 
     /// Both fit inside the strip with room above — a tab as tall as its
-    /// strip has nowhere to rise from.
+    /// strip has nowhere to rise from, and its top corners would meet
+    /// the window frame.
     #[test]
     fn every_tab_fits_inside_the_strip() {
         assert!(height(true) < STRIP_HEIGHT);
         assert!(height(false) < STRIP_HEIGHT);
+    }
+
+    /// The clear space above the active tab is exactly `STRIP_TOP_PAD`,
+    /// by construction rather than by coincidence. Pinned because the
+    /// obvious edit — nudging `STRIP_HEIGHT` to "make room" — would
+    /// silently make the two disagree.
+    #[test]
+    fn the_space_above_the_tallest_tab_is_the_padding_and_nothing_else() {
+        assert_eq!(STRIP_HEIGHT - height(true), STRIP_TOP_PAD);
     }
 
     /// The `+` shares the inactive tabs' baseline rather than being
