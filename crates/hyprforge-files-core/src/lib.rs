@@ -14,6 +14,7 @@ pub mod browser;
 pub mod density;
 pub mod filter;
 pub mod format;
+pub mod glyph;
 pub mod icon;
 pub mod keymap;
 pub mod prefs;

@@ -11,7 +11,16 @@ license.workspace = true
 #
 # Deliberately never hyprforge-core — that is Hyprland config machinery
 # and a new app should not need it.
-iced.workspace = true
+# `canvas` on top of the workspace base. The navigation glyphs are
+# *drawn* rather than typed — see `glyph.rs` for why a font character was
+# the wrong tool — and a stroked path is what draws them.
+#
+# Cargo unifies features, so this is already on in any build that
+# includes `hyprforge-settings`, which enables it for the layout editor.
+# Declared here anyway: `cargo build -p hyprforge-files-core` alone must
+# also get it, and a feature that only works because a sibling happens to
+# be in the same build is a trap.
+iced = { workspace = true, features = ["canvas"] }
 hyprforge-ui.workspace = true
 hyprforge-look.workspace = true
 hyprforge-paths.workspace = true

@@ -26,6 +26,7 @@
 use crate::density;
 use crate::filter::{filter_hidden, filter_query};
 use crate::format::{format_modified, human_readable_size};
+use crate::glyph;
 use crate::icon::{self, entry_icon};
 use crate::keymap::{self, Direction, Key, KeyAction, Modifiers};
 use crate::prefs::{Prefs, ViewMode};
@@ -724,9 +725,9 @@ fn file_area<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
 /// anchored where the hand expects them.
 fn header_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     let nav = row![
-        nav_button("\u{2039}", vm.can_go_back.then_some(Message::GoBack), scale),
-        nav_button("\u{203A}", vm.can_go_forward.then_some(Message::GoForward), scale),
-        nav_button("\u{2191}", Some(Message::GoUp), scale),
+        nav_button(glyph::Nav::Back, vm.can_go_back.then_some(Message::GoBack), scale),
+        nav_button(glyph::Nav::Forward, vm.can_go_forward.then_some(Message::GoForward), scale),
+        nav_button(glyph::Nav::Up, Some(Message::GoUp), scale),
     ]
     .spacing(spacing::XS)
     .align_y(iced::Alignment::Center);
@@ -782,7 +783,7 @@ fn plane_edge<'a>() -> Element<'a, Message> {
 /// than disappearing: a button that vanishes reflows the row and moves
 /// its neighbours under the pointer.
 fn nav_button<'a>(
-    glyph: &'a str,
+    kind: glyph::Nav,
     message: Option<Message>,
     scale: FontScale,
 ) -> Element<'a, Message> {
@@ -794,17 +795,25 @@ fn nav_button<'a>(
     // the user could act on.
     let filled = enabled && matches!(message, Some(Message::GoBack));
     let side = density::glyph_button(scale);
+    // The mark's colour is decided here rather than inherited, because a
+    // canvas draws with what it is given — `text_color` on the button
+    // below styles text, and there is no text.
+    let color = if enabled {
+        hyprforge_ui::theme::text()
+    } else {
+        hyprforge_ui::theme::text_dim()
+    };
     iced::widget::button(
-        container(
-            scaled_text(glyph, density::ROW_TEXT_BASE, scale)
-                .font(iced::Font::MONOSPACE)
-                .align_x(iced::alignment::Horizontal::Center),
-        )
-        .center_x(Length::Fill)
-        .center_y(Length::Fill),
+        container(glyph::nav(kind, side, color)).center_x(Length::Fill).center_y(Length::Fill),
     )
     .width(Length::Fixed(side))
     .height(Length::Fixed(side))
+    // No padding. An iced button pads by default, which left the canvas
+    // inside about 16px of this 26px square — and because the mark is
+    // sized as a fraction of what it is given, it drew a chevron scaled
+    // to the *padded* box. That is why the first drawn version came out
+    // visibly smaller than the typed glyphs it replaced.
+    .padding(0)
     .on_press_maybe(message)
     .style(move |_t: &iced::Theme, status| {
         let hovered = matches!(status, iced::widget::button::Status::Hovered);
@@ -933,15 +942,23 @@ fn inset_field_style(_t: &iced::Theme) -> container::Style {
 fn view_mode_toggle<'a>(prefs: &Prefs, scale: FontScale) -> Element<'a, Message> {
     let seg_w = density::glyph_button(scale) * 0.92;
     let seg_h = density::glyph_button(scale) * 0.77;
-    let segment = |glyph: &'a str, mode: Option<ViewMode>| {
+    let segment = |glyph_kind: glyph::View, mode: Option<ViewMode>| {
         let active = mode.is_some_and(|m| prefs.view_mode == m);
+        let color = if active {
+            hyprforge_ui::theme::text()
+        } else {
+            hyprforge_ui::theme::text_dim()
+        };
         iced::widget::button(
-            container(scaled_text(glyph, density::ROW_TEXT_BASE, scale))
+            container(glyph::view(glyph_kind, seg_h, color))
                 .center_x(Length::Fill)
                 .center_y(Length::Fill),
         )
         .width(Length::Fixed(seg_w))
         .height(Length::Fixed(seg_h))
+        // Same reason as `nav_button`: the default padding would shrink
+        // the mark inside its own segment and push it off centre.
+        .padding(0)
         .on_press_maybe(mode.map(Message::SetViewMode))
         .style(move |_t: &iced::Theme, status| {
             let hovered = matches!(status, iced::widget::button::Status::Hovered);
@@ -969,9 +986,9 @@ fn view_mode_toggle<'a>(prefs: &Prefs, scale: FontScale) -> Element<'a, Message>
 
     container(
         row![
-            segment("\u{2630}", Some(ViewMode::List)),
-            segment("\u{229E}", Some(ViewMode::Grid)),
-            segment("\u{2016}", None),
+            segment(glyph::View::List, Some(ViewMode::List)),
+            segment(glyph::View::Grid, Some(ViewMode::Grid)),
+            segment(glyph::View::Columns, None),
         ]
         .spacing(3.0)
         .align_y(iced::Alignment::Center),
