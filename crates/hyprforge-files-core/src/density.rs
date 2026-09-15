@@ -93,6 +93,76 @@ pub fn inner_radius() -> f32 {
     outer_radius() * INNER_OUTER_RATIO
 }
 
+/// The header bar's height. 44px at 100% scale.
+///
+/// Taller than the 28px controls inside it on purpose: the difference is
+/// what makes the bar read as a *plane* the controls sit on, rather than
+/// as a row of controls with a background colour.
+pub fn bar_height(scale: FontScale) -> f32 {
+    scale.apply(BAR_HEIGHT_BASE)
+}
+
+/// A text field — the path bar, the search field. 28px at 100%.
+pub fn field_height(scale: FontScale) -> f32 {
+    scale.apply(FIELD_HEIGHT_BASE)
+}
+
+/// A glyph button — the nav cluster, a view-mode segment. 26px at 100%.
+///
+/// Two pixels shorter than a field, deliberately: enough difference that
+/// a button feels pressable and a field feels typeable, close enough
+/// that the row still baselines cleanly.
+pub fn glyph_button(scale: FontScale) -> f32 {
+    scale.apply(GLYPH_BUTTON_BASE)
+}
+
+/// The radius on something nested *inside* a control — the path bar's
+/// current-directory chip, a segment inside the view-mode track.
+///
+/// Third level of a deliberate ladder: 12 on the window, 6 on a
+/// top-level control, 4 on something inside one. A nested thing sharing
+/// its parent's radius reads as a second parent rather than as a child.
+pub fn nested_radius() -> f32 {
+    inner_radius() * NESTED_RADIUS_FRACTION
+}
+
+const BAR_HEIGHT_BASE: f32 = 44.0;
+const FIELD_HEIGHT_BASE: f32 = 28.0;
+const GLYPH_BUTTON_BASE: f32 = 26.0;
+const NESTED_RADIUS_FRACTION: f32 = 4.0 / 6.0;
+
+/// The search field's fixed width. 190px at 100% scale.
+pub const SEARCH_FIELD_WIDTH: f32 = 190.0;
+
+/// The sidebar's fixed width, from the design's 216px at 100% scale.
+///
+/// Fixed rather than a fraction of the window: a sidebar that grows with
+/// the window wastes the space a file listing wants, and one that shrinks
+/// starts truncating "Downloads" on a narrow window. Not scaled by
+/// `FontScale` — the *rows* inside it scale, and a sidebar wide enough
+/// for its longest label at 100% is still wide enough at 125% because
+/// the label grows into the padding, not past it.
+pub const SIDEBAR_WIDTH: f32 = 216.0;
+
+/// A sidebar section heading — `PLACES`, `PINNED`, `TRASH`.
+///
+/// Smaller than the meta text it is built from, because a heading in a
+/// sidebar is a signpost rather than something to read: it should be
+/// findable when looked for and invisible when not.
+pub const SECTION_LABEL_BASE: f32 = META_TEXT_BASE * 0.85;
+
+/// The folder mark beside a sidebar row, at 100% scale.
+pub const SIDEBAR_MARK_BASE: f32 = 13.0;
+
+/// The status bar's height — the design's 30px at 100% scale, derived
+/// the same way the header is so it grows with the text inside it.
+pub fn status_height(scale: FontScale) -> f32 {
+    scale.apply(STATUS_HEIGHT_BASE)
+}
+
+const STATUS_HEIGHT_BASE: f32 = 30.0;
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

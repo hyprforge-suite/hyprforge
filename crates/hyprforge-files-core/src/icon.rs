@@ -65,64 +65,70 @@ pub fn badge_color(kind: EntryKind) -> Color {
 /// always used for now. `size` is the badge's side length in logical
 /// pixels before `scale` is applied.
 pub fn entry_icon<'a, Message: 'a>(kind: EntryKind, size: f32, scale: FontScale) -> Element<'a, Message> {
-    let side = scale.apply(size);
     let color = hyprforge_ui::color::to_iced(badge_color(kind));
-
-    // A drawn square, not a glyph.
-    //
-    // This used to put an emoji — 📁, 🖼, 📄 — inside the badge, and the
-    // badge's own `color` was computed and then thrown away, because a
-    // colour emoji renders in the emoji font with *its* colours. The
-    // folder came out the font's yellow on every theme, which breaks
-    // the suite's one real styling rule in spirit while never writing a
-    // hex code anywhere a grep would find it.
-    //
-    // It also depended on an emoji font being installed. The picker
-    // needs one and says so; a file manager listing a directory should
-    // not, and without one every row would have drawn an identical
-    // empty box.
-    //
-    // So the mark is the shape itself: a filled rounded square in the
-    // kind's colour, inside a lighter field of the same hue. Two
-    // elevations of one colour, which is the design's own idiom, and
-    // every pixel of it comes from the theme.
-    // Folders are filled; files are outlined.
-    //
-    // The strongest cue in a listing is not the colour, it is this: a
-    // directory of thirty folders and three files should show you the
-    // three at a glance, and fill-versus-outline does that before you
-    // have read a single name. The design draws exactly this
-    // distinction, and it is the one that survives at a size where a
-    // hue is barely legible.
-    let filled = kind == EntryKind::Folder;
-
-    if filled {
-        container(iced::widget::Space::new())
-            .width(Length::Fixed(side))
-            .height(Length::Fixed(side))
-            .style(move |_theme: &IcedTheme| container::Style {
-                background: Some(Background::Color(color)),
-                // Radius scaled with the badge rather than fixed, so it
-                // stays a rounded square at 200% instead of a square
-                // with a decorative nick in each corner.
-                border: Border { radius: (side * 0.28).into(), width: 0.0, color },
-                ..container::Style::default()
-            })
-            .into()
+    if kind == EntryKind::Folder {
+        folder_mark(color, size, scale)
     } else {
-        container(iced::widget::Space::new())
-            .width(Length::Fixed(side))
-            .height(Length::Fixed(side))
-            .style(move |_theme: &IcedTheme| container::Style {
-                // A whisper of fill inside the outline, so the shape
-                // reads as an object rather than as a hole in the row.
-                background: Some(Background::Color(iced::Color { a: 0.12, ..color })),
-                border: Border { radius: (side * 0.28).into(), width: OUTLINE_WIDTH, color },
-                ..container::Style::default()
-            })
-            .into()
+        file_mark(color, size, scale)
     }
 }
+
+/// A folder: a filled rectangle, wider than it is tall.
+///
+/// The proportion is the whole point and is why this is not the same
+/// shape as [`file_mark`]. A folder in the world is a wide pocket and a
+/// file is a tall page, and at 15px those two silhouettes are
+/// distinguishable before any colour is — which matters most in exactly
+/// the case where colour helps least, a directory of thirty folders and
+/// three files.
+pub fn folder_mark<'a, Message: 'a>(
+    color: iced::Color,
+    size: f32,
+    scale: FontScale,
+) -> Element<'a, Message> {
+    let w = scale.apply(size);
+    let h = w * FOLDER_ASPECT;
+    container(iced::widget::Space::new())
+        .width(Length::Fixed(w))
+        .height(Length::Fixed(h))
+        .style(move |_theme: &IcedTheme| container::Style {
+            background: Some(Background::Color(color)),
+            // Radius scaled with the mark rather than fixed, so it stays
+            // a rounded rectangle at 200% instead of a rectangle with a
+            // decorative nick in each corner.
+            border: Border { radius: (h * CORNER_FRACTION).into(), width: 0.0, color },
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// A file: an outlined rectangle, taller than it is wide — a page.
+pub fn file_mark<'a, Message: 'a>(
+    color: iced::Color,
+    size: f32,
+    scale: FontScale,
+) -> Element<'a, Message> {
+    let w = scale.apply(size) * FILE_WIDTH_FRACTION;
+    let h = scale.apply(size);
+    container(iced::widget::Space::new())
+        .width(Length::Fixed(w))
+        .height(Length::Fixed(h))
+        .style(move |_theme: &IcedTheme| container::Style {
+            // A whisper of fill inside the outline, so the shape reads as
+            // an object rather than as a hole in the row.
+            background: Some(Background::Color(iced::Color { a: 0.12, ..color })),
+            border: Border { radius: (w * CORNER_FRACTION).into(), width: OUTLINE_WIDTH, color },
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// A folder is this much taller than wide — 12/15, from the design.
+const FOLDER_ASPECT: f32 = 0.8;
+/// A file is this much narrower than tall — 12/14, from the design.
+const FILE_WIDTH_FRACTION: f32 = 0.857;
+/// Corner radius as a fraction of the mark's shorter side, so it scales.
+const CORNER_FRACTION: f32 = 0.17;
 
 /// The outline on a file's badge. Thin enough to read as a drawn edge
 /// rather than as a second filled square.

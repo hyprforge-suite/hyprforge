@@ -39,6 +39,47 @@ pub struct SidebarItem {
     pub label: String,
     /// Where clicking it navigates.
     pub path: PathBuf,
+    /// Which theme colour this row's folder mark takes.
+    pub tint: Tint,
+}
+
+/// A sidebar row's colour, named by *role* rather than by value.
+///
+/// The design gives each place its own hue so a row is findable by
+/// colour before it is read — you learn where Downloads sits and stop
+/// reading the label. Naming the role rather than the colour is what
+/// keeps that out of conflict with the rule that an app never writes a
+/// colour: these resolve through `hyprforge_look::Theme` at draw time,
+/// so a user on a different theme gets their own palette, distinct in
+/// the same way.
+///
+/// The roles are borrowed here for identity rather than for state, which
+/// is a real cost worth naming: `Warning` on the Pictures row does not
+/// mean anything is wrong. It is defensible because a sidebar place is
+/// not a state-bearing thing — there is no "Pictures is in trouble" for
+/// it to be confused with — but the same trick in the entry list, where
+/// rows *do* carry state, would be a mistake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tint {
+    Accent,
+    Info,
+    Success,
+    Warning,
+    Dim,
+}
+
+impl Tint {
+    /// Resolves to the live theme's colour for this role.
+    pub fn color(self) -> hyprforge_look::Color {
+        let t = hyprforge_ui::theme::active();
+        match self {
+            Tint::Accent => t.accent,
+            Tint::Info => t.info,
+            Tint::Success => t.success,
+            Tint::Warning => t.warning,
+            Tint::Dim => t.surfaces.text_dim,
+        }
+    }
 }
 
 /// Builds the **Places** section: Home, then each of Documents/Downloads/
@@ -55,22 +96,31 @@ pub fn build<B: FsBackend + ?Sized>(backend: &B, user_dirs: &UserDirs) -> Vec<Si
     let mut items = vec![SidebarItem {
         label: "Home".to_string(),
         path: backend.home_dir(),
+        tint: Tint::Accent,
     }];
 
-    let candidates: [(&str, &Option<PathBuf>); 6] = [
-        ("Documents", &user_dirs.documents),
-        ("Downloads", &user_dirs.download),
-        ("Pictures", &user_dirs.pictures),
-        ("Music", &user_dirs.music),
-        ("Videos", &user_dirs.videos),
-        ("Desktop", &user_dirs.desktop),
+    // A colour per place, so a row is findable before it is read. The
+    // assignment is arbitrary but *fixed*: what matters is that
+    // Downloads is always the same colour, not which colour it is.
+    // Beyond the four the theme has distinct roles for, the rest share
+    // the dim one rather than the palette repeating — two places in the
+    // same green would be worse than several in plain grey, because the
+    // eye would read the repeat as a grouping that means something.
+    let candidates: [(&str, &Option<PathBuf>, Tint); 6] = [
+        ("Documents", &user_dirs.documents, Tint::Info),
+        ("Downloads", &user_dirs.download, Tint::Success),
+        ("Pictures", &user_dirs.pictures, Tint::Warning),
+        ("Music", &user_dirs.music, Tint::Dim),
+        ("Videos", &user_dirs.videos, Tint::Dim),
+        ("Desktop", &user_dirs.desktop, Tint::Dim),
     ];
-    for (label, path) in candidates {
+    for (label, path, tint) in candidates {
         if let Some(path) = path {
             if exists_as_dir(backend, path) {
                 items.push(SidebarItem {
                     label: label.to_string(),
                     path: path.clone(),
+                    tint,
                 });
             }
         }
