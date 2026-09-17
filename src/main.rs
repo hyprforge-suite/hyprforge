@@ -132,7 +132,7 @@ fn main() -> iced::Result {
     // hyprforge-settings and on PAM setup in the greeter; it is not the
     // per-navigation directory read that has to stay off the UI thread.
     let user_dirs = xdg_user_dirs::load(&hyprforge_paths::config_home(), &backend.home_dir());
-    let sidebar_items = sidebar::build(backend.as_ref(), &user_dirs);
+    let sidebar_items = sidebar::build(backend.as_ref(), &user_dirs, &config.sidebar.places);
 
     let initial_size = Size::new(
         (prefs.window_width as f32).max(480.0),
