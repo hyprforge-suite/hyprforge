@@ -29,6 +29,9 @@ use crate::format::{format_kind, format_modified_at, format_owner, format_permis
 use crate::glyph;
 use crate::icon::{self, entry_icon};
 use crate::action::{self, Action, ActionContext, Scope};
+use crate::config::Config;
+use crate::menu::{self as menus, MenuItem, MenuKind};
+use std::sync::Arc;
 use crate::prefs::{Column, Columns, Prefs, ViewMode};
 use crate::sidebar::{self, PinnedItem, SidebarItem};
 use crate::sort::{sort_indices, SortColumn, SortDirection};
@@ -235,6 +238,12 @@ impl Selection {
         self.click(&rows[next].path);
     }
 
+    /// Moves the keyboard focus to `path` without touching what is
+    /// selected — a right click inside an existing selection.
+    fn focus(&mut self, path: &Path) {
+        self.focused = Some(path.to_path_buf());
+    }
+
     /// Selects every shown row, leaving the focus where it was — or on
     /// the first row if there was none, so a following arrow key has
     /// somewhere to start from.
@@ -275,6 +284,30 @@ impl Selection {
     }
 }
 
+/// Where a context menu was asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuSpot {
+    /// On this row (by position in the current view).
+    Row(usize),
+    /// On the empty space around the rows.
+    Background,
+    /// Wherever the keyboard focus is — the Menu key and Shift+F10. The
+    /// focused row if there is one, the background if not.
+    Focused,
+}
+
+/// A context menu that is showing.
+#[derive(Debug, Clone, PartialEq)]
+struct OpenMenu {
+    items: Vec<MenuItem>,
+    /// Where it was asked for, in window coordinates. Placement against
+    /// the window's edges happens at draw time, when the window's size is
+    /// known.
+    at: (f32, f32),
+    /// The item the arrow keys are on, if any.
+    highlighted: Option<usize>,
+}
+
 /// Everything a host must do in response to [`Browser::update`] or
 /// [`Browser::perform`] — the outcomes `Browser` cannot carry out
 /// itself because each one is either blocking I/O or a decision that
@@ -312,6 +345,10 @@ pub enum Outcome {
     Trash(Vec<PathBuf>),
     /// Open this folder in a new tab. A host without tabs ignores it.
     OpenInNewTab(PathBuf),
+    /// Open a context menu at the pointer. The browser does not know
+    /// where the pointer is — the window does, and fills it in, the same
+    /// way it fills in modifier keys on a click.
+    OpenContextMenuAtPointer(MenuSpot),
     /// A window-scope action — see [`crate::action::Scope`]. It reaches
     /// the host this way so a menu item for one travels the same road as
     /// every other action; a host without tabs ignores it.
@@ -355,6 +392,14 @@ pub enum Message {
     /// Carry out an action — from a menu, a button, or a key the host
     /// resolved through [`crate::keymap::Keymap`].
     Perform(Action),
+    /// Open the right-click menu for `spot` at `at` (window coordinates).
+    /// The view sends this with `at` unset; the host fills it in from
+    /// the pointer, because a right press carries no position.
+    OpenContextMenu { spot: MenuSpot, at: (f32, f32) },
+    /// A menu item was clicked, by position in the open menu.
+    MenuChose(usize),
+    /// Dismiss the menu — a click anywhere else.
+    CloseMenu,
     /// Type a character into the search box. The host decides a key
     /// press means this; see [`crate::keymap::Resolved::Type`].
     TypeToSearch(char),
@@ -443,6 +488,11 @@ pub struct Browser {
     /// for the life of this `Browser` — see
     /// [`Self::list_scrollable_id`]'s own doc.
     list_scrollable_id: Id,
+    /// What `files-config.toml` configured — the menus, and the keymap
+    /// their shortcut hints are read from. Shared, not copied per tab.
+    config: Arc<Config>,
+    /// The context menu, when one is showing.
+    menu: Option<OpenMenu>,
 }
 
 impl Browser {
@@ -472,6 +522,8 @@ impl Browser {
             // than inside `render` (which runs on every `view()` call)
             // is what guarantees that.
             list_scrollable_id: Id::unique(),
+            config: Arc::new(Config::default()),
+            menu: None,
         };
         (browser, Outcome::ReadDir(start_dir))
     }
@@ -614,8 +666,20 @@ impl Browser {
             }
             Message::Perform(action) => self.perform(action),
             Message::TypeToSearch(c) => {
+                // Typing is a new thing to do; an open menu is not what
+                // it was aimed at.
+                self.menu = None;
                 self.search_query.push(c);
                 self.refresh_view();
+                Outcome::None
+            }
+            Message::OpenContextMenu { spot, at } => {
+                self.open_menu(spot, at);
+                Outcome::None
+            }
+            Message::MenuChose(index) => self.choose_menu_item(index),
+            Message::CloseMenu => {
+                self.menu = None;
                 Outcome::None
             }
             Message::PinnedLoaded(items) => {
@@ -623,6 +687,18 @@ impl Browser {
                 Outcome::None
             }
         }
+    }
+
+    /// Uses `config` for menus and shortcut hints from now on. A host
+    /// calls this once per tab with the configuration it loaded; without
+    /// it a browser uses the shipped defaults.
+    pub fn set_config(&mut self, config: Arc<Config>) {
+        self.config = config;
+    }
+
+    /// Whether a context menu is showing.
+    pub fn menu_open(&self) -> bool {
+        self.menu.is_some()
     }
 
     /// What the listing looks like right now, for deciding which actions
@@ -641,7 +717,19 @@ impl Browser {
             can_go_forward: !self.forward_stack.is_empty(),
             has_parent: self.current_dir.parent().is_some(),
             searching: !self.search_query.is_empty(),
+            in_trash: self.in_trash(),
         }
+    }
+
+    /// Whether this listing is the Trash.
+    ///
+    /// Compared against the path the sidebar's Trash item navigates to,
+    /// which is how anyone gets there; `trash::TrashBackend::claims` is
+    /// the more forgiving check (symlinks, `..`) and decides how the
+    /// directory is *read*, but it touches the filesystem, and this runs
+    /// on every key press and every menu.
+    fn in_trash(&self) -> bool {
+        self.current_dir == crate::sidebar::trash_path()
     }
 
     /// The selected paths that are actually on screen, in listing order.
@@ -667,6 +755,30 @@ impl Browser {
     /// [`crate::action::enabled`] answer a menu uses to grey an item out,
     /// so the two cannot disagree.
     pub fn perform(&mut self, action: Action) -> Outcome {
+        // An open menu has the keyboard: arrows move through it, Open
+        // runs the highlighted item, Escape closes it. Anything else
+        // closes it and then does what it normally does.
+        if self.menu.is_some() {
+            match action {
+                Action::FocusUp | Action::ExtendUp => return self.step_menu(-1),
+                Action::FocusDown | Action::ExtendDown => return self.step_menu(1),
+                Action::Open => {
+                    let chosen = self.menu.as_ref().and_then(|m| m.highlighted);
+                    return match chosen {
+                        Some(index) => self.choose_menu_item(index),
+                        None => {
+                            self.menu = None;
+                            Outcome::None
+                        }
+                    };
+                }
+                Action::ClearSearch | Action::ContextMenu => {
+                    self.menu = None;
+                    return Outcome::None;
+                }
+                _ => self.menu = None,
+            }
+        }
         if action.scope() == Scope::Window {
             return Outcome::Window(action);
         }
@@ -716,6 +828,7 @@ impl Browser {
                 Outcome::PrefsChanged(self.prefs.clone())
             }
             Action::Trash => Outcome::Trash(self.selected_shown()),
+            Action::ContextMenu => Outcome::OpenContextMenuAtPointer(MenuSpot::Focused),
             // Handled above; listed so a new window action is a compile
             // error here rather than a silent fall-through.
             Action::NewTab
@@ -724,6 +837,101 @@ impl Browser {
             | Action::PreviousTab
             | Action::Tab(_) => Outcome::Window(action),
         }
+    }
+
+    /// Opens the menu for `spot`.
+    ///
+    /// A right click on a row that is not selected selects it — alone —
+    /// first, so the menu acts on what was clicked. A right click inside
+    /// an existing multi-selection keeps it, which is what every file
+    /// manager does and what makes "select five, right-click, trash"
+    /// work. A right click on the background clears the selection: the
+    /// menu there is about the folder, not about whatever was selected.
+    fn open_menu(&mut self, spot: MenuSpot, at: (f32, f32)) {
+        let row = match spot {
+            MenuSpot::Row(i) => Some(i),
+            MenuSpot::Background => None,
+            MenuSpot::Focused => {
+                let rows = self.rows();
+                self.selection
+                    .focused()
+                    .and_then(|f| rows.iter().position(|e| e.path == f))
+            }
+        };
+        let row_entry = row.and_then(|i| self.rows().get(i).map(|e| (i, e.path.clone(), e.is_dir)));
+        let kind = match &row_entry {
+            Some((index, path, is_dir)) => {
+                if !self.selection.is_selected(path) {
+                    let index = *index;
+                    self.with_rows(|selection, rows| selection.click_with(rows, index, false, false));
+                } else {
+                    self.selection.focus(path);
+                }
+                match (self.in_trash(), is_dir) {
+                    (true, _) => MenuKind::Trash,
+                    (false, true) => MenuKind::Folder,
+                    (false, false) => MenuKind::Entry,
+                }
+            }
+            None => {
+                self.selection.clear();
+                if self.in_trash() {
+                    MenuKind::Trash
+                } else {
+                    MenuKind::Empty
+                }
+            }
+        };
+        let items = menus::build(self.config.menus.get(kind), &self.action_context(), &self.config.keymap);
+        self.menu = (!items.is_empty()).then_some(OpenMenu { items, at, highlighted: None });
+    }
+
+    fn step_menu(&mut self, direction: i32) -> Outcome {
+        if let Some(menu) = &mut self.menu {
+            menu.highlighted = menus::step(&menu.items, menu.highlighted, direction)
+                .or(menu.highlighted);
+        }
+        Outcome::None
+    }
+
+    /// Runs the item at `index` and closes the menu. A separator or a
+    /// disabled item only closes it.
+    fn choose_menu_item(&mut self, index: usize) -> Outcome {
+        let Some(menu) = self.menu.take() else {
+            return Outcome::None;
+        };
+        match menu.items.get(index) {
+            Some(MenuItem::Action { action, enabled: true, .. }) => self.perform(*action),
+            _ => Outcome::None,
+        }
+    }
+
+    /// The context menu, drawn over the whole window — or `None` when no
+    /// menu is open. A host stacks this on top of everything else it
+    /// draws.
+    ///
+    /// Two layers. Underneath, a transparent area the size of the window
+    /// that closes the menu when clicked anywhere, left or right — and
+    /// takes that click, so it does not also land on whatever was under
+    /// it. On top, the menu itself, `opaque` so a click on it never
+    /// falls through to the closing layer, and `pin`ned where it was
+    /// asked for, flipped away from any edge it would run off
+    /// ([`menus::place`]).
+    pub fn menu_overlay(&self, scale: FontScale, window: (f32, f32)) -> Option<Element<'_, Message>> {
+        let menu = self.menu.as_ref()?;
+        let size = density::menu_size(&menu.items, scale);
+        let (x, y) = menus::place(menu.at, size, window);
+        let away = iced::widget::mouse_area(
+            iced::widget::Space::new().width(Length::Fill).height(Length::Fill),
+        )
+        .on_press(Message::CloseMenu)
+        .on_right_press(Message::CloseMenu);
+        let placed = iced::widget::pin(iced::widget::opaque(context_menu(menu, scale, size.0)))
+            .x(x)
+            .y(y)
+            .width(Length::Fill)
+            .height(Length::Fill);
+        Some(iced::widget::stack![away, placed].width(Length::Fill).height(Length::Fill).into())
     }
 
     fn apply_dir_loaded(&mut self, path: PathBuf, result: Result<Vec<Entry>, DirError>) -> Outcome {
@@ -825,6 +1033,7 @@ impl Browser {
     /// bookkeeping; they had a copy of this each, and a fourth thing to
     /// reset would have meant remembering all three.
     fn arrive_at(&mut self, path: PathBuf) -> Outcome {
+        self.menu = None;
         self.current_dir = path.clone();
         self.selection.clear();
         self.search_query.clear();
@@ -1839,6 +2048,17 @@ fn crumb_button<'a>(
 
 
 fn body_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
+    // Right-clicking anywhere the rows are not opens the folder's own
+    // menu. Rows capture their own right press first — see
+    // `with_row_menu` — so this only sees the empty space.
+    iced::widget::mouse_area(
+        container(body_content(vm, scale)).width(Length::Fill).height(Length::Fill),
+    )
+    .on_right_press(Message::OpenContextMenu { spot: MenuSpot::Background, at: (0.0, 0.0) })
+    .into()
+}
+
+fn body_content<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     match vm.load_state {
         LoadState::Loading => container(meta_text("Loading\u{2026}", BASE_TEXT_SIZE, scale))
             .center_x(Length::Fill)
@@ -1969,7 +2189,110 @@ fn entry_row<'a>(
         // text past 100%.
         .height(Length::Fixed(density::row_height(scale)))
         .style(move |t: &iced::Theme, status| selectable_row_style(t, status, selected));
-    styled.into()
+    with_row_menu(styled.into(), index)
+}
+
+/// Lets a row or cell open the context menu on a right click.
+///
+/// A `mouse_area` *around* the button — the arrangement that failed for
+/// double click, and works here. `button` captures only the *left*
+/// press, so the right press passes through it to this wrapper. This
+/// wrapper then captures it, which is what stops the background's own
+/// right-click handler from opening a second, folder-level menu on top.
+///
+/// The position is left unset: a right press carries none, and the
+/// window fills it in from the pointer.
+fn with_row_menu<'a>(inner: Element<'a, Message>, index: usize) -> Element<'a, Message> {
+    iced::widget::mouse_area(inner)
+        .on_right_press(Message::OpenContextMenu { spot: MenuSpot::Row(index), at: (0.0, 0.0) })
+        .into()
+}
+
+/// A context menu's own box: items and separators on the chrome plane,
+/// with a hairline border so it reads as lifted off the listing.
+///
+/// Every dimension here comes from `density`, the same numbers
+/// `density::menu_size` adds up to place the menu — so the box drawn is
+/// the box that was placed.
+fn context_menu<'a>(menu: &'a OpenMenu, scale: FontScale, width: f32) -> Element<'a, Message> {
+    let row_h = density::row_height(scale);
+    let mut list = column![].width(Length::Fill);
+    for (index, item) in menu.items.iter().enumerate() {
+        match item {
+            MenuItem::Separator => {
+                list = list.push(
+                    container(divider())
+                        .height(Length::Fixed(density::menu_separator_height(scale)))
+                        .center_y(Length::Fixed(density::menu_separator_height(scale)))
+                        .padding([0, spacing::SM as u16]),
+                );
+            }
+            MenuItem::Action { label, hint, enabled, .. } => {
+                let enabled = *enabled;
+                let highlighted = menu.highlighted == Some(index);
+                let colour = if enabled {
+                    hyprforge_ui::theme::text()
+                } else {
+                    hyprforge_ui::theme::text_dim()
+                };
+                let mut content = row![scaled_text(*label, density::ROW_TEXT_BASE, scale)
+                    .color(colour)
+                    .width(Length::Fill)]
+                .align_y(iced::Alignment::Center)
+                .spacing(spacing::MD);
+                if let Some(hint) = hint {
+                    content = content.push(meta_text(hint.as_str(), density::META_TEXT_BASE, scale));
+                }
+                list = list.push(
+                    iced::widget::button(content)
+                        .on_press_maybe(enabled.then_some(Message::MenuChose(index)))
+                        .width(Length::Fill)
+                        .height(Length::Fixed(row_h))
+                        .padding([0, spacing::SM as u16])
+                        .style(move |t: &iced::Theme, status| {
+                            menu_item_style(t, status, highlighted, enabled)
+                        }),
+                );
+            }
+        }
+    }
+    container(list)
+        .padding(density::menu_padding(scale))
+        .width(Length::Fixed(width))
+        .style(|_t: &iced::Theme| container::Style {
+            background: Some(iced::Background::Color(hyprforge_ui::theme::surface::sidebar())),
+            border: iced::Border {
+                color: hyprforge_ui::theme::surface::card_border(),
+                width: 1.0,
+                radius: density::inner_radius().into(),
+            },
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// A menu item's look.
+///
+/// Unlike a listing row, hover takes the accent here. In a menu the
+/// pointer *is* the choice being made — the item under it is what a
+/// click will run — so hover and the keyboard highlight are the same
+/// state and look the same. A disabled item never lights up.
+fn menu_item_style(
+    theme: &iced::Theme,
+    status: iced::widget::button::Status,
+    highlighted: bool,
+    enabled: bool,
+) -> iced::widget::button::Style {
+    use iced::widget::button;
+    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+    let lit = enabled && (highlighted || hovered);
+    button::Style {
+        background: lit
+            .then(|| iced::Background::Color(theme.extended_palette().primary.weak.color)),
+        text_color: hyprforge_ui::theme::text(),
+        border: iced::Border { radius: density::nested_radius().into(), ..iced::Border::default() },
+        ..button::Style::default()
+    }
 }
 
 /// The look of any row that can be *the chosen one* — an entry in the
@@ -2358,7 +2681,7 @@ fn grid_cell<'a>(
         // fill's edge.
         .padding(spacing::SM)
         .style(move |t: &iced::Theme, status| selectable_row_style(t, status, selected));
-    cell.into()
+    with_row_menu(cell.into(), index)
 }
 
 #[cfg(test)]
@@ -2608,6 +2931,177 @@ mod tests {
             }
             other => panic!("expected PrefsChanged, got {other:?}"),
         }
+    }
+
+    // --- the context menu -----------------------------------------------------
+
+    fn right_click(browser: &mut Browser, spot: MenuSpot) {
+        browser.update(Message::OpenContextMenu { spot, at: (10.0, 10.0) });
+    }
+
+    fn menu_labels(browser: &Browser) -> Vec<&'static str> {
+        browser
+            .menu
+            .as_ref()
+            .map(|m| {
+                m.items
+                    .iter()
+                    .filter_map(|i| match i {
+                        MenuItem::Action { label, .. } => Some(*label),
+                        MenuItem::Separator => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Right-clicking a row nobody selected makes it the selection, so
+    /// the menu acts on what was clicked rather than on something
+    /// selected earlier.
+    #[test]
+    fn right_clicking_an_unselected_row_selects_just_that_row() {
+        let mut browser = loaded_browser(&["a.txt", "b.txt"]);
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+        right_click(&mut browser, MenuSpot::Row(1));
+        assert_eq!(browser.selected_shown(), [PathBuf::from("/dir/b.txt")]);
+        assert!(browser.menu_open());
+    }
+
+    /// Right-clicking inside a multi-selection keeps it — "select five,
+    /// right-click, trash" has to trash five.
+    #[test]
+    fn right_clicking_inside_a_selection_keeps_the_whole_selection() {
+        let mut browser = loaded_browser(&["a.txt", "b.txt", "c.txt"]);
+        browser.perform(Action::SelectAll);
+        right_click(&mut browser, MenuSpot::Row(1));
+        assert_eq!(browser.selected_shown().len(), 3);
+        let outcome = browser.update(Message::MenuChose(
+            browser
+                .menu
+                .as_ref()
+                .unwrap()
+                .items
+                .iter()
+                .position(|i| matches!(i, MenuItem::Action { action: Action::Trash, .. }))
+                .unwrap(),
+        ));
+        match outcome {
+            Outcome::Trash(paths) => assert_eq!(paths.len(), 3),
+            other => panic!("expected Trash, got {other:?}"),
+        }
+        assert!(!browser.menu_open(), "choosing an item closes the menu");
+    }
+
+    #[test]
+    fn a_folder_a_file_and_the_background_each_get_their_own_menu() {
+        let (mut browser, _) =
+            Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
+        browser.update(Message::DirLoaded(
+            PathBuf::from("/dir"),
+            Ok(vec![entry("sub", true), entry("f.txt", false)]),
+        ));
+        right_click(&mut browser, MenuSpot::Row(0));
+        assert!(menu_labels(&browser).contains(&"Open in New Tab"), "a folder");
+        right_click(&mut browser, MenuSpot::Row(1));
+        assert!(!menu_labels(&browser).contains(&"Open in New Tab"), "a file");
+        right_click(&mut browser, MenuSpot::Background);
+        assert!(menu_labels(&browser).contains(&"Show Hidden Files"), "the folder itself");
+        assert!(browser.selected_shown().is_empty(), "the background clears the selection");
+    }
+
+    /// With the menu open the arrows move through it and Enter runs the
+    /// item — not the file behind it.
+    #[test]
+    fn the_keyboard_drives_an_open_menu() {
+        let mut browser = loaded_browser(&["a.txt", "b.txt"]);
+        right_click(&mut browser, MenuSpot::Row(0));
+        // Entry menu: Open, -, Select All, -, Move to Trash
+        browser.perform(Action::FocusDown); // Open
+        browser.perform(Action::FocusDown); // Select All
+        assert_eq!(browser.selected_shown().len(), 1, "moving in the menu moves nothing else");
+        assert_eq!(browser.perform(Action::Open), Outcome::None, "Select All ran");
+        assert_eq!(browser.selected_shown().len(), 2);
+        assert!(!browser.menu_open());
+    }
+
+    #[test]
+    fn escape_closes_the_menu_and_leaves_the_search_alone() {
+        let mut browser = loaded_browser(&["alpha.txt", "beta.txt"]);
+        browser.update(Message::TypeToSearch('a'));
+        right_click(&mut browser, MenuSpot::Background);
+        browser.perform(Action::ClearSearch);
+        assert!(!browser.menu_open());
+        assert_eq!(browser.rows().len(), 2, "alpha and beta both contain an a");
+        browser.perform(Action::ClearSearch);
+        assert!(browser.search_query.is_empty(), "the second Escape clears it");
+    }
+
+    /// A disabled item does nothing when clicked, beyond closing.
+    #[test]
+    fn choosing_a_disabled_item_only_closes_the_menu() {
+        let mut browser = loaded_browser(&["a.txt"]);
+        right_click(&mut browser, MenuSpot::Background);
+        // Background clears the selection; nothing is selected, so an
+        // `entry` menu's Trash would be off. Swap in a menu to check.
+        browser.menu = Some(OpenMenu {
+            items: menus::build(
+                &[crate::menu::MenuEntry::Action(Action::Trash)],
+                &browser.action_context(),
+                &crate::keymap::Keymap::defaults(),
+            ),
+            at: (0.0, 0.0),
+            highlighted: None,
+        });
+        assert_eq!(browser.update(Message::MenuChose(0)), Outcome::None);
+        assert!(!browser.menu_open());
+    }
+
+    #[test]
+    fn navigating_away_closes_the_menu() {
+        let mut browser = loaded_browser(&["a.txt"]);
+        right_click(&mut browser, MenuSpot::Background);
+        browser.update(Message::Navigate(PathBuf::from("/elsewhere")));
+        assert!(!browser.menu_open());
+    }
+
+    /// The Menu key asks the host for the pointer, then opens on the
+    /// focused row.
+    #[test]
+    fn the_menu_key_opens_the_menu_for_the_focused_row() {
+        let mut browser = loaded_browser(&["a.txt", "b.txt"]);
+        browser.update(Message::EntryClicked { index: 1, ctrl: false, shift: false });
+        assert_eq!(
+            browser.perform(Action::ContextMenu),
+            Outcome::OpenContextMenuAtPointer(MenuSpot::Focused)
+        );
+        browser.update(Message::OpenContextMenu { spot: MenuSpot::Focused, at: (5.0, 5.0) });
+        assert!(browser.menu_open());
+        assert_eq!(browser.selected_shown(), [PathBuf::from("/dir/b.txt")]);
+    }
+
+    /// The configured menu is the one shown.
+    #[test]
+    fn a_configured_menu_replaces_the_default() {
+        let mut browser = loaded_browser(&["a.txt"]);
+        let (config, _) = crate::config::parse(
+            "[menu]\nentry = [\"trash\"]\n",
+            Path::new("files-config.toml"),
+        );
+        browser.set_config(Arc::new(config));
+        right_click(&mut browser, MenuSpot::Row(0));
+        assert_eq!(menu_labels(&browser), ["Move to Trash"]);
+    }
+
+    #[test]
+    fn nothing_in_the_trash_offers_to_be_trashed_again() {
+        let trash = crate::sidebar::trash_path();
+        let (mut browser, _) = Browser::new(Mode::App, Prefs::default(), trash.clone(), vec![]);
+        let mut item = entry("old.txt", false);
+        item.path = trash.join("old.txt");
+        browser.update(Message::DirLoaded(trash, Ok(vec![item])));
+        right_click(&mut browser, MenuSpot::Row(0));
+        assert!(!menu_labels(&browser).contains(&"Move to Trash"));
+        assert_eq!(browser.perform(Action::Trash), Outcome::None, "and Delete does nothing");
     }
 
     // --- the status bar's own claims ----------------------------------------

@@ -47,6 +47,8 @@ pub enum Action {
     ToggleHidden,
     /// Move the selection to the trash.
     Trash,
+    /// Open the right-click menu from the keyboard, for the focused row.
+    ContextMenu,
     // Window scope: the tab strip.
     NewTab,
     CloseTab,
@@ -87,6 +89,7 @@ impl Action {
             Action::ClearSearch,
             Action::ToggleHidden,
             Action::Trash,
+            Action::ContextMenu,
             Action::NewTab,
             Action::CloseTab,
             Action::NextTab,
@@ -114,6 +117,7 @@ impl Action {
             Action::ClearSearch => "clear-search",
             Action::ToggleHidden => "show-hidden",
             Action::Trash => "trash",
+            Action::ContextMenu => "context-menu",
             Action::NewTab => "new-tab",
             Action::CloseTab => "close-tab",
             Action::NextTab => "next-tab",
@@ -160,6 +164,7 @@ impl Action {
             Action::ClearSearch => "Clear Search",
             Action::ToggleHidden => "Show Hidden Files",
             Action::Trash => "Move to Trash",
+            Action::ContextMenu => "Show Menu",
             Action::NewTab => "New Tab",
             Action::CloseTab => "Close Tab",
             Action::NextTab => "Next Tab",
@@ -215,6 +220,9 @@ impl Action {
             Action::ClearSearch => &["Escape"],
             Action::ToggleHidden => &["Ctrl+H"],
             Action::Trash => &["Delete"],
+            // The two keys every desktop uses for "the menu a right click
+            // would open".
+            Action::ContextMenu => &["Menu", "Shift+F10"],
             Action::NewTab => &["Ctrl+T"],
             Action::CloseTab => &["Ctrl+W"],
             Action::NextTab => &["Ctrl+Tab"],
@@ -254,6 +262,10 @@ pub struct ActionContext {
     pub can_go_forward: bool,
     pub has_parent: bool,
     pub searching: bool,
+    /// Whether the listing is the Trash. Trashing something already in
+    /// the trash would file it a second time under a new record, so the
+    /// Trash action is off here.
+    pub in_trash: bool,
 }
 
 /// Whether `action` would do anything in `ctx`.
@@ -276,8 +288,8 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         | Action::ExtendDown
         | Action::SelectAll => ctx.shown > 0,
         Action::ClearSearch => ctx.searching,
-        Action::ToggleHidden => true,
-        Action::Trash => ctx.selected > 0,
+        Action::ToggleHidden | Action::ContextMenu => true,
+        Action::Trash => ctx.selected > 0 && !ctx.in_trash,
         Action::NewTab
         | Action::CloseTab
         | Action::NextTab
@@ -341,6 +353,12 @@ mod tests {
         let ctx = ActionContext { shown: 4, ..ActionContext::default() };
         assert!(!enabled(Action::Trash, &ctx));
         assert!(enabled(Action::Trash, &ActionContext { selected: 1, ..ctx }));
+    }
+
+    #[test]
+    fn nothing_in_the_trash_can_be_trashed_again() {
+        let ctx = ActionContext { selected: 2, shown: 2, in_trash: true, ..ActionContext::default() };
+        assert!(!enabled(Action::Trash, &ctx));
     }
 
     #[test]

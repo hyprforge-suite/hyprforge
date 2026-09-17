@@ -109,6 +109,7 @@ fn main() -> iced::Result {
     // shown, never fatal: a typo in a binding must not stop the window
     // opening, and must not cost the bindings around it.
     let (config, config_problems) = hyprforge_files_core::config::load();
+    let config = Arc::new(config);
 
     let (prefs, prefs_status) = match hyprforge_files_core::prefs::load() {
         Ok(prefs) => (prefs, None),
@@ -143,7 +144,9 @@ fn main() -> iced::Result {
     // for reconciliation rather than made here. So the window always
     // starts with exactly one tab, at `start_dir`, same as before tabs
     // existed.
-    let (browser, outcome) = Browser::new(Mode::App, prefs.clone(), start_dir, sidebar_items.clone());
+    let (mut browser, outcome) =
+        Browser::new(Mode::App, prefs.clone(), start_dir, sidebar_items.clone());
+    browser.set_config(config.clone());
     let mut app = App {
         home_dir: backend.home_dir(),
         backend,
@@ -158,7 +161,9 @@ fn main() -> iced::Result {
         resize_generation: 0,
         modifiers: keyboard::Modifiers::default(),
         clicks: ClickTracker::new(),
-        keymap: config.keymap,
+        config: config.clone(),
+        #[cfg(debug_assertions)]
+        debug_menu: debug_menu_request(),
     };
     // Fulfils the `Outcome::ReadDir` `Browser::new` always returns —
     // otherwise the window opens showing nothing at all, forever, for
@@ -484,9 +489,9 @@ struct App {
     /// — its own tests pass ctrl/shift explicitly — and puts "what was
     /// held" in the one place that actually observes the keyboard.
     modifiers: keyboard::Modifiers,
-    /// What every key means — the one table. See
-    /// `hyprforge_files_core::keymap`.
-    keymap: keymap::Keymap,
+    /// What `files-config.toml` configured: every key's meaning, and
+    /// the menus. Shared with every tab's browser rather than copied.
+    config: Arc<hyprforge_files_core::config::Config>,
     /// Tracks click timing, so two quick presses on one row open it.
     ///
     /// Here rather than in the view, because iced's `button` captures a
@@ -495,6 +500,10 @@ struct App {
     /// `mouse_area` inside would break the single click that selects.
     /// See `hyprforge_files_core::click` for the whole argument.
     clicks: ClickTracker,
+    /// Debug builds only: open a context menu on the first row as soon
+    /// as the first listing arrives. See [`debug_menu_request`].
+    #[cfg(debug_assertions)]
+    debug_menu: Option<(f32, f32)>,
     /// The filesystem this window reads through, shared with every
     /// background read it issues.
     ///
@@ -569,6 +578,12 @@ impl App {
                 })
             }
             Outcome::OpenInNewTab(path) => self.open_tab(path),
+            Outcome::OpenContextMenuAtPointer(spot) => {
+                let outcome = self.tabs[tab_index]
+                    .browser
+                    .update(BrowserMessage::OpenContextMenu { spot, at: pointer::last() });
+                self.handle_outcome(tab_index, outcome)
+            }
             Outcome::Window(action) => self.perform_window(action),
         }
     }
@@ -602,8 +617,9 @@ impl App {
     fn open_tab(&mut self, start_dir: PathBuf) -> Task<Message> {
         let id = self.next_tab_id;
         self.next_tab_id += 1;
-        let (browser, outcome) =
+        let (mut browser, outcome) =
             Browser::new(Mode::App, self.last_prefs.clone(), start_dir, self.sidebar_items.clone());
+        browser.set_config(self.config.clone());
         self.tabs.push(Tab::new(id, browser));
         self.active = self.tabs.len() - 1;
         let index = self.active;
@@ -664,6 +680,12 @@ impl App {
                 // are facts about the world rather than about the model,
                 // and this is where the window knows them.
                 let msg = match msg {
+                    // A right press carries no position; the pointer
+                    // tracker has it. See `pointer`.
+                    BrowserMessage::OpenContextMenu { spot, .. } => {
+                        self.clicks.reset();
+                        BrowserMessage::OpenContextMenu { spot, at: pointer::last() }
+                    }
                     BrowserMessage::EntryClicked { index, .. } => {
                         let ctrl = self.modifiers.control();
                         let shift = self.modifiers.shift();
@@ -695,7 +717,7 @@ impl App {
                 }
                 self.handle_outcome(self.active, outcome)
             }
-            Message::KeyPressed(press) => match self.keymap.resolve(&press) {
+            Message::KeyPressed(press) => match self.config.keymap.resolve(&press) {
                 // Window actions never reach the browser, which the
                 // dialog host also renders and which has no tabs.
                 Some(Resolved::Action(action)) if action.scope() == Scope::Window => {
@@ -732,6 +754,13 @@ impl App {
                     return Task::none();
                 }
                 let outcome = self.tabs[index].browser.update(BrowserMessage::DirLoaded(path, result));
+                #[cfg(debug_assertions)]
+                if let Some(at) = self.debug_menu.take() {
+                    self.tabs[index].browser.update(BrowserMessage::OpenContextMenu {
+                        spot: hyprforge_files_core::browser::MenuSpot::Row(0),
+                        at,
+                    });
+                }
                 self.handle_outcome(index, outcome)
             }
             Message::TrashDone(tab_id, dir, errors) => {
@@ -908,7 +937,7 @@ impl App {
         // and the status bar below.
         let mut content = column![tabs_row].width(Length::Fill).height(Length::Fill);
 
-                // The window's own width, so the browser can collapse the
+        // The window's own width, so the browser can collapse the
         // sidebar and decide whether the list has to scroll sideways —
         // both properties of the window, which is this crate's business
         // to know and not the model's to go looking for.
@@ -931,7 +960,17 @@ impl App {
         // resolved from Hyprland's own `decoration:rounding`) rather than
         // hardcoded — see DESIGN.md's note on density being ratios, not
         // constants.
-        container(content).width(Length::Fill).height(Length::Fill).style(window_frame_style).into()
+        let window: Element<'_, Message> =
+            container(content).width(Length::Fill).height(Length::Fill).style(window_frame_style).into();
+
+        // The context menu floats over everything — tabs, header and
+        // listing alike — so it is stacked over the whole window rather
+        // than drawn inside the browser's own area.
+        let size = (self.last_window_size.0 as f32, self.last_window_size.1 as f32);
+        match tab.browser.menu_overlay(scale, size) {
+            Some(overlay) => iced::widget::stack![window, overlay.map(Message::Browser)].into(),
+            None => window,
+        }
     }
 
     /// Keys become `Message::KeyPressed`, and what they mean is decided
@@ -961,8 +1000,63 @@ impl App {
         Subscription::batch([
             keys,
             window::resize_events().map(|(_, size)| Message::WindowResized(size)),
+            pointer::track(),
         ])
     }
+}
+
+/// Where the pointer last was, kept without a message per mouse move.
+///
+/// A context menu opens at the pointer, and a right press carries no
+/// position. The obvious fix — a `Message::PointerMoved` on every cursor
+/// event — would run `update` and rebuild the whole window's widget tree
+/// every time the mouse moved, listing and all, to learn one number that
+/// matters only at the moment of a right click.
+///
+/// So the subscription's filter records the position in two atomics and
+/// returns `None`, which iced treats as "no message": nothing updates,
+/// nothing is rebuilt. `update` reads the atomics when a menu is asked
+/// for. It is process-wide state, and that is fine for exactly one
+/// reason: this process has one window — closing its last tab exits.
+mod pointer {
+    use iced::{event, mouse, Event, Subscription};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static X: AtomicU32 = AtomicU32::new(0);
+    static Y: AtomicU32 = AtomicU32::new(0);
+
+    /// Listens for pointer movement and never produces a message.
+    pub fn track<Message: 'static + Send>() -> Subscription<Message> {
+        event::listen_with(|event, _status, _window| {
+            if let Event::Mouse(mouse::Event::CursorMoved { position }) = event {
+                X.store(position.x.to_bits(), Ordering::Relaxed);
+                Y.store(position.y.to_bits(), Ordering::Relaxed);
+            }
+            None
+        })
+    }
+
+    /// The last pointer position seen, in window coordinates.
+    pub fn last() -> (f32, f32) {
+        (
+            f32::from_bits(X.load(Ordering::Relaxed)),
+            f32::from_bits(Y.load(Ordering::Relaxed)),
+        )
+    }
+}
+
+/// `HYPRFORGE_FILES_DEBUG_MENU=x,y` opens a context menu on the first
+/// row at that point once the first listing loads.
+///
+/// For looking at the menu. This machine has no way to synthesise a
+/// right click, and the menu's placement and look are only checkable in
+/// a screenshot. Compiled into debug builds only, the same way the lock
+/// screen's `--type-in` is: nothing in a release build reads it.
+#[cfg(debug_assertions)]
+fn debug_menu_request() -> Option<(f32, f32)> {
+    let raw = std::env::var("HYPRFORGE_FILES_DEBUG_MENU").ok()?;
+    let (x, y) = raw.split_once(',')?;
+    Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
 }
 
 /// What the status bar says when the window opens: a broken
@@ -1172,6 +1266,7 @@ fn key_press(event: &keyboard::Event) -> Option<keymap::KeyPress> {
             key::Named::PageUp => keymap::Key::PageUp,
             key::Named::PageDown => keymap::Key::PageDown,
             key::Named::Insert => keymap::Key::Insert,
+            key::Named::ContextMenu => keymap::Key::Menu,
             other => keymap::Key::F(function_key_number(other)?),
         },
         Key::Character(c) => {
@@ -1408,7 +1503,9 @@ mod tests {
             resize_generation: 0,
             modifiers: keyboard::Modifiers::default(),
             clicks: ClickTracker::new(),
-            keymap: keymap::Keymap::defaults(),
+            config: Arc::new(hyprforge_files_core::config::Config::default()),
+            #[cfg(debug_assertions)]
+            debug_menu: None,
         }
     }
 
@@ -1732,6 +1829,35 @@ mod tests {
         )));
         let _ = app.update(key("Ctrl+A"));
         assert_eq!(app.active_tab().browser.selected_shown().len(), 3);
+    }
+
+    /// The Menu key goes out to the window for the pointer and back in
+    /// as an open menu — the whole round trip, through `update`.
+    #[test]
+    fn the_menu_key_opens_a_context_menu() {
+        let mut app = app_for_test(&["/dir"]);
+        let _ = app.update(Message::Browser(BrowserMessage::DirLoaded(
+            PathBuf::from("/dir"),
+            Ok(vec![entry_named("a.txt")]),
+        )));
+        let _ = app.update(key("Menu"));
+        assert!(app.active_tab().browser.menu_open());
+        let _ = app.update(key("Escape"));
+        assert!(!app.active_tab().browser.menu_open());
+    }
+
+    #[test]
+    fn a_right_click_from_the_view_opens_a_menu() {
+        let mut app = app_for_test(&["/dir"]);
+        let _ = app.update(Message::Browser(BrowserMessage::DirLoaded(
+            PathBuf::from("/dir"),
+            Ok(vec![entry_named("a.txt")]),
+        )));
+        let _ = app.update(Message::Browser(BrowserMessage::OpenContextMenu {
+            spot: hyprforge_files_core::browser::MenuSpot::Row(0),
+            at: (0.0, 0.0),
+        }));
+        assert!(app.active_tab().browser.menu_open());
     }
 
     /// A Ctrl-held letter nobody bound must not type into search — it is

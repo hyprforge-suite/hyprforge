@@ -30,6 +30,7 @@
 
 use crate::action::Action;
 use crate::keymap::{Combo, Key, Keymap};
+use crate::menu::{MenuConfig, MenuEntry, MenuKind};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -41,6 +42,7 @@ use std::path::Path;
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Config {
     pub keymap: Keymap,
+    pub menus: MenuConfig,
 }
 
 /// One thing in the file that could not be used.
@@ -67,6 +69,7 @@ fn problem(message: impl Into<String>) -> ConfigProblem {
 #[serde(default)]
 struct RawConfig {
     keys: BTreeMap<String, OneOrMany>,
+    menu: BTreeMap<String, Vec<String>>,
 }
 
 /// `trash = "Delete"` and `rename = ["F2", "Ctrl+R"]` are both allowed —
@@ -134,8 +137,42 @@ pub fn parse(text: &str, path: &Path) -> (Config, Vec<ConfigProblem>) {
     };
     let overrides: BTreeMap<String, Vec<String>> =
         raw.keys.into_iter().map(|(id, v)| (id, v.into_vec())).collect();
-    let (keymap, problems) = keymap_with(&overrides);
-    (Config { keymap }, problems)
+    let (keymap, mut problems) = keymap_with(&overrides);
+    let (menus, menu_problems) = menus_with(&raw.menu);
+    problems.extend(menu_problems);
+    (Config { keymap, menus }, problems)
+}
+
+/// The default menus with `[menu]` applied.
+///
+/// A menu the file names is *replaced* by the file's list, in the
+/// file's order — a menu is an ordered whole, and merging two orders has
+/// no answer anyone would predict. A menu the file does not name keeps
+/// its default. An unknown id is reported and left out; the rest of that
+/// menu still shows.
+pub fn menus_with(overrides: &BTreeMap<String, Vec<String>>) -> (MenuConfig, Vec<ConfigProblem>) {
+    let mut menus = MenuConfig::default();
+    let mut problems = Vec::new();
+    for (name, ids) in overrides {
+        let Some(kind) = MenuKind::all().into_iter().find(|k| k.id() == name) else {
+            problems.push(problem(format!(
+                "[menu] {name}: there is no menu with that name (use {})",
+                MenuKind::all().map(|k| k.id()).join(", ")
+            )));
+            continue;
+        };
+        let mut entries = Vec::with_capacity(ids.len());
+        for id in ids {
+            match MenuEntry::parse(id) {
+                Some(entry) => entries.push(entry),
+                None => problems.push(problem(format!(
+                    "[menu] {name}: \"{id}\" is not an action, so it was left out"
+                ))),
+            }
+        }
+        menus.set(kind, entries);
+    }
+    (menus, problems)
 }
 
 /// The default keymap with `overrides` applied.
@@ -365,13 +402,38 @@ mod tests {
         assert_eq!(does(&config, "Backspace"), Some(Action::GoUp));
     }
 
-    /// Sections this version does not know yet — `[menu]`, which a
-    /// later version adds — must not make the whole file unreadable.
+    /// Sections this version does not know yet — ones a later version
+    /// adds — must not make the whole file unreadable.
     #[test]
     fn an_unknown_section_is_ignored_rather_than_fatal() {
-        let (config, problems) = parsed("[menu]\nentry = [\"open\"]\n[keys]\ntrash = \"Ctrl+D\"\n");
+        let (config, problems) =
+            parsed("[from-the-future]\nwidth = 3\n[keys]\ntrash = \"Ctrl+D\"\n");
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(does(&config, "Ctrl+D"), Some(Action::Trash));
+    }
+
+    #[test]
+    fn a_menu_named_in_the_file_is_replaced_in_the_files_order() {
+        let (config, problems) = parsed("[menu]\nentry = [\"trash\", \"-\", \"open\"]\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            config.menus.entry,
+            [
+                MenuEntry::Action(Action::Trash),
+                MenuEntry::Separator,
+                MenuEntry::Action(Action::Open)
+            ]
+        );
+        assert_eq!(config.menus.folder, MenuConfig::default().folder, "untouched menus keep defaults");
+    }
+
+    #[test]
+    fn an_unknown_menu_item_is_left_out_and_the_rest_still_shows() {
+        let (config, problems) = parsed("[menu]\nentry = [\"open\", \"frobnicate\"]\nsidebar = []\n");
+        assert_eq!(config.menus.entry, [MenuEntry::Action(Action::Open)]);
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems.iter().any(|p| p.message.contains("frobnicate")));
+        assert!(problems.iter().any(|p| p.message.contains("sidebar")));
     }
 
     /// The config is read, never written — this module has no function

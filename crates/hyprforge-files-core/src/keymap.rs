@@ -43,6 +43,8 @@ pub enum Key {
     PageUp,
     PageDown,
     Insert,
+    /// The Menu (application) key.
+    Menu,
     /// F1 to F24.
     F(u8),
     /// A character key, always stored lowercase — `Ctrl+N` and
@@ -130,6 +132,7 @@ fn parse_key(part: &str) -> Result<Key, ComboError> {
         "pageup" => Key::PageUp,
         "pagedown" => Key::PageDown,
         "insert" | "ins" => Key::Insert,
+        "menu" | "apps" => Key::Menu,
         "plus" => Key::Char('+'),
         "minus" => Key::Char('-'),
         _ => {
@@ -183,6 +186,7 @@ impl fmt::Display for Combo {
             Key::PageUp => f.write_str("PageUp"),
             Key::PageDown => f.write_str("PageDown"),
             Key::Insert => f.write_str("Insert"),
+            Key::Menu => f.write_str("Menu"),
             Key::F(n) => write!(f, "F{n}"),
             Key::Char('+') => f.write_str("Plus"),
             Key::Char('-') => f.write_str("Minus"),
