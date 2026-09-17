@@ -5,9 +5,9 @@
 //! itself, and `ops` for copy/move/rename's step-driven design.
 
 pub mod fs;
-mod localtime;
+pub mod localtime;
 pub mod ops;
-mod percent;
+pub mod percent;
 pub mod trash;
 
 pub use fs::{FileStatus, Filesystem, RealFilesystem};

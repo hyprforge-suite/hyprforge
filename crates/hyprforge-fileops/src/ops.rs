@@ -303,6 +303,16 @@ struct FileCopy {
     source_path: PathBuf,
     dest_path: PathBuf,
     src_meta: fs::Metadata,
+    /// The copy's scratch buffer, allocated once when the file is opened
+    /// and reused for every chunk.
+    ///
+    /// It used to be a `vec![0u8; CHUNK_SIZE]` inside the per-chunk
+    /// step, which allocates *and zeroes* a megabyte, fills it, and
+    /// frees it — once per megabyte copied. The module doc's own 40 GB
+    /// example is forty thousand of those, and 40 GB of pointless page
+    /// touching, for a buffer whose contents are overwritten before
+    /// anything reads them.
+    buf: Vec<u8>,
 }
 
 /// A copy, move or rename in progress. See the module doc for the design
@@ -454,9 +464,7 @@ impl<F: Filesystem> Operation<F> {
         // `resolve()` re-enters here after a root collision decision —
         // guard entry creation so a Replace/KeepBoth resolution doesn't
         // stat the root and push a second `entries[0]`.
-        let kind = if let Some(existing) = self.entries.first() {
-            existing.kind
-        } else {
+        if self.entries.is_empty() {
             let root_status = match fs::symlink_metadata(&self.source) {
                 Ok(meta) => meta,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -473,21 +481,19 @@ impl<F: Filesystem> Operation<F> {
                     return self.step();
                 }
             };
-            let kind = entry_kind_of(&root_status);
             self.entries.push(Entry {
                 source_relative: PathBuf::new(),
                 dest_relative: PathBuf::new(),
-                kind,
+                kind: entry_kind_of(&root_status),
             });
-            kind
-        };
+        }
 
         // A collision on the root is checked before anything else — in
         // particular before a `rename(2)` is even considered, because
         // `rename` on POSIX silently replaces an existing destination,
         // which would turn "ask the user" into "guess for them".
         if fs::symlink_metadata(&self.dest).is_ok() {
-            if let Some(outcome) = self.check_collision_or_prompt(CollisionCtx::Root, self.source.clone(), self.dest.clone(), kind) {
+            if let Some(outcome) = self.check_collision_or_prompt(CollisionCtx::Root, self.source.clone(), self.dest.clone()) {
                 return outcome;
             }
         }
@@ -663,7 +669,7 @@ impl<F: Filesystem> Operation<F> {
                     self.index += 1;
                     return StepOutcome::Progress(self.progress_snapshot(src_path));
                 }
-                if let Some(outcome) = self.check_collision_or_prompt(CollisionCtx::Entry(idx), src_path.clone(), dest_path.clone(), entry.kind) {
+                if let Some(outcome) = self.check_collision_or_prompt(CollisionCtx::Entry(idx), src_path.clone(), dest_path.clone()) {
                     return outcome;
                 }
                 if self.phase == Phase::Done {
@@ -733,7 +739,14 @@ impl<F: Filesystem> Operation<F> {
                         return StepOutcome::Progress(self.progress_snapshot(src_path));
                     }
                 };
-                self.current_copy = Some(FileCopy { reader, writer, source_path: src_path.clone(), dest_path, src_meta });
+                self.current_copy = Some(FileCopy {
+                    reader,
+                    writer,
+                    source_path: src_path.clone(),
+                    dest_path,
+                    src_meta,
+                    buf: vec![0u8; CHUNK_SIZE],
+                });
                 StepOutcome::Progress(self.progress_snapshot(src_path))
             }
         }
@@ -744,8 +757,7 @@ impl<F: Filesystem> Operation<F> {
     /// whole transfer, and that gives cancellation somewhere to land
     /// short of "wait for this file to finish".
     fn continue_file_copy(&mut self, mut copy: FileCopy) -> StepOutcome {
-        let mut buf = vec![0u8; CHUNK_SIZE];
-        let n = match copy.reader.read(&mut buf) {
+        let n = match copy.reader.read(&mut copy.buf) {
             Ok(n) => n,
             Err(source) => {
                 self.fail(copy.source_path.clone(), classify_read(&copy.source_path, source));
@@ -765,13 +777,13 @@ impl<F: Filesystem> Operation<F> {
                 self.index += 1;
                 return StepOutcome::Progress(self.progress_snapshot(copy.source_path));
             }
-            preserve_file_attrs(&copy.writer, &copy.dest_path, &copy.src_meta);
+            preserve_attrs(&copy.writer, &copy.dest_path, &copy.src_meta, "file");
             self.succeeded.push(copy.dest_path.clone());
             self.index += 1;
             return StepOutcome::Progress(self.progress_snapshot(copy.source_path));
         }
 
-        if let Err(source) = copy.writer.write_all(&buf[..n]) {
+        if let Err(source) = copy.writer.write_all(&copy.buf[..n]) {
             self.fail(copy.source_path.clone(), classify_write(&copy.dest_path, source));
             drop(copy.writer);
             let _ = fs::remove_file(&copy.dest_path);
@@ -794,7 +806,6 @@ impl<F: Filesystem> Operation<F> {
         ctx: CollisionCtx,
         source: PathBuf,
         dest: PathBuf,
-        _kind: EntryKind,
     ) -> Option<StepOutcome> {
         if let Some(policy) = self.collision_policy_for_rest {
             match ctx {
@@ -882,7 +893,7 @@ impl<F: Filesystem> Operation<F> {
             let src = self.source.join(&self.entries[i].source_relative);
             let dst = self.dest.join(&self.entries[i].dest_relative);
             if let (Ok(meta), Ok(dir)) = (fs::symlink_metadata(&src), File::open(&dst)) {
-                preserve_dir_attrs(&dir, &dst, &meta);
+                preserve_attrs(&dir, &dst, &meta, "directory");
             }
         }
 
@@ -969,9 +980,22 @@ fn renamed_sibling(dest: &Path) -> io::Result<PathBuf> {
 /// Never fails the copy: losing these is logged, not fatal — see the
 /// module doc's "What is not preserved" section for what is skipped
 /// entirely rather than best-effort.
-fn preserve_file_attrs(writer: &File, dest_path: &Path, src_meta: &fs::Metadata) {
+/// Copies the source's permissions and timestamps onto what was just
+/// written, best-effort.
+///
+/// Best-effort throughout, and deliberately: a copy that landed but
+/// whose mtime could not be set is a copy, not a failure, and a
+/// destination filesystem that refuses either (FAT, a read-only-ish
+/// mount, an NFS export squashing the caller) must not turn a
+/// successful transfer into a reported error.
+///
+/// `what` names the thing in the two warnings, and is the only
+/// difference there ever was between the file and directory versions of
+/// this — setting `accessed` on a directory is as harmless as setting it
+/// on a file, and both are already best-effort.
+fn preserve_attrs(handle: &File, dest_path: &Path, src_meta: &fs::Metadata, what: &'static str) {
     if let Err(e) = fs::set_permissions(dest_path, fs::Permissions::from_mode(src_meta.mode() & 0o7777)) {
-        tracing::warn!(path = %dest_path.display(), error = %e, "could not preserve permissions");
+        tracing::warn!(path = %dest_path.display(), error = %e, "could not preserve {what} permissions");
     }
     let mut times = fs::FileTimes::new();
     if let Ok(modified) = src_meta.modified() {
@@ -980,21 +1004,8 @@ fn preserve_file_attrs(writer: &File, dest_path: &Path, src_meta: &fs::Metadata)
     if let Ok(accessed) = src_meta.accessed() {
         times = times.set_accessed(accessed);
     }
-    if let Err(e) = writer.set_times(times) {
-        tracing::warn!(path = %dest_path.display(), error = %e, "could not preserve mtime");
-    }
-}
-
-fn preserve_dir_attrs(dir: &File, dest_path: &Path, src_meta: &fs::Metadata) {
-    if let Err(e) = fs::set_permissions(dest_path, fs::Permissions::from_mode(src_meta.mode() & 0o7777)) {
-        tracing::warn!(path = %dest_path.display(), error = %e, "could not preserve directory permissions");
-    }
-    let mut times = fs::FileTimes::new();
-    if let Ok(modified) = src_meta.modified() {
-        times = times.set_modified(modified);
-    }
-    if let Err(e) = dir.set_times(times) {
-        tracing::warn!(path = %dest_path.display(), error = %e, "could not preserve directory mtime");
+    if let Err(e) = handle.set_times(times) {
+        tracing::warn!(path = %dest_path.display(), error = %e, "could not preserve {what} mtime");
     }
 }
 

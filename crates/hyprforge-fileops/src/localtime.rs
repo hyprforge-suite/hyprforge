@@ -37,6 +37,7 @@ struct Tm {
 
 extern "C" {
     fn localtime_r(time: *const i64, result: *mut Tm) -> *mut Tm;
+    fn mktime(tm: *mut Tm) -> i64;
 }
 
 /// A local calendar date and time, precise to the second — exactly what
@@ -138,6 +139,45 @@ impl LocalDateTime {
         }
         Some(LocalDateTime { year, month, day, hour, minute, second })
     }
+
+    /// This local date and time as a [`SystemTime`], folded back through
+    /// `/etc/localtime` by the same C library that produced it.
+    ///
+    /// `mktime` and not arithmetic: it is `localtime_r`'s actual
+    /// inverse, so a `DeletionDate` written during one side of a DST
+    /// change reads back as the moment it was written rather than an
+    /// hour away from it. A hand-rolled civil-days conversion can only
+    /// treat the value as UTC, which is wrong by the host's whole offset
+    /// — up to about fourteen hours, and visible in a Modified column as
+    /// "Yesterday" for something trashed this morning.
+    ///
+    /// `None` when the C library cannot represent the value (`mktime`
+    /// answers `-1`) or when the result predates the epoch: both are the
+    /// "will not parse" case, for a caller to fall back from rather than
+    /// display a plausible wrong date.
+    pub fn to_system_time(self) -> Option<std::time::SystemTime> {
+        let mut tm: Tm = unsafe { std::mem::zeroed() };
+        tm.tm_year = self.year - 1900;
+        tm.tm_mon = self.month as c_int - 1;
+        tm.tm_mday = self.day as c_int;
+        tm.tm_hour = self.hour as c_int;
+        tm.tm_min = self.minute as c_int;
+        tm.tm_sec = self.second as c_int;
+        // -1 is "I do not know whether DST was in effect; work it out" —
+        // the only correct answer here, because the spec's timestamp
+        // carries no offset to tell us. Leaving it 0 would assert "not
+        // DST" and shift every summer timestamp by an hour.
+        tm.tm_isdst = -1;
+        // SAFETY: `tm` is a live, fully-initialised stack `Tm` matching
+        // glibc's layout. `mktime` normalises it in place and returns a
+        // `time_t`; it allocates nothing and retains no pointer past the
+        // call.
+        let secs = unsafe { mktime(&mut tm) };
+        if secs < 0 {
+            return None;
+        }
+        Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64))
+    }
 }
 
 #[cfg(test)]
@@ -172,6 +212,24 @@ mod tests {
         assert!(!s.contains('+'));
         assert_eq!(s.len(), "2026-08-10T19:38:57".len());
         assert!(LocalDateTime::parse(&s).is_some());
+    }
+
+    #[test]
+    fn a_local_time_converts_back_to_the_instant_it_came_from() {
+        // The property that matters is that `to_system_time` is
+        // `from_unix`'s inverse *through the host's real zone*, not
+        // through UTC — so this round-trips a timestamp rather than
+        // comparing against a constant, which would only hold in one
+        // timezone.
+        for secs in [0_i64, 1_000_000_000, 1_789_000_000, 946_684_800] {
+            let there_and_back = LocalDateTime::from_unix(secs)
+                .to_system_time()
+                .expect("a timestamp glibc just produced converts back")
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            assert_eq!(there_and_back, secs, "round trip lost the instant for unix time {secs}");
+        }
     }
 
     #[test]
