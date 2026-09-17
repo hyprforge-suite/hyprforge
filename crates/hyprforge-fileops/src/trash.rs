@@ -152,6 +152,18 @@ pub enum TrashError {
         #[source]
         source: io::Error,
     },
+
+    #[error("could not delete {path}: {source}")]
+    Erase {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+
+    /// Asked to erase something by its stored path, and no record in the
+    /// trash names it.
+    #[error("{path} is not in the trash")]
+    NotInTrash { path: PathBuf },
 }
 
 /// Where one trashed file ended up, and everything [`restore`] needs to
@@ -512,6 +524,44 @@ pub fn restore(item: &TrashedItem) -> Result<(), TrashError> {
     Ok(())
 }
 
+/// Deletes a trashed item for good — its content and its record.
+///
+/// Content first, record second. If removing the content fails partway
+/// through a large folder, the record stays, so the item is still listed
+/// and can be tried again; the other order would leave content nothing
+/// lists, filling the disk invisibly.
+pub fn erase(item: &TrashedItem) -> Result<(), TrashError> {
+    delete_permanently(&item.trashed_file)
+        .map_err(|source| TrashError::Erase { path: item.trashed_file.clone(), source })?;
+    std::fs::remove_file(&item.info_file)
+        .map_err(|source| TrashError::RemoveInfo { path: item.info_file.clone(), source })
+}
+
+/// [`erase`], for a caller that only has the stored path — a listing of
+/// the trash shows those, not the records behind them.
+pub fn erase_stored(home_trash: &Path, trashed_file: &Path) -> Result<(), TrashError> {
+    let item = list(home_trash)?
+        .into_iter()
+        .find(|item| item.trashed_file == trashed_file)
+        .ok_or_else(|| TrashError::NotInTrash { path: trashed_file.to_path_buf() })?;
+    erase(&item)
+}
+
+/// Removes `path` for good, file or folder, without following a symlink
+/// — deleting a link removes the link, never what it points at.
+///
+/// `std::fs::remove_dir_all` is safe here: it does not follow symlinks
+/// inside the tree either, including against a link swapped in while it
+/// runs.
+pub fn delete_permanently(path: &Path) -> io::Result<()> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -756,6 +806,64 @@ mod tests {
         let fs = MockFilesystem::new();
         let err = trash_into(&fs, &home_trash, &missing).unwrap_err();
         assert!(matches!(err, TrashError::SourceNotFound { .. }));
+    }
+
+    #[test]
+    fn erasing_removes_the_content_and_the_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let home_trash = dir.path().join("home").join("Trash");
+        let source = dir.path().join("docs").join("notes.txt");
+        write_file(&source, "gone for good");
+        let item = trash_into(&MockFilesystem::new(), &home_trash, &source).unwrap();
+
+        erase_stored(&home_trash, &item.trashed_file).unwrap();
+        assert!(!item.trashed_file.exists());
+        assert!(!item.info_file.exists());
+        assert!(list(&home_trash).unwrap().is_empty());
+    }
+
+    #[test]
+    fn erasing_a_trashed_folder_removes_all_of_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let home_trash = dir.path().join("home").join("Trash");
+        let folder = dir.path().join("docs").join("project");
+        write_file(&folder.join("deep").join("a.txt"), "x");
+        let item = trash_into(&MockFilesystem::new(), &home_trash, &folder).unwrap();
+        erase(&item).unwrap();
+        assert!(!item.trashed_file.exists());
+    }
+
+    #[test]
+    fn erasing_something_the_trash_has_no_record_of_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let home_trash = dir.path().join("home").join("Trash");
+        let stray = home_trash.join("files").join("stray.txt");
+        write_file(&stray, "x");
+        let err = erase_stored(&home_trash, &stray).unwrap_err();
+        assert!(matches!(err, TrashError::NotInTrash { .. }), "{err}");
+        assert!(stray.exists(), "nothing is deleted on a refusal");
+    }
+
+    /// Deleting a link deletes the link — never what it points at.
+    #[test]
+    fn deleting_a_symlink_leaves_its_target_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("keep");
+        write_file(&target.join("precious.txt"), "x");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        delete_permanently(&link).unwrap();
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        assert!(target.join("precious.txt").exists());
+    }
+
+    #[test]
+    fn deleting_a_folder_removes_the_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("tree");
+        write_file(&folder.join("a").join("b.txt"), "x");
+        delete_permanently(&folder).unwrap();
+        assert!(!folder.exists());
     }
 
     #[test]

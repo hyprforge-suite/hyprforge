@@ -164,6 +164,7 @@ fn main() -> iced::Result {
         resize_generation: 0,
         clipboard: Arc::new(MemoryClipboard::new()),
         jobs: Vec::new(),
+        confirm: None,
         next_job_id: 1,
         modifiers: keyboard::Modifiers::default(),
         clicks: ClickTracker::new(),
@@ -384,6 +385,10 @@ enum Message {
     FolderCreated(u64, PathBuf, Result<(), String>),
     /// Escape, in a text field that kept it — see `field_escape`.
     EscapeInField,
+    /// Yes to the confirmation dialog.
+    Confirm,
+    /// No to it.
+    CancelConfirm,
     /// The answer to the conflict a job is paused on.
     AnswerConflict(JobId, CollisionPolicy),
     /// "Do this for the rest" was ticked or unticked.
@@ -490,6 +495,8 @@ struct App {
     clipboard: Arc<dyn FileClipboard>,
     /// Pastes in progress, oldest first.
     jobs: Vec<RunningJob>,
+    /// A trash or delete waiting on the confirmation dialog.
+    confirm: Option<PendingConfirm>,
     next_job_id: JobId,
     last_window_size: (u32, u32),
     /// Bumped by every resize event, so only the *last* one in a drag
@@ -546,6 +553,22 @@ struct App {
     /// Holding the trait object is what puts this window's own update
     /// loop within reach of them.
     backend: Arc<dyn FsBackend>,
+}
+
+/// Something destructive, waiting for a yes.
+#[derive(Debug, Clone, PartialEq)]
+struct PendingConfirm {
+    removal: Removal,
+    paths: Vec<PathBuf>,
+    tab_id: u64,
+    dir: PathBuf,
+}
+
+/// The two ways a selection leaves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Removal {
+    Trash,
+    Delete,
 }
 
 /// A paste the window is waiting on.
@@ -612,15 +635,12 @@ impl App {
                 })
             }
             Outcome::Trash(paths) => {
-                if paths.is_empty() {
-                    return Task::none();
-                }
-                let tab = &self.tabs[tab_index];
-                let dir = tab.browser.current_dir().to_path_buf();
-                let tab_id = tab.id;
-                Task::perform(trash_many(paths), move |errors| {
-                    Message::TrashDone(tab_id, dir.clone(), errors)
-                })
+                let ask = self.config.behaviour.confirm_trash;
+                self.remove(tab_index, Removal::Trash, paths, ask)
+            }
+            Outcome::DeletePermanently(paths) => {
+                let ask = self.config.behaviour.confirm_delete;
+                self.remove(tab_index, Removal::Delete, paths, ask)
             }
             Outcome::OpenInNewTab(path) => self.open_tab(path),
             Outcome::SetClipboard(clip) => {
@@ -773,6 +793,38 @@ impl App {
                 }
                 self.refresh_dirs(&finished.dirs)
             }
+        }
+    }
+
+    /// Trashes or deletes `paths` — or, if `ask`, holds them for the
+    /// confirmation dialog first.
+    fn remove(&mut self, tab_index: usize, removal: Removal, paths: Vec<PathBuf>, ask: bool) -> Task<Message> {
+        if paths.is_empty() {
+            return Task::none();
+        }
+        let tab = &self.tabs[tab_index];
+        let pending = PendingConfirm {
+            removal,
+            paths,
+            tab_id: tab.id,
+            dir: tab.browser.current_dir().to_path_buf(),
+        };
+        if ask {
+            self.confirm = Some(pending);
+            return Task::none();
+        }
+        self.carry_out(pending)
+    }
+
+    fn carry_out(&mut self, pending: PendingConfirm) -> Task<Message> {
+        let PendingConfirm { removal, paths, tab_id, dir } = pending;
+        match removal {
+            Removal::Trash => Task::perform(trash_many(paths), move |errors| {
+                Message::TrashDone(tab_id, dir.clone(), errors)
+            }),
+            Removal::Delete => Task::perform(delete_many(paths), move |errors| {
+                Message::TrashDone(tab_id, dir.clone(), errors)
+            }),
         }
     }
 
@@ -943,6 +995,18 @@ impl App {
                 }
                 self.handle_outcome(self.active, outcome)
             }
+            // A confirmation has the keyboard. Escape says no. Enter says
+            // yes to a trash, which can be undone, and nothing to a
+            // permanent delete, which cannot — that one takes a click.
+            Message::KeyPressed(press) if self.confirm.is_some() => match press.key {
+                keymap::Key::Escape => self.update(Message::CancelConfirm),
+                keymap::Key::Enter
+                    if self.confirm.as_ref().is_some_and(|c| c.removal == Removal::Trash) =>
+                {
+                    self.update(Message::Confirm)
+                }
+                _ => Task::none(),
+            },
             // A conflict dialog has the keyboard. Escape cancels the job;
             // Enter keeps both, the one answer that neither loses a file
             // nor leaves one behind.
@@ -1011,6 +1075,14 @@ impl App {
             Message::Renamed(tab_id, to, result) => self.name_changed(tab_id, to, result, false),
             // A new folder goes straight into being named.
             Message::FolderCreated(tab_id, path, result) => self.name_changed(tab_id, path, result, true),
+            Message::Confirm => match self.confirm.take() {
+                Some(pending) => self.carry_out(pending),
+                None => Task::none(),
+            },
+            Message::CancelConfirm => {
+                self.confirm = None;
+                Task::none()
+            }
             Message::EscapeInField => {
                 let outcome = self.active_tab_mut().browser.update(BrowserMessage::RenameCancel);
                 self.handle_outcome(self.active, outcome)
@@ -1034,8 +1106,7 @@ impl App {
             }
             Message::TrashDone(tab_id, dir, errors) => {
                 if !errors.is_empty() {
-                    self.status =
-                        Some(format!("Couldn't move everything to Trash: {}", errors.join("; ")));
+                    self.status = Some(format!("Couldn't remove everything: {}", errors.join("; ")));
                 }
                 let Some(index) = self.tab_index(tab_id) else {
                     // The tab this delete was started from has since
@@ -1240,6 +1311,9 @@ impl App {
         // listing alike — so it is stacked over the whole window rather
         // than drawn inside the browser's own area.
         let size = (self.last_window_size.0 as f32, self.last_window_size.1 as f32);
+        if let Some(pending) = &self.confirm {
+            return iced::widget::stack![window, confirm_dialog(pending, scale)].into();
+        }
         // A conflict is a question the job is paused on, so it goes
         // above everything, the context menu included.
         if let Some((job, conflict)) =
@@ -1350,60 +1424,117 @@ fn job_progress_bar<'a>(job: &RunningJob, scale: FontScale) -> Element<'a, Messa
 
 /// The question a paused paste is asking.
 ///
-/// Over a full-window layer that swallows clicks, because the job is
-/// paused on this and nothing else in the window should look clickable
-/// meanwhile. Keep Both is the primary button: it is the one answer that
-/// neither loses a file nor leaves one behind, and it is what Enter does.
+/// Keep Both is the primary button: it is the one answer that neither
+/// loses a file nor leaves one behind, and it is what Enter does.
 fn conflict_dialog<'a>(job: &RunningJob, conflict: &Collision, scale: FontScale) -> Element<'a, Message> {
     use hyprforge_ui::widgets::primary_button;
-    let name = conflict
-        .dest
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| conflict.dest.display().to_string());
+    let name = display_name(&conflict.dest);
     let folder = conflict
         .dest
         .parent()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     let id = job.id;
-    let card = container(
-        column![
-            scaled_text(format!("\u{201C}{name}\u{201D} already exists"), 17.0, scale),
-            hyprforge_ui::widgets::meta_text(
-                format!("In {folder}. Replace it, keep both, or skip this one?"),
-                BASE_TEXT_SIZE,
-                scale,
-            ),
+    dialog(
+        format!("\u{201C}{name}\u{201D} already exists"),
+        format!("In {folder}. Replace it, keep both, or skip this one?"),
+        Some(
             iced::widget::checkbox(job.apply_to_rest)
                 .label("Do this for the rest")
                 .on_toggle(move |on| Message::SetApplyToRest(id, on))
-                .text_size(scale.apply(BASE_TEXT_SIZE)),
-            row![
-                secondary_button("Cancel").on_press(Message::CancelJob(id)),
-                iced::widget::Space::new().width(Length::Fill),
-                secondary_button("Skip").on_press(Message::AnswerConflict(id, CollisionPolicy::Skip)),
-                secondary_button("Replace")
-                    .on_press(Message::AnswerConflict(id, CollisionPolicy::Replace)),
-                primary_button("Keep Both")
-                    .on_press(Message::AnswerConflict(id, CollisionPolicy::KeepBoth)),
-            ]
-            .spacing(spacing::SM)
-            .align_y(iced::Alignment::Center),
+                .text_size(scale.apply(BASE_TEXT_SIZE))
+                .into(),
+        ),
+        row![
+            secondary_button("Cancel").on_press(Message::CancelJob(id)),
+            iced::widget::Space::new().width(Length::Fill),
+            secondary_button("Skip").on_press(Message::AnswerConflict(id, CollisionPolicy::Skip)),
+            secondary_button("Replace").on_press(Message::AnswerConflict(id, CollisionPolicy::Replace)),
+            primary_button("Keep Both").on_press(Message::AnswerConflict(id, CollisionPolicy::KeepBoth)),
         ]
-        .spacing(spacing::MD),
+        .spacing(spacing::SM)
+        .align_y(iced::Alignment::Center)
+        .into(),
+        scale,
     )
-    .padding(spacing::LG)
-    .max_width(scale.apply(460.0))
-    .style(|_t: &Theme| container::Style {
-        background: Some(Background::Color(hyprforge_ui::theme::surface::sidebar())),
-        border: Border {
-            color: hyprforge_ui::theme::surface::card_border(),
-            width: 1.0,
-            radius: hyprforge_files_core::density::outer_radius().into(),
-        },
-        ..container::Style::default()
-    });
+}
+
+/// Asks before a trash or a permanent delete.
+///
+/// Says what goes and whether it can come back. For a permanent delete
+/// the confirming button is the *secondary* one and Enter does not press
+/// it: the easy path through this dialog should be the one that keeps
+/// the files.
+fn confirm_dialog<'a>(pending: &PendingConfirm, scale: FontScale) -> Element<'a, Message> {
+    use hyprforge_ui::widgets::primary_button;
+    let what = match pending.paths.as_slice() {
+        [one] => format!("\u{201C}{}\u{201D}", display_name(one)),
+        many => format!("{} items", many.len()),
+    };
+    let (title, body, buttons) = match pending.removal {
+        Removal::Trash => (
+            format!("Move {what} to the Trash?"),
+            "You can restore anything from the Trash until it is emptied.".to_string(),
+            row![
+                iced::widget::Space::new().width(Length::Fill),
+                secondary_button("Cancel").on_press(Message::CancelConfirm),
+                primary_button("Move to Trash").on_press(Message::Confirm),
+            ],
+        ),
+        Removal::Delete => (
+            format!("Delete {what} permanently?"),
+            "This skips the Trash. It can't be undone.".to_string(),
+            row![
+                iced::widget::Space::new().width(Length::Fill),
+                secondary_button("Delete Permanently").on_press(Message::Confirm),
+                primary_button("Keep").on_press(Message::CancelConfirm),
+            ],
+        ),
+    };
+    dialog(title, body, None, buttons.spacing(spacing::SM).align_y(iced::Alignment::Center).into(), scale)
+}
+
+/// A path's final name for a dialog, falling back to the whole path.
+fn display_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// The shape every dialog here takes: a title, a sentence, an optional
+/// extra control, and a row of buttons, on a card over a dimmed window.
+///
+/// Over a full-window layer that swallows clicks, because a dialog is a
+/// question the window is waiting on and nothing else should look
+/// clickable meanwhile.
+fn dialog<'a>(
+    title: String,
+    body: String,
+    extra: Option<Element<'a, Message>>,
+    buttons: Element<'a, Message>,
+    scale: FontScale,
+) -> Element<'a, Message> {
+    let mut content = column![
+        scaled_text(title, 17.0, scale),
+        hyprforge_ui::widgets::meta_text(body, BASE_TEXT_SIZE, scale),
+    ]
+    .spacing(spacing::MD);
+    if let Some(extra) = extra {
+        content = content.push(extra);
+    }
+    content = content.push(buttons);
+    let card = container(content)
+        .padding(spacing::LG)
+        .max_width(scale.apply(460.0))
+        .style(|_t: &Theme| container::Style {
+            background: Some(Background::Color(hyprforge_ui::theme::surface::sidebar())),
+            border: Border {
+                color: hyprforge_ui::theme::surface::card_border(),
+                width: 1.0,
+                radius: hyprforge_files_core::density::outer_radius().into(),
+            },
+            ..container::Style::default()
+        });
     iced::widget::opaque(
         container(card)
             .center_x(Length::Fill)
@@ -1493,6 +1624,7 @@ mod pointer {
 /// - `menu@X:Y` — the first row's context menu, opened at (X, Y)
 /// - `conflict` — the paste-conflict dialog, on a job that does nothing
 /// - `rename` — the first row, being renamed
+/// - `delete` — the permanent-delete question, for the first row
 ///
 /// This machine cannot synthesise a click or a key press into a window,
 /// and how a menu, a dialog or an edit field *looks* is only checkable
@@ -1505,6 +1637,7 @@ struct DebugShow {
     menu_at: Option<(f32, f32)>,
     conflict: bool,
     rename: bool,
+    delete: bool,
 }
 
 #[cfg(debug_assertions)]
@@ -1523,6 +1656,8 @@ impl DebugShow {
                 show.conflict = true;
             } else if item == "rename" {
                 show.rename = true;
+            } else if item == "delete" {
+                show.delete = true;
             }
         }
         show
@@ -1556,6 +1691,11 @@ impl DebugShow {
         let browser = &mut app.tabs[index].browser;
         if let Some(at) = self.menu_at.take() {
             browser.update(BrowserMessage::OpenContextMenu { spot: MenuSpot::Row(0), at });
+        }
+        if std::mem::take(&mut self.delete) {
+            browser.update(BrowserMessage::EntryClicked { index: 0, ctrl: false, shift: false });
+            let outcome = browser.perform(Action::DeletePermanently);
+            return app.handle_outcome(index, outcome);
         }
         if std::mem::take(&mut self.rename) {
             browser.update(BrowserMessage::EntryClicked { index: 0, ctrl: false, shift: false });
@@ -1842,6 +1982,33 @@ async fn trash_many(paths: Vec<PathBuf>) -> Vec<String> {
     }
 }
 
+/// Deletes `paths` for good, off the UI thread. Anything in the Trash is
+/// erased with its record, so the Trash does not go on listing a file
+/// that is gone; anything else is removed without following symlinks.
+async fn delete_many(paths: Vec<PathBuf>) -> Vec<String> {
+    match tokio::task::spawn_blocking(move || {
+        let home_trash = hyprforge_fileops::home_trash_dir();
+        let stored = home_trash.join("files");
+        paths
+            .into_iter()
+            .filter_map(|p| {
+                let result = if p.parent() == Some(stored.as_path()) {
+                    hyprforge_fileops::erase_stored(&home_trash, &p).map_err(|e| e.to_string())
+                } else {
+                    hyprforge_fileops::delete_permanently(&p)
+                        .map_err(|e| format!("{}: {e}", display_name(&p)))
+                };
+                result.err()
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    {
+        Ok(errors) => errors,
+        Err(e) => vec![format!("Deleting was interrupted: {e}")],
+    }
+}
+
 /// How many folders one listing will count before giving up.
 const COUNT_BUDGET: usize = 400;
 
@@ -2010,6 +2177,7 @@ mod tests {
             resize_generation: 0,
             clipboard: Arc::new(MemoryClipboard::new()),
             jobs: Vec::new(),
+            confirm: None,
             next_job_id: 1,
             modifiers: keyboard::Modifiers::default(),
             clicks: ClickTracker::new(),
@@ -2755,6 +2923,93 @@ mod tests {
         let mut app = app_for_test(&["/dir"]);
         let _ = app.update(Message::Renamed(0, "/dir/b".into(), Err("nope".into())));
         assert_eq!(app.status.as_deref(), Some("nope"));
+    }
+
+    // --- trash and delete confirmation ---------------------------------------
+
+    fn with_behaviour(app: &mut App, behaviour: hyprforge_files_core::config::Behaviour) {
+        app.config = Arc::new(hyprforge_files_core::config::Config {
+            behaviour,
+            ..hyprforge_files_core::config::Config::default()
+        });
+    }
+
+    fn one_selected_file(app: &mut App) {
+        let _ = app.update(Message::Browser(BrowserMessage::DirLoaded(
+            PathBuf::from("/dir"),
+            Ok(vec![entry_named("a.txt")]),
+        )));
+        let _ = app.update(key("Down"));
+    }
+
+    /// Out of the box, Delete trashes straight away — the trash is the
+    /// undo.
+    #[test]
+    fn delete_trashes_without_asking_by_default() {
+        let mut app = app_for_test(&["/dir"]);
+        one_selected_file(&mut app);
+        let _ = app.update(key("Delete"));
+        assert!(app.confirm.is_none());
+    }
+
+    #[test]
+    fn confirm_trash_asks_first_and_enter_says_yes() {
+        let mut app = app_for_test(&["/dir"]);
+        with_behaviour(
+            &mut app,
+            hyprforge_files_core::config::Behaviour {
+                confirm_trash: true,
+                ..hyprforge_files_core::config::Behaviour::default()
+            },
+        );
+        one_selected_file(&mut app);
+        let _ = app.update(key("Delete"));
+        let pending = app.confirm.as_ref().expect("asked");
+        assert_eq!(pending.removal, Removal::Trash);
+        assert_eq!(pending.paths, [PathBuf::from("/dir/a.txt")]);
+        let _ = app.update(key("Enter"));
+        assert!(app.confirm.is_none(), "Enter confirmed a trash");
+    }
+
+    /// Enter never confirms a permanent delete; Escape cancels it.
+    #[test]
+    fn a_permanent_delete_needs_a_click_not_enter() {
+        let mut app = app_for_test(&["/dir"]);
+        one_selected_file(&mut app);
+        let _ = app.update(Message::Browser(BrowserMessage::Perform(Action::DeletePermanently)));
+        assert_eq!(app.confirm.as_ref().unwrap().removal, Removal::Delete, "asks by default");
+        let _ = app.update(key("Enter"));
+        assert!(app.confirm.is_some(), "Enter did not delete anything");
+        let _ = app.update(key("Escape"));
+        assert!(app.confirm.is_none());
+    }
+
+    /// While the dialog is up, keys do not reach the listing.
+    #[test]
+    fn keys_do_not_act_behind_the_dialog() {
+        let mut app = app_for_test(&["/dir"]);
+        one_selected_file(&mut app);
+        let _ = app.update(Message::Browser(BrowserMessage::Perform(Action::DeletePermanently)));
+        let _ = app.update(key("Ctrl+T"));
+        assert_eq!(app.tabs.len(), 1, "no tab opened behind the dialog");
+    }
+
+    #[tokio::test]
+    async fn deleting_permanently_removes_the_file_and_leaves_a_link_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("gone.txt");
+        std::fs::write(&file, "x").unwrap();
+        let keep = dir.path().join("keep");
+        std::fs::create_dir(&keep).unwrap();
+        std::fs::write(keep.join("precious"), "x").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&keep, &link).unwrap();
+
+        let errors = delete_many(vec![file.clone(), link.clone()]).await;
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(!file.exists());
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        assert!(keep.join("precious").exists());
     }
 
     /// Pasting a folder into itself is refused before any job starts.

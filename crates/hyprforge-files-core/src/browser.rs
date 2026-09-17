@@ -365,6 +365,8 @@ pub enum Outcome {
     /// Move these to the trash. Only paths the user can currently see —
     /// see [`Browser::perform`].
     Trash(Vec<PathBuf>),
+    /// Delete these for good. Only paths the user can currently see.
+    DeletePermanently(Vec<PathBuf>),
     /// Open this folder in a new tab. A host without tabs ignores it.
     OpenInNewTab(PathBuf),
     /// Put these files on the clipboard.
@@ -922,6 +924,7 @@ impl Browser {
                 Outcome::PrefsChanged(self.prefs.clone())
             }
             Action::Trash => Outcome::Trash(self.selected_shown()),
+            Action::DeletePermanently => Outcome::DeletePermanently(self.selected_shown()),
             Action::ContextMenu => Outcome::OpenContextMenuAtPointer(MenuSpot::Focused),
             Action::Copy | Action::Cut => Outcome::SetClipboard(crate::clipboard::FileClip {
                 paths: self.selected_shown(),

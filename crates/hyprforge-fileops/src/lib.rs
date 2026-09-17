@@ -15,7 +15,10 @@ pub use ops::{
     drive, Collision, CollisionDecision, CollisionPolicy, MoveStrategy, OpKind, Operation, OpsError,
     Progress, Report, StepOutcome,
 };
-pub use trash::{home_trash_dir, list, list_per_filesystem, restore, trash, trash_into, TrashError, TrashedItem};
+pub use trash::{
+    delete_permanently, erase, erase_stored, home_trash_dir, list, list_per_filesystem, restore, trash, trash_into,
+    TrashError, TrashedItem,
+};
 
 #[cfg(any(test, feature = "mock"))]
 pub use fs::mock::MockFilesystem;

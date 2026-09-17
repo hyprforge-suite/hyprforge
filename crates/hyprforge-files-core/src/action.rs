@@ -47,6 +47,8 @@ pub enum Action {
     ToggleHidden,
     /// Move the selection to the trash.
     Trash,
+    /// Delete the selection for good, bypassing the trash.
+    DeletePermanently,
     /// Put the selection on the clipboard, to be copied when pasted.
     Copy,
     /// Put the selection on the clipboard, to be moved when pasted.
@@ -103,6 +105,7 @@ impl Action {
             Action::ClearSearch,
             Action::ToggleHidden,
             Action::Trash,
+            Action::DeletePermanently,
             Action::Copy,
             Action::Cut,
             Action::Paste,
@@ -138,6 +141,7 @@ impl Action {
             Action::ClearSearch => "clear-search",
             Action::ToggleHidden => "show-hidden",
             Action::Trash => "trash",
+            Action::DeletePermanently => "delete-permanently",
             Action::Copy => "copy",
             Action::Cut => "cut",
             Action::Paste => "paste",
@@ -192,6 +196,7 @@ impl Action {
             Action::ClearSearch => "Clear Search",
             Action::ToggleHidden => "Show Hidden Files",
             Action::Trash => "Move to Trash",
+            Action::DeletePermanently => "Delete Permanently",
             Action::Copy => "Copy",
             Action::Cut => "Cut",
             Action::Paste => "Paste",
@@ -255,6 +260,10 @@ impl Action {
             Action::ClearSearch => &["Escape"],
             Action::ToggleHidden => &["Ctrl+H"],
             Action::Trash => &["Delete"],
+            // Unbound on purpose. A single key that skips the trash is one
+            // slip away from losing a file for good; anyone who wants
+            // Shift+Delete can bind it in `files-config.toml`.
+            Action::DeletePermanently => &[],
             Action::Copy => &["Ctrl+C"],
             Action::Cut => &["Ctrl+X"],
             Action::Paste => &["Ctrl+V"],
@@ -335,6 +344,7 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         Action::ClearSearch => ctx.searching,
         Action::ToggleHidden | Action::ContextMenu => true,
         Action::Trash => ctx.selected > 0 && !ctx.in_trash,
+        Action::DeletePermanently => ctx.selected > 0,
         Action::Copy | Action::CopyPath => ctx.selected > 0,
         // Moving something out of the Trash by hand would leave its
         // record behind; restoring is the way out, and it comes later.
@@ -378,16 +388,30 @@ mod tests {
         assert_eq!(Action::from_id("tab-10"), None);
     }
 
-    /// Every action has a way in. An action with no default key must be
-    /// one a menu will carry — and today there are none of those, so
-    /// every action has a key. This is the test that stops an action
-    /// going back to being built and unreachable.
+    /// Every action has a way in: a default key, or a place in a default
+    /// menu. This is the test that stops an action going back to being
+    /// built and unreachable.
     #[test]
-    fn every_action_ships_with_at_least_one_key() {
+    fn every_action_ships_with_a_key_or_a_menu_item() {
+        let menus = crate::menu::MenuConfig::default();
+        let in_a_menu = |action: Action| {
+            crate::menu::MenuKind::all()
+                .into_iter()
+                .any(|kind| menus.get(kind).contains(&crate::menu::MenuEntry::Action(action)))
+        };
         for action in Action::all() {
-            assert!(!action.default_keys().is_empty(), "{action:?} has no way to reach it");
+            assert!(
+                !action.default_keys().is_empty() || in_a_menu(action),
+                "{action:?} has no way to reach it"
+            );
             assert!(!action.label().is_empty(), "{action:?} has no label");
         }
+    }
+
+    /// Deleting for good is never one unconfigured keypress away.
+    #[test]
+    fn deleting_permanently_has_no_key_out_of_the_box() {
+        assert!(Action::DeletePermanently.default_keys().is_empty());
     }
 
     #[test]

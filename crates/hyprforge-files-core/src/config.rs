@@ -48,9 +48,22 @@ pub struct Config {
 
 /// `[behaviour]`: how the file manager acts when there is a choice to
 /// make.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Behaviour {
     pub on_conflict: OnConflict,
+    /// Ask before moving things to the trash. Off by default: the trash
+    /// is the undo, and a question every time teaches people to click
+    /// through questions.
+    pub confirm_trash: bool,
+    /// Ask before deleting for good. On by default, because there is no
+    /// undo; turning it off is a choice somebody has to make.
+    pub confirm_delete: bool,
+}
+
+impl Default for Behaviour {
+    fn default() -> Self {
+        Behaviour { on_conflict: OnConflict::Ask, confirm_trash: false, confirm_delete: true }
+    }
 }
 
 /// What a paste does when something is already at a destination.
@@ -118,6 +131,29 @@ struct RawConfig {
 #[serde(default, rename_all = "kebab-case")]
 struct RawBehaviour {
     on_conflict: Option<String>,
+    confirm_trash: Option<toml::Value>,
+    confirm_delete: Option<toml::Value>,
+}
+
+/// A `[behaviour]` switch: `true` or `false`, or a problem naming it —
+/// checked by hand for the same reason as the rest of this section.
+fn switch(
+    name: &str,
+    value: &Option<toml::Value>,
+    default: bool,
+    problems: &mut Vec<ConfigProblem>,
+) -> bool {
+    match value {
+        None => default,
+        Some(toml::Value::Boolean(on)) => *on,
+        Some(other) => {
+            problems.push(problem(format!(
+                "[behaviour] {name} = {other}: use true or false — {} until this is fixed",
+                if default { "on" } else { "off" }
+            )));
+            default
+        }
+    }
 }
 
 /// `trash = "Delete"` and `rename = ["F2", "Ctrl+R"]` are both allowed —
@@ -198,6 +234,10 @@ pub fn parse(text: &str, path: &Path) -> (Config, Vec<ConfigProblem>) {
             ))),
         }
     }
+    behaviour.confirm_trash =
+        switch("confirm-trash", &raw.behaviour.confirm_trash, behaviour.confirm_trash, &mut problems);
+    behaviour.confirm_delete =
+        switch("confirm-delete", &raw.behaviour.confirm_delete, behaviour.confirm_delete, &mut problems);
     (Config { keymap, menus, behaviour }, problems)
 }
 
@@ -516,6 +556,27 @@ mod tests {
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].message.contains("overwrite"));
         assert_eq!(does(&config, "Ctrl+D"), Some(Action::Trash), "the keys still applied");
+    }
+
+    #[test]
+    fn deleting_asks_and_trashing_does_not_unless_configured() {
+        let defaults = Config::default().behaviour;
+        assert!(defaults.confirm_delete);
+        assert!(!defaults.confirm_trash);
+        let (config, problems) =
+            parsed("[behaviour]\nconfirm-trash = true\nconfirm-delete = false\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(config.behaviour.confirm_trash);
+        assert!(!config.behaviour.confirm_delete);
+    }
+
+    /// A switch written as a string keeps its safe default and says so.
+    #[test]
+    fn a_switch_that_is_not_true_or_false_keeps_its_default() {
+        let (config, problems) = parsed("[behaviour]\nconfirm-delete = \"no\"\n");
+        assert!(config.behaviour.confirm_delete, "still asks");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].message.contains("confirm-delete"));
     }
 
     /// The config is read, never written — this module has no function
