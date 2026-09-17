@@ -11,5 +11,6 @@
 //! and the things a dialog deliberately does not have: launching what
 //! you double-click, and file operations.
 
+pub mod jobs;
 pub mod launch;
 pub mod tabstrip;

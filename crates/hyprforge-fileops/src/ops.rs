@@ -206,7 +206,7 @@ pub struct CollisionDecision {
 /// A destination path that already has something at it. Returned by
 /// [`Operation::step`] instead of proceeding; the caller answers with
 /// [`Operation::resolve`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Collision {
     /// The source entry that would land at `dest`, absolute.
     pub source: PathBuf,
@@ -218,7 +218,7 @@ pub struct Collision {
 /// are `None` while the source tree is still being walked (see the module
 /// doc) — legitimately unknown until the walk finishes, not a guess dressed
 /// up as a number.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Progress {
     pub bytes_done: u64,
     pub bytes_total: Option<u64>,

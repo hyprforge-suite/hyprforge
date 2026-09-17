@@ -238,6 +238,17 @@ impl Selection {
         self.click(&rows[next].path);
     }
 
+    /// Forgets every selected, focused or anchor path not in `present`.
+    fn retain(&mut self, present: &HashSet<PathBuf>) {
+        self.selected.retain(|p| present.contains(p));
+        if self.focused.as_ref().is_some_and(|p| !present.contains(p)) {
+            self.focused = None;
+        }
+        if self.anchor.as_ref().is_some_and(|p| !present.contains(p)) {
+            self.anchor = None;
+        }
+    }
+
     /// Moves the keyboard focus to `path` without touching what is
     /// selected — a right click inside an existing selection.
     fn focus(&mut self, path: &Path) {
@@ -345,6 +356,12 @@ pub enum Outcome {
     Trash(Vec<PathBuf>),
     /// Open this folder in a new tab. A host without tabs ignores it.
     OpenInNewTab(PathBuf),
+    /// Put these files on the clipboard.
+    SetClipboard(crate::clipboard::FileClip),
+    /// Put this text on the clipboard — the paths, for Copy Path.
+    CopyText(String),
+    /// Paste the clipboard's files into this folder.
+    Paste(PathBuf),
     /// Open a context menu at the pointer. The browser does not know
     /// where the pointer is — the window does, and fills it in, the same
     /// way it fills in modifier keys on a click.
@@ -493,6 +510,8 @@ pub struct Browser {
     config: Arc<Config>,
     /// The context menu, when one is showing.
     menu: Option<OpenMenu>,
+    /// Whether the clipboard holds files — see [`Self::set_can_paste`].
+    can_paste: bool,
 }
 
 impl Browser {
@@ -524,6 +543,7 @@ impl Browser {
             list_scrollable_id: Id::unique(),
             config: Arc::new(Config::default()),
             menu: None,
+            can_paste: false,
         };
         (browser, Outcome::ReadDir(start_dir))
     }
@@ -718,7 +738,14 @@ impl Browser {
             has_parent: self.current_dir.parent().is_some(),
             searching: !self.search_query.is_empty(),
             in_trash: self.in_trash(),
+            can_paste: self.can_paste,
         }
+    }
+
+    /// Tells the browser whether the clipboard holds files. The host owns
+    /// the clipboard and calls this whenever it changes.
+    pub fn set_can_paste(&mut self, can_paste: bool) {
+        self.can_paste = can_paste;
     }
 
     /// Whether this listing is the Trash.
@@ -829,6 +856,25 @@ impl Browser {
             }
             Action::Trash => Outcome::Trash(self.selected_shown()),
             Action::ContextMenu => Outcome::OpenContextMenuAtPointer(MenuSpot::Focused),
+            Action::Copy | Action::Cut => Outcome::SetClipboard(crate::clipboard::FileClip {
+                paths: self.selected_shown(),
+                verb: if action == Action::Cut {
+                    crate::clipboard::ClipVerb::Cut
+                } else {
+                    crate::clipboard::ClipVerb::Copy
+                },
+            }),
+            Action::CopyPath => Outcome::CopyText(
+                self.selected_shown()
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            Action::Paste => Outcome::Paste(self.current_dir.clone()),
+            // A re-read, not a navigation: history, search and the
+            // selection all stay.
+            Action::Refresh => Outcome::ReadDir(self.current_dir.clone()),
             // Handled above; listed so a new window action is a compile
             // error here rather than a silent fall-through.
             Action::NewTab
@@ -951,7 +997,13 @@ impl Browser {
                 self.load_state = LoadState::Error(e);
             }
         }
-        self.selection.clear();
+        // Not cleared: navigating somewhere new already cleared it in
+        // `arrive_at`, so the only listing that reaches here with a
+        // selection is a *refresh* of the same folder — after a paste, a
+        // rename, or F5 — and there the selection should survive. Paths
+        // that are gone are dropped so nothing can act on them.
+        let still_here: HashSet<PathBuf> = self.entries.iter().map(|e| e.path.clone()).collect();
+        self.selection.retain(&still_here);
         self.refresh_view();
 
         // No counts to clear: a folder's count now lives on the folder's
@@ -2933,6 +2985,50 @@ mod tests {
         }
     }
 
+    /// A refresh keeps the selection, minus anything that has gone —
+    /// the path-keyed selection makes that free, and it is what lets a
+    /// paste or a rename leave the things you were working on selected.
+    #[test]
+    fn refreshing_keeps_the_selection_of_what_is_still_there() {
+        let mut browser = loaded_browser(&["a.txt", "b.txt", "c.txt"]);
+        browser.perform(Action::SelectAll);
+        assert_eq!(browser.perform(Action::Refresh), Outcome::ReadDir(PathBuf::from("/dir")));
+        browser.update(Message::DirLoaded(
+            PathBuf::from("/dir"),
+            Ok(vec![entry("a.txt", false), entry("c.txt", false)]),
+        ));
+        assert_eq!(
+            browser.selected_shown(),
+            [PathBuf::from("/dir/a.txt"), PathBuf::from("/dir/c.txt")]
+        );
+    }
+
+    #[test]
+    fn copy_and_cut_put_the_visible_selection_on_the_clipboard() {
+        use crate::clipboard::{ClipVerb, FileClip};
+        let mut browser = loaded_browser(&["a.txt", "b.txt"]);
+        browser.perform(Action::SelectAll);
+        assert_eq!(
+            browser.perform(Action::Cut),
+            Outcome::SetClipboard(FileClip {
+                paths: vec!["/dir/a.txt".into(), "/dir/b.txt".into()],
+                verb: ClipVerb::Cut,
+            })
+        );
+        assert_eq!(
+            browser.perform(Action::CopyPath),
+            Outcome::CopyText("/dir/a.txt\n/dir/b.txt".to_string())
+        );
+    }
+
+    #[test]
+    fn paste_asks_the_host_to_paste_here_only_when_there_is_something() {
+        let mut browser = loaded_browser(&["a.txt"]);
+        assert_eq!(browser.perform(Action::Paste), Outcome::None);
+        browser.set_can_paste(true);
+        assert_eq!(browser.perform(Action::Paste), Outcome::Paste(PathBuf::from("/dir")));
+    }
+
     // --- the context menu -----------------------------------------------------
 
     fn right_click(browser: &mut Browser, spot: MenuSpot) {
@@ -3015,9 +3111,20 @@ mod tests {
     fn the_keyboard_drives_an_open_menu() {
         let mut browser = loaded_browser(&["a.txt", "b.txt"]);
         right_click(&mut browser, MenuSpot::Row(0));
-        // Entry menu: Open, -, Select All, -, Move to Trash
-        browser.perform(Action::FocusDown); // Open
-        browser.perform(Action::FocusDown); // Select All
+        // Walk down until Select All is highlighted, however the default
+        // menu happens to be ordered.
+        let highlighted = |b: &Browser| {
+            let menu = b.menu.as_ref().unwrap();
+            menu.highlighted.and_then(|i| match &menu.items[i] {
+                MenuItem::Action { action, .. } => Some(*action),
+                MenuItem::Separator => None,
+            })
+        };
+        browser.perform(Action::FocusDown);
+        assert_eq!(highlighted(&browser), Some(Action::Open), "Down starts at the top");
+        while highlighted(&browser) != Some(Action::SelectAll) {
+            browser.perform(Action::FocusDown);
+        }
         assert_eq!(browser.selected_shown().len(), 1, "moving in the menu moves nothing else");
         assert_eq!(browser.perform(Action::Open), Outcome::None, "Select All ran");
         assert_eq!(browser.selected_shown().len(), 2);

@@ -44,7 +44,10 @@
 //! of the *same* directory racing each other (a stale reload landing after
 //! a fresh one). See [`tests::a_stale_dir_loaded_result_is_ignored`].
 
+use hyprforge_files::jobs::{self, JobControl, JobEvent, JobId, JobSummary};
 use hyprforge_files_core::backend::FsBackend;
+use hyprforge_files_core::clipboard::{self as file_clipboard, ClipVerb, FileClipboard, MemoryClipboard};
+use hyprforge_fileops::{Collision, CollisionDecision, CollisionPolicy, Progress};
 use hyprforge_files_core::trash::RoutingBackend;
 use hyprforge_files_core::browser::Message as BrowserMessage;
 use hyprforge_files_core::keymap::Resolved;
@@ -159,12 +162,17 @@ fn main() -> iced::Result {
         status: startup_status(prefs_status, &config_problems),
         last_window_size,
         resize_generation: 0,
+        clipboard: Arc::new(MemoryClipboard::new()),
+        jobs: Vec::new(),
+        next_job_id: 1,
         modifiers: keyboard::Modifiers::default(),
         clicks: ClickTracker::new(),
         config: config.clone(),
         #[cfg(debug_assertions)]
         debug_menu: debug_menu_request(),
     };
+    #[cfg(debug_assertions)]
+    debug_conflict(&mut app);
     // Fulfils the `Outcome::ReadDir` `Browser::new` always returns —
     // otherwise the window opens showing nothing at all, forever, for
     // the same reason CLAUDE.md's "a five-second gap" rule exists: an
@@ -363,6 +371,13 @@ enum Message {
     /// same assumption every other index-carrying message in this file
     /// already makes).
     CloseTab(usize),
+    /// Something a paste job reported.
+    Job(JobEvent),
+    /// The answer to the conflict a job is paused on.
+    AnswerConflict(JobId, CollisionPolicy),
+    /// "Do this for the rest" was ticked or unticked.
+    SetApplyToRest(JobId, bool),
+    CancelJob(JobId),
     /// A click on a tab. The keyboard's tab actions go through
     /// [`App::perform_window`] instead.
     SwitchTab(usize),
@@ -460,6 +475,11 @@ struct App {
     /// Pillar 3 — every error reaching the user is a sentence here, never
     /// a log line they are expected to go find.
     status: Option<String>,
+    /// Copied and cut files, shared by every tab.
+    clipboard: Arc<dyn FileClipboard>,
+    /// Pastes in progress, oldest first.
+    jobs: Vec<RunningJob>,
+    next_job_id: JobId,
     last_window_size: (u32, u32),
     /// Bumped by every resize event, so only the *last* one in a drag
     /// writes the new size to disk.
@@ -515,6 +535,20 @@ struct App {
     /// Holding the trait object is what puts this window's own update
     /// loop within reach of them.
     backend: Arc<dyn FsBackend>,
+}
+
+/// A paste the window is waiting on.
+struct RunningJob {
+    id: JobId,
+    control: JobControl,
+    verb: ClipVerb,
+    /// Every folder whose listing the job changes — where things landed,
+    /// and, for a move, where they came from — refreshed when it ends.
+    dirs: Vec<PathBuf>,
+    progress: Option<Progress>,
+    /// The conflict the job is paused on, if any.
+    conflict: Option<Collision>,
+    apply_to_rest: bool,
 }
 
 impl App {
@@ -578,6 +612,15 @@ impl App {
                 })
             }
             Outcome::OpenInNewTab(path) => self.open_tab(path),
+            Outcome::SetClipboard(clip) => {
+                if let Err(e) = self.clipboard.set(clip) {
+                    self.status = Some(format!("Couldn't copy: {e}"));
+                }
+                self.sync_can_paste();
+                Task::none()
+            }
+            Outcome::CopyText(text) => iced::clipboard::write(text),
+            Outcome::Paste(into) => self.paste_into(into),
             Outcome::OpenContextMenuAtPointer(spot) => {
                 let outcome = self.tabs[tab_index]
                     .browser
@@ -585,6 +628,114 @@ impl App {
                 self.handle_outcome(tab_index, outcome)
             }
             Outcome::Window(action) => self.perform_window(action),
+        }
+    }
+
+    /// Tells every tab whether there is something to paste. Called
+    /// whenever the clipboard changes, and for every new tab.
+    fn sync_can_paste(&mut self) {
+        let can = self.clipboard.get().is_some();
+        for tab in &mut self.tabs {
+            tab.browser.set_can_paste(can);
+        }
+    }
+
+    /// Re-reads every tab showing one of `dirs`.
+    fn refresh_dirs(&mut self, dirs: &[PathBuf]) -> Task<Message> {
+        let indices: Vec<usize> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| dirs.iter().any(|d| d == tab.browser.current_dir()))
+            .map(|(i, _)| i)
+            .collect();
+        Task::batch(indices.into_iter().map(|i| {
+            let dir = self.tabs[i].browser.current_dir().to_path_buf();
+            self.spawn_read_dir(i, dir)
+        }))
+    }
+
+    /// Plans and starts pasting the clipboard into `into`.
+    fn paste_into(&mut self, into: PathBuf) -> Task<Message> {
+        let Some(clip) = self.clipboard.get() else {
+            return Task::none();
+        };
+        let plan = file_clipboard::plan(&clip, &into);
+        if !plan.refused.is_empty() {
+            self.status = Some(
+                plan.refused.iter().map(|(_, why)| why.as_str()).collect::<Vec<_>>().join(" "),
+            );
+        }
+        if plan.steps.is_empty() {
+            return Task::none();
+        }
+        let mut dirs = vec![into];
+        if clip.verb == ClipVerb::Cut {
+            for step in &plan.steps {
+                if let Some(parent) = step.source.parent() {
+                    if !dirs.iter().any(|d| d == parent) {
+                        dirs.push(parent.to_path_buf());
+                    }
+                }
+            }
+        }
+        let id = self.next_job_id;
+        self.next_job_id += 1;
+        let (control, events) = jobs::start(id, plan.steps, self.config.behaviour.on_conflict);
+        self.jobs.push(RunningJob {
+            id,
+            control,
+            verb: clip.verb,
+            dirs,
+            progress: None,
+            conflict: None,
+            apply_to_rest: false,
+        });
+        Task::run(events, Message::Job)
+    }
+
+    /// Updates the window for something a job reported.
+    fn job_event(&mut self, event: JobEvent) -> Task<Message> {
+        match event {
+            JobEvent::Progress { job, progress } => {
+                if let Some(running) = self.jobs.iter_mut().find(|j| j.id == job) {
+                    running.progress = Some(progress);
+                }
+                Task::none()
+            }
+            JobEvent::Collision { job, collision } => {
+                if let Some(running) = self.jobs.iter_mut().find(|j| j.id == job) {
+                    running.conflict = Some(collision);
+                }
+                Task::none()
+            }
+            JobEvent::Finished { job, summary } => {
+                let Some(at) = self.jobs.iter().position(|j| j.id == job) else {
+                    return Task::none();
+                };
+                let finished = self.jobs.remove(at);
+                if let Some(message) = job_report(finished.verb, &summary) {
+                    self.status = Some(message);
+                }
+                // A cut that fully landed leaves the clipboard pointing at
+                // files that are no longer there.
+                if finished.verb == ClipVerb::Cut && summary.complete() {
+                    self.clipboard.clear();
+                    self.sync_can_paste();
+                }
+                self.refresh_dirs(&finished.dirs)
+            }
+        }
+    }
+
+    /// Answers the conflict job `id` is paused on.
+    fn answer_conflict(&mut self, id: JobId, policy: CollisionPolicy) {
+        if let Some(running) = self.jobs.iter_mut().find(|j| j.id == id) {
+            if running.conflict.take().is_some() {
+                running
+                    .control
+                    .answer(CollisionDecision { policy, apply_to_rest: running.apply_to_rest });
+            }
         }
     }
 
@@ -620,6 +771,7 @@ impl App {
         let (mut browser, outcome) =
             Browser::new(Mode::App, self.last_prefs.clone(), start_dir, self.sidebar_items.clone());
         browser.set_config(self.config.clone());
+        browser.set_can_paste(self.clipboard.get().is_some());
         self.tabs.push(Tab::new(id, browser));
         self.active = self.tabs.len() - 1;
         let index = self.active;
@@ -717,6 +869,23 @@ impl App {
                 }
                 self.handle_outcome(self.active, outcome)
             }
+            // A conflict dialog has the keyboard. Escape cancels the job;
+            // Enter keeps both, the one answer that neither loses a file
+            // nor leaves one behind.
+            Message::KeyPressed(press)
+                if self.jobs.iter().any(|j| j.conflict.is_some())
+                    && matches!(press.key, keymap::Key::Escape | keymap::Key::Enter) =>
+            {
+                let Some(id) = self.jobs.iter().find(|j| j.conflict.is_some()).map(|j| j.id) else {
+                    return Task::none();
+                };
+                if press.key == keymap::Key::Escape {
+                    self.update(Message::CancelJob(id))
+                } else {
+                    self.answer_conflict(id, CollisionPolicy::KeepBoth);
+                    Task::none()
+                }
+            }
             Message::KeyPressed(press) => match self.config.keymap.resolve(&press) {
                 // Window actions never reach the browser, which the
                 // dialog host also renders and which has no tabs.
@@ -762,6 +931,24 @@ impl App {
                     });
                 }
                 self.handle_outcome(index, outcome)
+            }
+            Message::Job(event) => self.job_event(event),
+            Message::AnswerConflict(id, policy) => {
+                self.answer_conflict(id, policy);
+                Task::none()
+            }
+            Message::SetApplyToRest(id, on) => {
+                if let Some(running) = self.jobs.iter_mut().find(|j| j.id == id) {
+                    running.apply_to_rest = on;
+                }
+                Task::none()
+            }
+            Message::CancelJob(id) => {
+                if let Some(running) = self.jobs.iter_mut().find(|j| j.id == id) {
+                    running.conflict = None;
+                    running.control.cancel();
+                }
+                Task::none()
             }
             Message::TrashDone(tab_id, dir, errors) => {
                 if !errors.is_empty() {
@@ -944,6 +1131,10 @@ impl App {
         let viewport_width = self.last_window_size.0 as f32;
         content = content.push(tab.browser.view(scale, viewport_width).map(Message::Browser));
 
+        if let Some(job) = self.jobs.iter().find(|j| j.conflict.is_none()) {
+            content = content.push(job_progress_bar(job, scale));
+        }
+
         if let Some(status) = &self.status {
             let bar = row![
                 scaled_text(status.clone(), BASE_TEXT_SIZE, scale).width(Length::Fill),
@@ -967,6 +1158,13 @@ impl App {
         // listing alike — so it is stacked over the whole window rather
         // than drawn inside the browser's own area.
         let size = (self.last_window_size.0 as f32, self.last_window_size.1 as f32);
+        // A conflict is a question the job is paused on, so it goes
+        // above everything, the context menu included.
+        if let Some((job, conflict)) =
+            self.jobs.iter().find_map(|j| j.conflict.as_ref().map(|c| (j, c)))
+        {
+            return iced::widget::stack![window, conflict_dialog(job, conflict, scale)].into();
+        }
         match tab.browser.menu_overlay(scale, size) {
             Some(overlay) => iced::widget::stack![window, overlay.map(Message::Browser)].into(),
             None => window,
@@ -1004,6 +1202,146 @@ impl App {
         ])
     }
 }
+
+/// What the status bar says when a paste ends, or `None` when there is
+/// nothing worth interrupting anyone for — a paste that simply worked is
+/// visible in the listing already.
+fn job_report(verb: ClipVerb, summary: &JobSummary) -> Option<String> {
+    let doing = match verb {
+        ClipVerb::Copy => "copied",
+        ClipVerb::Cut => "moved",
+    };
+    let mut parts = Vec::new();
+    if summary.cancelled {
+        parts.push(format!("Stopped after {} {doing}.", plural(summary.done, "item", "items")));
+    }
+    if summary.skipped > 0 {
+        parts.push(format!("{} skipped.", plural(summary.skipped, "item", "items")));
+    }
+    if !summary.failed.is_empty() {
+        parts.push(format!("Some items weren't {doing}: {}", summary.failed.join("; ")));
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    if n == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{n} {many}")
+    }
+}
+
+/// One line under the listing while a paste runs: what it is doing, how
+/// far it has got, and a way to stop it.
+fn job_progress_bar<'a>(job: &RunningJob, scale: FontScale) -> Element<'a, Message> {
+    let doing = match job.verb {
+        ClipVerb::Copy => "Copying",
+        ClipVerb::Cut => "Moving",
+    };
+    let detail = match &job.progress {
+        // Totals are unknown while the source tree is still being
+        // walked — `Progress` says so rather than guessing.
+        Some(Progress { entries_done, entries_total: Some(total), bytes_done, bytes_total, .. }) => {
+            let mut text = format!("{entries_done} of {total}");
+            if let Some(bytes_total) = bytes_total {
+                text.push_str(&format!(
+                    " \u{00B7} {} of {}",
+                    hyprforge_files_core::human_readable_size(*bytes_done),
+                    hyprforge_files_core::human_readable_size(*bytes_total)
+                ));
+            }
+            text
+        }
+        _ => "counting\u{2026}".to_string(),
+    };
+    row![
+        scaled_text(format!("{doing} \u{00B7} {detail}"), BASE_TEXT_SIZE, scale).width(Length::Fill),
+        secondary_button("Cancel").on_press(Message::CancelJob(job.id)),
+    ]
+    .spacing(spacing::SM)
+    .align_y(iced::Alignment::Center)
+    .padding([spacing::XS as u16, spacing::MD as u16])
+    .into()
+}
+
+/// The question a paused paste is asking.
+///
+/// Over a full-window layer that swallows clicks, because the job is
+/// paused on this and nothing else in the window should look clickable
+/// meanwhile. Keep Both is the primary button: it is the one answer that
+/// neither loses a file nor leaves one behind, and it is what Enter does.
+fn conflict_dialog<'a>(job: &RunningJob, conflict: &Collision, scale: FontScale) -> Element<'a, Message> {
+    use hyprforge_ui::widgets::primary_button;
+    let name = conflict
+        .dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| conflict.dest.display().to_string());
+    let folder = conflict
+        .dest
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let id = job.id;
+    let card = container(
+        column![
+            scaled_text(format!("\u{201C}{name}\u{201D} already exists"), 17.0, scale),
+            hyprforge_ui::widgets::meta_text(
+                format!("In {folder}. Replace it, keep both, or skip this one?"),
+                BASE_TEXT_SIZE,
+                scale,
+            ),
+            iced::widget::checkbox(job.apply_to_rest)
+                .label("Do this for the rest")
+                .on_toggle(move |on| Message::SetApplyToRest(id, on))
+                .text_size(scale.apply(BASE_TEXT_SIZE)),
+            row![
+                secondary_button("Cancel").on_press(Message::CancelJob(id)),
+                iced::widget::Space::new().width(Length::Fill),
+                secondary_button("Skip").on_press(Message::AnswerConflict(id, CollisionPolicy::Skip)),
+                secondary_button("Replace")
+                    .on_press(Message::AnswerConflict(id, CollisionPolicy::Replace)),
+                primary_button("Keep Both")
+                    .on_press(Message::AnswerConflict(id, CollisionPolicy::KeepBoth)),
+            ]
+            .spacing(spacing::SM)
+            .align_y(iced::Alignment::Center),
+        ]
+        .spacing(spacing::MD),
+    )
+    .padding(spacing::LG)
+    .max_width(scale.apply(460.0))
+    .style(|_t: &Theme| container::Style {
+        background: Some(Background::Color(hyprforge_ui::theme::surface::sidebar())),
+        border: Border {
+            color: hyprforge_ui::theme::surface::card_border(),
+            width: 1.0,
+            radius: hyprforge_files_core::density::outer_radius().into(),
+        },
+        ..container::Style::default()
+    });
+    iced::widget::opaque(
+        container(card)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            // The window behind, dimmed with its own root colour rather
+            // than an invented black: the listing still reads as there,
+            // and plainly not what the keyboard or pointer is on.
+            .style(|_t: &Theme| container::Style {
+                background: Some(Background::Color(Color {
+                    a: SCRIM_ALPHA,
+                    ..hyprforge_ui::theme::surface::root()
+                })),
+                ..container::Style::default()
+            }),
+    )
+}
+
+/// How much of the window a dialog's dim layer hides.
+const SCRIM_ALPHA: f32 = 0.6;
 
 /// Where the pointer last was, kept without a message per mouse move.
 ///
@@ -1057,6 +1395,30 @@ fn debug_menu_request() -> Option<(f32, f32)> {
     let raw = std::env::var("HYPRFORGE_FILES_DEBUG_MENU").ok()?;
     let (x, y) = raw.split_once(',')?;
     Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+}
+
+/// `HYPRFORGE_FILES_DEBUG_CONFLICT=1` opens the paste-conflict dialog on
+/// a job that does nothing, for the same reason as
+/// [`debug_menu_request`]: the dialog only appears mid-paste, and this
+/// machine cannot drive a paste by hand. Debug builds only.
+#[cfg(debug_assertions)]
+fn debug_conflict(app: &mut App) {
+    if std::env::var_os("HYPRFORGE_FILES_DEBUG_CONFLICT").is_none() {
+        return;
+    }
+    let (control, _events) = jobs::start(0, Vec::new(), hyprforge_files_core::config::OnConflict::Ask);
+    app.jobs.push(RunningJob {
+        id: 0,
+        control,
+        verb: ClipVerb::Copy,
+        dirs: Vec::new(),
+        progress: None,
+        conflict: Some(Collision {
+            source: PathBuf::from("/tmp/quarterly report.pdf"),
+            dest: app.home_dir.join("Documents").join("quarterly report.pdf"),
+        }),
+        apply_to_rest: false,
+    });
 }
 
 /// What the status bar says when the window opens: a broken
@@ -1501,6 +1863,9 @@ mod tests {
             status: None,
             last_window_size: (900, 600),
             resize_generation: 0,
+            clipboard: Arc::new(MemoryClipboard::new()),
+            jobs: Vec::new(),
+            next_job_id: 1,
             modifiers: keyboard::Modifiers::default(),
             clicks: ClickTracker::new(),
             config: Arc::new(hyprforge_files_core::config::Config::default()),
@@ -2066,6 +2431,148 @@ mod tests {
             Path::new("/dir/sub"),
             "the first click in the new folder selects; it must not open"
         );
+    }
+
+    // --- copy, cut and paste ---------------------------------------------------
+
+    /// A window on a real temporary folder, with its listing loaded.
+    fn app_on(dir: &Path) -> App {
+        let mut app = app_for_test(&[dir.to_str().unwrap()]);
+        let entries = RoutingBackend::default().read_dir(dir).unwrap();
+        let _ = app.update(Message::Browser(BrowserMessage::DirLoaded(dir.to_path_buf(), Ok(entries))));
+        app
+    }
+
+    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// The whole road from the keyboard to the disk, bar the stream iced
+    /// would deliver job events on: select, copy, paste, and a second
+    /// file appears.
+    #[test]
+    fn ctrl_c_then_ctrl_v_duplicates_a_file_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+        let mut app = app_on(dir.path());
+
+        let _ = app.update(key("Ctrl+A"));
+        let _ = app.update(key("Ctrl+C"));
+        assert!(app.active_tab().browser.action_context().can_paste, "the tab knows there is something");
+        let _ = app.update(key("Ctrl+V"));
+        assert_eq!(app.jobs.len(), 1, "a paste job is running");
+
+        wait_until("the copy", || std::fs::read_dir(dir.path()).unwrap().count() == 2);
+    }
+
+    /// A cut that fully landed empties the clipboard — its files are no
+    /// longer where it says they are — and every tab stops offering Paste.
+    #[test]
+    fn a_completed_cut_empties_the_clipboard() {
+        let from = tempfile::tempdir().unwrap();
+        let to = tempfile::tempdir().unwrap();
+        std::fs::write(from.path().join("a.txt"), "x").unwrap();
+        let mut app = app_on(from.path());
+        let _ = app.update(key("Ctrl+A"));
+        let _ = app.update(key("Ctrl+X"));
+
+        let _ = app.update(Message::Browser(BrowserMessage::Navigate(to.path().to_path_buf())));
+        let _ = app.update(key("Ctrl+V"));
+        let id = app.jobs[0].id;
+        assert_eq!(app.jobs[0].dirs, [to.path().to_path_buf(), from.path().to_path_buf()]);
+
+        let _ = app.update(Message::Job(JobEvent::Finished {
+            job: id,
+            summary: JobSummary { done: 1, ..JobSummary::default() },
+        }));
+        assert!(app.jobs.is_empty());
+        assert_eq!(app.clipboard.get(), None);
+        assert!(!app.active_tab().browser.action_context().can_paste);
+        wait_until("the move", || to.path().join("a.txt").exists());
+    }
+
+    /// A cut that did not fully land keeps the clipboard, so what is
+    /// left can be pasted again.
+    #[test]
+    fn a_partial_cut_keeps_the_clipboard() {
+        let mut app = app_for_test(&["/dir"]);
+        app.clipboard
+            .set(hyprforge_files_core::clipboard::FileClip {
+                paths: vec!["/nowhere/a".into()],
+                verb: ClipVerb::Cut,
+            })
+            .unwrap();
+        let (control, _events) = jobs::start(9, vec![], hyprforge_files_core::config::OnConflict::Ask);
+        app.jobs.push(RunningJob {
+            id: 9,
+            control,
+            verb: ClipVerb::Cut,
+            dirs: vec![],
+            progress: None,
+            conflict: None,
+            apply_to_rest: false,
+        });
+        let _ = app.update(Message::Job(JobEvent::Finished {
+            job: 9,
+            summary: JobSummary { done: 1, failed: vec!["disk full".into()], ..JobSummary::default() },
+        }));
+        assert!(app.clipboard.get().is_some());
+        assert!(app.status.as_deref().unwrap().contains("disk full"));
+    }
+
+    #[test]
+    fn escape_during_a_conflict_cancels_the_job_rather_than_the_search() {
+        let mut app = app_for_test(&["/dir"]);
+        let (control, _events) = jobs::start(3, vec![], hyprforge_files_core::config::OnConflict::Ask);
+        app.jobs.push(RunningJob {
+            id: 3,
+            control,
+            verb: ClipVerb::Copy,
+            dirs: vec![],
+            progress: None,
+            conflict: Some(Collision { source: "/a/x".into(), dest: "/dir/x".into() }),
+            apply_to_rest: false,
+        });
+        let _ = app.update(key("Escape"));
+        assert!(app.jobs[0].conflict.is_none(), "the dialog is gone");
+    }
+
+    #[test]
+    fn a_paste_that_simply_worked_says_nothing() {
+        assert_eq!(job_report(ClipVerb::Copy, &JobSummary { done: 3, ..JobSummary::default() }), None);
+    }
+
+    #[test]
+    fn a_paste_report_names_what_went_wrong() {
+        let summary = JobSummary {
+            done: 1,
+            skipped: 2,
+            failed: vec!["x.txt: permission denied".into()],
+            cancelled: true,
+        };
+        let text = job_report(ClipVerb::Cut, &summary).unwrap();
+        assert!(text.contains("Stopped after 1 item moved"), "{text}");
+        assert!(text.contains("2 items skipped"), "{text}");
+        assert!(text.contains("permission denied"), "{text}");
+    }
+
+    /// Pasting a folder into itself is refused before any job starts.
+    #[test]
+    fn pasting_a_folder_into_itself_is_refused_up_front() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let mut app = app_on(dir.path());
+        let _ = app.update(key("Ctrl+A"));
+        let _ = app.update(key("Ctrl+C"));
+        let _ = app.update(Message::Browser(BrowserMessage::Navigate(sub.clone())));
+        let _ = app.update(key("Ctrl+V"));
+        assert!(app.jobs.is_empty());
+        assert!(app.status.as_deref().unwrap().contains("inside itself"));
     }
 
     // --- the backend seam --------------------------------------------------

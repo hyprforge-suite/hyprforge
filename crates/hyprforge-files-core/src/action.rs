@@ -47,6 +47,16 @@ pub enum Action {
     ToggleHidden,
     /// Move the selection to the trash.
     Trash,
+    /// Put the selection on the clipboard, to be copied when pasted.
+    Copy,
+    /// Put the selection on the clipboard, to be moved when pasted.
+    Cut,
+    /// Put what the clipboard holds into this folder.
+    Paste,
+    /// Put the selected paths on the clipboard as text.
+    CopyPath,
+    /// Read this folder again.
+    Refresh,
     /// Open the right-click menu from the keyboard, for the focused row.
     ContextMenu,
     // Window scope: the tab strip.
@@ -89,6 +99,11 @@ impl Action {
             Action::ClearSearch,
             Action::ToggleHidden,
             Action::Trash,
+            Action::Copy,
+            Action::Cut,
+            Action::Paste,
+            Action::CopyPath,
+            Action::Refresh,
             Action::ContextMenu,
             Action::NewTab,
             Action::CloseTab,
@@ -117,6 +132,11 @@ impl Action {
             Action::ClearSearch => "clear-search",
             Action::ToggleHidden => "show-hidden",
             Action::Trash => "trash",
+            Action::Copy => "copy",
+            Action::Cut => "cut",
+            Action::Paste => "paste",
+            Action::CopyPath => "copy-path",
+            Action::Refresh => "refresh",
             Action::ContextMenu => "context-menu",
             Action::NewTab => "new-tab",
             Action::CloseTab => "close-tab",
@@ -164,6 +184,11 @@ impl Action {
             Action::ClearSearch => "Clear Search",
             Action::ToggleHidden => "Show Hidden Files",
             Action::Trash => "Move to Trash",
+            Action::Copy => "Copy",
+            Action::Cut => "Cut",
+            Action::Paste => "Paste",
+            Action::CopyPath => "Copy Path",
+            Action::Refresh => "Refresh",
             Action::ContextMenu => "Show Menu",
             Action::NewTab => "New Tab",
             Action::CloseTab => "Close Tab",
@@ -220,6 +245,11 @@ impl Action {
             Action::ClearSearch => &["Escape"],
             Action::ToggleHidden => &["Ctrl+H"],
             Action::Trash => &["Delete"],
+            Action::Copy => &["Ctrl+C"],
+            Action::Cut => &["Ctrl+X"],
+            Action::Paste => &["Ctrl+V"],
+            Action::CopyPath => &["Ctrl+Shift+C"],
+            Action::Refresh => &["F5", "Ctrl+R"],
             // The two keys every desktop uses for "the menu a right click
             // would open".
             Action::ContextMenu => &["Menu", "Shift+F10"],
@@ -266,6 +296,9 @@ pub struct ActionContext {
     /// the trash would file it a second time under a new record, so the
     /// Trash action is off here.
     pub in_trash: bool,
+    /// Whether the clipboard holds files to paste. The host knows; the
+    /// browser is told.
+    pub can_paste: bool,
 }
 
 /// Whether `action` would do anything in `ctx`.
@@ -290,6 +323,12 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         Action::ClearSearch => ctx.searching,
         Action::ToggleHidden | Action::ContextMenu => true,
         Action::Trash => ctx.selected > 0 && !ctx.in_trash,
+        Action::Copy | Action::CopyPath => ctx.selected > 0,
+        // Moving something out of the Trash by hand would leave its
+        // record behind; restoring is the way out, and it comes later.
+        Action::Cut => ctx.selected > 0 && !ctx.in_trash,
+        Action::Paste => ctx.can_paste && !ctx.in_trash,
+        Action::Refresh => true,
         Action::NewTab
         | Action::CloseTab
         | Action::NextTab
@@ -359,6 +398,21 @@ mod tests {
     fn nothing_in_the_trash_can_be_trashed_again() {
         let ctx = ActionContext { selected: 2, shown: 2, in_trash: true, ..ActionContext::default() };
         assert!(!enabled(Action::Trash, &ctx));
+    }
+
+    #[test]
+    fn paste_needs_something_to_paste_and_somewhere_that_is_not_the_trash() {
+        let ctx = ActionContext::default();
+        assert!(!enabled(Action::Paste, &ctx));
+        assert!(enabled(Action::Paste, &ActionContext { can_paste: true, ..ctx }));
+        assert!(!enabled(Action::Paste, &ActionContext { can_paste: true, in_trash: true, ..ctx }));
+    }
+
+    #[test]
+    fn copying_out_of_the_trash_is_fine_but_cutting_is_not() {
+        let ctx = ActionContext { selected: 1, in_trash: true, ..ActionContext::default() };
+        assert!(enabled(Action::Copy, &ctx));
+        assert!(!enabled(Action::Cut, &ctx));
     }
 
     #[test]

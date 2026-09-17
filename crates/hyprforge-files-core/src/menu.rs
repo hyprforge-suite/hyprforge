@@ -82,10 +82,30 @@ impl Default for MenuConfig {
         use Action::*;
         use MenuEntry::{Action as A, Separator as Sep};
         MenuConfig {
-            entry: vec![A(Open), Sep, A(SelectAll), Sep, A(Trash)],
-            folder: vec![A(Open), A(OpenInNewTab), Sep, A(SelectAll), Sep, A(Trash)],
-            empty: vec![A(SelectAll), A(ToggleHidden), Sep, A(GoUp), A(NewTab)],
-            trash: vec![A(Open), Sep, A(SelectAll)],
+            entry: vec![A(Open), Sep, A(Cut), A(Copy), A(CopyPath), Sep, A(SelectAll), Sep, A(Trash)],
+            folder: vec![
+                A(Open),
+                A(OpenInNewTab),
+                Sep,
+                A(Cut),
+                A(Copy),
+                A(CopyPath),
+                Sep,
+                A(SelectAll),
+                Sep,
+                A(Trash),
+            ],
+            empty: vec![
+                A(Paste),
+                Sep,
+                A(SelectAll),
+                A(ToggleHidden),
+                A(Refresh),
+                Sep,
+                A(GoUp),
+                A(NewTab),
+            ],
+            trash: vec![A(Open), Sep, A(Copy), A(CopyPath), Sep, A(SelectAll)],
         }
     }
 }

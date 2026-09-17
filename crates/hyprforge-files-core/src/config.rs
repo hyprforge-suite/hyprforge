@@ -43,6 +43,43 @@ use std::path::Path;
 pub struct Config {
     pub keymap: Keymap,
     pub menus: MenuConfig,
+    pub behaviour: Behaviour,
+}
+
+/// `[behaviour]`: how the file manager acts when there is a choice to
+/// make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Behaviour {
+    pub on_conflict: OnConflict,
+}
+
+/// What a paste does when something is already at a destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OnConflict {
+    /// Stop and ask, with "apply to the rest" on offer. The default:
+    /// the other three all decide something about a file the user has
+    /// not been shown.
+    #[default]
+    Ask,
+    /// Paste alongside, under a numbered name.
+    KeepBoth,
+    /// Leave what is there, and the pasted one where it was.
+    Skip,
+    /// Overwrite what is there. Configurable because some people want
+    /// it; never the default, because it is the one that loses data.
+    Replace,
+}
+
+impl OnConflict {
+    fn parse(text: &str) -> Option<OnConflict> {
+        match text.trim() {
+            "ask" => Some(OnConflict::Ask),
+            "keep-both" => Some(OnConflict::KeepBoth),
+            "skip" => Some(OnConflict::Skip),
+            "replace" => Some(OnConflict::Replace),
+            _ => None,
+        }
+    }
 }
 
 /// One thing in the file that could not be used.
@@ -70,6 +107,17 @@ fn problem(message: impl Into<String>) -> ConfigProblem {
 struct RawConfig {
     keys: BTreeMap<String, OneOrMany>,
     menu: BTreeMap<String, Vec<String>>,
+    behaviour: RawBehaviour,
+}
+
+/// `[behaviour]` as written. Values are strings checked by hand rather
+/// than enums serde would check, because a serde error fails the whole
+/// file — and one misspelled value must cost one setting, not every
+/// binding written above it.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+struct RawBehaviour {
+    on_conflict: Option<String>,
 }
 
 /// `trash = "Delete"` and `rename = ["F2", "Ctrl+R"]` are both allowed —
@@ -140,7 +188,17 @@ pub fn parse(text: &str, path: &Path) -> (Config, Vec<ConfigProblem>) {
     let (keymap, mut problems) = keymap_with(&overrides);
     let (menus, menu_problems) = menus_with(&raw.menu);
     problems.extend(menu_problems);
-    (Config { keymap, menus }, problems)
+    let mut behaviour = Behaviour::default();
+    if let Some(text) = &raw.behaviour.on_conflict {
+        match OnConflict::parse(text) {
+            Some(choice) => behaviour.on_conflict = choice,
+            None => problems.push(problem(format!(
+                "[behaviour] on-conflict = \"{text}\": use ask, keep-both, skip or replace — \
+                 asking until this is fixed"
+            ))),
+        }
+    }
+    (Config { keymap, menus, behaviour }, problems)
 }
 
 /// The default menus with `[menu]` applied.
@@ -434,6 +492,30 @@ mod tests {
         assert_eq!(problems.len(), 2, "{problems:?}");
         assert!(problems.iter().any(|p| p.message.contains("frobnicate")));
         assert!(problems.iter().any(|p| p.message.contains("sidebar")));
+    }
+
+    #[test]
+    fn asking_is_the_default_for_a_conflict() {
+        assert_eq!(Config::default().behaviour.on_conflict, OnConflict::Ask);
+    }
+
+    #[test]
+    fn the_conflict_policy_is_configurable() {
+        let (config, problems) = parsed("[behaviour]\non-conflict = \"keep-both\"\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(config.behaviour.on_conflict, OnConflict::KeepBoth);
+    }
+
+    /// A misspelled value costs that one setting — and it falls back to
+    /// asking, never to one of the choices that decides for the user.
+    #[test]
+    fn a_misspelled_conflict_policy_asks_and_keeps_the_rest_of_the_file() {
+        let (config, problems) =
+            parsed("[keys]\ntrash = \"Ctrl+D\"\n[behaviour]\non-conflict = \"overwrite\"\n");
+        assert_eq!(config.behaviour.on_conflict, OnConflict::Ask);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].message.contains("overwrite"));
+        assert_eq!(does(&config, "Ctrl+D"), Some(Action::Trash), "the keys still applied");
     }
 
     /// The config is read, never written — this module has no function
