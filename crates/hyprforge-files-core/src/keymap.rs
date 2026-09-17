@@ -6,7 +6,7 @@
 //! share both halves, so the two can never disagree about what Ctrl+A
 //! does.
 //!
-//! Bindings are written in the syntax `files.toml` uses — `Ctrl+Shift+N`,
+//! Bindings are written in the syntax `files-config.toml` uses — `Ctrl+Shift+N`,
 //! `Alt+Left`, `F2` — and parsed by [`Combo::parse`]. The shipped
 //! defaults go through the same parser ([`Action::default_keys`]), so
 //! there is no second hand-built table for the config to drift from.
@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 /// The keys a binding can name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Key {
     Enter,
     Backspace,
@@ -52,7 +52,7 @@ pub enum Key {
 }
 
 /// Which modifier keys were held.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
 pub struct Modifiers {
     pub ctrl: bool,
     pub alt: bool,
@@ -63,7 +63,7 @@ pub struct Modifiers {
 }
 
 /// A key and the modifiers held with it — one binding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Combo {
     pub key: Key,
     pub mods: Modifiers,
@@ -258,6 +258,13 @@ impl Keymap {
             }
         }
         Keymap { bindings }
+    }
+
+    /// A keymap holding exactly these bindings — how
+    /// [`crate::config`] builds one after merging a file over the
+    /// defaults.
+    pub fn from_bindings(bindings: impl IntoIterator<Item = (Combo, Action)>) -> Keymap {
+        Keymap { bindings: bindings.into_iter().collect() }
     }
 
     /// What `press` means, or `None` if nothing.

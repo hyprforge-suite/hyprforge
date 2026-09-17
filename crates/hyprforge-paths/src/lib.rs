@@ -86,6 +86,19 @@ pub fn files_toml_path() -> PathBuf {
     hyprforge_config_dir().join("files.toml")
 }
 
+/// The file browser's *hand-written* configuration — key bindings, and
+/// later menus and behaviour switches.
+///
+/// A separate file from [`files_toml_path`] because the two have
+/// different writers. `files.toml` is state the app rewrites whole on
+/// every save, including every time a window resize settles, and a
+/// whole-struct rewrite drops comments and reorders tables. Anything a
+/// person writes by hand, comments and all, has to live where the app
+/// never writes.
+pub fn files_config_toml_path() -> PathBuf {
+    hyprforge_config_dir().join("files-config.toml")
+}
+
 /// Where the clipboard manager keeps its history. Its own subdirectory,
 /// not a file directly under `hyprforge_config_dir()`, because the index
 /// is one file but image content is one file *per entry* — see

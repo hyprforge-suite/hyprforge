@@ -10,7 +10,7 @@
 //! there is no single table to configure.
 //!
 //! Each action has a stable id (`"trash"`, `"tab-3"`). That id is what
-//! `files.toml` names, so it is part of the file format: renaming one
+//! `files-config.toml` names, so it is part of the file format: renaming one
 //! breaks somebody's config. [`Action::from_id`] and [`Action::id`] are
 //! tested to round-trip over [`Action::all`] so a new variant cannot be
 //! added without one.
@@ -22,7 +22,7 @@
 //! notion of rather than every host re-deriving the split.
 
 /// One thing a person can ask for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Action {
     /// Open the focused entry: a folder navigates into itself, a file is
     /// handed to the host.
@@ -96,7 +96,7 @@ impl Action {
         all
     }
 
-    /// The id `files.toml` uses for this action. Part of the file format.
+    /// The id `files-config.toml` uses for this action. Part of the file format.
     pub fn id(self) -> &'static str {
         match self {
             Action::Open => "open",
@@ -136,7 +136,7 @@ impl Action {
         }
     }
 
-    /// The action a `files.toml` id names, or `None` for an id this
+    /// The action a `files-config.toml` id names, or `None` for an id this
     /// version does not know — which the caller reports, never ignores.
     pub fn from_id(id: &str) -> Option<Action> {
         Action::all().into_iter().find(|a| a.id() == id)
@@ -190,7 +190,7 @@ impl Action {
     }
 
     /// The keys this action is bound to out of the box, in the syntax
-    /// `files.toml` uses.
+    /// `files-config.toml` uses.
     ///
     /// Written as strings and parsed by the same function that reads the
     /// config file, so the shipped defaults *are* a config — there is no
@@ -291,7 +291,7 @@ mod tests {
     use super::*;
 
     /// The ids are the config file's vocabulary. A variant that could not
-    /// be named in `files.toml`, or two that shared a name, would be a
+    /// be named in `files-config.toml`, or two that shared a name, would be a
     /// setting nobody could write.
     #[test]
     fn every_action_round_trips_through_its_id() {

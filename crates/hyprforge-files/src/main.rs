@@ -103,6 +103,13 @@ fn main() -> iced::Result {
     // user is told, and nothing here saves over the broken file until
     // they fix it (the next `prefs::update` call refuses to write over a
     // file it can't reload — see `Message::PrefsSaved`'s handling below).
+    // The hand-written config: key bindings today, menus and behaviour
+    // later. Read once, before the window opens — a small local file,
+    // the same budget `prefs::load` spends just below. Problems are
+    // shown, never fatal: a typo in a binding must not stop the window
+    // opening, and must not cost the bindings around it.
+    let (config, config_problems) = hyprforge_files_core::config::load();
+
     let (prefs, prefs_status) = match hyprforge_files_core::prefs::load() {
         Ok(prefs) => (prefs, None),
         Err(e) => (
@@ -146,12 +153,12 @@ fn main() -> iced::Result {
         sidebar_items,
         last_prefs: prefs,
         font_scale: FontScale(hyprforge_ui::theme::active().font_scale),
-        status: prefs_status,
+        status: startup_status(prefs_status, &config_problems),
         last_window_size,
         resize_generation: 0,
         modifiers: keyboard::Modifiers::default(),
         clicks: ClickTracker::new(),
-        keymap: keymap::Keymap::defaults(),
+        keymap: config.keymap,
     };
     // Fulfils the `Outcome::ReadDir` `Browser::new` always returns —
     // otherwise the window opens showing nothing at all, forever, for
@@ -958,6 +965,30 @@ impl App {
     }
 }
 
+/// What the status bar says when the window opens: a broken
+/// `files.toml`, and anything in `files-config.toml` that could not be
+/// used.
+///
+/// All of it, in one line. A person who mistyped two bindings should
+/// learn about both at once rather than fix one, restart and find the
+/// other.
+fn startup_status(
+    prefs_status: Option<String>,
+    config_problems: &[hyprforge_files_core::config::ConfigProblem],
+) -> Option<String> {
+    let mut parts: Vec<String> = prefs_status.into_iter().collect();
+    match config_problems {
+        [] => {}
+        [one] => parts.push(format!("files-config.toml: {one}")),
+        many => parts.push(format!(
+            "files-config.toml has {} problems: {}",
+            many.len(),
+            many.iter().map(|p| p.to_string()).collect::<Vec<_>>().join("; ")
+        )),
+    }
+    (!parts.is_empty()).then(|| parts.join(" \u{00B7} "))
+}
+
 /// A tab's display name: its directory's own name, or the full path for
 /// a directory with none (`/`).
 fn tab_display_name(dir: &Path) -> String {
@@ -1593,6 +1624,35 @@ mod tests {
         assert_eq!(app.active, 0, "an out-of-range jump must leave the active tab exactly where it was");
         app.jump_to_tab(1); // Ctrl+2, in range
         assert_eq!(app.active, 1);
+    }
+
+    #[test]
+    fn a_clean_start_says_nothing() {
+        assert_eq!(startup_status(None, &[]), None);
+    }
+
+    /// Every problem at once — fixing one and restarting to discover the
+    /// next is the experience this avoids.
+    #[test]
+    fn every_config_problem_is_reported_together() {
+        let (_, problems) = hyprforge_files_core::config::parse(
+            "[keys]\ntrash = \"Ctrl+Banana\"\nnope = \"Ctrl+K\"\n",
+            Path::new("files-config.toml"),
+        );
+        let status = startup_status(None, &problems).unwrap();
+        assert!(status.contains("2 problems"), "{status}");
+        assert!(status.contains("Banana") && status.contains("nope"), "{status}");
+    }
+
+    #[test]
+    fn a_broken_prefs_file_and_a_config_problem_are_both_shown() {
+        let (_, problems) = hyprforge_files_core::config::parse(
+            "[keys]\nnope = \"Ctrl+K\"\n",
+            Path::new("files-config.toml"),
+        );
+        let status = startup_status(Some("files.toml is broken".into()), &problems).unwrap();
+        assert!(status.starts_with("files.toml is broken"), "{status}");
+        assert!(status.contains("nope"), "{status}");
     }
 
     // --- keys, through the one table ------------------------------------------

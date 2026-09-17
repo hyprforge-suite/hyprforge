@@ -13,6 +13,7 @@ pub mod action;
 pub mod backend;
 pub mod browser;
 pub mod click;
+pub mod config;
 pub mod density;
 pub mod filter;
 pub mod format;
