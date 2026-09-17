@@ -169,10 +169,14 @@ fn main() -> iced::Result {
         clicks: ClickTracker::new(),
         config: config.clone(),
         #[cfg(debug_assertions)]
-        debug_menu: debug_menu_request(),
+        debug_show: DebugShow::from_env(),
     };
     #[cfg(debug_assertions)]
-    debug_conflict(&mut app);
+    {
+        let show = std::mem::take(&mut app.debug_show);
+        show.at_startup(&mut app);
+        app.debug_show = show;
+    }
     // Fulfils the `Outcome::ReadDir` `Browser::new` always returns —
     // otherwise the window opens showing nothing at all, forever, for
     // the same reason CLAUDE.md's "a five-second gap" rule exists: an
@@ -373,6 +377,13 @@ enum Message {
     CloseTab(usize),
     /// Something a paste job reported.
     Job(JobEvent),
+    /// A rename finished: the tab it was asked from, the new path, and
+    /// how it went.
+    Renamed(u64, PathBuf, Result<(), String>),
+    /// A new folder was made, or could not be.
+    FolderCreated(u64, PathBuf, Result<(), String>),
+    /// Escape, in a text field that kept it — see `field_escape`.
+    EscapeInField,
     /// The answer to the conflict a job is paused on.
     AnswerConflict(JobId, CollisionPolicy),
     /// "Do this for the rest" was ticked or unticked.
@@ -520,10 +531,10 @@ struct App {
     /// `mouse_area` inside would break the single click that selects.
     /// See `hyprforge_files_core::click` for the whole argument.
     clicks: ClickTracker,
-    /// Debug builds only: open a context menu on the first row as soon
-    /// as the first listing arrives. See [`debug_menu_request`].
+    /// Debug builds only: what to put on screen for a screenshot. See
+    /// [`DebugShow`].
     #[cfg(debug_assertions)]
-    debug_menu: Option<(f32, f32)>,
+    debug_show: DebugShow,
     /// The filesystem this window reads through, shared with every
     /// background read it issues.
     ///
@@ -621,6 +632,43 @@ impl App {
             }
             Outcome::CopyText(text) => iced::clipboard::write(text),
             Outcome::Paste(into) => self.paste_into(into),
+            Outcome::FocusRename { id, select } => Task::batch([
+                iced::widget::operation::focus(id.clone()),
+                iced::widget::operation::select_range(id, 0, select),
+            ]),
+            Outcome::Rename { from, to } => {
+                let tab_id = self.tabs[tab_index].id;
+                Task::perform(
+                    async move {
+                        let target = to.clone();
+                        let result = tokio::task::spawn_blocking(move || jobs::rename(&from, &target))
+                            .await
+                            .unwrap_or_else(|e| Err(format!("Renaming was interrupted: {e}")));
+                        (to, result)
+                    },
+                    move |(to, result)| Message::Renamed(tab_id, to, result),
+                )
+            }
+            Outcome::CreateFolder(path) => {
+                let tab_id = self.tabs[tab_index].id;
+                Task::perform(
+                    async move {
+                        let target = path.clone();
+                        let result = tokio::task::spawn_blocking(move || jobs::create_folder(&target))
+                            .await
+                            .unwrap_or_else(|e| Err(format!("Making the folder was interrupted: {e}")));
+                        (path, result)
+                    },
+                    move |(path, result)| Message::FolderCreated(tab_id, path, result),
+                )
+            }
+            Outcome::Notice(text) => {
+                self.status = Some(text);
+                Task::none()
+            }
+            Outcome::Many(outcomes) => Task::batch(
+                outcomes.into_iter().map(|outcome| self.handle_outcome(tab_index, outcome)).collect::<Vec<_>>(),
+            ),
             Outcome::OpenContextMenuAtPointer(spot) => {
                 let outcome = self.tabs[tab_index]
                     .browser
@@ -726,6 +774,32 @@ impl App {
                 self.refresh_dirs(&finished.dirs)
             }
         }
+    }
+
+    /// After a rename or a new folder: say what went wrong, or have the
+    /// tab select the result once its listing shows it — and, for a new
+    /// folder, start naming it. Refreshed either way, so a failed rename
+    /// still shows the folder as it really is.
+    fn name_changed(
+        &mut self,
+        tab_id: u64,
+        path: PathBuf,
+        result: Result<(), String>,
+        rename_next: bool,
+    ) -> Task<Message> {
+        let Some(index) = self.tab_index(tab_id) else {
+            return Task::none();
+        };
+        match result {
+            Ok(()) => {
+                self.tabs[index]
+                    .browser
+                    .update(BrowserMessage::AfterListing { path, rename: rename_next });
+            }
+            Err(why) => self.status = Some(why),
+        }
+        let dir = self.tabs[index].browser.current_dir().to_path_buf();
+        self.spawn_read_dir(index, dir)
     }
 
     /// Answers the conflict job `id` is paused on.
@@ -923,16 +997,24 @@ impl App {
                     return Task::none();
                 }
                 let outcome = self.tabs[index].browser.update(BrowserMessage::DirLoaded(path, result));
+                let task = self.handle_outcome(index, outcome);
                 #[cfg(debug_assertions)]
-                if let Some(at) = self.debug_menu.take() {
-                    self.tabs[index].browser.update(BrowserMessage::OpenContextMenu {
-                        spot: hyprforge_files_core::browser::MenuSpot::Row(0),
-                        at,
-                    });
-                }
-                self.handle_outcome(index, outcome)
+                let task = {
+                    let mut show = std::mem::take(&mut self.debug_show);
+                    let shown = show.after_listing(self, index);
+                    self.debug_show = show;
+                    Task::batch([task, shown])
+                };
+                task
             }
             Message::Job(event) => self.job_event(event),
+            Message::Renamed(tab_id, to, result) => self.name_changed(tab_id, to, result, false),
+            // A new folder goes straight into being named.
+            Message::FolderCreated(tab_id, path, result) => self.name_changed(tab_id, path, result, true),
+            Message::EscapeInField => {
+                let outcome = self.active_tab_mut().browser.update(BrowserMessage::RenameCancel);
+                self.handle_outcome(self.active, outcome)
+            }
             Message::AnswerConflict(id, policy) => {
                 self.answer_conflict(id, policy);
                 Task::none()
@@ -1199,6 +1281,7 @@ impl App {
             keys,
             window::resize_events().map(|(_, size)| Message::WindowResized(size)),
             pointer::track(),
+            iced::event::listen_with(field_escape),
         ])
     }
 }
@@ -1343,6 +1426,27 @@ fn conflict_dialog<'a>(job: &RunningJob, conflict: &Collision, scale: FontScale)
 /// How much of the window a dialog's dim layer hides.
 const SCRIM_ALPHA: f32 = 0.6;
 
+/// Escape pressed in a text field that took it.
+///
+/// A text field captures Escape — it drops its own focus — so the
+/// keymap, which only hears keys nobody captured, never sees it. That is
+/// right for the search box and wrong for the rename field, where Escape
+/// is how you back out. Iced 0.14's text field has no "lost focus"
+/// callback to listen for instead, so this listens for the captured
+/// Escape itself; the browser ignores it unless a rename is open.
+fn field_escape(event: iced::Event, status: iced::event::Status, _window: window::Id) -> Option<Message> {
+    match (event, status) {
+        (
+            iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                key: Key::Named(key::Named::Escape),
+                ..
+            }),
+            iced::event::Status::Captured,
+        ) => Some(Message::EscapeInField),
+        _ => None,
+    }
+}
+
 /// Where the pointer last was, kept without a message per mouse move.
 ///
 /// A context menu opens at the pointer, and a right press carries no
@@ -1383,42 +1487,83 @@ mod pointer {
     }
 }
 
-/// `HYPRFORGE_FILES_DEBUG_MENU=x,y` opens a context menu on the first
-/// row at that point once the first listing loads.
+/// Things to show on screen without a person driving the window, read
+/// from `HYPRFORGE_FILES_DEBUG` — a comma-separated list:
 ///
-/// For looking at the menu. This machine has no way to synthesise a
-/// right click, and the menu's placement and look are only checkable in
-/// a screenshot. Compiled into debug builds only, the same way the lock
-/// screen's `--type-in` is: nothing in a release build reads it.
+/// - `menu@X:Y` — the first row's context menu, opened at (X, Y)
+/// - `conflict` — the paste-conflict dialog, on a job that does nothing
+/// - `rename` — the first row, being renamed
+///
+/// This machine cannot synthesise a click or a key press into a window,
+/// and how a menu, a dialog or an edit field *looks* is only checkable
+/// in a screenshot; this is how those were checked. Compiled into debug
+/// builds only, the way the lock screen's `--type-in` is: nothing in a
+/// release build reads it.
 #[cfg(debug_assertions)]
-fn debug_menu_request() -> Option<(f32, f32)> {
-    let raw = std::env::var("HYPRFORGE_FILES_DEBUG_MENU").ok()?;
-    let (x, y) = raw.split_once(',')?;
-    Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+#[derive(Debug, Default)]
+struct DebugShow {
+    menu_at: Option<(f32, f32)>,
+    conflict: bool,
+    rename: bool,
 }
 
-/// `HYPRFORGE_FILES_DEBUG_CONFLICT=1` opens the paste-conflict dialog on
-/// a job that does nothing, for the same reason as
-/// [`debug_menu_request`]: the dialog only appears mid-paste, and this
-/// machine cannot drive a paste by hand. Debug builds only.
 #[cfg(debug_assertions)]
-fn debug_conflict(app: &mut App) {
-    if std::env::var_os("HYPRFORGE_FILES_DEBUG_CONFLICT").is_none() {
-        return;
+impl DebugShow {
+    fn from_env() -> DebugShow {
+        let mut show = DebugShow::default();
+        let Ok(raw) = std::env::var("HYPRFORGE_FILES_DEBUG") else {
+            return show;
+        };
+        for item in raw.split(',').map(str::trim) {
+            if let Some(at) = item.strip_prefix("menu@") {
+                show.menu_at = at
+                    .split_once(':')
+                    .and_then(|(x, y)| Some((x.parse().ok()?, y.parse().ok()?)));
+            } else if item == "conflict" {
+                show.conflict = true;
+            } else if item == "rename" {
+                show.rename = true;
+            }
+        }
+        show
     }
-    let (control, _events) = jobs::start(0, Vec::new(), hyprforge_files_core::config::OnConflict::Ask);
-    app.jobs.push(RunningJob {
-        id: 0,
-        control,
-        verb: ClipVerb::Copy,
-        dirs: Vec::new(),
-        progress: None,
-        conflict: Some(Collision {
-            source: PathBuf::from("/tmp/quarterly report.pdf"),
-            dest: app.home_dir.join("Documents").join("quarterly report.pdf"),
-        }),
-        apply_to_rest: false,
-    });
+
+    /// Everything that can be shown before any listing has loaded.
+    fn at_startup(&self, app: &mut App) {
+        if !self.conflict {
+            return;
+        }
+        let (control, _events) =
+            jobs::start(0, Vec::new(), hyprforge_files_core::config::OnConflict::Ask);
+        app.jobs.push(RunningJob {
+            id: 0,
+            control,
+            verb: ClipVerb::Copy,
+            dirs: Vec::new(),
+            progress: None,
+            conflict: Some(Collision {
+                source: PathBuf::from("/tmp/quarterly report.pdf"),
+                dest: app.home_dir.join("Documents").join("quarterly report.pdf"),
+            }),
+            apply_to_rest: false,
+        });
+    }
+
+    /// Everything that needs rows, once the first listing is in. Each
+    /// happens once.
+    fn after_listing(&mut self, app: &mut App, index: usize) -> Task<Message> {
+        use hyprforge_files_core::browser::MenuSpot;
+        let browser = &mut app.tabs[index].browser;
+        if let Some(at) = self.menu_at.take() {
+            browser.update(BrowserMessage::OpenContextMenu { spot: MenuSpot::Row(0), at });
+        }
+        if std::mem::take(&mut self.rename) {
+            browser.update(BrowserMessage::EntryClicked { index: 0, ctrl: false, shift: false });
+            let outcome = browser.perform(Action::Rename);
+            return app.handle_outcome(index, outcome);
+        }
+        Task::none()
+    }
 }
 
 /// What the status bar says when the window opens: a broken
@@ -1870,7 +2015,7 @@ mod tests {
             clicks: ClickTracker::new(),
             config: Arc::new(hyprforge_files_core::config::Config::default()),
             #[cfg(debug_assertions)]
-            debug_menu: None,
+            debug_show: DebugShow::default(),
         }
     }
 
@@ -2558,6 +2703,58 @@ mod tests {
         assert!(text.contains("Stopped after 1 item moved"), "{text}");
         assert!(text.contains("2 items skipped"), "{text}");
         assert!(text.contains("permission denied"), "{text}");
+    }
+
+    /// F2, type, Enter — and the file is renamed on disk, then selected
+    /// under its new name once the listing shows it.
+    #[test]
+    fn f2_then_enter_renames_a_file_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "x").unwrap();
+        let mut app = app_on(dir.path());
+        let _ = app.update(key("Down"));
+        let _ = app.update(key("F2"));
+        let _ = app.update(Message::Browser(BrowserMessage::RenameInput("b.txt".into())));
+        let _ = app.update(Message::Browser(BrowserMessage::RenameCommit));
+        // The rename runs on a task iced would deliver; stand in for it.
+        let from = dir.path().join("a.txt");
+        let to = dir.path().join("b.txt");
+        let result = jobs::rename(&from, &to);
+        let _ = app.update(Message::Renamed(app.tabs[0].id, to.clone(), result));
+        let entries = RoutingBackend::default().read_dir(dir.path()).unwrap();
+        let _ = app.update(Message::Browser(BrowserMessage::DirLoaded(dir.path().to_path_buf(), Ok(entries))));
+
+        assert!(to.exists() && !from.exists());
+        assert_eq!(app.active_tab().browser.selected_shown(), [to]);
+    }
+
+    /// Escape in the rename field reaches the browser even though the
+    /// field swallowed it.
+    #[test]
+    fn escape_in_the_rename_field_abandons_the_rename() {
+        let mut app = app_for_test(&["/dir"]);
+        let _ = app.update(Message::Browser(BrowserMessage::DirLoaded(
+            PathBuf::from("/dir"),
+            Ok(vec![entry_named("a.txt")]),
+        )));
+        let _ = app.update(key("Down"));
+        let _ = app.update(key("F2"));
+        let _ = app.update(Message::EscapeInField);
+        // A second F2 would open it again; Enter with nothing open does
+        // nothing — so if the edit were still open, this would commit it.
+        let _ = app.update(Message::Browser(BrowserMessage::RenameInput("zzz".into())));
+        assert_eq!(
+            app.update(Message::Browser(BrowserMessage::RenameCommit)).units(),
+            0,
+            "nothing was left to commit"
+        );
+    }
+
+    #[test]
+    fn a_failed_rename_is_said() {
+        let mut app = app_for_test(&["/dir"]);
+        let _ = app.update(Message::Renamed(0, "/dir/b".into(), Err("nope".into())));
+        assert_eq!(app.status.as_deref(), Some("nope"));
     }
 
     /// Pasting a folder into itself is refused before any job starts.

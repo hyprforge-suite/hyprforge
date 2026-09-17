@@ -57,6 +57,10 @@ pub enum Action {
     CopyPath,
     /// Read this folder again.
     Refresh,
+    /// Edit the selected name in place.
+    Rename,
+    /// Make a folder here, and start naming it.
+    NewFolder,
     /// Open the right-click menu from the keyboard, for the focused row.
     ContextMenu,
     // Window scope: the tab strip.
@@ -104,6 +108,8 @@ impl Action {
             Action::Paste,
             Action::CopyPath,
             Action::Refresh,
+            Action::Rename,
+            Action::NewFolder,
             Action::ContextMenu,
             Action::NewTab,
             Action::CloseTab,
@@ -137,6 +143,8 @@ impl Action {
             Action::Paste => "paste",
             Action::CopyPath => "copy-path",
             Action::Refresh => "refresh",
+            Action::Rename => "rename",
+            Action::NewFolder => "new-folder",
             Action::ContextMenu => "context-menu",
             Action::NewTab => "new-tab",
             Action::CloseTab => "close-tab",
@@ -189,6 +197,8 @@ impl Action {
             Action::Paste => "Paste",
             Action::CopyPath => "Copy Path",
             Action::Refresh => "Refresh",
+            Action::Rename => "Rename",
+            Action::NewFolder => "New Folder",
             Action::ContextMenu => "Show Menu",
             Action::NewTab => "New Tab",
             Action::CloseTab => "Close Tab",
@@ -250,6 +260,8 @@ impl Action {
             Action::Paste => &["Ctrl+V"],
             Action::CopyPath => &["Ctrl+Shift+C"],
             Action::Refresh => &["F5", "Ctrl+R"],
+            Action::Rename => &["F2"],
+            Action::NewFolder => &["Ctrl+Shift+N"],
             // The two keys every desktop uses for "the menu a right click
             // would open".
             Action::ContextMenu => &["Menu", "Shift+F10"],
@@ -329,6 +341,8 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         Action::Cut => ctx.selected > 0 && !ctx.in_trash,
         Action::Paste => ctx.can_paste && !ctx.in_trash,
         Action::Refresh => true,
+        Action::Rename => ctx.selected == 1 && !ctx.in_trash,
+        Action::NewFolder => !ctx.in_trash,
         Action::NewTab
         | Action::CloseTab
         | Action::NextTab

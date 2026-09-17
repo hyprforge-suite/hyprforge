@@ -22,6 +22,7 @@ pub mod glyph;
 pub mod icon;
 pub mod keymap;
 pub mod menu;
+pub mod naming;
 pub mod prefs;
 pub mod sidebar;
 pub mod sort;

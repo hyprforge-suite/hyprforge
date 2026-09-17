@@ -307,6 +307,17 @@ pub enum MenuSpot {
     Focused,
 }
 
+/// A name being edited in place.
+#[derive(Debug, Clone, PartialEq)]
+struct Renaming {
+    path: PathBuf,
+    text: String,
+    /// The edit field's identity, so the host can focus it and select
+    /// the name. Fresh per rename: a reused `Id` would let iced carry the
+    /// last rename's cursor into this one.
+    id: Id,
+}
+
 /// A context menu that is showing.
 #[derive(Debug, Clone, PartialEq)]
 struct OpenMenu {
@@ -362,6 +373,17 @@ pub enum Outcome {
     CopyText(String),
     /// Paste the clipboard's files into this folder.
     Paste(PathBuf),
+    /// Focus the rename field and select its first `select` characters —
+    /// the name without its extension.
+    FocusRename { id: Id, select: usize },
+    /// Rename `from` to `to` (same folder).
+    Rename { from: PathBuf, to: PathBuf },
+    /// Create this folder, then show it being renamed.
+    CreateFolder(PathBuf),
+    /// Tell the person something, in the status bar.
+    Notice(String),
+    /// Several things to do, in order.
+    Many(Vec<Outcome>),
     /// Open a context menu at the pointer. The browser does not know
     /// where the pointer is — the window does, and fills it in, the same
     /// way it fills in modifier keys on a click.
@@ -409,6 +431,16 @@ pub enum Message {
     /// Carry out an action — from a menu, a button, or a key the host
     /// resolved through [`crate::keymap::Keymap`].
     Perform(Action),
+    /// The rename field's text changed.
+    RenameInput(String),
+    /// Enter in the rename field.
+    RenameCommit,
+    /// Leave the name as it was.
+    RenameCancel,
+    /// When `path` next appears in a listing, select it — and start
+    /// renaming it if `rename`. How a new folder arrives ready to name,
+    /// and how a renamed file stays selected under its new name.
+    AfterListing { path: PathBuf, rename: bool },
     /// Open the right-click menu for `spot` at `at` (window coordinates).
     /// The view sends this with `at` unset; the host fills it in from
     /// the pointer, because a right press carries no position.
@@ -434,6 +466,8 @@ pub enum Message {
 #[derive(Debug, Clone, PartialEq)]
 struct ViewModel<'a> {
     current_dir: &'a Path,
+    /// The name being edited, if any.
+    renaming: Option<&'a Renaming>,
     column_picker_open: bool,
     /// Whether the sidebar is collapsed right now — the resolved answer,
     /// not the preference, so `render` never has to ask twice.
@@ -512,6 +546,10 @@ pub struct Browser {
     menu: Option<OpenMenu>,
     /// Whether the clipboard holds files — see [`Self::set_can_paste`].
     can_paste: bool,
+    /// The name being edited in place, if any.
+    renaming: Option<Renaming>,
+    /// See [`Message::AfterListing`].
+    after_listing: Option<(PathBuf, bool)>,
 }
 
 impl Browser {
@@ -544,6 +582,8 @@ impl Browser {
             config: Arc::new(Config::default()),
             menu: None,
             can_paste: false,
+            renaming: None,
+            after_listing: None,
         };
         (browser, Outcome::ReadDir(start_dir))
     }
@@ -638,7 +678,30 @@ impl Browser {
             Message::GoForward => self.go_forward(),
             Message::GoUp => self.go_up(),
             Message::EntryClicked { index, ctrl, shift } => {
+                // Clicking another row abandons an edit rather than
+                // committing it: a half-typed name is not a decision, and
+                // a rename nobody confirmed is the worse surprise.
+                let editing = self.renaming.as_ref().map(|r| r.path.clone());
+                let on_edited = self.rows().get(index).map(|e| e.path.clone()) == editing;
+                if !on_edited {
+                    self.renaming = None;
+                }
                 self.with_rows(|selection, rows| selection.click_with(rows, index, ctrl, shift));
+                Outcome::None
+            }
+            Message::RenameInput(text) => {
+                if let Some(renaming) = &mut self.renaming {
+                    renaming.text = text;
+                }
+                Outcome::None
+            }
+            Message::RenameCommit => self.commit_rename(),
+            Message::RenameCancel => {
+                self.renaming = None;
+                Outcome::None
+            }
+            Message::AfterListing { path, rename } => {
+                self.after_listing = Some((path, rename));
                 Outcome::None
             }
             Message::EntryActivated(index) => self.activate(index),
@@ -782,6 +845,10 @@ impl Browser {
     /// [`crate::action::enabled`] answer a menu uses to grey an item out,
     /// so the two cannot disagree.
     pub fn perform(&mut self, action: Action) -> Outcome {
+        // Any action ends an edit in progress. The field has the
+        // keyboard while it is focused, so a key reaching here was not
+        // typed into it.
+        self.renaming = None;
         // An open menu has the keyboard: arrows move through it, Open
         // runs the highlighted item, Escape closes it. Anything else
         // closes it and then does what it normally does.
@@ -872,6 +939,11 @@ impl Browser {
                     .join("\n"),
             ),
             Action::Paste => Outcome::Paste(self.current_dir.clone()),
+            Action::Rename => self.begin_rename(),
+            Action::NewFolder => {
+                let name = crate::naming::new_folder_name(self.entries.iter().map(|e| e.name.as_str()));
+                Outcome::CreateFolder(self.current_dir.join(name))
+            }
             // A re-read, not a navigation: history, search and the
             // selection all stay.
             Action::Refresh => Outcome::ReadDir(self.current_dir.clone()),
@@ -885,6 +957,44 @@ impl Browser {
         }
     }
 
+    /// Starts editing the one selected name.
+    fn begin_rename(&mut self) -> Outcome {
+        let selected = self.selected_shown();
+        let [path] = selected.as_slice() else {
+            return Outcome::None;
+        };
+        let Some(entry) = self.entries.iter().find(|e| &e.path == path) else {
+            return Outcome::None;
+        };
+        let id = Id::unique();
+        let select = crate::naming::stem_len(&entry.name, entry.is_dir);
+        self.renaming = Some(Renaming { path: path.clone(), text: entry.name.clone(), id: id.clone() });
+        Outcome::FocusRename { id, select }
+    }
+
+    /// Enter in the rename field: rename, close quietly, or say why not
+    /// and leave the field open to fix.
+    fn commit_rename(&mut self) -> Outcome {
+        let Some(renaming) = &self.renaming else {
+            return Outcome::None;
+        };
+        let old = renaming.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let siblings = self.entries.iter().map(|e| e.name.as_str());
+        match crate::naming::check_rename(&old, &renaming.text, siblings) {
+            crate::naming::RenameCheck::Unchanged => {
+                self.renaming = None;
+                Outcome::None
+            }
+            crate::naming::RenameCheck::Refused(why) => Outcome::Notice(why),
+            crate::naming::RenameCheck::To(name) => {
+                let from = renaming.path.clone();
+                let to = self.current_dir.join(name);
+                self.renaming = None;
+                Outcome::Rename { from, to }
+            }
+        }
+    }
+
     /// Opens the menu for `spot`.
     ///
     /// A right click on a row that is not selected selects it — alone —
@@ -894,6 +1004,7 @@ impl Browser {
     /// work. A right click on the background clears the selection: the
     /// menu there is about the folder, not about whatever was selected.
     fn open_menu(&mut self, spot: MenuSpot, at: (f32, f32)) {
+        self.renaming = None;
         let row = match spot {
             MenuSpot::Row(i) => Some(i),
             MenuSpot::Background => None,
@@ -1010,11 +1121,22 @@ impl Browser {
         // own `Entry`, and the entries were just replaced wholesale.
         let folders: Vec<PathBuf> =
             self.entries.iter().filter(|e| e.is_dir).map(|e| e.path.clone()).collect();
-        if folders.is_empty() {
-            Outcome::None
-        } else {
-            Outcome::CountFolders(folders)
-        }
+        let counts = if folders.is_empty() { Outcome::None } else { Outcome::CountFolders(folders) };
+
+        // Something the host asked to have selected once it showed up —
+        // a folder just made, a file just renamed. If it is not here yet
+        // the request waits for the next listing.
+        let arrived = match &self.after_listing {
+            Some((path, _)) => self.rows().iter().position(|e| &e.path == path),
+            None => None,
+        };
+        let Some(index) = arrived else {
+            return counts;
+        };
+        let (_, rename) = self.after_listing.take().expect("checked just above");
+        self.with_rows(|selection, rows| selection.click_with(rows, index, false, false));
+        let then = if rename { self.begin_rename() } else { Outcome::None };
+        Outcome::Many(vec![counts, then])
     }
 
     fn refresh_view(&mut self) {
@@ -1086,6 +1208,8 @@ impl Browser {
     /// reset would have meant remembering all three.
     fn arrive_at(&mut self, path: PathBuf) -> Outcome {
         self.menu = None;
+        self.renaming = None;
+        self.after_listing = None;
         self.current_dir = path.clone();
         self.selection.clear();
         self.search_query.clear();
@@ -1165,6 +1289,7 @@ impl Browser {
     fn view_model(&self, viewport_width: f32) -> ViewModel<'_> {
         ViewModel {
             current_dir: &self.current_dir,
+            renaming: self.renaming.as_ref(),
             column_picker_open: self.column_picker_open,
             sidebar_collapsed: self.prefs.sidebar.collapsed(viewport_width),
             viewport_width,
@@ -2176,6 +2301,7 @@ fn entry_row<'a>(
     entry: &'a Entry,
     selected: bool,
     columns: &Columns,
+    renaming: Option<&'a Renaming>,
     scale: FontScale,
     now: chrono::DateTime<chrono::Local>,
 ) -> Element<'a, Message> {
@@ -2188,13 +2314,22 @@ fn entry_row<'a>(
     // defers git entirely, and a column with nothing to put in it is
     // exactly the "reads as broken, not as not-yet" trap the sidebar
     // section rule is written to avoid.
+    let editing = renaming.filter(|r| r.path == entry.path);
+    // A row being renamed drops its accent fill while the field is open:
+    // the field's own selection is accent, and accent text on an accent
+    // row is text that has disappeared. The field's accent outline is
+    // what marks the row instead.
+    let selected = selected && editing.is_none();
     let mut row_content = row![
         entry_icon(entry.kind, 20.0, scale),
         // `&entry.name`, not a clone: `scaled_text` borrows for `'a`,
         // and this row is rebuilt for every visible entry on every
         // redraw — a hover anywhere in the window allocated one `String`
         // per row for a value that was already sitting right there.
-        list_cell(scaled_text(&entry.name, density::ROW_TEXT_BASE, scale), NAME_PORTION),
+        match editing {
+            Some(r) => container(rename_field(r, scale)).width(Length::FillPortion(NAME_PORTION)).into(),
+            None => list_cell(scaled_text(&entry.name, density::ROW_TEXT_BASE, scale), NAME_PORTION),
+        },
     ]
     .spacing(spacing::SM)
     .align_y(iced::Alignment::Center);
@@ -2589,6 +2724,7 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
             entry,
             vm.selection.is_selected(&entry.path),
             &vm.prefs.columns,
+            vm.renaming,
             scale,
             now,
         ));
@@ -2654,6 +2790,7 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // the grid just sat at one size with an expanding margin beside it,
     // which is most of why it read as squashed. This asks the layout how
     // much room there actually is and fills it.
+    let renaming = vm.renaming;
     iced::widget::responsive(move |size| {
         let gap = density::grid_gap(scale);
         // The width the layout actually handed us, which is the same
@@ -2669,7 +2806,7 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
                 grid = grid.push(current);
                 current = row![].spacing(gap);
             }
-            current = current.push(grid_cell(index, entry, selected, scale));
+            current = current.push(grid_cell(index, entry, selected, renaming, scale));
         }
         // The last row is padded out with empty space to a full set of
         // columns, so its cells keep the width the rows above gave them
@@ -2688,38 +2825,92 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     .into()
 }
 
+/// A grid cell's name.
+fn grid_name<'a>(entry: &'a Entry, scale: FontScale) -> Element<'a, Message> {
+    // The same text size as a list row's name, not a smaller one. The
+    // grid used to shrink it to 12px, which made a view meant for
+    // *recognising* things harder to read than the one meant for
+    // scanning them.
+    //
+    // `WordOrGlyph`, not the default `Word`: a name with no spaces in it
+    // — `IntradaScreenConnect`, and most of a source tree — is one
+    // "word", and word wrapping cannot break it, so it runs straight out
+    // of the cell and across its neighbour. This wraps at word
+    // boundaries where there are any and falls back to breaking
+    // mid-name where there are none.
+    container(
+        scaled_text(&entry.name, density::ROW_TEXT_BASE, scale)
+            .align_x(iced::Alignment::Center)
+            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+            .width(Length::Fill),
+    )
+    // And clipped to the room a name actually has, so a third line
+    // cannot push the cell taller than its neighbours and stagger the
+    // row. Two lines is the budget; past that the name is cut rather
+    // than the grid distorted.
+    .height(Length::Fixed(density::grid_name_height(scale)))
+    .clip(true)
+    .into()
+}
+
+/// The in-place edit field a name becomes while it is renamed.
+///
+/// Same text size as the name it replaces, and no taller than a row, so
+/// starting a rename does not shift anything around it.
+fn rename_field<'a>(renaming: &'a Renaming, scale: FontScale) -> Element<'a, Message> {
+    text_input("", &renaming.text)
+        .id(renaming.id.clone())
+        .on_input(Message::RenameInput)
+        .on_submit(Message::RenameCommit)
+        .size(scale.apply(density::ROW_TEXT_BASE))
+        .padding([0, spacing::XS as u16])
+        .width(Length::Fill)
+        .style(rename_field_style)
+        .into()
+}
+
+/// The rename field's look: the listing's own surface, cut into the
+/// selected row, with a hairline of accent round it.
+///
+/// It sits on a row that is already accent-filled, so iced's default —
+/// an accent text selection on a black box — failed twice over: the
+/// selected text was accent on accent and vanished, and the black box
+/// was a colour nothing else in the window uses. On the listing's own
+/// surface the accent selection reads, and the field reads as a hole in
+/// the row you can type into.
+fn rename_field_style(
+    theme: &iced::Theme,
+    _status: iced::widget::text_input::Status,
+) -> iced::widget::text_input::Style {
+    let accent = theme.extended_palette().primary.weak.color;
+    iced::widget::text_input::Style {
+        background: iced::Background::Color(hyprforge_ui::theme::surface::card()),
+        border: iced::Border { color: accent, width: 1.0, radius: density::nested_radius().into() },
+        icon: hyprforge_ui::theme::text_dim(),
+        placeholder: hyprforge_ui::theme::text_dim(),
+        value: hyprforge_ui::theme::text(),
+        selection: accent,
+    }
+}
+
 /// One cell of the grid: a big icon over a centred name.
 fn grid_cell<'a>(
     index: usize,
     entry: &'a Entry,
     selected: bool,
+    renaming: Option<&'a Renaming>,
     scale: FontScale,
 ) -> Element<'a, Message> {
+    let editing = renaming.filter(|r| r.path == entry.path);
+    // Unfilled while being renamed — see `entry_row`.
+    let selected = selected && editing.is_none();
+    let name: Element<'a, Message> = match editing {
+        Some(r) => rename_field(r, scale),
+        None => grid_name(entry, scale),
+    };
     let content = column![
         entry_icon(entry.kind, density::grid_icon_size(scale), scale),
-        // The same text size as a list row's name, not a smaller one.
-        // The grid used to shrink it to 12px, which made a view meant
-        // for *recognising* things harder to read than the one meant for
-        // scanning them.
-        //
-        // `WordOrGlyph`, not the default `Word`: a name with no spaces
-        // in it — `IntradaScreenConnect`, and most of a source tree —
-        // is one "word", and word wrapping cannot break it, so it runs
-        // straight out of the cell and across its neighbour. This wraps
-        // at word boundaries where there are any and falls back to
-        // breaking mid-name where there are none.
-        container(
-            scaled_text(&entry.name, density::ROW_TEXT_BASE, scale)
-                .align_x(iced::Alignment::Center)
-                .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
-                .width(Length::Fill),
-        )
-        // And clipped to the room a name actually has, so a third line
-        // cannot push the cell taller than its neighbours and stagger
-        // the row. Two lines is the budget; past that the name is cut
-        // rather than the grid distorted.
-        .height(Length::Fixed(density::grid_name_height(scale)))
-        .clip(true),
+        name,
     ]
     .spacing(spacing::SM)
     .align_x(iced::Alignment::Center);
@@ -3027,6 +3218,127 @@ mod tests {
         assert_eq!(browser.perform(Action::Paste), Outcome::None);
         browser.set_can_paste(true);
         assert_eq!(browser.perform(Action::Paste), Outcome::Paste(PathBuf::from("/dir")));
+    }
+
+    // --- rename and new folder ------------------------------------------------
+
+    fn start_renaming(browser: &mut Browser, index: usize) -> Outcome {
+        browser.update(Message::EntryClicked { index, ctrl: false, shift: false });
+        browser.perform(Action::Rename)
+    }
+
+    #[test]
+    fn f2_opens_the_name_with_everything_but_the_extension_selected() {
+        let mut browser = loaded_browser(&["report.pdf"]);
+        match start_renaming(&mut browser, 0) {
+            Outcome::FocusRename { select, .. } => assert_eq!(select, 6),
+            other => panic!("expected FocusRename, got {other:?}"),
+        }
+        assert_eq!(browser.renaming.as_ref().unwrap().text, "report.pdf");
+    }
+
+    #[test]
+    fn rename_needs_exactly_one_selected() {
+        let mut browser = loaded_browser(&["a.txt", "b.txt"]);
+        assert_eq!(browser.perform(Action::Rename), Outcome::None, "nothing selected");
+        browser.perform(Action::SelectAll);
+        assert_eq!(browser.perform(Action::Rename), Outcome::None, "two selected");
+    }
+
+    #[test]
+    fn enter_renames_to_what_was_typed() {
+        let mut browser = loaded_browser(&["a.txt"]);
+        start_renaming(&mut browser, 0);
+        browser.update(Message::RenameInput("b.txt".into()));
+        assert_eq!(
+            browser.update(Message::RenameCommit),
+            Outcome::Rename { from: "/dir/a.txt".into(), to: "/dir/b.txt".into() }
+        );
+        assert!(browser.renaming.is_none());
+    }
+
+    /// A bad name is said, and the field stays open to fix it.
+    #[test]
+    fn a_taken_name_keeps_the_field_open_with_a_reason() {
+        let mut browser = loaded_browser(&["a.txt", "b.txt"]);
+        start_renaming(&mut browser, 0);
+        browser.update(Message::RenameInput("b.txt".into()));
+        assert!(matches!(browser.update(Message::RenameCommit), Outcome::Notice(_)));
+        assert!(browser.renaming.is_some());
+    }
+
+    /// Clearing the field and pressing Enter is how people back out.
+    #[test]
+    fn an_emptied_field_closes_without_renaming() {
+        let mut browser = loaded_browser(&["a.txt"]);
+        start_renaming(&mut browser, 0);
+        browser.update(Message::RenameInput(String::new()));
+        assert_eq!(browser.update(Message::RenameCommit), Outcome::None);
+        assert!(browser.renaming.is_none());
+    }
+
+    #[test]
+    fn escape_and_a_click_elsewhere_both_abandon_the_edit() {
+        let mut browser = loaded_browser(&["a.txt", "b.txt"]);
+        start_renaming(&mut browser, 0);
+        browser.update(Message::RenameCancel);
+        assert!(browser.renaming.is_none());
+
+        start_renaming(&mut browser, 0);
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+        assert!(browser.renaming.is_some(), "a click inside the row being renamed keeps it");
+        browser.update(Message::EntryClicked { index: 1, ctrl: false, shift: false });
+        assert!(browser.renaming.is_none(), "a click on another row abandons it");
+    }
+
+    #[test]
+    fn a_new_folder_gets_the_first_free_name() {
+        let mut browser = loaded_browser(&["New folder", "a.txt"]);
+        assert_eq!(
+            browser.perform(Action::NewFolder),
+            Outcome::CreateFolder("/dir/New folder 2".into())
+        );
+    }
+
+    /// The host asks for the new folder to be named once the listing
+    /// shows it; the listing that shows it selects it and opens the edit.
+    #[test]
+    fn a_new_folder_arrives_selected_and_being_named() {
+        let (mut browser, _) =
+            Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
+        browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(vec![entry("a.txt", false)])));
+        browser.update(Message::AfterListing { path: "/dir/New folder".into(), rename: true });
+        // A listing without it leaves the request waiting.
+        browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(vec![entry("a.txt", false)])));
+        assert!(browser.renaming.is_none());
+
+        let outcome = browser.update(Message::DirLoaded(
+            PathBuf::from("/dir"),
+            Ok(vec![entry("a.txt", false), entry("New folder", true)]),
+        ));
+        assert!(
+            matches!(&outcome, Outcome::Many(v) if v.iter().any(|o| matches!(o, Outcome::FocusRename { .. }))),
+            "{outcome:?}"
+        );
+        assert_eq!(browser.selected_shown(), [PathBuf::from("/dir/New folder")]);
+        assert_eq!(browser.renaming.as_ref().unwrap().text, "New folder");
+    }
+
+    /// Navigating away drops a pending request, so it cannot select a
+    /// same-named thing somewhere else.
+    #[test]
+    fn a_pending_selection_does_not_follow_you_to_another_folder() {
+        let mut browser = loaded_browser(&["a.txt"]);
+        browser.update(Message::AfterListing { path: "/dir/x".into(), rename: true });
+        browser.update(Message::Navigate("/other".into()));
+        assert!(browser.after_listing.is_none());
+    }
+
+    #[test]
+    fn nothing_in_the_trash_can_be_renamed_or_made() {
+        let ctx = ActionContext { selected: 1, in_trash: true, ..ActionContext::default() };
+        assert!(!action::enabled(Action::Rename, &ctx));
+        assert!(!action::enabled(Action::NewFolder, &ctx));
     }
 
     // --- the context menu -----------------------------------------------------
@@ -3797,6 +4109,7 @@ mod tests {
     ) -> ViewModel<'a> {
         ViewModel {
             current_dir,
+            renaming: None,
             column_picker_open: false,
             sidebar_collapsed: false,
             viewport_width: 1000.0,

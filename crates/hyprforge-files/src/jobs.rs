@@ -188,6 +188,52 @@ fn run(
     summary
 }
 
+/// Renames `from` to `to` in one go — a rename is a single `rename(2)`
+/// in the same folder, too quick to be worth a job.
+///
+/// Through `Operation` rather than `std::fs::rename`, because
+/// `std::fs::rename` replaces whatever is at `to` without a word. The
+/// name was checked against the listing when Enter was pressed, but
+/// something can appear in between; here that is a collision, answered
+/// Cancel, and reported — never an overwrite.
+pub fn rename(from: &std::path::Path, to: &std::path::Path) -> Result<(), String> {
+    let mut op = Operation::real(hyprforge_fileops::OpKind::Move, from, to);
+    loop {
+        match op.step() {
+            StepOutcome::Progress(_) => {}
+            StepOutcome::Collision(_) => {
+                op.resolve(CollisionDecision { policy: CollisionPolicy::Cancel, apply_to_rest: true });
+            }
+            StepOutcome::Done(report) => {
+                if let Some((_, message)) = report.failed.into_iter().next() {
+                    return Err(message);
+                }
+                if report.cancelled {
+                    let name = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    return Err(format!("Something called \"{name}\" appeared there first."));
+                }
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// Makes a new, empty folder. `create_dir` and not `create_dir_all`, so
+/// a folder that appeared under the same name in the meantime is an
+/// error rather than silently "created" again.
+pub fn create_folder(path: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir(path).map_err(|e| {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        match e.kind() {
+            std::io::ErrorKind::AlreadyExists => format!("\"{name}\" already exists."),
+            std::io::ErrorKind::PermissionDenied => {
+                "You don't have permission to make a folder here.".to_string()
+            }
+            _ => format!("Couldn't make \"{name}\": {e}"),
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,6 +426,40 @@ mod tests {
             }
         }
         assert_eq!(fs::read_to_string(&b).unwrap(), "old");
+    }
+
+    #[test]
+    fn a_rename_renames() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        fs::write(&a, "x").unwrap();
+        rename(&a, &dir.path().join("b.txt")).unwrap();
+        assert!(dir.path().join("b.txt").exists());
+        assert!(!a.exists());
+    }
+
+    /// The case `std::fs::rename` gets wrong: it would replace `b.txt`
+    /// without a word.
+    #[test]
+    fn a_rename_onto_an_existing_name_is_refused_and_overwrites_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, "mine").unwrap();
+        fs::write(&b, "theirs").unwrap();
+        let err = rename(&a, &b).unwrap_err();
+        assert!(err.contains("b.txt"), "{err}");
+        assert_eq!(fs::read_to_string(&b).unwrap(), "theirs");
+        assert!(a.exists());
+    }
+
+    #[test]
+    fn a_new_folder_is_made_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("New folder");
+        create_folder(&path).unwrap();
+        assert!(path.is_dir());
+        assert!(create_folder(&path).unwrap_err().contains("already exists"));
     }
 
     #[test]
