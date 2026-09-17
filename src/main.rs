@@ -47,10 +47,11 @@
 use hyprforge_files_core::backend::FsBackend;
 use hyprforge_files_core::trash::RoutingBackend;
 use hyprforge_files_core::browser::Message as BrowserMessage;
+use hyprforge_files_core::keymap::Resolved;
 use hyprforge_files_core::sidebar::SidebarItem;
 use hyprforge_files_core::{
-    keymap, sidebar, xdg_user_dirs, Browser, Click, ClickTracker, DirError, DirErrorKind, Entry,
-    Mode, Outcome, Prefs,
+    keymap, sidebar, xdg_user_dirs, Action, Browser, Click, ClickTracker, DirError, DirErrorKind,
+    Entry, Mode, Outcome, Prefs, Scope,
 };
 use hyprforge_ui::theme::{app_theme, spacing, FontScale, BASE_TEXT_SIZE};
 use std::sync::Arc;
@@ -150,6 +151,7 @@ fn main() -> iced::Result {
         resize_generation: 0,
         modifiers: keyboard::Modifiers::default(),
         clicks: ClickTracker::new(),
+        keymap: keymap::Keymap::defaults(),
     };
     // Fulfils the `Outcome::ReadDir` `Browser::new` always returns —
     // otherwise the window opens showing nothing at all, forever, for
@@ -319,14 +321,15 @@ async fn count_folders(
 #[derive(Debug, Clone, PartialEq)]
 enum Message {
     Browser(BrowserMessage),
-    BrowserKey(keymap::Key, keymap::Modifiers),
+    /// A key nobody else took — resolved in `update` against
+    /// [`App::keymap`], which is state a subscription closure cannot see.
+    KeyPressed(keymap::KeyPress),
     /// The tab a directory read was issued for, the generation it was
     /// issued under, the directory it was for, and what came back — see
     /// the module doc's note on `read_generation`, and [`Tab`]'s own doc
     /// for why the guard is per-tab rather than per-window now that a
     /// window can have several reads in flight at once, one per tab.
     DirLoaded(u64, u64, PathBuf, Result<Vec<Entry>, DirError>),
-    DeleteSelected,
     /// The tab a trash operation was started from, the directory to
     /// refresh, and what (if anything) failed.
     TrashDone(u64, PathBuf, Vec<String>),
@@ -340,7 +343,7 @@ enum Message {
     /// [`App::resize_generation`].
     WindowSettled(u64),
     DismissStatus,
-    /// `Ctrl+T`, or the titlebar's `+`.
+    /// The titlebar's `+`. `Ctrl+T` is `Action::NewTab`.
     NewTab,
     /// `Ctrl+W`, or a tab's own close affordance — by position in
     /// `App::tabs` at the moment the message was produced (view and
@@ -348,12 +351,9 @@ enum Message {
     /// same assumption every other index-carrying message in this file
     /// already makes).
     CloseTab(usize),
+    /// A click on a tab. The keyboard's tab actions go through
+    /// [`App::perform_window`] instead.
     SwitchTab(usize),
-    /// `Ctrl+Tab` (`+1`) / `Ctrl+Shift+Tab` (`-1`).
-    CycleTab(i32),
-    /// `Ctrl+1`..`Ctrl+9`, zero-based. Silently does nothing past the
-    /// last tab — see [`App::jump_to_tab`].
-    JumpToTab(usize),
 }
 
 /// One open directory tree view, with the state that makes it a tab
@@ -477,6 +477,9 @@ struct App {
     /// — its own tests pass ctrl/shift explicitly — and puts "what was
     /// held" in the one place that actually observes the keyboard.
     modifiers: keyboard::Modifiers,
+    /// What every key means — the one table. See
+    /// `hyprforge_files_core::keymap`.
+    keymap: keymap::Keymap,
     /// Tracks click timing, so two quick presses on one row open it.
     ///
     /// Here rather than in the view, because iced's `button` captures a
@@ -525,7 +528,7 @@ impl App {
         })
     }
 
-    /// Carries out everything `Browser::update`/`handle_key` handed back
+    /// Carries out everything `Browser::update`/`perform` handed back
     /// but could not do itself — see `hyprforge_files_core::browser::Outcome`'s
     /// own doc for why each of these belongs to the host. `tab_index` is
     /// which tab produced the outcome, needed only for `ReadDir` (every
@@ -547,6 +550,43 @@ impl App {
                     Message::Browser(BrowserMessage::CountsLoaded(counts))
                 })
             }
+            Outcome::Trash(paths) => {
+                if paths.is_empty() {
+                    return Task::none();
+                }
+                let tab = &self.tabs[tab_index];
+                let dir = tab.browser.current_dir().to_path_buf();
+                let tab_id = tab.id;
+                Task::perform(trash_many(paths), move |errors| {
+                    Message::TrashDone(tab_id, dir.clone(), errors)
+                })
+            }
+            Outcome::OpenInNewTab(path) => self.open_tab(path),
+            Outcome::Window(action) => self.perform_window(action),
+        }
+    }
+
+    /// Carries out a window-scope action: the tab strip's half of the
+    /// action vocabulary, which the dialog host does not have.
+    fn perform_window(&mut self, action: Action) -> Task<Message> {
+        match action {
+            Action::NewTab => self.open_tab(self.home_dir.clone()),
+            Action::CloseTab => self.close_tab(self.active),
+            Action::NextTab => {
+                self.cycle_tab(1);
+                Task::none()
+            }
+            Action::PreviousTab => {
+                self.cycle_tab(-1);
+                Task::none()
+            }
+            Action::Tab(n) => {
+                self.jump_to_tab(usize::from(n).saturating_sub(1));
+                Task::none()
+            }
+            // A browser action has no business here; `Browser::perform`
+            // never hands one back. Doing nothing is the safe reading.
+            _ => Task::none(),
         }
     }
 
@@ -648,10 +688,24 @@ impl App {
                 }
                 self.handle_outcome(self.active, outcome)
             }
-            Message::BrowserKey(key, mods) => {
-                let outcome = self.active_tab_mut().browser.handle_key(key, mods);
-                self.handle_outcome(self.active, outcome)
-            }
+            Message::KeyPressed(press) => match self.keymap.resolve(&press) {
+                // Window actions never reach the browser, which the
+                // dialog host also renders and which has no tabs.
+                Some(Resolved::Action(action)) if action.scope() == Scope::Window => {
+                    self.perform_window(action)
+                }
+                Some(Resolved::Action(action)) => {
+                    self.clicks.reset();
+                    let outcome = self.active_tab_mut().browser.perform(action);
+                    self.handle_outcome(self.active, outcome)
+                }
+                Some(Resolved::Type(c)) => {
+                    let outcome =
+                        self.active_tab_mut().browser.update(BrowserMessage::TypeToSearch(c));
+                    self.handle_outcome(self.active, outcome)
+                }
+                None => Task::none(),
+            },
             Message::DirLoaded(tab_id, generation, path, result) => {
                 let Some(index) = self.tab_index(tab_id) else {
                     // The tab that asked for this closed before the read
@@ -672,24 +726,6 @@ impl App {
                 }
                 let outcome = self.tabs[index].browser.update(BrowserMessage::DirLoaded(path, result));
                 self.handle_outcome(index, outcome)
-            }
-            Message::DeleteSelected => {
-                let tab = self.active_tab();
-                // Straight out of the selection — it stores paths now,
-                // so there is nothing to resolve against a listing that
-                // may have been re-sorted since the click. That
-                // resolution step is what used to be able to trash a
-                // file nobody selected.
-                let paths: Vec<PathBuf> =
-                    tab.browser.selection().selected_paths().iter().cloned().collect();
-                if paths.is_empty() {
-                    return Task::none();
-                }
-                let dir = tab.browser.current_dir().to_path_buf();
-                let tab_id = tab.id;
-                Task::perform(trash_many(paths), move |errors| {
-                    Message::TrashDone(tab_id, dir.clone(), errors)
-                })
             }
             Message::TrashDone(tab_id, dir, errors) => {
                 if !errors.is_empty() {
@@ -762,12 +798,8 @@ impl App {
             // One bounds check, not two spellings of it: clicking a tab
             // and `Ctrl+N` differ only in which affordance asked, and
             // nothing downstream cares which.
-            Message::SwitchTab(index) | Message::JumpToTab(index) => {
+            Message::SwitchTab(index) => {
                 self.jump_to_tab(index);
-                Task::none()
-            }
-            Message::CycleTab(delta) => {
-                self.cycle_tab(delta);
                 Task::none()
             }
         }
@@ -895,19 +927,18 @@ impl App {
         container(content).width(Length::Fill).height(Length::Fill).style(window_frame_style).into()
     }
 
-    /// The keyboard grammar: everything `keymap::resolve` gives meaning
-    /// to is forwarded to `Browser::handle_key` (see that module's own
-    /// doc — this is the host wiring it names), plus Delete (trashing is
-    /// this app's own concern, never the shared browsing view's or the
-    /// portal dialog's) and the tab shortcuts below (same reasoning: a
-    /// dialog has no tabs, so this grammar belongs to the window, not to
-    /// `Browser`).
+    /// Keys become `Message::KeyPressed`, and what they mean is decided
+    /// in `update` against [`App::keymap`] — the one table. This used to
+    /// decide in three places here (Delete first, then the Ctrl tab
+    /// shortcuts, then the browser's own grammar), and that precedence
+    /// could only be learned by reading this function.
+    ///
+    /// `keyboard::listen` only delivers keys no widget captured, so while
+    /// the search field has focus, Ctrl+A selects its text rather than
+    /// the files and Backspace deletes a character rather than going up
+    /// a level. That is the behaviour wanted, and it comes free.
     fn subscription(&self) -> Subscription<Message> {
-        // `Subscription::filter_map`/`map` require a non-capturing (zero-
-        // sized) closure — `with` is iced's own way to thread state like
-        // `self.active` into one anyway, as a tuple element instead of a
-        // capture.
-        let keys = keyboard::listen().with(self.active).filter_map(|(active, event)| {
+        let keys = keyboard::listen().filter_map(|event| {
             // Which modifiers are held is tracked separately from which
             // key was pressed, because a *click* needs to know and a
             // click carries none of its own: neither `button::on_press`
@@ -918,18 +949,7 @@ impl App {
             if let keyboard::Event::ModifiersChanged(modifiers) = &event {
                 return Some(Message::ModifiersChanged(*modifiers));
             }
-            let keyboard::Event::KeyPressed { key, modifiers, .. } = &event else {
-                return None;
-            };
-            if let Key::Named(key::Named::Delete) = key {
-                return Some(Message::DeleteSelected);
-            }
-            if modifiers.control() {
-                if let Some(msg) = tab_shortcut(key, modifiers.shift(), active) {
-                    return Some(msg);
-                }
-            }
-            to_browser_key(&event).map(|(k, m)| Message::BrowserKey(k, m))
+            key_press(&event).map(Message::KeyPressed)
         });
         Subscription::batch([
             keys,
@@ -942,30 +962,6 @@ impl App {
 /// a directory with none (`/`).
 fn tab_display_name(dir: &Path) -> String {
     dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| dir.display().to_string())
-}
-
-/// The Ctrl-held keys the titlebar's tab strip gives meaning to — new,
-/// close, cycle, jump — kept separate from `to_browser_key`'s browsing
-/// grammar so, for instance, Ctrl+T can never be misread as "type T into
-/// the search box" (`keymap::resolve` already refuses a Ctrl-held
-/// character for exactly that reason; this is the window-level analogue
-/// of the same rule for keys `Browser` has no notion of at all).
-fn tab_shortcut(key: &Key, shift: bool, active: usize) -> Option<Message> {
-    match key.as_ref() {
-        Key::Character("t") => Some(Message::NewTab),
-        Key::Character("w") => Some(Message::CloseTab(active)),
-        Key::Named(key::Named::Tab) => Some(Message::CycleTab(if shift { -1 } else { 1 })),
-        Key::Character(c) => {
-            let mut chars = c.chars();
-            match (chars.next(), chars.next()) {
-                (Some(d), None) if d.is_ascii_digit() && d != '0' => {
-                    Some(Message::JumpToTab(d.to_digit(10).unwrap() as usize - 1))
-                }
-                _ => None,
-            }
-        }
-        _ => None,
-    }
 }
 
 fn tab_dot_color(is_active: bool) -> Color {
@@ -1106,34 +1102,97 @@ const RESIZE_SETTLE: u64 = 400;
 /// fill appear in exactly the right shape with no reflow.
 const TAB_PADDING_X: u16 = 14;
 
-/// Maps one iced key press to this browser's own [`keymap::Key`], or
-/// `None` if it means nothing here (Delete is handled by the caller
-/// separately — see [`App::subscription`]).
+/// One iced key press, as the keymap reads it — or `None` for a key no
+/// binding can name.
 ///
-/// Named keys (Enter/Backspace/Escape/arrows) are read from `key`; a
-/// printable character is read from `text`, never from `key` — the
-/// CLAUDE.md rule on the three things iced reports for a keypress: `key`
-/// is unmodified, so reading it for typed text would turn `Shift+/` into
-/// `/` instead of `?` and silently mistype a search. This browser has no
-/// password field, but the rule is the right default everywhere text
-/// gets typed, not only where it happens to matter today.
-fn to_browser_key(event: &keyboard::Event) -> Option<(keymap::Key, keymap::Modifiers)> {
+/// Two fields, deliberately from two places — the CLAUDE.md rule on the
+/// three things iced reports for a key press:
+///
+/// - `key` comes from iced's *unmodified* `key`, which is what a binding
+///   is matched against. Ctrl+Shift+N arrives as `n` with Ctrl and Shift
+///   held, which is exactly how the binding is written.
+/// - `text` comes from iced's `text`, what the press actually typed, and
+///   is only ever used for typing into search. Reading `key` for that
+///   would turn `Shift+/` into `/`.
+fn key_press(event: &keyboard::Event) -> Option<keymap::KeyPress> {
     let keyboard::Event::KeyPressed { key: pressed, modifiers, text, .. } = event else {
         return None;
     };
-    let mods =
-        keymap::Modifiers { ctrl: modifiers.control(), alt: modifiers.alt(), shift: modifiers.shift() };
-    let mapped = match pressed {
-        Key::Named(key::Named::Enter) => Some(keymap::Key::Enter),
-        Key::Named(key::Named::Backspace) => Some(keymap::Key::Backspace),
-        Key::Named(key::Named::Escape) => Some(keymap::Key::Escape),
-        Key::Named(key::Named::ArrowUp) => Some(keymap::Key::ArrowUp),
-        Key::Named(key::Named::ArrowDown) => Some(keymap::Key::ArrowDown),
-        Key::Named(key::Named::ArrowLeft) => Some(keymap::Key::ArrowLeft),
-        Key::Named(key::Named::ArrowRight) => Some(keymap::Key::ArrowRight),
-        _ => text.as_ref().and_then(|t| t.chars().next()).map(keymap::Key::Character),
+    let mods = keymap::Modifiers {
+        ctrl: modifiers.control(),
+        alt: modifiers.alt(),
+        shift: modifiers.shift(),
+        logo: modifiers.logo(),
     };
-    mapped.map(|k| (k, mods))
+    let key = match pressed.as_ref() {
+        Key::Named(named) => match named {
+            key::Named::Enter => keymap::Key::Enter,
+            key::Named::Backspace => keymap::Key::Backspace,
+            key::Named::Escape => keymap::Key::Escape,
+            key::Named::Delete => keymap::Key::Delete,
+            key::Named::Tab => keymap::Key::Tab,
+            key::Named::Space => keymap::Key::Space,
+            key::Named::ArrowUp => keymap::Key::Up,
+            key::Named::ArrowDown => keymap::Key::Down,
+            key::Named::ArrowLeft => keymap::Key::Left,
+            key::Named::ArrowRight => keymap::Key::Right,
+            key::Named::Home => keymap::Key::Home,
+            key::Named::End => keymap::Key::End,
+            key::Named::PageUp => keymap::Key::PageUp,
+            key::Named::PageDown => keymap::Key::PageDown,
+            key::Named::Insert => keymap::Key::Insert,
+            other => keymap::Key::F(function_key_number(other)?),
+        },
+        Key::Character(c) => {
+            let mut chars = c.chars();
+            match (chars.next(), chars.next()) {
+                (Some(ch), None) => keymap::Key::Char(ch.to_lowercase().next().unwrap_or(ch)),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    let text = text.as_ref().and_then(|t| {
+        let mut chars = t.chars();
+        match (chars.next(), chars.next()) {
+            (Some(ch), None) => Some(ch),
+            _ => None,
+        }
+    });
+    Some(keymap::KeyPress { key, mods, text })
+}
+
+/// F1 to F24 as their number, `None` for any other named key.
+fn function_key_number(named: key::Named) -> Option<u8> {
+    use key::Named as N;
+    let n = match named {
+        N::F1 => 1,
+        N::F2 => 2,
+        N::F3 => 3,
+        N::F4 => 4,
+        N::F5 => 5,
+        N::F6 => 6,
+        N::F7 => 7,
+        N::F8 => 8,
+        N::F9 => 9,
+        N::F10 => 10,
+        N::F11 => 11,
+        N::F12 => 12,
+        N::F13 => 13,
+        N::F14 => 14,
+        N::F15 => 15,
+        N::F16 => 16,
+        N::F17 => 17,
+        N::F18 => 18,
+        N::F19 => 19,
+        N::F20 => 20,
+        N::F21 => 21,
+        N::F22 => 22,
+        N::F23 => 23,
+        N::F24 => 24,
+        _ => return None,
+    };
+    Some(n)
 }
 
 async fn trash_many(paths: Vec<PathBuf>) -> Vec<String> {
@@ -1318,6 +1377,7 @@ mod tests {
             resize_generation: 0,
             modifiers: keyboard::Modifiers::default(),
             clicks: ClickTracker::new(),
+            keymap: keymap::Keymap::defaults(),
         }
     }
 
@@ -1535,13 +1595,100 @@ mod tests {
         assert_eq!(app.active, 1);
     }
 
+    // --- keys, through the one table ------------------------------------------
+    //
+    // Sent as `Message::KeyPressed` through `App::update`, the road a real
+    // key takes, rather than asserting on `Keymap::resolve` alone — the
+    // double-click bug was a unit that passed while the wiring was dead.
+
+    fn key(binding: &str) -> Message {
+        let combo = keymap::Combo::parse(binding).unwrap();
+        Message::KeyPressed(keymap::KeyPress { key: combo.key, mods: combo.mods, text: None })
+    }
+
+    fn typed(c: char) -> Message {
+        Message::KeyPressed(keymap::KeyPress {
+            key: keymap::Key::Char(c),
+            mods: keymap::Modifiers::default(),
+            text: Some(c),
+        })
+    }
+
     #[test]
-    fn tab_shortcut_reads_ctrl_1_through_9_as_zero_based_indices() {
-        assert_eq!(tab_shortcut(&Key::Character("1".into()), false, 0), Some(Message::JumpToTab(0)));
-        assert_eq!(tab_shortcut(&Key::Character("9".into()), false, 0), Some(Message::JumpToTab(8)));
-        assert_eq!(tab_shortcut(&Key::Character("0".into()), false, 0), None, "there is no tab 0");
-        assert_eq!(tab_shortcut(&Key::Character("t".into()), false, 0), Some(Message::NewTab));
-        assert_eq!(tab_shortcut(&Key::Character("w".into()), false, 3), Some(Message::CloseTab(3)));
+    fn ctrl_and_a_digit_jumps_to_that_tab_counted_from_one() {
+        let mut app = app_for_test(&["/a", "/b", "/c"]);
+        let _ = app.update(key("Ctrl+3"));
+        assert_eq!(app.active, 2);
+        let _ = app.update(key("Ctrl+1"));
+        assert_eq!(app.active, 0);
+        let _ = app.update(key("Ctrl+9"));
+        assert_eq!(app.active, 0, "no ninth tab: nothing happens");
+        let _ = app.update(key("Ctrl+0"));
+        assert_eq!(app.active, 0, "there is no tab 0");
+    }
+
+    #[test]
+    fn ctrl_tab_and_ctrl_shift_tab_cycle_and_wrap() {
+        let mut app = app_for_test(&["/a", "/b"]);
+        let _ = app.update(key("Ctrl+Tab"));
+        assert_eq!(app.active, 1);
+        let _ = app.update(key("Ctrl+Tab"));
+        assert_eq!(app.active, 0, "wraps forward");
+        let _ = app.update(key("Ctrl+Shift+Tab"));
+        assert_eq!(app.active, 1, "wraps backward");
+    }
+
+    #[test]
+    fn ctrl_t_opens_a_tab_and_ctrl_w_closes_the_active_one() {
+        let mut app = app_for_test(&["/a"]);
+        let _ = app.update(key("Ctrl+T"));
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active, 1, "the new tab is the active one");
+        let _ = app.update(key("Ctrl+W"));
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    /// A plain character types into the search box of the active tab,
+    /// and Escape clears it — the two ends of type-to-search.
+    #[test]
+    fn a_typed_character_searches_the_active_tab() {
+        let mut app = app_for_test(&["/dir"]);
+        let _ = app.update(Message::Browser(BrowserMessage::DirLoaded(
+            PathBuf::from("/dir"),
+            Ok(vec![entry_named("alpha.txt"), entry_named("beta.txt")]),
+        )));
+        let _ = app.update(typed('b'));
+        assert_eq!(app.active_tab().browser.rows().len(), 1);
+        let _ = app.update(key("Escape"));
+        assert_eq!(app.active_tab().browser.rows().len(), 2);
+    }
+
+    #[test]
+    fn ctrl_a_selects_every_shown_file() {
+        let mut app = app_for_test(&["/dir"]);
+        let _ = app.update(Message::Browser(BrowserMessage::DirLoaded(
+            PathBuf::from("/dir"),
+            Ok(vec![entry_named("a.txt"), entry_named("b.txt"), entry_named("c.txt")]),
+        )));
+        let _ = app.update(key("Ctrl+A"));
+        assert_eq!(app.active_tab().browser.selected_shown().len(), 3);
+    }
+
+    /// A Ctrl-held letter nobody bound must not type into search — it is
+    /// somebody's shortcut, just not ours.
+    #[test]
+    fn an_unbound_ctrl_letter_does_nothing() {
+        let mut app = app_for_test(&["/dir"]);
+        let _ = app.update(Message::Browser(BrowserMessage::DirLoaded(
+            PathBuf::from("/dir"),
+            Ok(vec![entry_named("a.txt")]),
+        )));
+        let _ = app.update(Message::KeyPressed(keymap::KeyPress {
+            key: keymap::Key::Char('q'),
+            mods: keymap::Modifiers { ctrl: true, ..keymap::Modifiers::default() },
+            text: Some('q'),
+        }));
+        assert_eq!(app.active_tab().browser.rows().len(), 1, "no search was typed");
     }
 
     // --- ctrl/shift click ---------------------------------------------------
