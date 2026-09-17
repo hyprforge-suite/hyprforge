@@ -383,6 +383,12 @@ enum Message {
     Job(JobEvent),
     /// A finished move emptied the clipboard.
     ClipboardCleared,
+    /// A finished restore removed the records of what it put back.
+    TrashTidied,
+    /// The records behind a restore were found: the tab it was asked
+    /// from, the items (stored path, original path, record), and anything
+    /// that could not be found.
+    RestoreReady(u64, Vec<(PathBuf, PathBuf, PathBuf)>, Vec<String>),
     /// A rename finished: the tab it was asked from, the new path, and
     /// how it went.
     Renamed(u64, PathBuf, Result<(), String>),
@@ -574,13 +580,55 @@ struct PendingConfirm {
 enum Removal {
     Trash,
     Delete,
+    EmptyTrash,
 }
 
-/// A paste the window is waiting on.
+/// What a job is doing, which decides its wording and its clean-up.
+#[derive(Debug, Clone, PartialEq)]
+enum JobKind {
+    Copy,
+    Move,
+    /// Putting trashed items back. Each pair is an item's stored path and
+    /// its `.trashinfo` record: once the stored file has gone — moved back
+    /// to where it came from — its record goes too.
+    Restore { records: Vec<(PathBuf, PathBuf)> },
+}
+
+impl JobKind {
+    fn of(verb: ClipVerb) -> JobKind {
+        match verb {
+            ClipVerb::Copy => JobKind::Copy,
+            ClipVerb::Cut => JobKind::Move,
+        }
+    }
+
+    /// "Copying", for the progress line.
+    fn doing(&self) -> &'static str {
+        match self {
+            JobKind::Copy => "Copying",
+            JobKind::Move => "Moving",
+            JobKind::Restore { .. } => "Restoring",
+        }
+    }
+
+    /// "copied", for the report.
+    fn done(&self) -> &'static str {
+        match self {
+            JobKind::Copy => "copied",
+            JobKind::Move => "moved",
+            JobKind::Restore { .. } => "restored",
+        }
+    }
+}
+
+/// A paste — or a restore — the window is waiting on.
 struct RunningJob {
     id: JobId,
     control: JobControl,
-    verb: ClipVerb,
+    kind: JobKind,
+    /// When it started. Progress is only shown once it has run long
+    /// enough to be worth showing — see `[behaviour] progress-after-ms`.
+    started: Instant,
     /// Every folder whose listing the job changes — where things landed,
     /// and, for a move, where they came from — refreshed when it ends.
     dirs: Vec<PathBuf>,
@@ -642,6 +690,24 @@ impl App {
             Outcome::Trash(paths) => {
                 let ask = self.config.behaviour.confirm_trash;
                 self.remove(tab_index, Removal::Trash, paths, ask)
+            }
+            Outcome::Restore(paths) => {
+                let tab_id = self.tabs[tab_index].id;
+                Task::perform(find_restorable(paths), move |(items, errors)| {
+                    Message::RestoreReady(tab_id, items, errors)
+                })
+            }
+            Outcome::EmptyTrash => {
+                let tab = &self.tabs[tab_index];
+                // Always asked, whatever `confirm-delete` says: this is
+                // every file in the Trash at once.
+                self.confirm = Some(PendingConfirm {
+                    removal: Removal::EmptyTrash,
+                    paths: tab.browser.rows().iter().map(|e| e.path.clone()).collect(),
+                    tab_id: tab.id,
+                    dir: tab.browser.current_dir().to_path_buf(),
+                });
+                Task::none()
             }
             Outcome::DeletePermanently(paths) => {
                 let ask = self.config.behaviour.confirm_delete;
@@ -776,7 +842,57 @@ impl App {
         self.jobs.push(RunningJob {
             id,
             control,
-            verb: clip.verb,
+            kind: JobKind::of(clip.verb),
+            started: Instant::now(),
+            dirs,
+            progress: None,
+            conflict: None,
+            apply_to_rest: false,
+        });
+        Task::run(events, Message::Job)
+    }
+
+    /// Starts putting trashed items back, once their records are found.
+    fn restore(
+        &mut self,
+        tab_id: u64,
+        items: Vec<(PathBuf, PathBuf, PathBuf)>,
+        errors: Vec<String>,
+    ) -> Task<Message> {
+        if !errors.is_empty() {
+            self.status = Some(format!("Couldn't restore everything: {}", errors.join("; ")));
+        }
+        if items.is_empty() {
+            return Task::none();
+        }
+        let trash_dir = self
+            .tab_index(tab_id)
+            .map(|i| self.tabs[i].browser.current_dir().to_path_buf());
+        let mut dirs: Vec<PathBuf> = trash_dir.into_iter().collect();
+        let mut steps = Vec::with_capacity(items.len());
+        let mut records = Vec::with_capacity(items.len());
+        for (stored, original, record) in items {
+            if let Some(parent) = original.parent() {
+                if !dirs.iter().any(|d| d == parent) {
+                    dirs.push(parent.to_path_buf());
+                }
+            }
+            steps.push(hyprforge_files_core::clipboard::PasteStep {
+                source: stored.clone(),
+                dest: original,
+                kind: hyprforge_fileops::OpKind::Move,
+                duplicate: false,
+            });
+            records.push((stored, record));
+        }
+        let id = self.next_job_id;
+        self.next_job_id += 1;
+        let (control, events) = jobs::start(id, steps, self.config.behaviour.on_conflict);
+        self.jobs.push(RunningJob {
+            id,
+            control,
+            kind: JobKind::Restore { records },
+            started: Instant::now(),
             dirs,
             progress: None,
             conflict: None,
@@ -805,7 +921,7 @@ impl App {
                     return Task::none();
                 };
                 let finished = self.jobs.remove(at);
-                if let Some(message) = job_report(finished.verb, &summary) {
+                if let Some(message) = job_report(&finished.kind, &summary) {
                     self.status = Some(message);
                 }
                 // A cut that fully landed leaves the clipboard pointing at
@@ -813,7 +929,28 @@ impl App {
                 // that paints: the system clipboard is asked first whether
                 // it still holds them.
                 let refresh = self.refresh_dirs(&finished.dirs);
-                if finished.verb == ClipVerb::Cut && summary.complete() {
+                if let JobKind::Restore { records } = finished.kind {
+                    // Records are removed only for items whose stored
+                    // file really left — a skipped or failed item keeps
+                    // its record and stays in the Trash to try again.
+                    let tidied = Task::perform(
+                        async move {
+                            let _ = tokio::task::spawn_blocking(move || {
+                                for (stored, record) in records {
+                                    if std::fs::symlink_metadata(&stored).is_err() {
+                                        if let Err(e) = std::fs::remove_file(&record) {
+                                            tracing::warn!(error = %e, "a restored item's trash record could not be removed");
+                                        }
+                                    }
+                                }
+                            })
+                            .await;
+                        },
+                        |()| Message::TrashTidied,
+                    );
+                    return Task::batch([refresh, tidied]);
+                }
+                if finished.kind == JobKind::Move && summary.complete() {
                     let clipboard = self.clipboard.clone();
                     let cleared = Task::perform(
                         async move {
@@ -855,6 +992,9 @@ impl App {
                 Message::TrashDone(tab_id, dir.clone(), errors)
             }),
             Removal::Delete => Task::perform(delete_many(paths), move |errors| {
+                Message::TrashDone(tab_id, dir.clone(), errors)
+            }),
+            Removal::EmptyTrash => Task::perform(empty_trash(), move |errors| {
                 Message::TrashDone(tab_id, dir.clone(), errors)
             }),
         }
@@ -1104,6 +1244,8 @@ impl App {
                 task
             }
             Message::PasteFrom(into, clip) => self.paste_into(into, clip),
+            Message::TrashTidied => Task::none(),
+            Message::RestoreReady(tab_id, items, errors) => self.restore(tab_id, items, errors),
             Message::ClipboardCleared => {
                 self.sync_can_paste();
                 Task::none()
@@ -1321,7 +1463,11 @@ impl App {
         let viewport_width = self.last_window_size.0 as f32;
         content = content.push(tab.browser.view(scale, viewport_width).map(Message::Browser));
 
-        if let Some(job) = self.jobs.iter().find(|j| j.conflict.is_none()) {
+        // Only once a job has run long enough to notice. A paste of three
+        // small files finishes before the bar could be read, and a bar
+        // that flashes up and vanishes reads as something going wrong.
+        let after = std::time::Duration::from_millis(self.config.behaviour.progress_after_ms);
+        if let Some(job) = self.jobs.iter().find(|j| j.conflict.is_none() && j.started.elapsed() >= after) {
             content = content.push(job_progress_bar(job, scale));
         }
 
@@ -1400,11 +1546,8 @@ impl App {
 /// What the status bar says when a paste ends, or `None` when there is
 /// nothing worth interrupting anyone for — a paste that simply worked is
 /// visible in the listing already.
-fn job_report(verb: ClipVerb, summary: &JobSummary) -> Option<String> {
-    let doing = match verb {
-        ClipVerb::Copy => "copied",
-        ClipVerb::Cut => "moved",
-    };
+fn job_report(kind: &JobKind, summary: &JobSummary) -> Option<String> {
+    let doing = kind.done();
     let mut parts = Vec::new();
     if summary.cancelled {
         parts.push(format!("Stopped after {} {doing}.", plural(summary.done, "item", "items")));
@@ -1429,10 +1572,7 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 /// One line under the listing while a paste runs: what it is doing, how
 /// far it has got, and a way to stop it.
 fn job_progress_bar<'a>(job: &RunningJob, scale: FontScale) -> Element<'a, Message> {
-    let doing = match job.verb {
-        ClipVerb::Copy => "Copying",
-        ClipVerb::Cut => "Moving",
-    };
+    let doing = job.kind.doing();
     let detail = match &job.progress {
         // Totals are unknown while the source tree is still being
         // walked — `Progress` says so rather than guessing.
@@ -1516,6 +1656,15 @@ fn confirm_dialog<'a>(pending: &PendingConfirm, scale: FontScale) -> Element<'a,
                 iced::widget::Space::new().width(Length::Fill),
                 secondary_button("Cancel").on_press(Message::CancelConfirm),
                 primary_button("Move to Trash").on_press(Message::Confirm),
+            ],
+        ),
+        Removal::EmptyTrash => (
+            "Empty the Trash?".to_string(),
+            format!("{} will be deleted permanently. This can't be undone.", plural(pending.paths.len(), "item", "items")),
+            row![
+                iced::widget::Space::new().width(Length::Fill),
+                secondary_button("Empty Trash").on_press(Message::Confirm),
+                primary_button("Keep").on_press(Message::CancelConfirm),
             ],
         ),
         Removal::Delete => (
@@ -1710,7 +1859,8 @@ impl DebugShow {
         app.jobs.push(RunningJob {
             id: 0,
             control,
-            verb: ClipVerb::Copy,
+            kind: JobKind::Copy,
+            started: Instant::now(),
             dirs: Vec::new(),
             progress: None,
             conflict: Some(Collision {
@@ -1770,7 +1920,7 @@ fn startup_status(
 /// A tab's display name: its directory's own name, or the full path for
 /// a directory with none (`/`).
 fn tab_display_name(dir: &Path) -> String {
-    dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| dir.display().to_string())
+    hyprforge_files_core::sidebar::place_name(dir)
 }
 
 fn tab_dot_color(is_active: bool) -> Color {
@@ -2046,6 +2196,52 @@ async fn delete_many(paths: Vec<PathBuf>) -> Vec<String> {
     }
 }
 
+/// Finds the trash records behind these stored paths, and makes sure
+/// each item's original folder exists — restoring into a folder that has
+/// since been deleted recreates it rather than failing. Off the UI
+/// thread: it reads every record in the Trash.
+async fn find_restorable(stored: Vec<PathBuf>) -> (Vec<(PathBuf, PathBuf, PathBuf)>, Vec<String>) {
+    tokio::task::spawn_blocking(move || {
+        let home_trash = hyprforge_fileops::home_trash_dir();
+        let mut items = Vec::new();
+        let mut errors = Vec::new();
+        for path in stored {
+            match hyprforge_fileops::find_stored(&home_trash, &path) {
+                Ok(item) => {
+                    if let Some(parent) = item.original_path.parent() {
+                        if let Err(e) = std::fs::create_dir_all(parent) {
+                            errors.push(format!("{}: {e}", parent.display()));
+                            continue;
+                        }
+                    }
+                    items.push((item.trashed_file, item.original_path, item.info_file));
+                }
+                Err(e) => errors.push(e.to_string()),
+            }
+        }
+        (items, errors)
+    })
+    .await
+    .unwrap_or_else(|e| (Vec::new(), vec![format!("Restoring was interrupted: {e}")]))
+}
+
+/// Deletes everything in the home Trash for good, record by record, so
+/// one item that cannot be deleted does not stop the rest.
+async fn empty_trash() -> Vec<String> {
+    tokio::task::spawn_blocking(|| {
+        let home_trash = hyprforge_fileops::home_trash_dir();
+        match hyprforge_fileops::list(&home_trash) {
+            Ok(items) => items
+                .iter()
+                .filter_map(|item| hyprforge_fileops::erase(item).err().map(|e| e.to_string()))
+                .collect(),
+            Err(e) => vec![e.to_string()],
+        }
+    })
+    .await
+    .unwrap_or_else(|e| vec![format!("Emptying the Trash was interrupted: {e}")])
+}
+
 /// How many folders one listing will count before giving up.
 const COUNT_BUDGET: usize = 400;
 
@@ -2241,6 +2437,7 @@ mod tests {
             mode: 0o644,
             uid: 1000,
             owner: Some("alex".to_string()),
+            origin: None,
         }
     }
 
@@ -2873,7 +3070,8 @@ mod tests {
         app.jobs.push(RunningJob {
             id: 9,
             control,
-            verb: ClipVerb::Cut,
+            kind: JobKind::Move,
+            started: Instant::now(),
             dirs: vec![],
             progress: None,
             conflict: None,
@@ -2894,7 +3092,8 @@ mod tests {
         app.jobs.push(RunningJob {
             id: 3,
             control,
-            verb: ClipVerb::Copy,
+            kind: JobKind::Copy,
+            started: Instant::now(),
             dirs: vec![],
             progress: None,
             conflict: Some(Collision { source: "/a/x".into(), dest: "/dir/x".into() }),
@@ -2916,7 +3115,7 @@ mod tests {
 
     #[test]
     fn a_paste_that_simply_worked_says_nothing() {
-        assert_eq!(job_report(ClipVerb::Copy, &JobSummary { done: 3, ..JobSummary::default() }), None);
+        assert_eq!(job_report(&JobKind::Copy, &JobSummary { done: 3, ..JobSummary::default() }), None);
     }
 
     #[test]
@@ -2927,7 +3126,7 @@ mod tests {
             failed: vec!["x.txt: permission denied".into()],
             cancelled: true,
         };
-        let text = job_report(ClipVerb::Cut, &summary).unwrap();
+        let text = job_report(&JobKind::Move, &summary).unwrap();
         assert!(text.contains("Stopped after 1 item moved"), "{text}");
         assert!(text.contains("2 items skipped"), "{text}");
         assert!(text.contains("permission denied"), "{text}");
@@ -3070,6 +3269,80 @@ mod tests {
         assert!(!file.exists());
         assert!(std::fs::symlink_metadata(&link).is_err());
         assert!(keep.join("precious").exists());
+    }
+
+    // --- restore and empty trash ----------------------------------------------
+
+    /// A restore is a job: the stored file moves back to where it came
+    /// from, and both folders are refreshed when it ends. Driven from
+    /// temporary files — `RestoreReady` is where the real Trash would
+    /// have been read, and a test must never read or change that.
+    #[test]
+    fn a_restore_moves_the_item_back_where_it_came_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let stored = dir.path().join("trash-files").join("notes.txt");
+        std::fs::create_dir_all(stored.parent().unwrap()).unwrap();
+        std::fs::write(&stored, "back again").unwrap();
+        let original = dir.path().join("documents").join("notes.txt");
+        std::fs::create_dir_all(original.parent().unwrap()).unwrap();
+        let record = dir.path().join("notes.txt.trashinfo");
+
+        let mut app = app_for_test(&["/dir"]);
+        let _ = app.update(Message::RestoreReady(
+            app.tabs[0].id,
+            vec![(stored.clone(), original.clone(), record.clone())],
+            vec![],
+        ));
+        assert_eq!(app.jobs.len(), 1);
+        assert!(matches!(&app.jobs[0].kind, JobKind::Restore { records } if records == &[(stored.clone(), record)]));
+        assert!(app.jobs[0].dirs.contains(&original.parent().unwrap().to_path_buf()));
+        wait_until("the restore", || original.exists());
+        assert_eq!(std::fs::read_to_string(&original).unwrap(), "back again");
+    }
+
+    #[test]
+    fn records_that_could_not_be_found_are_reported() {
+        let mut app = app_for_test(&["/dir"]);
+        let _ = app.update(Message::RestoreReady(0, vec![], vec!["/x is not in the trash".into()]));
+        assert!(app.jobs.is_empty());
+        assert!(app.status.as_deref().unwrap().contains("not in the trash"));
+    }
+
+    /// Emptying the Trash always asks — and Enter never says yes. This
+    /// test stops at the question: the confirmed path deletes the real
+    /// Trash, which no test may do.
+    #[test]
+    fn emptying_the_trash_always_asks_and_needs_a_click() {
+        let trash = hyprforge_files_core::sidebar::trash_path();
+        let mut app = app_for_test(&[trash.to_str().unwrap()]);
+        with_behaviour(
+            &mut app,
+            hyprforge_files_core::config::Behaviour {
+                confirm_delete: false,
+                ..hyprforge_files_core::config::Behaviour::default()
+            },
+        );
+        let mut item = entry_named("old.txt");
+        item.path = trash.join("old.txt");
+        let _ = app.update(Message::Browser(BrowserMessage::DirLoaded(trash.clone(), Ok(vec![item]))));
+        let _ = app.update(Message::Browser(BrowserMessage::Perform(Action::EmptyTrash)));
+        let pending = app.confirm.as_ref().expect("asked even with confirm-delete off");
+        assert_eq!(pending.removal, Removal::EmptyTrash);
+        assert_eq!(pending.paths.len(), 1);
+        let _ = app.update(key("Enter"));
+        assert!(app.confirm.is_some(), "Enter did not empty the Trash");
+        let _ = app.update(key("Escape"));
+        assert!(app.confirm.is_none());
+    }
+
+    #[test]
+    fn a_restore_report_says_restored() {
+        let text = job_report(
+            &JobKind::Restore { records: vec![] },
+            &JobSummary { skipped: 1, failed: vec!["busy".into()], ..JobSummary::default() },
+        )
+        .unwrap();
+        assert!(text.contains("weren't restored"), "{text}");
     }
 
     /// Pasting a folder into itself is refused before any job starts.
