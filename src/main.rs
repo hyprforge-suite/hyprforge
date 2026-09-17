@@ -51,7 +51,7 @@ use hyprforge_fileops::{Collision, CollisionDecision, CollisionPolicy, Progress}
 use hyprforge_files_core::trash::RoutingBackend;
 use hyprforge_files_core::browser::Message as BrowserMessage;
 use hyprforge_files_core::keymap::Resolved;
-use hyprforge_files_core::sidebar::SidebarItem;
+use hyprforge_files_core::sidebar::{PinChange, PinnedItem, SidebarItem};
 use hyprforge_files_core::{
     keymap, sidebar, xdg_user_dirs, Action, Browser, Click, ClickTracker, DirError, DirErrorKind,
     Entry, Mode, Outcome, Prefs, Scope,
@@ -158,6 +158,7 @@ fn main() -> iced::Result {
         next_tab_id: 1,
         sidebar_items,
         last_prefs: prefs,
+        pinned_items: Vec::new(),
         font_scale: FontScale(hyprforge_ui::theme::active().font_scale),
         status: startup_status(prefs_status, &config_problems),
         last_window_size,
@@ -185,7 +186,7 @@ fn main() -> iced::Result {
     // otherwise the window opens showing nothing at all, forever, for
     // the same reason CLAUDE.md's "a five-second gap" rule exists: an
     // outcome nobody satisfies is silent, not merely slow.
-    let boot_task = app.handle_outcome(0, outcome);
+    let boot_task = Task::batch([app.handle_outcome(0, outcome), app.load_pinned()]);
 
     // `iced::application` calls this closure exactly once; a `RefCell`
     // lets `main` build the real starting state above (which needs I/O)
@@ -365,6 +366,8 @@ enum Message {
     /// what failed.
     TrashDone(u64, PathBuf, Vec<(PathBuf, PathBuf, PathBuf)>, Vec<String>),
     PrefsSaved(Result<Prefs, String>),
+    /// The pinned folders, read afresh — for every tab's sidebar.
+    PinnedLoaded(Vec<PinnedItem>),
     WindowResized(Size),
     /// Ctrl/shift went down or came up. Tracked so a click on a row can
     /// be told what was held at the time — see [`App::modifiers`].
@@ -508,6 +511,13 @@ struct App {
     /// history, not per-tab view preferences).
     last_prefs: Prefs,
     font_scale: FontScale,
+    /// The sidebar's pinned folders, as last read. The window owns the
+    /// pinned list rather than each tab: a tab's `Prefs` is a copy taken
+    /// when it opened, so letting a tab save its copy would put back a
+    /// pin another tab had since removed. `last_prefs.pinned` is the
+    /// list; this is what it looked like on disk, for a new tab to show
+    /// straight away.
+    pinned_items: Vec<PinnedItem>,
     /// One line shown at the bottom of the window: what
     /// `launch::open`/trashing/saving preferences said, if anything did.
     /// Pillar 3 — every error reaching the user is a sentence here, never
@@ -697,9 +707,11 @@ impl App {
                 self.status = opened.message(&path);
                 Task::none()
             }
-            Outcome::PrefsChanged(prefs) => {
-                Task::perform(save_prefs(move |p: &mut Prefs| *p = prefs.clone()), Message::PrefsSaved)
-            }
+            Outcome::PrefsChanged(prefs) => Task::perform(
+                save_prefs(move |p: &mut Prefs| *p = merge_tab_prefs(p, prefs)),
+                Message::PrefsSaved,
+            ),
+            Outcome::Pins(change) => self.change_pins(&change),
             Outcome::CountFolders(folders) => {
                 Task::perform(count_folders(self.backend.clone(), folders), |counts| {
                     Message::Browser(BrowserMessage::CountsLoaded(counts))
@@ -1133,6 +1145,42 @@ impl App {
         }
     }
 
+    /// Pins, unpins or moves a pin — for every tab at once, and on disk.
+    fn change_pins(&mut self, change: &PinChange) -> Task<Message> {
+        let pinned = hyprforge_files_core::sidebar::apply_pin_change(&self.last_prefs.pinned, change);
+        if pinned == self.last_prefs.pinned {
+            return Task::none();
+        }
+        self.last_prefs.pinned = pinned.clone();
+        for tab in &mut self.tabs {
+            tab.browser.set_pins(pinned.clone());
+        }
+        // Only the list is written: the rest of the file belongs to
+        // whichever tab last changed a view setting.
+        let save = Task::perform(
+            save_prefs(move |p: &mut Prefs| p.pinned = pinned),
+            Message::PrefsSaved,
+        );
+        Task::batch([save, self.load_pinned()])
+    }
+
+    /// Reads each pinned folder off the UI thread — a pin can be on a
+    /// slow or vanished mount.
+    fn load_pinned(&self) -> Task<Message> {
+        let backend = self.backend.clone();
+        let pinned = self.last_prefs.pinned.clone();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    hyprforge_files_core::sidebar::build_pinned(backend.as_ref(), &pinned)
+                })
+                .await
+                .unwrap_or_default()
+            },
+            Message::PinnedLoaded,
+        )
+    }
+
     /// Opens a new tab at `start_dir` and makes it active — `Ctrl+T` and
     /// the titlebar `+` both funnel here.
     fn open_tab(&mut self, start_dir: PathBuf) -> Task<Message> {
@@ -1142,6 +1190,7 @@ impl App {
             Browser::new(Mode::App, self.last_prefs.clone(), start_dir, self.sidebar_items.clone());
         browser.set_config(self.config.clone());
         browser.set_can_paste(self.clipboard.may_hold_files());
+        let _ = browser.update(BrowserMessage::PinnedLoaded(self.pinned_items.clone()));
         self.tabs.push(Tab::new(id, browser));
         self.active = self.tabs.len() - 1;
         let index = self.active;
@@ -1394,8 +1443,24 @@ impl App {
             }
             Message::PrefsSaved(Ok(prefs)) => {
                 // Feeds the next `Ctrl+T`/`+` — see `last_prefs`'s own
-                // doc.
+                // doc. The pinned list is the window's own, and newer
+                // than a save that may have started before it changed.
+                let pinned = std::mem::take(&mut self.last_prefs.pinned);
                 self.last_prefs = prefs;
+                self.last_prefs.pinned = pinned;
+                Task::none()
+            }
+            Message::PinnedLoaded(items) => {
+                // A list read before a later change is stale; the later
+                // change's own read is on its way.
+                let paths: Vec<PathBuf> = items.iter().map(|i| i.path.clone()).collect();
+                if paths != self.last_prefs.pinned {
+                    return Task::none();
+                }
+                for tab in &mut self.tabs {
+                    let _ = tab.browser.update(BrowserMessage::PinnedLoaded(items.clone()));
+                }
+                self.pinned_items = items;
                 Task::none()
             }
             Message::PrefsSaved(Err(e)) => {
@@ -2370,6 +2435,17 @@ async fn empty_trash() -> Vec<String> {
 const COUNT_BUDGET: usize = 400;
 
 /// Read-modify-write against `files.toml` off the UI thread, via
+/// What a tab's view-setting change writes: its own copy of the view
+/// settings, over whatever is on disk for everything a tab does not own.
+/// A tab's `Prefs` was copied when it opened, so its pinned list and
+/// window size are out of date by the time it saves.
+fn merge_tab_prefs(on_disk: &Prefs, mut from_tab: Prefs) -> Prefs {
+    from_tab.pinned = on_disk.pinned.clone();
+    from_tab.window_width = on_disk.window_width;
+    from_tab.window_height = on_disk.window_height;
+    from_tab
+}
+
 /// `hyprforge_files_core::prefs::update` as the brief names — see that
 /// function's own doc for why a read-modify-write beats saving a copy
 /// loaded earlier (two processes, the app and the portal dialog, can
@@ -2529,7 +2605,8 @@ mod tests {
             sidebar_items: vec![],
             home_dir: PathBuf::from("/home/alex"),
             last_prefs: Prefs::default(),
-                font_scale: FontScale::default(),
+            pinned_items: vec![],
+            font_scale: FontScale::default(),
             status: None,
             last_window_size: (900, 600),
             resize_generation: 0,
@@ -2546,6 +2623,57 @@ mod tests {
             #[cfg(debug_assertions)]
             debug_show: DebugShow::default(),
         }
+    }
+
+    // --- pins: owned by the window ---------------------------------------
+
+    fn pinned_item(path: &str) -> PinnedItem {
+        PinnedItem { label: path.trim_start_matches('/').to_string(), path: path.into(), item_count: Some(0) }
+    }
+
+    /// A pin made in one tab shows in every tab — the list is the
+    /// window's, not a tab's. (The returned tasks are never run here, so
+    /// nothing reaches the real `files.toml`.)
+    #[test]
+    fn a_pin_made_in_one_tab_reaches_every_tab() {
+        let mut app = app_for_test(&["/a", "/b"]);
+        let _ = app.handle_outcome(0, Outcome::Pins(PinChange::Pin("/a".into())));
+        assert_eq!(app.last_prefs.pinned, vec![PathBuf::from("/a")]);
+        let _ = app.update(Message::PinnedLoaded(vec![pinned_item("/a")]));
+        for tab in &app.tabs {
+            assert_eq!(tab.browser.pinned(), &[pinned_item("/a")]);
+        }
+        let _ = app.open_tab("/c".into());
+        assert_eq!(app.tabs[2].browser.pinned(), &[pinned_item("/a")], "a new tab too");
+    }
+
+    /// A read that started before a later change must not put the older
+    /// list back on screen.
+    #[test]
+    fn a_stale_pinned_read_is_ignored() {
+        let mut app = app_for_test(&["/a"]);
+        let _ = app.handle_outcome(0, Outcome::Pins(PinChange::Pin("/a".into())));
+        let _ = app.handle_outcome(0, Outcome::Pins(PinChange::Pin("/b".into())));
+        let _ = app.update(Message::PinnedLoaded(vec![pinned_item("/a")]));
+        assert!(app.tabs[0].browser.pinned().is_empty());
+    }
+
+    /// A tab saving its view settings must not put back pins or a window
+    /// size from when it opened.
+    #[test]
+    fn a_tab_saving_its_view_keeps_the_pins_and_size_on_disk() {
+        let mut on_disk = Prefs::default();
+        on_disk.pinned = vec!["/now".into()];
+        on_disk.window_width = 1200;
+        on_disk.window_height = 800;
+        let mut from_tab = Prefs::default();
+        from_tab.pinned = vec!["/then".into()];
+        from_tab.window_width = 900;
+        from_tab.show_hidden = !from_tab.show_hidden;
+        let merged = merge_tab_prefs(&on_disk, from_tab.clone());
+        assert_eq!(merged.pinned, on_disk.pinned);
+        assert_eq!((merged.window_width, merged.window_height), (1200, 800));
+        assert_eq!(merged.show_hidden, from_tab.show_hidden, "the tab's own setting is saved");
     }
 
     fn entry_named(name: &str) -> Entry {
