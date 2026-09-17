@@ -44,14 +44,17 @@
 //! of the *same* directory racing each other (a stale reload landing after
 //! a fresh one). See [`tests::a_stale_dir_loaded_result_is_ignored`].
 
-use hyprforge_files_core::backend::{FsBackend, StdBackend};
+use hyprforge_files_core::backend::FsBackend;
+use hyprforge_files_core::trash::RoutingBackend;
 use hyprforge_files_core::browser::Message as BrowserMessage;
 use hyprforge_files_core::sidebar::SidebarItem;
 use hyprforge_files_core::{
-    keymap, sidebar, xdg_user_dirs, Browser, DirError, DirErrorKind, Entry, EntryKind, Mode,
-    Outcome, Prefs,
+    keymap, sidebar, xdg_user_dirs, Browser, Click, ClickTracker, DirError, DirErrorKind, Entry,
+    Mode, Outcome, Prefs,
 };
 use hyprforge_ui::theme::{app_theme, spacing, FontScale, BASE_TEXT_SIZE};
+use std::sync::Arc;
+use std::time::Instant;
 use hyprforge_ui::widgets::{scaled_text, secondary_button};
 use iced::keyboard::{self, key, Key};
 use iced::widget::{button, column, container, row};
@@ -83,8 +86,14 @@ fn main() -> iced::Result {
     // suite does it.
     hyprforge_ui::theme::init(hyprforge_appearance::look::resolve());
 
-    let backend = StdBackend;
-    let start_dir = resolve_start_dir(&backend, std::env::args().nth(1));
+    // One backend, held for the life of the window and handed to every
+    // read. `RoutingBackend` is what decides that the trash lists by its
+    // records rather than by its storage directory — see
+    // `hyprforge_files_core::trash`. Behind `Arc<dyn FsBackend>` because
+    // each read runs on a background thread and because that is the type
+    // that lets a test drive this whole window against `MockBackend`.
+    let backend: Arc<dyn FsBackend> = Arc::new(RoutingBackend::default());
+    let start_dir = resolve_start_dir(backend.as_ref(), std::env::args().nth(1));
 
     // A `files.toml` that exists and will not parse must be reported,
     // never silently defaulted — see `hyprforge_files_core::prefs`'s own
@@ -111,7 +120,7 @@ fn main() -> iced::Result {
     // hyprforge-settings and on PAM setup in the greeter; it is not the
     // per-navigation directory read that has to stay off the UI thread.
     let user_dirs = xdg_user_dirs::load(&hyprforge_paths::config_home(), &backend.home_dir());
-    let sidebar_items = sidebar::build(&backend, &user_dirs);
+    let sidebar_items = sidebar::build(backend.as_ref(), &user_dirs);
 
     let initial_size = Size::new(
         (prefs.window_width as f32).max(480.0),
@@ -128,15 +137,19 @@ fn main() -> iced::Result {
     // existed.
     let (browser, outcome) = Browser::new(Mode::App, prefs.clone(), start_dir, sidebar_items.clone());
     let mut app = App {
+        home_dir: backend.home_dir(),
+        backend,
         tabs: vec![Tab::new(0, browser)],
         active: 0,
         next_tab_id: 1,
         sidebar_items,
-        home_dir: backend.home_dir(),
         last_prefs: prefs,
         font_scale: FontScale(hyprforge_ui::theme::active().font_scale),
         status: prefs_status,
         last_window_size,
+        resize_generation: 0,
+        modifiers: keyboard::Modifiers::default(),
+        clicks: ClickTracker::new(),
     };
     // Fulfils the `Outcome::ReadDir` `Browser::new` always returns —
     // otherwise the window opens showing nothing at all, forever, for
@@ -190,7 +203,7 @@ fn main() -> iced::Result {
 /// `Browser`'s own `LoadState::Error` — the actionable "doesn't exist"
 /// sentence the brief asks for, already built, not a second copy of it
 /// invented here. See [`tests::a_nonexistent_start_path_is_not_short_circuited`].
-fn resolve_start_dir(backend: &impl FsBackend, arg: Option<String>) -> PathBuf {
+fn resolve_start_dir(backend: &dyn FsBackend, arg: Option<String>) -> PathBuf {
     let Some(arg) = arg else {
         return backend.home_dir();
     };
@@ -211,47 +224,22 @@ fn resolve_arg_path(arg: &str) -> PathBuf {
         return PathBuf::from(arg);
     };
     let rest = rest.strip_prefix("localhost").unwrap_or(rest);
-    let decoded = percent_decode(rest);
-    if decoded.starts_with('/') {
-        PathBuf::from(decoded)
+    // `hyprforge_fileops::percent` decodes over raw bytes rather than
+    // `str`, so a filename that is not valid UTF-8 survives the trip —
+    // the same reason that module gives for doing it that way. A `%`
+    // that is not a valid escape makes it refuse; the argument is then
+    // taken literally, which is the only remaining honest reading of it.
+    let Ok(decoded) = hyprforge_fileops::percent::decode_path(rest) else {
+        return PathBuf::from(arg);
+    };
+    if decoded.is_absolute() {
+        decoded
     } else {
         // No leading slash means no `///` triple-slash form was used —
         // still an absolute local path per the scheme, so one is added
         // rather than resolving it against whatever the cwd happens to
         // be.
-        PathBuf::from(format!("/{decoded}"))
-    }
-}
-
-/// Percent-decoding, the one piece of URI handling `resolve_arg_path`
-/// needs. `hyprforge-fileops::percent` does the same job for `.trashinfo`
-/// files but is a private module of that crate — this crate is scoped to
-/// `hyprforge-files/` only, so this is its own small copy rather than a
-/// cross-crate change out of scope for this pass.
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                out.push(hi * 16 + lo);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
+        Path::new("/").join(decoded)
     }
 }
 
@@ -259,8 +247,24 @@ fn hex_val(b: u8) -> Option<u8> {
 // Directory reads, off the UI thread
 // ---------------------------------------------------------------------
 
-async fn read_dir_task(path: PathBuf) -> Result<Vec<Entry>, DirError> {
-    match tokio::task::spawn_blocking(move || read_dir_sync(&path)).await {
+/// Reads one directory off the UI thread, through whichever backend
+/// claims it.
+///
+/// The backend is handed in rather than constructed here. That is what
+/// makes everything above this function reachable with the mock: a
+/// window's whole update loop — stale generations, tab routing, folder
+/// counts — used to be untestable without a real disk, because this one
+/// function named `StdBackend` as a concrete type and nothing else in
+/// the app held a backend at all.
+async fn read_dir_task(
+    backend: Arc<dyn FsBackend>,
+    path: PathBuf,
+) -> Result<Vec<Entry>, DirError> {
+    match tokio::task::spawn_blocking(move || {
+        backend.read_dir(&path).map_err(|e| DirError::from(&e))
+    })
+    .await
+    {
         Ok(result) => result,
         Err(e) => Err(DirError {
             message: format!("Reading this folder was interrupted: {e}"),
@@ -269,144 +273,43 @@ async fn read_dir_task(path: PathBuf) -> Result<Vec<Entry>, DirError> {
     }
 }
 
-/// The synchronous half of a directory read. Runs on the background
-/// runtime, never on the UI thread.
+/// The second pass behind a folder's Size cell: how many things are in
+/// each of these directories.
 ///
-/// One special case: the Trash sidebar item points at the trash's own
-/// `files/` directory, and reading that with a plain `read_dir` shows
-/// the *stored* names — `hyprland.conf.bak` with nothing saying it came
-/// from `~/.config/hypr/`, and a `Monkey Around.2.mp4` that was never
-/// called that (the `.2` is the trash's own collision suffix, not part
-/// of the real name). [`is_trash_dir`] recognises that one path and
-/// [`trash_entries`] builds the listing from `hyprforge_fileops::trash::list`
-/// instead, using each item's *original* name.
-fn read_dir_sync(path: &Path) -> Result<Vec<Entry>, DirError> {
-    let trash_files_dir = hyprforge_fileops::home_trash_dir().join("files");
-    if is_trash_dir(path, &trash_files_dir) {
-        return trash_entries().map_err(|message| DirError { message, kind: DirErrorKind::Other });
-    }
-    StdBackend.read_dir(path).map_err(|e| DirError::from(&e))
-}
-
-/// Whether `candidate` is the trash's `files/` directory — compared
-/// through `canonicalize` first, so a symlink to it or a spelling with a
-/// redundant `..` still matches, and falling back to a plain equality
-/// check when either side cannot be canonicalized (most commonly: the
-/// trash has never been used, so `files/` does not exist yet — that must
-/// not make the comparison silently say "not the trash" and fall through
-/// to an ordinary, always-empty `read_dir`, which would look identical
-/// to "you have nothing in the trash" for the wrong reason).
-fn is_trash_dir(candidate: &Path, trash_files_dir: &Path) -> bool {
-    match (std::fs::canonicalize(candidate), std::fs::canonicalize(trash_files_dir)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => candidate == trash_files_dir,
-    }
-}
-
-fn trash_entries() -> Result<Vec<Entry>, String> {
-    trash_entries_from(&hyprforge_fileops::home_trash_dir())
-}
-
-/// [`trash_entries`], parameterised over the trash directory — the seam
-/// [`tests`] uses to point this at a throwaway directory instead of the
-/// real `$XDG_DATA_HOME/Trash`.
-fn trash_entries_from(trash_dir: &Path) -> Result<Vec<Entry>, String> {
-    let items = hyprforge_fileops::list(trash_dir).map_err(|e| e.to_string())?;
-    Ok(items.iter().filter_map(trash_entry).collect())
-}
-
-/// One [`hyprforge_fileops::TrashedItem`] as a listing [`Entry`] — name
-/// from `original_path` (never the on-disk stored name), path pointing
-/// at the real trashed file (so activating it still works), kind/size/
-/// dir-ness read from that file's own metadata the same way
-/// `StdBackend::read_dir` builds every other entry.
+/// One call per folder, which is why this is a second pass rather than
+/// part of the listing — see `Outcome::CountFolders`'s own doc.
 ///
-/// `None` for an item whose trashed file has itself vanished since
-/// `list()` walked `info/` — the same "one bad entry must not sink the
-/// whole listing" rule `StdBackend::read_dir` already follows, applied
-/// here for the same reason.
-fn trash_entry(item: &hyprforge_fileops::TrashedItem) -> Option<Entry> {
-    let name = item.original_path.file_name()?.to_string_lossy().into_owned();
-    let meta = std::fs::symlink_metadata(&item.trashed_file).ok()?;
-    let is_symlink = meta.file_type().is_symlink();
-    let is_dir = if is_symlink {
-        std::fs::metadata(&item.trashed_file).map(|m| m.is_dir()).unwrap_or(false)
-    } else {
-        meta.is_dir()
-    };
-    let size = if is_dir { 0 } else { meta.len() };
-    // `deleted_at` first — it is what the row is actually about ("when
-    // did this leave"), the trashed file's own mtime second only as a
-    // fallback if that timestamp somehow fails to parse.
-    let modified = parse_deletion_date(&item.deleted_at).or_else(|| meta.modified().ok());
-    Some(Entry {
-        is_dir,
-        size,
-        modified,
-        is_symlink,
-        // A restored/re-trashed item's link brokenness is not tracked by
-        // the trash spec at all; treating it as never-broken matches
-        // what `list()` itself reports and keeps this mapping simple —
-        // a broken-link badge on a trashed item is a nicety this pass
-        // does not attempt.
-        link_broken: false,
-        hidden: name.starts_with('.'),
-        kind: EntryKind::classify(is_dir, &name),
-        name,
-        path: item.trashed_file.clone(),
+/// Through the same backend as the listing itself, so the trash's count
+/// agrees with the trash's listing rather than counting its storage
+/// directory behind its back.
+///
+/// Bounded by [`COUNT_BUDGET`]. A directory of ten thousand
+/// subdirectories would otherwise spend ten thousand reads filling in a
+/// column nobody has scrolled to, on a machine the user is trying to do
+/// something else with. Past the budget the rest simply stay
+/// `ItemCount::Pending`, which the Size cell already renders as blank —
+/// the alternative, counting forever, is invisible until it is
+/// someone's fan spinning up.
+async fn count_folders(
+    backend: Arc<dyn FsBackend>,
+    folders: Vec<PathBuf>,
+) -> Vec<(PathBuf, Option<usize>)> {
+    tokio::task::spawn_blocking(move || {
+        folders
+            .into_iter()
+            .take(COUNT_BUDGET)
+            .map(|path| {
+                // `None` rather than `Some(0)` when the read fails: a
+                // folder you have no permission to open is not an empty
+                // one, and `ItemCount::Unreadable` says so with an em
+                // dash where `Known(0)` would say "0 items".
+                let count = backend.count_children(&path).ok();
+                (path, count)
+            })
+            .collect()
     })
-}
-
-/// Parses a `.trashinfo` `DeletionDate=` value (`YYYY-MM-DDThh:mm:ss`,
-/// local time, no timezone suffix — see `hyprforge_fileops::trash`'s own
-/// doc) into a [`SystemTime`].
-///
-/// Treated as UTC rather than the host's real local time: this crate has
-/// no timezone database dependency, and the error that introduces is
-/// bounded by the host's own UTC offset (at most about 14 hours) — an
-/// acceptable approximation for "when was this put in the trash", a
-/// value this crate only ever displays, never sorts against a strict
-/// deadline. `None` for anything that does not parse as that exact
-/// shape; the caller falls back to the trashed file's own mtime.
-fn parse_deletion_date(s: &str) -> Option<std::time::SystemTime> {
-    let bytes = s.as_bytes();
-    if bytes.len() != 19 {
-        return None;
-    }
-    let field = |range: std::ops::Range<usize>| s.get(range)?.parse::<i64>().ok();
-    if &s[4..5] != "-" || &s[7..8] != "-" || &s[10..11] != "T" || &s[13..14] != ":" || &s[16..17] != ":" {
-        return None;
-    }
-    let year = field(0..4)?;
-    let month = field(5..7)?;
-    let day = field(8..10)?;
-    let hour = field(11..13)?;
-    let minute = field(14..16)?;
-    let second = field(17..19)?;
-
-    let days = days_from_civil(year, month, day)?;
-    let secs = days.checked_mul(86_400)?.checked_add(hour * 3600 + minute * 60 + second)?;
-    if secs < 0 {
-        return None;
-    }
-    Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64))
-}
-
-/// Days since the Unix epoch for a proleptic-Gregorian `(year, month,
-/// day)` — Howard Hinnant's `days_from_civil` algorithm, chosen over
-/// adding a date/time crate dependency to this crate for the sake of one
-/// conversion. `None` for a month or day out of range.
-fn days_from_civil(y: i64, m: i64, d: i64) -> Option<i64> {
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
-        return None;
-    }
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400; // [0, 399]
-    let mp = (m + 9) % 12; // [0, 11]
-    let doy = (153 * mp + 2) / 5 + d - 1; // [0, 365]
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
-    Some(era * 146_097 + doe - 719_468)
+    .await
+    .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------
@@ -429,6 +332,13 @@ enum Message {
     TrashDone(u64, PathBuf, Vec<String>),
     PrefsSaved(Result<Prefs, String>),
     WindowResized(Size),
+    /// Ctrl/shift went down or came up. Tracked so a click on a row can
+    /// be told what was held at the time — see [`App::modifiers`].
+    ModifiersChanged(keyboard::Modifiers),
+    /// A resize has gone quiet — the generation this was armed with, so
+    /// a drag that is still going can ignore it. See
+    /// [`App::resize_generation`].
+    WindowSettled(u64),
     DismissStatus,
     /// `Ctrl+T`, or the titlebar's `+`.
     NewTab,
@@ -539,6 +449,53 @@ struct App {
     /// a log line they are expected to go find.
     status: Option<String>,
     last_window_size: (u32, u32),
+    /// Bumped by every resize event, so only the *last* one in a drag
+    /// writes the new size to disk.
+    ///
+    /// `window::resize_events` fires continuously while a window edge is
+    /// being dragged, and each event whose rounded size differs writes
+    /// the whole of `files.toml` — read, parse, re-serialise, temp file,
+    /// rename. A drag is tens of those a second, for a number only the
+    /// final one of them is right about. The `last_window_size` guard
+    /// cannot help: it only suppresses an *identical* size, which a drag
+    /// never produces.
+    ///
+    /// The same generation guard the directory reads use, for the same
+    /// reason: a stale answer has to be recognisable as stale rather
+    /// than raced against.
+    resize_generation: u64,
+    /// Which modifiers are held right now.
+    ///
+    /// A row click has to know, because ctrl-click toggles and
+    /// shift-click ranges — and a click in iced 0.14 carries no modifier
+    /// state of its own, on either `button` or `mouse_area`. So
+    /// `Message::EntryClicked` arrives from the view with both flags
+    /// `false`, and `update` fills them in from here before the browser
+    /// sees it.
+    ///
+    /// That leaves `Browser` a pure function of the message it is given
+    /// — its own tests pass ctrl/shift explicitly — and puts "what was
+    /// held" in the one place that actually observes the keyboard.
+    modifiers: keyboard::Modifiers,
+    /// Tracks click timing, so two quick presses on one row open it.
+    ///
+    /// Here rather than in the view, because iced's `button` captures a
+    /// left press before any `mouse_area` wrapped around it can see one
+    /// — so `on_double_click` on the outside never fires, and moving the
+    /// `mouse_area` inside would break the single click that selects.
+    /// See `hyprforge_files_core::click` for the whole argument.
+    clicks: ClickTracker,
+    /// The filesystem this window reads through, shared with every
+    /// background read it issues.
+    ///
+    /// `App` used to hold none at all: the one in `main()` was dropped
+    /// after startup and the read function named `StdBackend` inline. So
+    /// `backend::MockBackend`'s carefully-built cases — an unreadable
+    /// directory, an entry that vanishes mid-read, fifty thousand
+    /// entries — were properties of the mock and of nothing that ships.
+    /// Holding the trait object is what puts this window's own update
+    /// loop within reach of them.
+    backend: Arc<dyn FsBackend>,
 }
 
 impl App {
@@ -563,7 +520,7 @@ impl App {
         tab.read_generation += 1;
         let generation = tab.read_generation;
         let tab_id = tab.id;
-        Task::perform(read_dir_task(path.clone()), move |result| {
+        Task::perform(read_dir_task(self.backend.clone(), path.clone()), move |result| {
             Message::DirLoaded(tab_id, generation, path.clone(), result)
         })
     }
@@ -585,9 +542,11 @@ impl App {
             Outcome::PrefsChanged(prefs) => {
                 Task::perform(save_prefs(move |p: &mut Prefs| *p = prefs.clone()), Message::PrefsSaved)
             }
-            Outcome::CountFolders(folders) => Task::perform(count_folders(folders), |counts| {
-                Message::Browser(BrowserMessage::CountsLoaded(counts))
-            }),
+            Outcome::CountFolders(folders) => {
+                Task::perform(count_folders(self.backend.clone(), folders), |counts| {
+                    Message::Browser(BrowserMessage::CountsLoaded(counts))
+                })
+            }
         }
     }
 
@@ -648,8 +607,45 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers;
+                Task::none()
+            }
             Message::Browser(msg) => {
+                // A click arrives from the view bare: no modifiers, and
+                // no notion of whether it is the second of a pair. Both
+                // are facts about the world rather than about the model,
+                // and this is where the window knows them.
+                let msg = match msg {
+                    BrowserMessage::EntryClicked { index, .. } => {
+                        let ctrl = self.modifiers.control();
+                        let shift = self.modifiers.shift();
+                        if ctrl || shift {
+                            // A modifier-held click is a selection
+                            // gesture, never half of an open — and it
+                            // must not leave a press behind that a
+                            // following plain click could pair with.
+                            self.clicks.reset();
+                            BrowserMessage::EntryClicked { index, ctrl, shift }
+                        } else {
+                            match self.clicks.press(index, Instant::now()) {
+                                Click::Double => BrowserMessage::EntryActivated(index),
+                                Click::Single => {
+                                    BrowserMessage::EntryClicked { index, ctrl, shift }
+                                }
+                            }
+                        }
+                    }
+                    other => other,
+                };
                 let outcome = self.active_tab_mut().browser.update(msg);
+                // Arriving somewhere new ends any click sequence: the row
+                // under the pointer is a different file now, and pairing
+                // the next press with the one that got us here would open
+                // whatever happens to be in that position.
+                if matches!(outcome, Outcome::ReadDir(_)) {
+                    self.clicks.reset();
+                }
                 self.handle_outcome(self.active, outcome)
             }
             Message::BrowserKey(key, mods) => {
@@ -679,13 +675,13 @@ impl App {
             }
             Message::DeleteSelected => {
                 let tab = self.active_tab();
-                let paths: Vec<PathBuf> = tab
-                    .browser
-                    .selection()
-                    .selected_indices()
-                    .iter()
-                    .filter_map(|&i| tab.browser.view_entries().get(i).map(|e| e.path.clone()))
-                    .collect();
+                // Straight out of the selection — it stores paths now,
+                // so there is nothing to resolve against a listing that
+                // may have been re-sorted since the click. That
+                // resolution step is what used to be able to trash a
+                // file nobody selected.
+                let paths: Vec<PathBuf> =
+                    tab.browser.selection().selected_paths().iter().cloned().collect();
                 if paths.is_empty() {
                     return Task::none();
                 }
@@ -730,6 +726,25 @@ impl App {
                     return Task::none();
                 }
                 self.last_window_size = (w, h);
+                // Nothing is written here — only a timer armed. See
+                // `resize_generation`.
+                self.resize_generation += 1;
+                let generation = self.resize_generation;
+                Task::perform(
+                    async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(RESIZE_SETTLE)).await;
+                        generation
+                    },
+                    Message::WindowSettled,
+                )
+            }
+            Message::WindowSettled(generation) => {
+                // A later resize has already armed its own timer; this
+                // one is about a size the window no longer has.
+                if generation != self.resize_generation {
+                    return Task::none();
+                }
+                let (w, h) = self.last_window_size;
                 Task::perform(
                     save_prefs(move |p: &mut Prefs| {
                         p.window_width = w;
@@ -744,18 +759,15 @@ impl App {
             }
             Message::NewTab => self.open_tab(self.home_dir.clone()),
             Message::CloseTab(index) => self.close_tab(index),
-            Message::SwitchTab(index) => {
-                if index < self.tabs.len() {
-                    self.active = index;
-                }
+            // One bounds check, not two spellings of it: clicking a tab
+            // and `Ctrl+N` differ only in which affordance asked, and
+            // nothing downstream cares which.
+            Message::SwitchTab(index) | Message::JumpToTab(index) => {
+                self.jump_to_tab(index);
                 Task::none()
             }
             Message::CycleTab(delta) => {
                 self.cycle_tab(delta);
-                Task::none()
-            }
-            Message::JumpToTab(index) => {
-                self.jump_to_tab(index);
                 Task::none()
             }
         }
@@ -806,7 +818,7 @@ impl App {
                 background: matches!(status, button::Status::Hovered)
                     .then(|| Background::Color(hyprforge_ui::theme::surface::row())),
                 text_color: hyprforge_ui::theme::text_dim(),
-                border: Border { radius: iced::border::top(TAB_RADIUS), ..Border::default() },
+                border: Border { radius: iced::border::top(hyprforge_files::tabstrip::TAB_RADIUS), ..Border::default() },
                 ..button::Style::default()
             }),
         );
@@ -857,7 +869,12 @@ impl App {
         // and the status bar below.
         let mut content = column![tabs_row].width(Length::Fill).height(Length::Fill);
 
-        content = content.push(tab.browser.view(scale).map(Message::Browser));
+                // The window's own width, so the browser can collapse the
+        // sidebar and decide whether the list has to scroll sideways —
+        // both properties of the window, which is this crate's business
+        // to know and not the model's to go looking for.
+        let viewport_width = self.last_window_size.0 as f32;
+        content = content.push(tab.browser.view(scale, viewport_width).map(Message::Browser));
 
         if let Some(status) = &self.status {
             let bar = row![
@@ -891,6 +908,16 @@ impl App {
         // `self.active` into one anyway, as a tuple element instead of a
         // capture.
         let keys = keyboard::listen().with(self.active).filter_map(|(active, event)| {
+            // Which modifiers are held is tracked separately from which
+            // key was pressed, because a *click* needs to know and a
+            // click carries none of its own: neither `button::on_press`
+            // nor `mouse_area::on_press` takes modifier state in iced
+            // 0.14. The window is the thing that watches the keyboard,
+            // so the window is what supplies them — see
+            // `Message::ModifiersChanged`.
+            if let keyboard::Event::ModifiersChanged(modifiers) = &event {
+                return Some(Message::ModifiersChanged(*modifiers));
+            }
             let keyboard::Event::KeyPressed { key, modifiers, .. } = &event else {
                 return None;
             };
@@ -980,7 +1007,7 @@ fn tab_button_style(status: button::Status, is_active: bool) -> button::Style {
         border: Border {
             // Top corners only. A tab meets the pane below it; it does
             // not sit on it.
-            radius: iced::border::top(TAB_RADIUS),
+            radius: iced::border::top(hyprforge_files::tabstrip::TAB_RADIUS),
             width: 0.0,
             color: Color::TRANSPARENT,
         },
@@ -988,15 +1015,16 @@ fn tab_button_style(status: button::Status, is_active: bool) -> button::Style {
     }
 }
 
-/// Matches `tabstrip`'s own corner radius — the two draw the same tab.
-const TAB_RADIUS: f32 = 8.0;
 
 
 /// The floating window's outer chrome: background at the root surface,
 /// corners rounded to the compositor's own `decoration:rounding` (via
 /// `Theme::rounding`) rather than a value this app invented.
 fn window_frame_style(_theme: &Theme) -> container::Style {
-    let radius = hyprforge_ui::theme::active().rounding as f32;
+    // `density::outer_radius`, not a second read of `Theme::rounding`:
+    // the radius ladder (12 outer / 6 inner / 4 nested) has one source,
+    // and every other radius in this app already goes through it.
+    let radius = hyprforge_files_core::density::outer_radius();
     container::Style {
         background: Some(Background::Color(hyprforge_ui::theme::surface::root())),
         border: Border { radius: radius.into(), width: 0.0, color: Color::TRANSPARENT },
@@ -1010,7 +1038,7 @@ fn window_frame_style(_theme: &Theme) -> container::Style {
 /// distinct from the switch one.
 fn tab_widget(index: usize, tab: &Tab, is_active: bool, scale: FontScale) -> Element<'_, Message> {
     let height = scale.apply(hyprforge_files::tabstrip::height(is_active));
-    let mark = hyprforge_files::tabstrip::identity_mark(tab_dot_color(is_active), false, scale);
+    let mark = hyprforge_files::tabstrip::identity_mark(tab_dot_color(is_active), scale);
     let name = tab_display_name(tab.browser.current_dir());
 
     // Dim text on an inactive tab, full brightness on the active one.
@@ -1067,6 +1095,12 @@ fn tab_widget(index: usize, tab: &Tab, is_active: bool, scale: FontScale) -> Ele
     .into()
 }
 
+/// How long a resize has to stay still before the new window size is
+/// written to `files.toml`. Long enough that a drag writes once at the
+/// end rather than continuously, short enough that letting go and
+/// closing the window immediately still saves.
+const RESIZE_SETTLE: u64 = 400;
+
 /// A tab's horizontal padding. Declared for inactive tabs too, even
 /// though nothing paints their background, so activating one makes a
 /// fill appear in exactly the right shape with no reflow.
@@ -1116,43 +1150,14 @@ async fn trash_many(paths: Vec<PathBuf>) -> Vec<String> {
     }
 }
 
+/// How many folders one listing will count before giving up.
+const COUNT_BUDGET: usize = 400;
+
 /// Read-modify-write against `files.toml` off the UI thread, via
 /// `hyprforge_files_core::prefs::update` as the brief names — see that
 /// function's own doc for why a read-modify-write beats saving a copy
 /// loaded earlier (two processes, the app and the portal dialog, can
 /// each have their own idea of what the file last said).
-/// Counts what is inside each directory, off the UI thread.
-///
-/// One `read_dir` per folder, which is why this is a second pass rather
-/// than part of the listing — see `Outcome::CountFolders`'s own doc.
-///
-/// Bounded by `COUNT_BUDGET`. A directory of ten thousand subdirectories
-/// would otherwise spend ten thousand `read_dir` calls filling in a
-/// column nobody has scrolled to, on a machine the user is trying to do
-/// something else with. Past the budget the rest simply stay blank,
-/// which is a state the Size cell already renders — the alternative,
-/// counting forever, is invisible until it is someone's fan spinning up.
-async fn count_folders(folders: Vec<PathBuf>) -> Vec<(PathBuf, Option<usize>)> {
-    tokio::task::spawn_blocking(move || {
-        folders
-            .into_iter()
-            .take(COUNT_BUDGET)
-            .map(|path| {
-                // `None` rather than `Some(0)` when the read fails: a
-                // folder you have no permission to open is not an empty
-                // one, and the cell says so with an em dash.
-                let count = std::fs::read_dir(&path).ok().map(|entries| entries.count());
-                (path, count)
-            })
-            .collect()
-    })
-    .await
-    .unwrap_or_default()
-}
-
-/// How many folders one listing will count before giving up.
-const COUNT_BUDGET: usize = 400;
-
 async fn save_prefs(mutate: impl FnOnce(&mut Prefs) + Send + 'static) -> Result<Prefs, String> {
     match tokio::task::spawn_blocking(move || hyprforge_files_core::prefs::update(mutate)).await {
         Ok(Ok(prefs)) => Ok(prefs),
@@ -1198,7 +1203,7 @@ mod tests {
 
     #[test]
     fn resolve_start_dir_with_no_argument_is_home() {
-        let backend = StdBackend;
+        let backend = RoutingBackend::default();
         assert_eq!(resolve_start_dir(&backend, None), backend.home_dir());
     }
 
@@ -1207,7 +1212,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("notes.txt");
         std::fs::write(&file, "hi").unwrap();
-        let backend = StdBackend;
+        let backend = RoutingBackend::default();
         assert_eq!(
             resolve_start_dir(&backend, Some(file.to_string_lossy().into_owned())),
             dir.path()
@@ -1224,7 +1229,7 @@ mod tests {
     fn a_nonexistent_start_path_is_not_short_circuited() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("does-not-exist");
-        let backend = StdBackend;
+        let backend = RoutingBackend::default();
         assert_eq!(
             resolve_start_dir(&backend, Some(missing.to_string_lossy().into_owned())),
             missing
@@ -1234,10 +1239,13 @@ mod tests {
     // --- reading a nonexistent directory: error state, not empty --------
 
     #[test]
-    fn read_dir_sync_of_a_nonexistent_directory_is_an_error() {
+    fn reading_a_nonexistent_directory_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("nope");
-        let err = read_dir_sync(&missing).expect_err("a directory that was never there is an error");
+        let err = RoutingBackend::default()
+            .read_dir(&missing)
+            .map_err(|e| DirError::from(&e))
+            .expect_err("a directory that was never there is an error");
         assert_eq!(err.kind, DirErrorKind::NotFound);
     }
 
@@ -1252,10 +1260,10 @@ mod tests {
         let (mut browser, outcome) = Browser::new(Mode::App, Prefs::default(), missing.clone(), vec![]);
         assert_eq!(outcome, Outcome::ReadDir(missing.clone()));
 
-        let result = read_dir_sync(&missing);
+        let result = RoutingBackend::default().read_dir(&missing).map_err(|e| DirError::from(&e));
         browser.update(BrowserMessage::DirLoaded(missing, result));
 
-        assert!(browser.view_entries().is_empty());
+        assert!(browser.rows().is_empty());
         // Reaching into the same crate's own `LoadState` the way
         // `hyprforge_files_core::browser`'s own tests do — this asserts
         // the *kind* of empty, not just that nothing is shown.
@@ -1263,7 +1271,24 @@ mod tests {
         assert!(is_error, "expected an Error load state, browser debug: {browser:?}");
     }
 
+    /// The names of a browser's rows, in order — what these tests are
+    /// actually asserting about. `rows()` borrows out of the browser's
+    /// one owned listing, so it cannot be compared against an owned
+    /// `Vec<Entry>` directly.
+    fn row_names(browser: &hyprforge_files_core::Browser) -> Vec<&str> {
+        browser.rows().into_iter().map(|e| e.name.as_str()).collect()
+    }
+
+    fn names_of(entries: &[hyprforge_files_core::Entry]) -> Vec<&str> {
+        entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
     // --- tabs: per-tab state, generation guard, close/cycle/jump ----------
+
+    use hyprforge_files_core::backend::mock::MockBackend;
+    // Test-only: the window builds no `Entry` of its own any more —
+    // every listing comes from a backend.
+    use hyprforge_files_core::{EntryKind, EntrySize};
 
     fn browser_at(dir: &str) -> Browser {
         let (browser, _) = Browser::new(Mode::App, Prefs::default(), PathBuf::from(dir), vec![]);
@@ -1277,6 +1302,10 @@ mod tests {
             dirs.iter().enumerate().map(|(id, dir)| Tab::new(id as u64, browser_at(dir))).collect();
         let next_tab_id = tabs.len() as u64;
         App {
+            // The mock, not the real filesystem: these tests are about
+            // the window's own loop, and nothing in them should depend
+            // on what happens to be on the machine running them.
+            backend: Arc::new(hyprforge_files_core::backend::mock::MockBackend::new()),
             tabs,
             active: 0,
             next_tab_id,
@@ -1286,6 +1315,9 @@ mod tests {
                 font_scale: FontScale::default(),
             status: None,
             last_window_size: (900, 600),
+            resize_generation: 0,
+            modifiers: keyboard::Modifiers::default(),
+            clicks: ClickTracker::new(),
         }
     }
 
@@ -1294,12 +1326,17 @@ mod tests {
             name: name.to_string(),
             path: PathBuf::from("/dir").join(name),
             is_dir: false,
-            size: 1,
+            size: EntrySize::Bytes(1),
             modified: None,
             is_symlink: false,
             link_broken: false,
             hidden: false,
             kind: EntryKind::Other,
+            // Fixtures: these tests are about tab routing and read
+            // generations, none of which look at ownership.
+            mode: 0o644,
+            uid: 1000,
+            owner: Some("alex".to_string()),
         }
     }
 
@@ -1320,15 +1357,15 @@ mod tests {
 
         let fresh = vec![entry_named("fresh.txt")];
         let _ = app.update(Message::DirLoaded(tab_id, 2, PathBuf::from("/dir"), Ok(fresh.clone())));
-        assert_eq!(app.tabs[0].browser.view_entries(), fresh.as_slice());
+        assert_eq!(row_names(&app.tabs[0].browser), names_of(&fresh));
 
         // The stale generation-1 result now arrives, for the same path.
         let stale = vec![entry_named("stale.txt")];
         let _ = app.update(Message::DirLoaded(tab_id, 1, PathBuf::from("/dir"), Ok(stale)));
 
         assert_eq!(
-            app.tabs[0].browser.view_entries(),
-            fresh.as_slice(),
+            row_names(&app.tabs[0].browser),
+            names_of(&fresh),
             "the stale generation-1 result must not have overwritten the fresh listing"
         );
     }
@@ -1341,7 +1378,7 @@ mod tests {
 
         let entries = vec![entry_named("a.txt")];
         let _ = app.update(Message::DirLoaded(tab_id, 1, PathBuf::from("/dir"), Ok(entries.clone())));
-        assert_eq!(app.tabs[0].browser.view_entries(), entries.as_slice());
+        assert_eq!(row_names(&app.tabs[0].browser), names_of(&entries));
     }
 
     /// The bug the brief names as the one "most likely to exist and
@@ -1366,12 +1403,12 @@ mod tests {
         let _ = app.update(Message::DirLoaded(tab_two_id, 1, PathBuf::from("/two"), Ok(two_entries.clone())));
 
         assert_eq!(
-            app.tabs[1].browser.view_entries(),
-            two_entries.as_slice(),
+            row_names(&app.tabs[1].browser),
+            names_of(&two_entries),
             "the result must still reach tab 2, even though it is no longer visible"
         );
         assert!(
-            app.tabs[0].browser.view_entries().is_empty(),
+            app.tabs[0].browser.rows().is_empty(),
             "tab 1, the one actually on screen, must not have received tab 2's listing"
         );
     }
@@ -1507,119 +1544,277 @@ mod tests {
         assert_eq!(tab_shortcut(&Key::Character("w".into()), false, 3), Some(Message::CloseTab(3)));
     }
 
-    // --- the Trash sidebar item -------------------------------------------
+    // --- ctrl/shift click ---------------------------------------------------
 
+    /// Multi-select is only reachable if the modifiers held at click
+    /// time reach the browser. The view cannot supply them — a click in
+    /// iced 0.14 carries none — so the window does, and this is the
+    /// property that says it still does.
     #[test]
-    fn is_trash_dir_matches_the_real_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let trash_files = dir.path().join("Trash").join("files");
-        std::fs::create_dir_all(&trash_files).unwrap();
-        assert!(is_trash_dir(&trash_files, &trash_files));
+    fn a_row_click_is_told_which_modifiers_were_held() {
+        let mut app = app_for_test(&["/dir"]);
+        let entries = vec![
+            entry_named("a.txt"),
+            entry_named("b.txt"),
+            entry_named("c.txt"),
+        ];
+        let _ = app.update(Message::Browser(BrowserMessage::DirLoaded(
+            PathBuf::from("/dir"),
+            Ok(entries),
+        )));
+
+        // A plain click selects one.
+        let _ = app.update(Message::Browser(BrowserMessage::EntryClicked {
+            index: 0,
+            ctrl: false,
+            shift: false,
+        }));
+        assert_eq!(app.active_tab().browser.selection().selected_paths().len(), 1);
+
+        // Ctrl goes down, and the same message — which the view still
+        // builds with `ctrl: false` — now adds to the selection instead
+        // of replacing it.
+        let _ = app.update(Message::ModifiersChanged(
+            keyboard::Modifiers::CTRL,
+        ));
+        let _ = app.update(Message::Browser(BrowserMessage::EntryClicked {
+            index: 2,
+            ctrl: false,
+            shift: false,
+        }));
+        assert_eq!(
+            app.active_tab().browser.selection().selected_paths().len(),
+            2,
+            "ctrl-click must add to the selection, not replace it"
+        );
     }
 
-    /// The exact wording of the brief: "including via a symlinked or
-    /// non-canonical spelling".
+    /// Shift-click ranges, through the same route.
     #[test]
-    fn is_trash_dir_recognises_a_symlink_and_a_noncanonical_spelling() {
-        let dir = tempfile::tempdir().unwrap();
-        let trash_files = dir.path().join("Trash").join("files");
-        std::fs::create_dir_all(&trash_files).unwrap();
+    fn shift_click_selects_a_range_through_the_windows_modifier_state() {
+        let mut app = app_for_test(&["/dir"]);
+        let entries = vec![entry_named("a.txt"), entry_named("b.txt"), entry_named("c.txt")];
+        let _ = app.update(Message::Browser(BrowserMessage::DirLoaded(
+            PathBuf::from("/dir"),
+            Ok(entries),
+        )));
+        let _ = app.update(Message::Browser(BrowserMessage::EntryClicked {
+            index: 0,
+            ctrl: false,
+            shift: false,
+        }));
+        let _ = app.update(Message::ModifiersChanged(keyboard::Modifiers::SHIFT));
+        let _ = app.update(Message::Browser(BrowserMessage::EntryClicked {
+            index: 2,
+            ctrl: false,
+            shift: false,
+        }));
+        assert_eq!(app.active_tab().browser.selection().selected_paths().len(), 3);
+    }
 
-        let symlink = dir.path().join("trash-link");
-        std::os::unix::fs::symlink(&trash_files, &symlink).unwrap();
-        assert!(is_trash_dir(&symlink, &trash_files), "a symlink to the trash must still match");
+    // --- double click to open ------------------------------------------------
+    //
+    // These go through `App::update` with real `Message::Browser` values
+    // rather than testing `ClickTracker` alone, because the bug they
+    // exist to catch was not in the timing at all — it was that the
+    // click never reached anything. `mouse_area::on_double_click`
+    // wrapped around a `button` is silently inert, since `button`
+    // captures the press first. A test of the tracker would have passed
+    // throughout.
 
-        let noncanonical = dir.path().join("Trash").join(".").join("files");
-        assert!(
-            is_trash_dir(&noncanonical, &trash_files),
-            "a `.`-laden spelling of the same path must still match"
+    fn clicked(index: usize) -> Message {
+        Message::Browser(BrowserMessage::EntryClicked { index, ctrl: false, shift: false })
+    }
+
+    /// Two quick clicks on a folder navigate into it.
+    #[test]
+    fn double_clicking_a_folder_opens_it() {
+        let mut app = app_for_test(&["/dir"]);
+        let _ = app.update(Message::Browser(BrowserMessage::DirLoaded(
+            PathBuf::from("/dir"),
+            Ok(vec![Entry {
+                name: "sub".to_string(),
+                path: PathBuf::from("/dir/sub"),
+                is_dir: true,
+                size: EntrySize::UNCOUNTED,
+                kind: EntryKind::Folder,
+                ..entry_named("sub")
+            }]),
+        )));
+
+        let _ = app.update(clicked(0));
+        assert_eq!(
+            app.active_tab().browser.current_dir(),
+            Path::new("/dir"),
+            "one click selects and stays put"
         );
 
-        let unrelated = dir.path().join("Documents");
-        std::fs::create_dir_all(&unrelated).unwrap();
-        assert!(!is_trash_dir(&unrelated, &trash_files));
+        let _ = app.update(clicked(0));
+        assert_eq!(
+            app.active_tab().browser.current_dir(),
+            Path::new("/dir/sub"),
+            "the second click opens the folder"
+        );
     }
 
-    /// The defect the brief names directly: the stored file in `files/`
-    /// can carry a collision suffix (`thing.2.txt`) that was never part
-    /// of the real name, and the directory a file was trashed *from* is
-    /// nowhere in the stored name at all. The listing must show the
-    /// *original* name from the `.trashinfo` file, not the on-disk one —
-    /// while still pointing at the real on-disk path so activating it
-    /// works.
+    /// And the first click still selects, which is what makes it
+    /// possible to see what you are about to open.
     #[test]
-    fn trash_entries_show_the_original_name_not_the_collision_suffixed_stored_one() {
-        let dir = tempfile::tempdir().unwrap();
-        let trash_dir = dir.path().join("Trash");
-        let files_dir = trash_dir.join("files");
-        let info_dir = trash_dir.join("info");
-        std::fs::create_dir_all(&files_dir).unwrap();
-        std::fs::create_dir_all(&info_dir).unwrap();
+    fn the_first_click_of_a_pair_still_selects() {
+        let mut app = app_for_test(&["/dir"]);
+        let _ = app.update(Message::Browser(BrowserMessage::DirLoaded(
+            PathBuf::from("/dir"),
+            Ok(vec![entry_named("a.txt"), entry_named("b.txt")]),
+        )));
+        let _ = app.update(clicked(1));
+        assert_eq!(app.active_tab().browser.selection().selected_paths().len(), 1);
+    }
 
-        // Stored under a disambiguated name, as if a second "thing.txt"
-        // had already been trashed once before this one.
-        std::fs::write(files_dir.join("thing.2.txt"), b"second copy").unwrap();
-        std::fs::write(
-            info_dir.join("thing.2.txt.trashinfo"),
-            "[Trash Info]\nPath=/home/alex/projects/thing.txt\nDeletionDate=2024-03-01T12:30:00\n",
+    /// A ctrl-click is a selection gesture, never half of an open — and
+    /// two of them in quick succession must not open anything.
+    #[test]
+    fn a_modifier_held_click_never_opens_anything() {
+        let mut app = app_for_test(&["/dir"]);
+        let _ = app.update(Message::Browser(BrowserMessage::DirLoaded(
+            PathBuf::from("/dir"),
+            Ok(vec![Entry {
+                name: "sub".to_string(),
+                path: PathBuf::from("/dir/sub"),
+                is_dir: true,
+                size: EntrySize::UNCOUNTED,
+                kind: EntryKind::Folder,
+                ..entry_named("sub")
+            }]),
+        )));
+        let _ = app.update(Message::ModifiersChanged(keyboard::Modifiers::CTRL));
+        let _ = app.update(clicked(0));
+        let _ = app.update(clicked(0));
+        assert_eq!(
+            app.active_tab().browser.current_dir(),
+            Path::new("/dir"),
+            "ctrl-clicking twice selects and deselects; it does not open"
+        );
+    }
+
+    /// Navigating ends a click sequence. Otherwise the press that opened
+    /// a folder could pair with the first press in the folder it opened,
+    /// and that one would open too.
+    #[test]
+    fn a_click_in_a_newly_opened_folder_does_not_pair_with_the_one_that_opened_it() {
+        let mut app = app_for_test(&["/dir"]);
+        let _ = app.update(Message::Browser(BrowserMessage::DirLoaded(
+            PathBuf::from("/dir"),
+            Ok(vec![Entry {
+                name: "sub".to_string(),
+                path: PathBuf::from("/dir/sub"),
+                is_dir: true,
+                size: EntrySize::UNCOUNTED,
+                kind: EntryKind::Folder,
+                ..entry_named("sub")
+            }]),
+        )));
+        let _ = app.update(clicked(0));
+        let _ = app.update(clicked(0));
+        // Now inside /dir/sub, holding one folder at index 0 again.
+        let _ = app.update(Message::Browser(BrowserMessage::DirLoaded(
+            PathBuf::from("/dir/sub"),
+            Ok(vec![Entry {
+                name: "deeper".to_string(),
+                path: PathBuf::from("/dir/sub/deeper"),
+                is_dir: true,
+                size: EntrySize::UNCOUNTED,
+                kind: EntryKind::Folder,
+                ..entry_named("deeper")
+            }]),
+        )));
+        let _ = app.update(clicked(0));
+        assert_eq!(
+            app.active_tab().browser.current_dir(),
+            Path::new("/dir/sub"),
+            "the first click in the new folder selects; it must not open"
+        );
+    }
+
+    // --- the backend seam --------------------------------------------------
+    //
+    // These are the tests the seam exists for. The window used to name
+    // `StdBackend` inline in its read function and hold no backend at
+    // all, so `MockBackend`'s carefully-built cases — an unreadable
+    // directory, an entry that vanishes mid-read — were properties of
+    // the mock and of nothing that ships. Reaching them from here is
+    // what makes the trait more than a shape.
+
+    fn mock_backend() -> hyprforge_files_core::backend::mock::MockBackend {
+        hyprforge_files_core::backend::mock::MockBackend::new()
+    }
+
+    #[tokio::test]
+    async fn the_window_reads_a_listing_through_the_backend_it_was_given() {
+        let mock = mock_backend();
+        mock.seed(
+            "/dir",
+            vec![
+                MockBackend::file(Path::new("/dir"), "notes.txt", 12),
+                MockBackend::dir(Path::new("/dir"), "sub"),
+            ],
+        );
+        let backend: Arc<dyn FsBackend> = Arc::new(mock);
+
+        let entries = read_dir_task(backend, PathBuf::from("/dir")).await.expect("the mock lists");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].size, EntrySize::Bytes(12));
+        assert_eq!(entries[1].size, EntrySize::UNCOUNTED, "a folder starts uncounted");
+    }
+
+    /// A directory that exists and cannot be read is an error, never an
+    /// empty listing — CLAUDE.md's `hlconfig::storage` rule. Provable
+    /// here without arranging a real permission failure on the machine
+    /// running the tests, which is the whole argument for the mock.
+    #[tokio::test]
+    async fn an_unreadable_directory_reaches_the_window_as_an_error_not_as_empty() {
+        let mock = mock_backend();
+        mock.seed("/locked", vec![]);
+        mock.make_unreadable("/locked");
+        let backend: Arc<dyn FsBackend> = Arc::new(mock);
+
+        let err = read_dir_task(backend, PathBuf::from("/locked"))
+            .await
+            .expect_err("a directory we cannot read is an error");
+        assert_eq!(err.kind, DirErrorKind::PermissionDenied);
+    }
+
+    /// The second pass goes through the same backend as the listing, so
+    /// a folder's count is answered by whatever described the folder.
+    #[tokio::test]
+    async fn folder_counts_are_answered_by_the_same_backend_as_the_listing() {
+        let mock = mock_backend();
+        mock.seed("/dir", vec![MockBackend::dir(Path::new("/dir"), "sub")]);
+        mock.seed(
+            "/dir/sub",
+            vec![
+                MockBackend::file(Path::new("/dir/sub"), "a", 1),
+                MockBackend::file(Path::new("/dir/sub"), "b", 1),
+            ],
+        );
+        mock.seed("/dir/locked", vec![]);
+        mock.make_unreadable("/dir/locked");
+        let backend: Arc<dyn FsBackend> = Arc::new(mock);
+
+        let counts = count_folders(
+            backend,
+            vec![PathBuf::from("/dir/sub"), PathBuf::from("/dir/locked")],
         )
-        .unwrap();
-
-        let entries = trash_entries_from(&trash_dir).unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].name, "thing.txt", "must show the original name, not thing.2.txt");
-        assert_eq!(entries[0].path, files_dir.join("thing.2.txt"), "must still point at the real file");
-        assert!(!entries[0].is_dir);
-        assert_eq!(entries[0].size, "second copy".len() as u64);
+        .await;
+        assert_eq!(counts[0], (PathBuf::from("/dir/sub"), Some(2)));
+        // `None`, which becomes `ItemCount::Unreadable` — never
+        // `Some(0)`, which would render as "0 items".
+        assert_eq!(counts[1], (PathBuf::from("/dir/locked"), None));
     }
 
-    #[test]
-    fn trash_entries_skip_an_item_whose_stored_file_has_vanished() {
-        let dir = tempfile::tempdir().unwrap();
-        let trash_dir = dir.path().join("Trash");
-        let info_dir = trash_dir.join("info");
-        std::fs::create_dir_all(&info_dir).unwrap();
-        // No corresponding file under files/ — as if it were removed by
-        // hand outside this crate.
-        std::fs::write(
-            info_dir.join("gone.txt.trashinfo"),
-            "[Trash Info]\nPath=/home/alex/gone.txt\nDeletionDate=2024-03-01T12:30:00\n",
-        )
-        .unwrap();
-
-        let entries = trash_entries_from(&trash_dir).unwrap();
-        assert!(entries.is_empty(), "a vanished trashed file must be skipped, not error the whole listing");
-    }
-
-    #[test]
-    fn a_missing_trash_directory_is_an_empty_listing_not_an_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let never_used = dir.path().join("never-used-trash");
-        assert_eq!(trash_entries_from(&never_used).unwrap(), Vec::new());
-    }
-
-    // --- deletion-date parsing ----------------------------------------------
-
-    #[test]
-    fn the_unix_epoch_parses_to_the_unix_epoch() {
-        assert_eq!(parse_deletion_date("1970-01-01T00:00:00"), Some(std::time::UNIX_EPOCH));
-    }
-
-    #[test]
-    fn a_later_date_parses_to_the_correct_offset() {
-        // 2024-01-02T03:04:05 UTC is 1704164645 seconds after the epoch —
-        // checked against a standard epoch converter, not derived from
-        // this same algorithm.
-        let parsed = parse_deletion_date("2024-01-02T03:04:05").unwrap();
-        let secs = parsed.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-        assert_eq!(secs, 1_704_164_645);
-    }
-
-    #[test]
-    fn a_malformed_deletion_date_is_none_not_a_panic() {
-        assert_eq!(parse_deletion_date("not-a-date-at-all"), None);
-        assert_eq!(parse_deletion_date("2024/01/02 03:04:05"), None);
-    }
+    // The Trash's own listing behaviour — that it shows original names
+    // rather than stored ones, skips a vanished item, and is recognised
+    // through a symlink — is tested in `hyprforge_files_core::trash`,
+    // where it now lives as a backend rather than as a branch here.
 
     // --- sanity: unused-import guard for SidebarItem in future tests ----
     #[test]
