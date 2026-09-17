@@ -48,6 +48,10 @@ pub enum JobEvent {
 pub struct JobSummary {
     /// Items placed.
     pub done: usize,
+    /// Each placed item: where it came from, and where it actually landed
+    /// — which a Keep Both answer can make different from where it was
+    /// sent. What an undo takes back.
+    pub placed: Vec<(std::path::PathBuf, std::path::PathBuf)>,
     /// Items left alone because of a Skip answer.
     pub skipped: usize,
     /// One sentence per thing that went wrong — already the actionable
@@ -179,6 +183,7 @@ fn run(
                         summary.skipped += 1;
                     } else if !report.succeeded.is_empty() {
                         summary.done += 1;
+                        summary.placed.push((step.source.clone(), report.dest));
                     }
                     continue 'items;
                 }
@@ -234,6 +239,97 @@ pub fn create_folder(path: &std::path::Path) -> Result<(), String> {
     })
 }
 
+/// Takes back one recorded action. Returns the folders whose listings
+/// changed, and a sentence for each part that could not be undone.
+///
+/// Every branch checks that the world still matches the record before
+/// touching anything, and refuses rather than guesses when it does not:
+/// a file renamed again since, a folder that has things in it now, a
+/// name that is taken again. Undoing a copy moves the copies to the
+/// Trash and never deletes them.
+pub fn undo(done: hyprforge_files_core::undo::Undoable) -> (Vec<std::path::PathBuf>, Vec<String>) {
+    use hyprforge_files_core::undo::Undoable;
+    use std::path::{Path, PathBuf};
+
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut errors = Vec::new();
+    let touched = |dirs: &mut Vec<PathBuf>, path: &Path| {
+        if let Some(parent) = path.parent() {
+            if !dirs.iter().any(|d| d == parent) {
+                dirs.push(parent.to_path_buf());
+            }
+        }
+    };
+    let exists = |path: &Path| std::fs::symlink_metadata(path).is_ok();
+    let name = |path: &Path| {
+        path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+    };
+
+    // "Put `now` back at `was`" — shared by rename and move.
+    let put_back = |dirs: &mut Vec<PathBuf>, errors: &mut Vec<String>, was: &Path, now: &Path| {
+        if !exists(now) {
+            errors.push(format!("\u{201C}{}\u{201D} isn't there any more.", name(now)));
+        } else if exists(was) {
+            errors.push(format!("Something called \u{201C}{}\u{201D} is back where it was.", name(was)));
+        } else {
+            match rename(now, was) {
+                Ok(()) => {
+                    touched(dirs, now);
+                    touched(dirs, was);
+                }
+                Err(e) => errors.push(e),
+            }
+        }
+    };
+
+    match done {
+        Undoable::Trashed(items) => {
+            for (stored, original, record) in items {
+                let item = hyprforge_fileops::TrashedItem {
+                    original_path: original.clone(),
+                    deleted_at: String::new(),
+                    trashed_file: stored.clone(),
+                    info_file: record,
+                };
+                match hyprforge_fileops::restore(&item) {
+                    Ok(()) => {
+                        dirs.push(stored.parent().map(Path::to_path_buf).unwrap_or_default());
+                        touched(&mut dirs, &original);
+                    }
+                    Err(e) => errors.push(e.to_string()),
+                }
+            }
+        }
+        Undoable::Renamed { from, to } => put_back(&mut dirs, &mut errors, &from, &to),
+        Undoable::Moved(items) => {
+            for (was, now) in items {
+                put_back(&mut dirs, &mut errors, &was, &now);
+            }
+        }
+        Undoable::Copied(copies) => {
+            for copy in copies {
+                if !exists(&copy) {
+                    continue;
+                }
+                match hyprforge_fileops::trash(&copy) {
+                    Ok(_) => touched(&mut dirs, &copy),
+                    Err(e) => errors.push(e.to_string()),
+                }
+            }
+        }
+        Undoable::MadeFolder(path) => match std::fs::remove_dir(&path) {
+            Ok(()) => touched(&mut dirs, &path),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => errors.push(format!(
+                "\u{201C}{}\u{201D} has things in it now, so it was left where it is.",
+                name(&path)
+            )),
+            Err(e) => errors.push(format!("{}: {e}", name(&path))),
+        },
+    }
+    (dirs, errors)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,7 +379,7 @@ mod tests {
         let b = dir.path().join("b.txt");
         let (control, events) = start(1, vec![step(&a, &b, OpKind::Copy)], OnConflict::Ask);
         let (summary, _) = drive(&control, events, never);
-        assert_eq!(summary, JobSummary { done: 1, ..JobSummary::default() });
+        assert_eq!(summary, JobSummary { done: 1, placed: vec![(a.clone(), b.clone())], ..JobSummary::default() });
         assert!(summary.complete());
         assert_eq!(fs::read_to_string(&b).unwrap(), "hello");
         assert!(a.exists());
@@ -316,6 +412,8 @@ mod tests {
         assert_eq!(collisions, 0);
         assert!(summary.complete(), "{summary:?}");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2, "the original and one copy");
+        assert_ne!(summary.placed[0].1, a, "the copy is recorded where it really is");
+        assert!(summary.placed[0].1.exists());
     }
 
     /// A conflict pauses the job and the answer is carried out.
@@ -426,6 +524,104 @@ mod tests {
             }
         }
         assert_eq!(fs::read_to_string(&b).unwrap(), "old");
+    }
+
+    // --- undo ---------------------------------------------------------------
+
+    use hyprforge_files_core::undo::Undoable;
+
+    #[test]
+    fn undoing_a_rename_renames_it_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.txt"), dir.path().join("b.txt"));
+        fs::write(&b, "x").unwrap();
+        let (dirs, errors) = undo(Undoable::Renamed { from: a.clone(), to: b.clone() });
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(a.exists() && !b.exists());
+        assert_eq!(dirs, [dir.path().to_path_buf()]);
+    }
+
+    /// Renamed again since: the record no longer describes the world,
+    /// and nothing is touched.
+    #[test]
+    fn an_undo_that_no_longer_fits_is_refused_and_touches_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.txt"), dir.path().join("b.txt"));
+        let (errors_gone, errors_taken);
+        {
+            let (_, errors) = undo(Undoable::Renamed { from: a.clone(), to: b.clone() });
+            errors_gone = errors;
+        }
+        fs::write(&a, "someone else's").unwrap();
+        fs::write(&b, "mine").unwrap();
+        {
+            let (_, errors) = undo(Undoable::Renamed { from: a.clone(), to: b.clone() });
+            errors_taken = errors;
+        }
+        assert!(errors_gone[0].contains("isn't there"), "{errors_gone:?}");
+        assert!(errors_taken[0].contains("is back where it was"), "{errors_taken:?}");
+        assert_eq!(fs::read_to_string(&a).unwrap(), "someone else's");
+        assert_eq!(fs::read_to_string(&b).unwrap(), "mine");
+    }
+
+    #[test]
+    fn undoing_a_move_moves_everything_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let there = dir.path().join("there");
+        fs::create_dir(&there).unwrap();
+        fs::write(there.join("a"), "1").unwrap();
+        fs::write(there.join("b"), "2").unwrap();
+        let moved = vec![
+            (dir.path().join("a"), there.join("a")),
+            (dir.path().join("b"), there.join("b")),
+        ];
+        let (_, errors) = undo(Undoable::Moved(moved));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(dir.path().join("a").exists() && dir.path().join("b").exists());
+    }
+
+    /// A made folder goes only while it is still empty.
+    #[test]
+    fn undoing_a_new_folder_removes_it_only_if_it_is_still_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("New folder");
+        fs::create_dir(&empty).unwrap();
+        let (_, errors) = undo(Undoable::MadeFolder(empty.clone()));
+        assert!(errors.is_empty() && !empty.exists());
+
+        let used = dir.path().join("New folder 2");
+        fs::create_dir(&used).unwrap();
+        fs::write(used.join("keep.txt"), "x").unwrap();
+        let (_, errors) = undo(Undoable::MadeFolder(used.clone()));
+        assert!(errors[0].contains("has things in it"), "{errors:?}");
+        assert!(used.join("keep.txt").exists());
+    }
+
+    /// Undoing a trash puts the item back — driven through a trash made
+    /// in a temporary directory, never the real one.
+    #[test]
+    fn undoing_a_trash_puts_the_item_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let home_trash = dir.path().join("Trash");
+        let original = dir.path().join("docs").join("notes.txt");
+        fs::create_dir_all(original.parent().unwrap()).unwrap();
+        fs::write(&original, "hello").unwrap();
+        let item = hyprforge_fileops::trash_into(
+            &hyprforge_fileops::fs::mock::MockFilesystem::new(),
+            &home_trash,
+            &original,
+        )
+        .unwrap();
+        assert!(!original.exists());
+
+        let (_, errors) = undo(Undoable::Trashed(vec![(
+            item.trashed_file.clone(),
+            item.original_path.clone(),
+            item.info_file.clone(),
+        )]));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(fs::read_to_string(&original).unwrap(), "hello");
+        assert!(!item.info_file.exists(), "the record went with it");
     }
 
     #[test]

@@ -69,7 +69,9 @@ pub enum Action {
     NewFolder,
     /// Open the right-click menu from the keyboard, for the focused row.
     ContextMenu,
-    // Window scope: the tab strip.
+    // Window scope: the tab strip, and undo — whose history spans tabs.
+    /// Take back the most recent trash, rename, move, copy or new folder.
+    Undo,
     NewTab,
     CloseTab,
     NextTab,
@@ -120,6 +122,7 @@ impl Action {
             Action::Rename,
             Action::NewFolder,
             Action::ContextMenu,
+            Action::Undo,
             Action::NewTab,
             Action::CloseTab,
             Action::NextTab,
@@ -158,6 +161,7 @@ impl Action {
             Action::Rename => "rename",
             Action::NewFolder => "new-folder",
             Action::ContextMenu => "context-menu",
+            Action::Undo => "undo",
             Action::NewTab => "new-tab",
             Action::CloseTab => "close-tab",
             Action::NextTab => "next-tab",
@@ -215,6 +219,7 @@ impl Action {
             Action::Rename => "Rename",
             Action::NewFolder => "New Folder",
             Action::ContextMenu => "Show Menu",
+            Action::Undo => "Undo",
             Action::NewTab => "New Tab",
             Action::CloseTab => "Close Tab",
             Action::NextTab => "Next Tab",
@@ -235,7 +240,8 @@ impl Action {
 
     pub fn scope(self) -> Scope {
         match self {
-            Action::NewTab
+            Action::Undo
+            | Action::NewTab
             | Action::CloseTab
             | Action::NextTab
             | Action::PreviousTab
@@ -288,6 +294,7 @@ impl Action {
             // The two keys every desktop uses for "the menu a right click
             // would open".
             Action::ContextMenu => &["Menu", "Shift+F10"],
+            Action::Undo => &["Ctrl+Z"],
             Action::NewTab => &["Ctrl+T"],
             Action::CloseTab => &["Ctrl+W"],
             Action::NextTab => &["Ctrl+Tab"],
@@ -369,7 +376,8 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         Action::Refresh => true,
         Action::Rename => ctx.selected == 1 && !ctx.in_trash,
         Action::NewFolder => !ctx.in_trash,
-        Action::NewTab
+        Action::Undo
+        | Action::NewTab
         | Action::CloseTab
         | Action::NextTab
         | Action::PreviousTab
@@ -430,14 +438,21 @@ mod tests {
         assert!(Action::DeletePermanently.default_keys().is_empty());
     }
 
+    /// The window's own actions are the tab strip and undo, whose
+    /// history spans every tab. The open/save dialog has neither.
     #[test]
-    fn only_the_tab_actions_belong_to_the_window() {
+    fn only_tabs_and_undo_belong_to_the_window() {
         for action in Action::all() {
-            let is_tab = matches!(
+            let is_window = matches!(
                 action,
-                Action::NewTab | Action::CloseTab | Action::NextTab | Action::PreviousTab | Action::Tab(_)
+                Action::Undo
+                    | Action::NewTab
+                    | Action::CloseTab
+                    | Action::NextTab
+                    | Action::PreviousTab
+                    | Action::Tab(_)
             );
-            assert_eq!(action.scope() == Scope::Window, is_tab, "{action:?}");
+            assert_eq!(action.scope() == Scope::Window, is_window, "{action:?}");
         }
     }
 

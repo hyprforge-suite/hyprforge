@@ -62,6 +62,11 @@ pub struct Behaviour {
     /// short job finishes before a bar could be read, and one that
     /// flashes up and vanishes reads as something going wrong.
     pub progress_after_ms: u64,
+    /// How many steps Ctrl+Z can take back. `0` turns undo off.
+    pub undo_depth: u64,
+    /// How long "Moved 3 items to the Trash · Undo" stays in the status
+    /// bar. `0` turns the notice off; Ctrl+Z still works.
+    pub undo_notice_seconds: u64,
 }
 
 impl Default for Behaviour {
@@ -71,6 +76,8 @@ impl Default for Behaviour {
             confirm_trash: false,
             confirm_delete: true,
             progress_after_ms: 500,
+            undo_depth: 20,
+            undo_notice_seconds: 6,
         }
     }
 }
@@ -143,6 +150,31 @@ struct RawBehaviour {
     confirm_trash: Option<toml::Value>,
     confirm_delete: Option<toml::Value>,
     progress_after_ms: Option<toml::Value>,
+    undo_depth: Option<toml::Value>,
+    undo_notice_seconds: Option<toml::Value>,
+}
+
+/// A `[behaviour]` number within `range`, or a problem naming it.
+fn number(
+    name: &str,
+    value: &Option<toml::Value>,
+    range: std::ops::RangeInclusive<i64>,
+    current: u64,
+    unit: &str,
+    problems: &mut Vec<ConfigProblem>,
+) -> u64 {
+    match value {
+        None => current,
+        Some(toml::Value::Integer(n)) if range.contains(n) => *n as u64,
+        Some(other) => {
+            problems.push(problem(format!(
+                "[behaviour] {name} = {other}: use {unit} from {} to {} — {current} until this is fixed",
+                range.start(),
+                range.end()
+            )));
+            current
+        }
+    }
 }
 
 /// A `[behaviour]` switch: `true` or `false`, or a problem naming it —
@@ -248,17 +280,24 @@ pub fn parse(text: &str, path: &Path) -> (Config, Vec<ConfigProblem>) {
         switch("confirm-trash", &raw.behaviour.confirm_trash, behaviour.confirm_trash, &mut problems);
     behaviour.confirm_delete =
         switch("confirm-delete", &raw.behaviour.confirm_delete, behaviour.confirm_delete, &mut problems);
-    match &raw.behaviour.progress_after_ms {
-        None => {}
-        Some(toml::Value::Integer(ms)) if (0..=60_000).contains(ms) => {
-            behaviour.progress_after_ms = *ms as u64;
-        }
-        Some(other) => problems.push(problem(format!(
-            "[behaviour] progress-after-ms = {other}: use a number of milliseconds from 0 to 60000 — \
-             {} until this is fixed",
-            behaviour.progress_after_ms
-        ))),
-    }
+    behaviour.progress_after_ms = number(
+        "progress-after-ms",
+        &raw.behaviour.progress_after_ms,
+        0..=60_000,
+        behaviour.progress_after_ms,
+        "milliseconds",
+        &mut problems,
+    );
+    behaviour.undo_depth =
+        number("undo-depth", &raw.behaviour.undo_depth, 0..=1_000, behaviour.undo_depth, "a count", &mut problems);
+    behaviour.undo_notice_seconds = number(
+        "undo-notice-seconds",
+        &raw.behaviour.undo_notice_seconds,
+        0..=600,
+        behaviour.undo_notice_seconds,
+        "seconds",
+        &mut problems,
+    );
     (Config { keymap, menus, behaviour }, problems)
 }
 
@@ -609,6 +648,17 @@ mod tests {
         let (config, problems) = parsed("[behaviour]\nprogress-after-ms = -5\n");
         assert_eq!(config.behaviour.progress_after_ms, 500);
         assert_eq!(problems.len(), 1);
+    }
+
+    #[test]
+    fn undo_is_configurable_and_on_by_default() {
+        let defaults = Config::default().behaviour;
+        assert_eq!(defaults.undo_depth, 20);
+        assert_eq!(defaults.undo_notice_seconds, 6);
+        let (config, problems) = parsed("[behaviour]\nundo-depth = 0\nundo-notice-seconds = 0\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(config.behaviour.undo_depth, 0);
+        assert_eq!(config.behaviour.undo_notice_seconds, 0);
     }
 
     /// The config is read, never written — this module has no function

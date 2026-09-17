@@ -258,6 +258,11 @@ pub struct Report {
     /// remove the now-redundant source — content is safe (it exists at
     /// both ends), but the caller needs to know the source is not gone.
     pub source_removal_failed: Option<String>,
+    /// Where the root actually landed. The destination asked for, unless
+    /// a Keep Both answer to a conflict on the root renamed it — which is
+    /// the case a caller cannot work out for itself, and the one an undo
+    /// needs: taking back a copy means finding the copy.
+    pub dest: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -451,6 +456,7 @@ impl<F: Filesystem> Operation<F> {
             cancelled: self.cancelled,
             move_strategy: self.move_strategy,
             source_removal_failed: self.source_removal_failed.take(),
+            dest: self.dest.clone(),
         }
     }
 
@@ -1206,6 +1212,18 @@ mod tests {
         assert_eq!(report.succeeded, vec![dir.path().join("dst.2.txt")]);
         assert_eq!(fs::read_to_string(dir.path().join("dst.2.txt")).unwrap(), "new");
         assert_eq!(fs::read_to_string(&dest).unwrap(), "old", "the original must be untouched");
+        assert_eq!(report.dest, dir.path().join("dst.2.txt"), "the report says where it really went");
+    }
+
+    #[test]
+    fn the_report_names_the_destination_asked_for_when_nothing_was_in_the_way() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("src.txt");
+        write_file(&source, "x");
+        let dest = dir.path().join("dst.txt");
+        let mut op = Operation::real(OpKind::Copy, &source, &dest);
+        let report = drive(&mut op, |_| unreachable!("nothing is in the way"));
+        assert_eq!(report.dest, dest);
     }
 
     #[test]

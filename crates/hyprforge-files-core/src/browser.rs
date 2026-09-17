@@ -961,7 +961,8 @@ impl Browser {
             Action::Refresh => Outcome::ReadDir(self.current_dir.clone()),
             // Handled above; listed so a new window action is a compile
             // error here rather than a silent fall-through.
-            Action::NewTab
+            Action::Undo
+            | Action::NewTab
             | Action::CloseTab
             | Action::NextTab
             | Action::PreviousTab

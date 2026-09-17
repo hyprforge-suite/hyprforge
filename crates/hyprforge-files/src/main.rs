@@ -165,6 +165,9 @@ fn main() -> iced::Result {
         clipboard: Arc::new(hyprforge_files::system_clipboard::SystemClipboard::new()),
         jobs: Vec::new(),
         confirm: None,
+        undo: hyprforge_files_core::undo::UndoHistory::new(config.behaviour.undo_depth as usize),
+        notice: None,
+        next_notice: 0,
         next_job_id: 1,
         modifiers: keyboard::Modifiers::default(),
         clicks: ClickTracker::new(),
@@ -357,7 +360,10 @@ enum Message {
     DirLoaded(u64, u64, PathBuf, Result<Vec<Entry>, DirError>),
     /// The tab a trash operation was started from, the directory to
     /// refresh, and what (if anything) failed.
-    TrashDone(u64, PathBuf, Vec<String>),
+    /// The tab, the folder to refresh, each item that went to the Trash
+    /// (stored path, original path, record — what an undo needs), and
+    /// what failed.
+    TrashDone(u64, PathBuf, Vec<(PathBuf, PathBuf, PathBuf)>, Vec<String>),
     PrefsSaved(Result<Prefs, String>),
     WindowResized(Size),
     /// Ctrl/shift went down or came up. Tracked so a click on a row can
@@ -385,13 +391,18 @@ enum Message {
     ClipboardCleared,
     /// A finished restore removed the records of what it put back.
     TrashTidied,
+    /// An undo finished: the folders it changed, and anything it could
+    /// not take back.
+    Undone(Vec<PathBuf>, Vec<String>),
+    /// The undo notice with this number has been up long enough.
+    NoticeExpired(u64),
     /// The records behind a restore were found: the tab it was asked
     /// from, the items (stored path, original path, record), and anything
     /// that could not be found.
     RestoreReady(u64, Vec<(PathBuf, PathBuf, PathBuf)>, Vec<String>),
     /// A rename finished: the tab it was asked from, the new path, and
     /// how it went.
-    Renamed(u64, PathBuf, Result<(), String>),
+    Renamed(u64, PathBuf, PathBuf, Result<(), String>),
     /// A new folder was made, or could not be.
     FolderCreated(u64, PathBuf, Result<(), String>),
     /// Escape, in a text field that kept it — see `field_escape`.
@@ -508,6 +519,13 @@ struct App {
     jobs: Vec<RunningJob>,
     /// A trash or delete waiting on the confirmation dialog.
     confirm: Option<PendingConfirm>,
+    /// What Ctrl+Z can take back.
+    undo: hyprforge_files_core::undo::UndoHistory,
+    /// "Moved 3 items to the Trash · Undo", with the number its expiry
+    /// timer was armed with — a newer notice replaces it, and the older
+    /// timer must not take the newer notice down with it.
+    notice: Option<(u64, String)>,
+    next_notice: u64,
     next_job_id: JobId,
     last_window_size: (u32, u32),
     /// Bumped by every resize event, so only the *last* one in a drag
@@ -731,13 +749,13 @@ impl App {
                 let tab_id = self.tabs[tab_index].id;
                 Task::perform(
                     async move {
-                        let target = to.clone();
-                        let result = tokio::task::spawn_blocking(move || jobs::rename(&from, &target))
+                        let (source, target) = (from.clone(), to.clone());
+                        let result = tokio::task::spawn_blocking(move || jobs::rename(&source, &target))
                             .await
                             .unwrap_or_else(|e| Err(format!("Renaming was interrupted: {e}")));
-                        (to, result)
+                        (from, to, result)
                     },
-                    move |(to, result)| Message::Renamed(tab_id, to, result),
+                    move |(from, to, result)| Message::Renamed(tab_id, from, to, result),
                 )
             }
             Outcome::CreateFolder(path) => {
@@ -929,6 +947,17 @@ impl App {
                 // that paints: the system clipboard is asked first whether
                 // it still holds them.
                 let refresh = self.refresh_dirs(&finished.dirs);
+                let done = match &finished.kind {
+                    JobKind::Copy => Some(hyprforge_files_core::undo::Undoable::Copied(
+                        summary.placed.iter().map(|(_, now)| now.clone()).collect(),
+                    )),
+                    JobKind::Move => Some(hyprforge_files_core::undo::Undoable::Moved(summary.placed.clone())),
+                    // Undoing a restore would be trashing again, which is
+                    // one keypress away already.
+                    JobKind::Restore { .. } => None,
+                };
+                let noticed = done.map(|done| self.record(done)).unwrap_or_else(Task::none);
+                let refresh = Task::batch([refresh, noticed]);
                 if let JobKind::Restore { records } = finished.kind {
                     // Records are removed only for items whose stored
                     // file really left — a skipped or failed item keeps
@@ -988,14 +1017,16 @@ impl App {
     fn carry_out(&mut self, pending: PendingConfirm) -> Task<Message> {
         let PendingConfirm { removal, paths, tab_id, dir } = pending;
         match removal {
-            Removal::Trash => Task::perform(trash_many(paths), move |errors| {
-                Message::TrashDone(tab_id, dir.clone(), errors)
+            Removal::Trash => Task::perform(trash_many(paths), move |(trashed, errors)| {
+                Message::TrashDone(tab_id, dir.clone(), trashed, errors)
             }),
+            // Nothing to take back from either — which is what their
+            // confirmation dialogs say.
             Removal::Delete => Task::perform(delete_many(paths), move |errors| {
-                Message::TrashDone(tab_id, dir.clone(), errors)
+                Message::TrashDone(tab_id, dir.clone(), Vec::new(), errors)
             }),
             Removal::EmptyTrash => Task::perform(empty_trash(), move |errors| {
-                Message::TrashDone(tab_id, dir.clone(), errors)
+                Message::TrashDone(tab_id, dir.clone(), Vec::new(), errors)
             }),
         }
     }
@@ -1010,9 +1041,14 @@ impl App {
         path: PathBuf,
         result: Result<(), String>,
         rename_next: bool,
+        done: hyprforge_files_core::undo::Undoable,
     ) -> Task<Message> {
+        let noticed = match &result {
+            Ok(()) => self.record(done),
+            Err(_) => Task::none(),
+        };
         let Some(index) = self.tab_index(tab_id) else {
-            return Task::none();
+            return noticed;
         };
         match result {
             Ok(()) => {
@@ -1023,7 +1059,28 @@ impl App {
             Err(why) => self.status = Some(why),
         }
         let dir = self.tabs[index].browser.current_dir().to_path_buf();
-        self.spawn_read_dir(index, dir)
+        Task::batch([self.spawn_read_dir(index, dir), noticed])
+    }
+
+    /// Remembers something Ctrl+Z can take back, and offers it in the
+    /// status bar for `undo-notice-seconds`.
+    fn record(&mut self, done: hyprforge_files_core::undo::Undoable) -> Task<Message> {
+        if done.is_empty() || self.config.behaviour.undo_depth == 0 {
+            return Task::none();
+        }
+        let text = done.describe();
+        self.undo.push(done);
+        let seconds = self.config.behaviour.undo_notice_seconds;
+        if seconds == 0 {
+            return Task::none();
+        }
+        self.next_notice += 1;
+        let id = self.next_notice;
+        self.notice = Some((id, text));
+        Task::perform(
+            async move { tokio::time::sleep(std::time::Duration::from_secs(seconds)).await },
+            move |()| Message::NoticeExpired(id),
+        )
     }
 
     /// Answers the conflict job `id` is paused on.
@@ -1041,6 +1098,21 @@ impl App {
     /// action vocabulary, which the dialog host does not have.
     fn perform_window(&mut self, action: Action) -> Task<Message> {
         match action {
+            Action::Undo => {
+                self.notice = None;
+                let Some(done) = self.undo.pop() else {
+                    self.status = Some("There's nothing to undo.".to_string());
+                    return Task::none();
+                };
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || jobs::undo(done))
+                            .await
+                            .unwrap_or_else(|e| (Vec::new(), vec![format!("Undo was interrupted: {e}")]))
+                    },
+                    |(dirs, errors)| Message::Undone(dirs, errors),
+                )
+            }
             Action::NewTab => self.open_tab(self.home_dir.clone()),
             Action::CloseTab => self.close_tab(self.active),
             Action::NextTab => {
@@ -1245,15 +1317,33 @@ impl App {
             }
             Message::PasteFrom(into, clip) => self.paste_into(into, clip),
             Message::TrashTidied => Task::none(),
+            Message::Undone(dirs, errors) => {
+                if !errors.is_empty() {
+                    self.status = Some(format!("Couldn't undo everything: {}", errors.join(" ")));
+                }
+                self.refresh_dirs(&dirs)
+            }
+            Message::NoticeExpired(id) => {
+                if self.notice.as_ref().is_some_and(|(current, _)| *current == id) {
+                    self.notice = None;
+                }
+                Task::none()
+            }
             Message::RestoreReady(tab_id, items, errors) => self.restore(tab_id, items, errors),
             Message::ClipboardCleared => {
                 self.sync_can_paste();
                 Task::none()
             }
             Message::Job(event) => self.job_event(event),
-            Message::Renamed(tab_id, to, result) => self.name_changed(tab_id, to, result, false),
+            Message::Renamed(tab_id, from, to, result) => {
+                let done = hyprforge_files_core::undo::Undoable::Renamed { from, to: to.clone() };
+                self.name_changed(tab_id, to, result, false, done)
+            }
             // A new folder goes straight into being named.
-            Message::FolderCreated(tab_id, path, result) => self.name_changed(tab_id, path, result, true),
+            Message::FolderCreated(tab_id, path, result) => {
+                let done = hyprforge_files_core::undo::Undoable::MadeFolder(path.clone());
+                self.name_changed(tab_id, path, result, true, done)
+            }
             Message::Confirm => match self.confirm.take() {
                 Some(pending) => self.carry_out(pending),
                 None => Task::none(),
@@ -1283,15 +1373,16 @@ impl App {
                 }
                 Task::none()
             }
-            Message::TrashDone(tab_id, dir, errors) => {
+            Message::TrashDone(tab_id, dir, trashed, errors) => {
                 if !errors.is_empty() {
                     self.status = Some(format!("Couldn't remove everything: {}", errors.join("; ")));
                 }
+                let noticed = self.record(hyprforge_files_core::undo::Undoable::Trashed(trashed));
                 let Some(index) = self.tab_index(tab_id) else {
                     // The tab this delete was started from has since
                     // closed. The files are already trashed either way;
                     // there is simply no listing left to refresh.
-                    return Task::none();
+                    return noticed;
                 };
                 // Refresh regardless of whether anything failed, so what
                 // did succeed disappears from the listing. Safe even if
@@ -1299,7 +1390,7 @@ impl App {
                 // this issues a plain read (not a navigation), and
                 // `Browser` ignores a `DirLoaded` for a directory that is
                 // no longer current.
-                self.spawn_read_dir(index, dir)
+                Task::batch([self.spawn_read_dir(index, dir), noticed])
             }
             Message::PrefsSaved(Ok(prefs)) => {
                 // Feeds the next `Ctrl+T`/`+` — see `last_prefs`'s own
@@ -1471,6 +1562,10 @@ impl App {
             content = content.push(job_progress_bar(job, scale));
         }
 
+        if let Some((_, text)) = &self.notice {
+            content = content.push(undo_notice(text, scale));
+        }
+
         if let Some(status) = &self.status {
             let bar = row![
                 scaled_text(status.clone(), BASE_TEXT_SIZE, scale).width(Length::Fill),
@@ -1567,6 +1662,22 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     } else {
         format!("{n} {many}")
     }
+}
+
+/// "Moved 3 items to the Trash · Undo" — the moment after something was
+/// done is when taking it back is most wanted, and least likely to
+/// meet a folder that has moved on.
+fn undo_notice<'a>(text: &str, scale: FontScale) -> Element<'a, Message> {
+    row![
+        scaled_text(text.to_string(), BASE_TEXT_SIZE, scale).width(Length::Fill),
+        // The action, not its key: Ctrl+Z may have been rebound, and a
+        // button that sent the default key would quietly stop working.
+        secondary_button("Undo").on_press(Message::Browser(BrowserMessage::Perform(Action::Undo))),
+    ]
+    .spacing(spacing::SM)
+    .align_y(iced::Alignment::Center)
+    .padding([spacing::XS as u16, spacing::MD as u16])
+    .into()
 }
 
 /// One line under the listing while a paste runs: what it is doing, how
@@ -1811,6 +1922,7 @@ mod pointer {
 /// - `conflict` — the paste-conflict dialog, on a job that does nothing
 /// - `rename` — the first row, being renamed
 /// - `delete` — the permanent-delete question, for the first row
+/// - `notice` — the undo notice, as a trash of three items leaves it
 ///
 /// This machine cannot synthesise a click or a key press into a window,
 /// and how a menu, a dialog or an edit field *looks* is only checkable
@@ -1824,6 +1936,7 @@ struct DebugShow {
     conflict: bool,
     rename: bool,
     delete: bool,
+    notice: bool,
 }
 
 #[cfg(debug_assertions)]
@@ -1844,6 +1957,8 @@ impl DebugShow {
                 show.rename = true;
             } else if item == "delete" {
                 show.delete = true;
+            } else if item == "notice" {
+                show.notice = true;
             }
         }
         show
@@ -1851,6 +1966,10 @@ impl DebugShow {
 
     /// Everything that can be shown before any listing has loaded.
     fn at_startup(&self, app: &mut App) {
+        if self.notice {
+            // No timer: it stays up for the screenshot.
+            app.notice = Some((0, "Moved 3 items to the Trash".to_string()));
+        }
         if !self.conflict {
             return;
         }
@@ -2155,18 +2274,23 @@ fn function_key_number(named: key::Named) -> Option<u8> {
     Some(n)
 }
 
-async fn trash_many(paths: Vec<PathBuf>) -> Vec<String> {
-    match tokio::task::spawn_blocking(move || {
-            paths
-                .into_iter()
-                .filter_map(|p| hyprforge_fileops::trash(&p).err().map(|e| e.to_string()))
-                .collect::<Vec<_>>()
-        })
-        .await
-    {
-        Ok(errors) => errors,
-        Err(e) => vec![format!("Deleting was interrupted: {e}")],
-    }
+/// Moves `paths` to the Trash, off the UI thread. Returns each item that
+/// went — as stored path, original path and record, which is what an
+/// undo needs to put it back — and what failed.
+async fn trash_many(paths: Vec<PathBuf>) -> (Vec<(PathBuf, PathBuf, PathBuf)>, Vec<String>) {
+    tokio::task::spawn_blocking(move || {
+        let mut trashed = Vec::new();
+        let mut errors = Vec::new();
+        for path in paths {
+            match hyprforge_fileops::trash(&path) {
+                Ok(item) => trashed.push((item.trashed_file, item.original_path, item.info_file)),
+                Err(e) => errors.push(e.to_string()),
+            }
+        }
+        (trashed, errors)
+    })
+    .await
+    .unwrap_or_else(|e| (Vec::new(), vec![format!("Moving to the Trash was interrupted: {e}")]))
 }
 
 /// Deletes `paths` for good, off the UI thread. Anything in the Trash is
@@ -2412,6 +2536,9 @@ mod tests {
             clipboard: Arc::new(MemoryClipboard::new()),
             jobs: Vec::new(),
             confirm: None,
+            undo: hyprforge_files_core::undo::UndoHistory::new(20),
+            notice: None,
+            next_notice: 0,
             next_job_id: 1,
             modifiers: keyboard::Modifiers::default(),
             clicks: ClickTracker::new(),
@@ -3125,6 +3252,7 @@ mod tests {
             skipped: 2,
             failed: vec!["x.txt: permission denied".into()],
             cancelled: true,
+            ..JobSummary::default()
         };
         let text = job_report(&JobKind::Move, &summary).unwrap();
         assert!(text.contains("Stopped after 1 item moved"), "{text}");
@@ -3147,7 +3275,7 @@ mod tests {
         let from = dir.path().join("a.txt");
         let to = dir.path().join("b.txt");
         let result = jobs::rename(&from, &to);
-        let _ = app.update(Message::Renamed(app.tabs[0].id, to.clone(), result));
+        let _ = app.update(Message::Renamed(app.tabs[0].id, from.clone(), to.clone(), result));
         let entries = RoutingBackend::default().read_dir(dir.path()).unwrap();
         let _ = app.update(Message::Browser(BrowserMessage::DirLoaded(dir.path().to_path_buf(), Ok(entries))));
 
@@ -3180,7 +3308,7 @@ mod tests {
     #[test]
     fn a_failed_rename_is_said() {
         let mut app = app_for_test(&["/dir"]);
-        let _ = app.update(Message::Renamed(0, "/dir/b".into(), Err("nope".into())));
+        let _ = app.update(Message::Renamed(0, "/dir/a".into(), "/dir/b".into(), Err("nope".into())));
         assert_eq!(app.status.as_deref(), Some("nope"));
     }
 
@@ -3343,6 +3471,99 @@ mod tests {
         )
         .unwrap();
         assert!(text.contains("weren't restored"), "{text}");
+    }
+
+    // --- undo -------------------------------------------------------------------
+
+    /// A rename is remembered and offered straight away, and Ctrl+Z takes
+    /// it back — on disk.
+    #[test]
+    fn ctrl_z_takes_back_a_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.txt"), dir.path().join("b.txt"));
+        std::fs::write(&b, "x").unwrap();
+        let mut app = app_on(dir.path());
+        let _ = app.update(Message::Renamed(app.tabs[0].id, a.clone(), b.clone(), Ok(())));
+        assert_eq!(app.notice.as_ref().map(|(_, t)| t.as_str()), Some("Renamed to \u{201C}b.txt\u{201D}"));
+
+        let _ = app.update(key("Ctrl+Z"));
+        assert!(app.notice.is_none(), "the notice goes when its undo is used");
+        // The undo runs as a task; stand in for it.
+        let (dirs, errors) = jobs::undo(hyprforge_files_core::undo::Undoable::Renamed {
+            from: a.clone(),
+            to: b.clone(),
+        });
+        let _ = app.update(Message::Undone(dirs, errors));
+        assert!(a.exists() && !b.exists());
+        assert!(app.status.is_none());
+    }
+
+    /// The notice's button is the action, so it still undoes when Ctrl+Z
+    /// has been bound to something else.
+    #[test]
+    fn the_undo_button_works_whatever_ctrl_z_is_bound_to() {
+        let mut app = app_for_test(&["/dir"]);
+        let (config, _) = hyprforge_files_core::config::parse(
+            "[keys]\nundo = \"Ctrl+Alt+U\"\nselect-all = \"Ctrl+Z\"\n",
+            Path::new("files-config.toml"),
+        );
+        app.config = Arc::new(config);
+        let _ = app.update(Message::FolderCreated(0, "/dir/x".into(), Ok(())));
+        assert!(!app.undo.is_empty());
+        let _ = app.update(Message::Browser(BrowserMessage::Perform(Action::Undo)));
+        assert!(app.undo.is_empty(), "the button's message undid it");
+    }
+
+    /// Ctrl+Z with nothing to take back says so.
+    #[test]
+    fn undo_with_nothing_to_undo_says_so() {
+        let mut app = app_for_test(&["/dir"]);
+        let _ = app.update(key("Ctrl+Z"));
+        assert!(app.status.as_deref().unwrap().contains("nothing to undo"));
+    }
+
+    /// A trash that moved nothing records nothing, so the Ctrl+Z meant
+    /// for the thing before it still works.
+    #[test]
+    fn a_trash_that_moved_nothing_is_not_remembered() {
+        let mut app = app_for_test(&["/dir"]);
+        let _ = app.update(Message::TrashDone(0, "/dir".into(), vec![], vec!["busy".into()]));
+        assert!(app.undo.is_empty());
+        assert!(app.notice.is_none());
+    }
+
+    /// The notice's timer only takes down the notice it was armed for.
+    #[test]
+    fn an_older_notice_timer_leaves_a_newer_notice_alone() {
+        let mut app = app_for_test(&["/dir"]);
+        let _ = app.update(Message::FolderCreated(0, "/dir/one".into(), Ok(())));
+        let first = app.notice.as_ref().unwrap().0;
+        let _ = app.update(Message::FolderCreated(0, "/dir/two".into(), Ok(())));
+        let _ = app.update(Message::NoticeExpired(first));
+        assert!(app.notice.as_ref().unwrap().1.contains("two"), "the newer notice stays");
+    }
+
+    /// A move job is remembered by where each item really landed.
+    #[test]
+    fn a_finished_move_is_remembered_by_where_things_landed() {
+        let mut app = app_for_test(&["/dir"]);
+        let (control, _events) = jobs::start(5, vec![], hyprforge_files_core::config::OnConflict::Ask);
+        app.jobs.push(RunningJob {
+            id: 5,
+            control,
+            kind: JobKind::Move,
+            started: Instant::now(),
+            dirs: vec![],
+            progress: None,
+            conflict: None,
+            apply_to_rest: false,
+        });
+        let placed = vec![(PathBuf::from("/a/x"), PathBuf::from("/b/x.2"))];
+        let _ = app.update(Message::Job(JobEvent::Finished {
+            job: 5,
+            summary: JobSummary { done: 1, placed: placed.clone(), ..JobSummary::default() },
+        }));
+        assert_eq!(app.undo.pop(), Some(hyprforge_files_core::undo::Undoable::Moved(placed)));
     }
 
     /// Pasting a folder into itself is refused before any job starts.

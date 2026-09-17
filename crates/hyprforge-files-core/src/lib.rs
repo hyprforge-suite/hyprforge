@@ -28,6 +28,7 @@ pub mod sidebar;
 pub mod sort;
 pub mod trash;
 pub mod types;
+pub mod undo;
 pub mod users;
 pub mod xdg_user_dirs;
 

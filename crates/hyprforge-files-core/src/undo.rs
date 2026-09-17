@@ -1,0 +1,174 @@
+//! What can be taken back, and in what order.
+//!
+//! A record of things that were done, kept as plain paths: the history
+//! decides nothing and touches nothing. Carrying an undo out is I/O, so
+//! it is the window's job — and every undo checks, before acting, that
+//! the world still looks the way the record says, and refuses with a
+//! sentence rather than guessing when it does not.
+//!
+//! What undo means for each:
+//!
+//! - **Trashed** — put the items back where they came from.
+//! - **Renamed** — rename back.
+//! - **Moved** — move back.
+//! - **Copied** — move the copies to the Trash. Never delete them: an
+//!   undo that loses a file is worse than no undo.
+//! - **Made a folder** — remove it, only if it is still empty.
+//!
+//! A permanent delete is not here, because there is nothing to take back
+//! from — which is what its confirmation dialog says.
+
+use std::collections::VecDeque;
+use std::path::PathBuf;
+
+/// One thing that was done.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Undoable {
+    /// Items moved to the Trash: each one's stored path, the path it came
+    /// from, and its `.trashinfo` record.
+    Trashed(Vec<(PathBuf, PathBuf, PathBuf)>),
+    Renamed { from: PathBuf, to: PathBuf },
+    /// Items moved, as `(where it was, where it is now)`.
+    Moved(Vec<(PathBuf, PathBuf)>),
+    /// Copies made, where they are.
+    Copied(Vec<PathBuf>),
+    MadeFolder(PathBuf),
+}
+
+impl Undoable {
+    /// What the notice offering to undo it says.
+    pub fn describe(&self) -> String {
+        match self {
+            Undoable::Trashed(items) => format!("Moved {} to the Trash", count(items.len())),
+            Undoable::Renamed { to, .. } => format!("Renamed to \u{201C}{}\u{201D}", name(to)),
+            Undoable::Moved(items) => format!("Moved {}", count(items.len())),
+            Undoable::Copied(items) => format!("Copied {}", count(items.len())),
+            Undoable::MadeFolder(path) => format!("Made \u{201C}{}\u{201D}", name(path)),
+        }
+    }
+
+    /// Whether there is anything in it to take back. A job that placed
+    /// nothing records nothing.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Undoable::Trashed(items) => items.is_empty(),
+            Undoable::Moved(items) => items.is_empty(),
+            Undoable::Copied(items) => items.is_empty(),
+            Undoable::Renamed { .. } | Undoable::MadeFolder(_) => false,
+        }
+    }
+}
+
+fn count(n: usize) -> String {
+    if n == 1 {
+        "1 item".to_string()
+    } else {
+        format!("{n} items")
+    }
+}
+
+fn name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// The most recent things done, newest last.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UndoHistory {
+    entries: VecDeque<Undoable>,
+    depth: usize,
+}
+
+impl UndoHistory {
+    /// A history that remembers the last `depth` things. Short on
+    /// purpose: an undo is for the thing you just did, and a record from
+    /// an hour ago is more likely to meet a folder that has moved on than
+    /// to do what anyone wants.
+    pub fn new(depth: usize) -> Self {
+        UndoHistory { entries: VecDeque::with_capacity(depth), depth }
+    }
+
+    /// Remembers `done`, forgetting the oldest past the depth. An empty
+    /// record is not remembered — undoing it would do nothing, and would
+    /// use up the Ctrl+Z meant for the thing before it.
+    pub fn push(&mut self, done: Undoable) {
+        if done.is_empty() || self.depth == 0 {
+            return;
+        }
+        if self.entries.len() == self.depth {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(done);
+    }
+
+    /// The most recent thing, taken off the history.
+    pub fn pop(&mut self) -> Option<Undoable> {
+        self.entries.pop_back()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn copied(n: usize) -> Undoable {
+        Undoable::Copied((0..n).map(|i| PathBuf::from(format!("/c{i}"))).collect())
+    }
+
+    #[test]
+    fn the_newest_thing_is_undone_first() {
+        let mut history = UndoHistory::new(10);
+        history.push(copied(1));
+        history.push(Undoable::MadeFolder("/new".into()));
+        assert_eq!(history.pop(), Some(Undoable::MadeFolder("/new".into())));
+        assert_eq!(history.pop(), Some(copied(1)));
+        assert_eq!(history.pop(), None);
+    }
+
+    #[test]
+    fn the_oldest_is_forgotten_past_the_depth() {
+        let mut history = UndoHistory::new(2);
+        history.push(copied(1));
+        history.push(copied(2));
+        history.push(copied(3));
+        assert_eq!(history.pop(), Some(copied(3)));
+        assert_eq!(history.pop(), Some(copied(2)));
+        assert_eq!(history.pop(), None, "the first was forgotten");
+    }
+
+    /// A job that placed nothing must not use up the Ctrl+Z meant for
+    /// the thing before it.
+    #[test]
+    fn nothing_done_is_not_remembered() {
+        let mut history = UndoHistory::new(5);
+        history.push(copied(1));
+        history.push(copied(0));
+        history.push(Undoable::Trashed(vec![]));
+        assert_eq!(history.pop(), Some(copied(1)));
+    }
+
+    #[test]
+    fn a_depth_of_zero_turns_undo_off() {
+        let mut history = UndoHistory::new(0);
+        history.push(copied(1));
+        assert!(history.is_empty());
+    }
+
+    #[test]
+    fn each_record_describes_itself_for_the_notice() {
+        assert_eq!(
+            Undoable::Trashed(vec![("/t/a".into(), "/a".into(), "/i/a".into()); 3]).describe(),
+            "Moved 3 items to the Trash"
+        );
+        assert_eq!(
+            Undoable::Renamed { from: "/a.txt".into(), to: "/b.txt".into() }.describe(),
+            "Renamed to \u{201C}b.txt\u{201D}"
+        );
+        assert_eq!(copied(1).describe(), "Copied 1 item");
+    }
+}
