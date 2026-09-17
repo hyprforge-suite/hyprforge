@@ -23,7 +23,9 @@
 //! could not be described. [`StdBackend::read_dir`] skips and logs
 //! instead.
 
-use crate::types::{Entry, EntryKind, FilesError};
+use crate::types::{Entry, EntryKind, EntrySize, FilesError};
+use crate::users::UserNames;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 pub trait FsBackend: Send + Sync {
@@ -41,6 +43,20 @@ pub trait FsBackend: Send + Sync {
     /// from "present but broken" for a config file: collapsing the two
     /// would make a broken link indistinguishable from a typo'd path.
     fn stat(&self, path: &Path) -> Result<Entry, FilesError>;
+
+    /// How many things are directly inside `path`.
+    ///
+    /// On the trait rather than left to a caller's own `std::fs`,
+    /// because it is the second half of building a listing — a folder's
+    /// Size cell — and a caller that reaches around the trait for it
+    /// puts half the listing beyond reach of the mock.
+    ///
+    /// Deliberately *not* `read_dir(path).map(|e| e.len())`: that
+    /// `stat`s every child and builds a complete [`Entry`] for each,
+    /// only to throw all of it away and keep the length. A pinned
+    /// Downloads folder with five thousand files is five thousand
+    /// syscalls for one number that one `getdents` loop already has.
+    fn count_children(&self, path: &Path) -> Result<usize, FilesError>;
 
     /// The user's home directory, as the browser's default starting
     /// place and the target of a "Home" shortcut.
@@ -63,6 +79,8 @@ impl FsBackend for StdBackend {
         let iter =
             std::fs::read_dir(path).map_err(|e| FilesError::from_io(path.to_path_buf(), e))?;
         let mut entries = Vec::new();
+        // One cache for the whole listing — see `build_entry_with`.
+        let mut users = UserNames::new();
         for item in iter {
             let dir_entry = match item {
                 Ok(d) => d,
@@ -98,7 +116,7 @@ impl FsBackend for StdBackend {
                     continue;
                 }
             };
-            entries.push(build_entry(entry_path, name, &meta));
+            entries.push(build_entry_with(entry_path, name, &meta, &mut users));
         }
         Ok(entries)
     }
@@ -111,6 +129,12 @@ impl FsBackend for StdBackend {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.to_string_lossy().into_owned());
         Ok(build_entry(path.to_path_buf(), name, &meta))
+    }
+
+    fn count_children(&self, path: &Path) -> Result<usize, FilesError> {
+        let iter = std::fs::read_dir(path).map_err(|e| FilesError::from_io(path.to_path_buf(), e))?;
+        // The entries themselves are never built — see the trait's doc.
+        Ok(iter.count())
     }
 
     fn home_dir(&self) -> PathBuf {
@@ -130,14 +154,47 @@ impl FsBackend for StdBackend {
     }
 }
 
+/// A directory's size is a child count nobody has taken yet; a file's is
+/// the byte count `stat` just answered with. One place, so "a directory
+/// has no byte size" is stated once rather than at each construction.
+fn entry_size(is_dir: bool, len: u64) -> EntrySize {
+    if is_dir {
+        EntrySize::UNCOUNTED
+    } else {
+        EntrySize::Bytes(len)
+    }
+}
+
 /// Builds an [`Entry`] from a path, its final name component, and its
 /// **un-followed** metadata (`symlink_metadata`, or the equivalent
 /// `DirEntry::metadata`). Shared by [`StdBackend::read_dir`] and
 /// [`StdBackend::stat`] so the symlink-following logic exists in exactly
 /// one place.
 fn build_entry(path: PathBuf, name: String, meta: &std::fs::Metadata) -> Entry {
+    build_entry_with(path, name, meta, &mut UserNames::new())
+}
+
+/// [`build_entry`], sharing one uid-to-name cache across a whole
+/// listing.
+///
+/// A directory of ten thousand files almost always has one or two
+/// distinct owners, so the name-service lookup that matters is the
+/// repeated one — see [`UserNames`]'s own doc for why the cache is
+/// per-listing rather than global.
+fn build_entry_with(
+    path: PathBuf,
+    name: String,
+    meta: &std::fs::Metadata,
+    users: &mut UserNames,
+) -> Entry {
     let hidden = name.starts_with('.') && name != "." && name != "..";
     let is_symlink = meta.file_type().is_symlink();
+    // From the *un-followed* metadata, like everything else here: a
+    // symlink's own permissions and owner are what `ls -l` shows for it,
+    // and following the link would report the target's instead.
+    let mode = meta.mode() & 0o7777;
+    let uid = meta.uid();
+    let owner = users.get(uid).map(str::to_owned);
 
     if !is_symlink {
         let is_dir = meta.is_dir();
@@ -146,11 +203,14 @@ fn build_entry(path: PathBuf, name: String, meta: &std::fs::Metadata) -> Entry {
             name,
             path,
             is_dir,
-            size: if is_dir { 0 } else { meta.len() },
+            size: entry_size(is_dir, meta.len()),
             modified: meta.modified().ok(),
             is_symlink: false,
             link_broken: false,
             hidden,
+            mode,
+            uid,
+            owner,
         };
     }
 
@@ -168,11 +228,14 @@ fn build_entry(path: PathBuf, name: String, meta: &std::fs::Metadata) -> Entry {
                 name,
                 path,
                 is_dir,
-                size: if is_dir { 0 } else { target.len() },
+                size: entry_size(is_dir, target.len()),
                 modified: target.modified().ok(),
                 is_symlink: true,
                 link_broken: false,
                 hidden,
+                mode,
+                uid,
+                owner,
             }
         }
         Err(_) => Entry {
@@ -180,13 +243,16 @@ fn build_entry(path: PathBuf, name: String, meta: &std::fs::Metadata) -> Entry {
             name,
             path,
             is_dir: false,
-            size: 0,
+            size: EntrySize::UNCOUNTED,
             // The symlink's own mtime (when it was last re-pointed),
             // since the target's is unreachable.
             modified: meta.modified().ok(),
             is_symlink: true,
             link_broken: true,
             hidden,
+            mode,
+            uid,
+            owner,
         },
     }
 }
@@ -256,12 +322,18 @@ pub mod mock {
                 name: name.to_string(),
                 path: dir.join(name),
                 is_dir: false,
-                size,
+                size: EntrySize::Bytes(size),
                 modified: Some(SystemTime::UNIX_EPOCH),
                 is_symlink: false,
                 link_broken: false,
                 hidden: name.starts_with('.'),
                 kind: EntryKind::classify(false, name),
+                // Ownership and permissions are fixtures here: these
+                // helpers build entries for tests about names, sizes and
+                // ordering, none of which read them.
+                mode: 0o644,
+                uid: 1000,
+                owner: Some("alex".to_string()),
             }
         }
 
@@ -270,12 +342,18 @@ pub mod mock {
                 name: name.to_string(),
                 path: parent.join(name),
                 is_dir: true,
-                size: 0,
+                size: EntrySize::UNCOUNTED,
                 modified: Some(SystemTime::UNIX_EPOCH),
                 is_symlink: false,
                 link_broken: false,
                 hidden: name.starts_with('.'),
                 kind: EntryKind::Folder,
+                // Ownership and permissions are fixtures here: these
+                // helpers build entries for tests about names, sizes and
+                // ordering, none of which read them.
+                mode: 0o755,
+                uid: 1000,
+                owner: Some("alex".to_string()),
             }
         }
 
@@ -311,6 +389,14 @@ pub mod mock {
     }
 
     impl FsBackend for MockBackend {
+        fn count_children(&self, path: &Path) -> Result<usize, FilesError> {
+            // Through `read_dir` so an unreadable or absent directory
+            // fails here exactly as it does there — a mock whose two
+            // answers about the same directory disagree is worse than no
+            // mock.
+            self.read_dir(path).map(|entries| entries.len())
+        }
+
         fn read_dir(&self, path: &Path) -> Result<Vec<Entry>, FilesError> {
             if self.unreadable.lock().unwrap().contains(path) {
                 return Err(FilesError::PermissionDenied {
@@ -353,12 +439,18 @@ pub mod mock {
                     name,
                     path: path.to_path_buf(),
                     is_dir: true,
-                    size: 0,
+                    size: EntrySize::UNCOUNTED,
                     modified: Some(SystemTime::UNIX_EPOCH),
                     is_symlink: false,
                     link_broken: false,
                     hidden: false,
                     kind: EntryKind::Folder,
+                    // Ownership and permissions are fixtures here: these
+                    // helpers build entries for tests about names, sizes and
+                    // ordering, none of which read them.
+                    mode: 0o644,
+                    uid: 1000,
+                    owner: Some("alex".to_string()),
                 });
             }
             for entries in tree.values() {
@@ -490,7 +582,7 @@ mod tests {
         assert_eq!(entries.len(), 2);
         let file = entries.iter().find(|e| e.name == "a.txt").unwrap();
         assert!(!file.is_dir);
-        assert_eq!(file.size, 2);
+        assert_eq!(file.size, EntrySize::Bytes(2));
         let subdir = entries.iter().find(|e| e.name == "sub").unwrap();
         assert!(subdir.is_dir);
     }

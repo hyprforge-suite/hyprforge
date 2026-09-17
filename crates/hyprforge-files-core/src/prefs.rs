@@ -27,74 +27,140 @@ pub enum ViewMode {
     Grid,
 }
 
-// `SortColumn`/`SortDirection` live in `crate::sort` as the pure-function
-// module's own vocabulary; they derive (De)Serialize here rather than
-// there so `sort.rs` — which is otherwise plain data and functions with
-// no notion of "on disk" — does not need to know about TOML at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Whether the sidebar is showing.
+///
+/// Three states rather than a `bool`, because two different things want
+/// to decide this and only one of them is the user. `Auto` lets the
+/// window width decide — a sidebar is 216 logical pixels, which is most
+/// of a narrow window and worth reclaiming automatically. `Shown` and
+/// `Hidden` are what the toggle sets, and they win everywhere, including
+/// below the breakpoint: a small window is a reason to *default* to
+/// hiding the sidebar, never a reason to refuse to show it. Somebody
+/// narrowing a window to navigate to Downloads still has to be able to
+/// reach Downloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum SortColumnPref {
-    Name,
-    Size,
-    Modified,
+pub enum SidebarPref {
+    #[default]
+    Auto,
+    Shown,
+    Hidden,
+}
+
+impl SidebarPref {
+    /// Whether the sidebar is collapsed, given how wide the window is.
+    pub fn collapsed(self, viewport_width: f32) -> bool {
+        match self {
+            SidebarPref::Shown => false,
+            SidebarPref::Hidden => true,
+            SidebarPref::Auto => viewport_width < crate::density::SIDEBAR_COLLAPSE_BELOW,
+        }
+    }
+}
+
+/// One optional column in the list view.
+///
+/// Name is not here: it is the row's identity, and a listing with the
+/// names switched off is not a listing. Everything else is the user's
+/// choice and is remembered — see [`Columns`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Column {
     Kind,
+    Size,
+    Owner,
+    Permissions,
+    Modified,
 }
 
-impl From<SortColumn> for SortColumnPref {
-    fn from(c: SortColumn) -> Self {
-        match c {
-            SortColumn::Name => SortColumnPref::Name,
-            SortColumn::Size => SortColumnPref::Size,
-            SortColumn::Modified => SortColumnPref::Modified,
-            SortColumn::Kind => SortColumnPref::Kind,
+impl Column {
+    /// Left to right, the order they appear in the header. One list, so
+    /// the header, the rows and the picker cannot disagree about it.
+    pub const ALL: [Column; 5] =
+        [Column::Kind, Column::Size, Column::Owner, Column::Permissions, Column::Modified];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Column::Kind => "Kind",
+            Column::Size => "Size",
+            Column::Owner => "Owner",
+            Column::Permissions => "Permissions",
+            Column::Modified => "Modified",
         }
     }
 }
 
-impl From<SortColumnPref> for SortColumn {
-    fn from(c: SortColumnPref) -> Self {
-        match c {
-            SortColumnPref::Name => SortColumn::Name,
-            SortColumnPref::Size => SortColumn::Size,
-            SortColumnPref::Modified => SortColumn::Modified,
-            SortColumnPref::Kind => SortColumn::Kind,
-        }
-    }
-}
-
+/// Which optional columns the list view shows.
+///
+/// A struct of named `bool`s rather than a `HashSet<Column>`, because
+/// this is what lands in `files.toml` and `columns.owner = false` reads
+/// as a setting where a list of strings reads as data. `#[serde(default)]`
+/// per field, so a file written before a column existed still parses and
+/// simply gets that column's default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum SortDirectionPref {
-    Ascending,
-    Descending,
+#[serde(default)]
+pub struct Columns {
+    pub kind: bool,
+    pub size: bool,
+    pub owner: bool,
+    pub permissions: bool,
+    pub modified: bool,
 }
 
-impl From<SortDirection> for SortDirectionPref {
-    fn from(d: SortDirection) -> Self {
-        match d {
-            SortDirection::Ascending => SortDirectionPref::Ascending,
-            SortDirection::Descending => SortDirectionPref::Descending,
-        }
+impl Default for Columns {
+    fn default() -> Self {
+        // All five on by default. The alternative — shipping the new
+        // ones off — means nobody discovers them, and the picker that
+        // turns them off is right there in the header.
+        Columns { kind: true, size: true, owner: true, permissions: true, modified: true }
     }
 }
 
-impl From<SortDirectionPref> for SortDirection {
-    fn from(d: SortDirectionPref) -> Self {
-        match d {
-            SortDirectionPref::Ascending => SortDirection::Ascending,
-            SortDirectionPref::Descending => SortDirection::Descending,
+impl Columns {
+    pub fn shows(&self, column: Column) -> bool {
+        match column {
+            Column::Kind => self.kind,
+            Column::Size => self.size,
+            Column::Owner => self.owner,
+            Column::Permissions => self.permissions,
+            Column::Modified => self.modified,
         }
+    }
+
+    pub fn set(&mut self, column: Column, shown: bool) {
+        let slot = match column {
+            Column::Kind => &mut self.kind,
+            Column::Size => &mut self.size,
+            Column::Owner => &mut self.owner,
+            Column::Permissions => &mut self.permissions,
+            Column::Modified => &mut self.modified,
+        };
+        *slot = shown;
+    }
+
+    pub fn toggle(&mut self, column: Column) {
+        let shown = self.shows(column);
+        self.set(column, !shown);
+    }
+
+    /// The shown columns, in header order.
+    pub fn shown(&self) -> impl Iterator<Item = Column> + '_ {
+        Column::ALL.into_iter().filter(|&c| self.shows(c))
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Prefs {
-    sort_column: SortColumnPref,
-    sort_direction: SortDirectionPref,
+    sort_column: SortColumn,
+    sort_direction: SortDirection,
     pub directories_first: bool,
     pub show_hidden: bool,
     pub view_mode: ViewMode,
+    /// Which optional list columns to show — see [`Columns`].
+    pub columns: Columns,
+    /// Whether the sidebar shows — see [`SidebarPref`].
+    pub sidebar: SidebarPref,
     /// Whether the preview pane is enabled. Defaults to on, but this is
     /// a real off state a user can choose and have honoured — not merely
     /// "on unless we forgot to ask", which is the distinction the brief
@@ -134,11 +200,13 @@ pub struct Prefs {
 impl Default for Prefs {
     fn default() -> Self {
         Prefs {
-            sort_column: SortColumnPref::Name,
-            sort_direction: SortDirectionPref::Ascending,
+            sort_column: SortColumn::Name,
+            sort_direction: SortDirection::Ascending,
             directories_first: true,
             show_hidden: false,
             view_mode: ViewMode::List,
+            columns: Columns::default(),
+            sidebar: SidebarPref::default(),
             preview_pane: true,
             window_width: 900,
             window_height: 600,
@@ -148,20 +216,24 @@ impl Default for Prefs {
 }
 
 impl Prefs {
+    // Accessors rather than `pub` fields, kept from when these wrapped a
+    // mirror type: they are now the only thing stopping a caller writing
+    // a sort column without going through `Browser`, which has to
+    // re-sort when one changes.
     pub fn sort_column(&self) -> SortColumn {
-        self.sort_column.into()
+        self.sort_column
     }
 
     pub fn set_sort_column(&mut self, column: SortColumn) {
-        self.sort_column = column.into();
+        self.sort_column = column;
     }
 
     pub fn sort_direction(&self) -> SortDirection {
-        self.sort_direction.into()
+        self.sort_direction
     }
 
     pub fn set_sort_direction(&mut self, direction: SortDirection) {
-        self.sort_direction = direction.into();
+        self.sort_direction = direction;
     }
 }
 
@@ -255,6 +327,85 @@ pub fn update_at(path: &Path, f: impl FnOnce(&mut Prefs)) -> Result<Prefs, Prefs
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A narrow window collapses the sidebar on its own — 216 pixels
+    /// of it is most of a small window, and the listing it exists to
+    /// help you navigate has no room left.
+    #[test]
+    fn a_narrow_window_collapses_the_sidebar_and_a_wide_one_does_not() {
+        assert!(SidebarPref::Auto.collapsed(500.0));
+        assert!(!SidebarPref::Auto.collapsed(1200.0));
+    }
+
+    /// And an explicit choice beats the width in both directions. A
+    /// small window is a reason to *default* to hiding the sidebar,
+    /// never a reason to refuse to show it: somebody who narrowed a
+    /// window still has to be able to reach Downloads.
+    #[test]
+    fn an_explicit_choice_wins_over_the_width_in_both_directions() {
+        assert!(!SidebarPref::Shown.collapsed(320.0), "asked for it at any width");
+        assert!(SidebarPref::Hidden.collapsed(3000.0), "hidden at any width");
+    }
+
+    #[test]
+    fn the_sidebar_choice_survives_a_round_trip_through_toml() {
+        let mut prefs = Prefs::default();
+        assert_eq!(prefs.sidebar, SidebarPref::Auto, "letting the width decide is the default");
+        prefs.sidebar = SidebarPref::Hidden;
+        let back: Prefs = toml::from_str(&toml::to_string_pretty(&prefs).unwrap()).unwrap();
+        assert_eq!(back.sidebar, SidebarPref::Hidden);
+    }
+
+    /// Name is not a `Column`, and that is the point: a listing with the
+    /// names switched off is not a listing.
+    #[test]
+    fn every_optional_column_can_be_switched_off() {
+        let mut columns = Columns::default();
+        for column in Column::ALL {
+            assert!(columns.shows(column), "{column:?} is on by default");
+            columns.toggle(column);
+            assert!(!columns.shows(column), "{column:?} must switch off");
+        }
+        assert_eq!(columns.shown().count(), 0);
+    }
+
+    /// `shown()` is what both the header and the rows walk, so its order
+    /// is what stops a cell landing under the wrong heading.
+    #[test]
+    fn shown_columns_come_back_in_header_order() {
+        let mut columns = Columns::default();
+        columns.set(Column::Size, false);
+        let shown: Vec<Column> = columns.shown().collect();
+        assert_eq!(shown, [Column::Kind, Column::Owner, Column::Permissions, Column::Modified]);
+    }
+
+    /// A `files.toml` written before these columns existed still parses,
+    /// and simply gets their defaults — the `#[serde(default)]` rule
+    /// this module's own doc sets out, checked rather than assumed.
+    #[test]
+    fn a_settings_file_written_before_columns_existed_still_parses() {
+        let older = r#"
+            sort_column = "name"
+            sort_direction = "ascending"
+            directories_first = true
+            show_hidden = false
+            view_mode = "list"
+        "#;
+        let prefs: Prefs = toml::from_str(older).expect("an older file still parses");
+        assert_eq!(prefs.columns, Columns::default());
+    }
+
+    /// And a file that turns one off gets it back off, which is the
+    /// whole point of remembering the choice.
+    #[test]
+    fn a_column_switched_off_survives_a_round_trip_through_toml() {
+        let mut prefs = Prefs::default();
+        prefs.columns.set(Column::Permissions, false);
+        let text = toml::to_string_pretty(&prefs).unwrap();
+        let back: Prefs = toml::from_str(&text).unwrap();
+        assert!(!back.columns.shows(Column::Permissions));
+        assert!(back.columns.shows(Column::Owner), "the others are untouched");
+    }
 
     #[test]
     fn the_preview_pane_is_on_by_default() {

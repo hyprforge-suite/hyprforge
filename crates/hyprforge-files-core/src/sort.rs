@@ -5,17 +5,29 @@
 //! hand-built entries and never a real directory.
 
 use crate::types::{Entry, EntryKind};
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// These two derive (De)Serialize directly. `crate::prefs` used to carry
+// a mirror of each — `SortColumnPref`/`SortDirectionPref` — plus four
+// `From` impls, so that this module "did not need to know about TOML".
+// It still does not: a `#[derive]` on a fieldless enum says how it
+// spells itself, not where it gets written, and the mirrors' real cost
+// was six variants to keep in step by hand across two files for a
+// separation nothing was enforcing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SortColumn {
     Name,
     Size,
     Modified,
     Kind,
+    Owner,
+    Permissions,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SortDirection {
     Ascending,
     Descending,
@@ -32,7 +44,35 @@ pub enum SortDirection {
 /// folders" with "the *only* way to see kind-based order" would make
 /// picking, say, Size-descending silently undo it.
 pub fn sort(entries: &mut [Entry], column: SortColumn, direction: SortDirection, directories_first: bool) {
-    entries.sort_by(|a, b| {
+    entries.sort_by(|a, b| row_order(a, b, column, direction, directories_first));
+}
+
+/// [`sort`] over a list of *indices* into `entries`, which is how a
+/// browser holds its current view: one owned listing, and an ordering of
+/// the subset being shown.
+///
+/// Same comparator, so "sorted" cannot mean two different things
+/// depending on which entry point a caller reached for.
+pub fn sort_indices(
+    view: &mut [usize],
+    entries: &[Entry],
+    column: SortColumn,
+    direction: SortDirection,
+    directories_first: bool,
+) {
+    view.sort_by(|&a, &b| {
+        row_order(&entries[a], &entries[b], column, direction, directories_first)
+    });
+}
+
+fn row_order(
+    a: &Entry,
+    b: &Entry,
+    column: SortColumn,
+    direction: SortDirection,
+    directories_first: bool,
+) -> Ordering {
+    {
         if directories_first {
             // `is_dir` true sorts first regardless of `direction` — a
             // reversed size sort should put the *biggest file* first
@@ -49,12 +89,16 @@ pub fn sort(entries: &mut [Entry], column: SortColumn, direction: SortDirection,
             SortDirection::Ascending => ordering,
             SortDirection::Descending => ordering.reverse(),
         }
-    });
+    }
 }
 
 fn compare(a: &Entry, b: &Entry, column: SortColumn) -> Ordering {
     match column {
         SortColumn::Name => natural_compare(&a.name, &b.name),
+        // `EntrySize`'s own ordering — so the column sorts by exactly
+        // what it displays. It used to sort by a `u64` that was always
+        // `0` for a directory while the cell showed an item count, which
+        // meant clicking the Size header ordered folders by name.
         SortColumn::Size => a.size.cmp(&b.size).then_with(|| natural_compare(&a.name, &b.name)),
         SortColumn::Modified => a
             .modified
@@ -63,6 +107,26 @@ fn compare(a: &Entry, b: &Entry, column: SortColumn) -> Ordering {
         SortColumn::Kind => kind_rank(a.kind)
             .cmp(&kind_rank(b.kind))
             .then_with(|| natural_compare(&a.name, &b.name)),
+        // By the name where there is one, and by the uid where there is
+        // not — so files owned by users this system cannot name group
+        // together rather than scattering through the alphabet. The
+        // same order `format_owner` displays, which is the rule every
+        // sortable column here follows.
+        SortColumn::Owner => owner_key(a).cmp(&owner_key(b)).then_with(|| natural_compare(&a.name, &b.name)),
+        // By the bits, not by the rendered string: `drwxr-xr-x` sorts
+        // `d` before `-`, which would order by file type rather than by
+        // permission and put every directory in one lump whichever way
+        // the arrow points.
+        SortColumn::Permissions => a.mode.cmp(&b.mode).then_with(|| natural_compare(&a.name, &b.name)),
+    }
+}
+
+/// Sort key for the Owner column: named owners first, alphabetically,
+/// then unnamed ones by uid.
+fn owner_key(entry: &Entry) -> (u8, &str, u32) {
+    match entry.owner.as_deref() {
+        Some(name) => (0, name, entry.uid),
+        None => (1, "", entry.uid),
     }
 }
 
@@ -194,7 +258,7 @@ fn compare_digit_runs(a: &str, b: &str) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::EntryKind;
+    use crate::types::{EntryKind, EntrySize, ItemCount};
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
 
@@ -203,12 +267,25 @@ mod tests {
             name: name.to_string(),
             path: PathBuf::from("/").join(name),
             is_dir,
-            size,
+            // A directory's "size" is a child count, so a test that
+            // hands one a number means that many items — see
+            // `EntrySize`.
+            size: if is_dir {
+                EntrySize::Items(ItemCount::Known(size as usize))
+            } else {
+                EntrySize::Bytes(size)
+            },
             modified: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(modified_secs)),
             is_symlink: false,
             link_broken: false,
             hidden: name.starts_with('.'),
             kind: EntryKind::classify(is_dir, name),
+            // Ownership and permissions are fixtures here: these
+            // helpers build entries for tests about names, sizes and
+            // ordering, none of which read them.
+            mode: 0o644,
+            uid: 1000,
+            owner: Some("alex".to_string()),
         }
     }
 

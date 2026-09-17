@@ -41,15 +41,24 @@ pub fn filter_hidden(entries: Vec<Entry>, show_hidden: bool) -> Vec<Entry> {
 /// keystroke, and content search in particular is a different, far more
 /// expensive feature (an index, not a predicate) that phase 2 has not
 /// been asked for.
+/// `query` must already be lowercased — see [`filter_query`], which is
+/// what does it. Taking it pre-folded rather than folding it here is the
+/// difference between lowercasing the search box's contents once and
+/// lowercasing it again for every entry in the directory, on every
+/// keystroke.
 pub fn matches_query(entry: &Entry, query: &str) -> bool {
     if query.is_empty() {
         return true;
     }
-    entry.name.to_lowercase().contains(&query.to_lowercase())
+    entry.name.to_lowercase().contains(query)
 }
 
 pub fn filter_query(entries: Vec<Entry>, query: &str) -> Vec<Entry> {
-    entries.into_iter().filter(|e| matches_query(e, query)).collect()
+    if query.is_empty() {
+        return entries;
+    }
+    let query = query.to_lowercase();
+    entries.into_iter().filter(|e| matches_query(e, &query)).collect()
 }
 
 #[cfg(test)]
@@ -63,12 +72,18 @@ mod tests {
             name: name.to_string(),
             path: PathBuf::from("/").join(name),
             is_dir: false,
-            size: 0,
+            size: crate::types::EntrySize::Bytes(0),
             modified: None,
             is_symlink: false,
             link_broken: false,
             hidden: name.starts_with('.') && name != "." && name != "..",
             kind: EntryKind::classify(false, name),
+            // Ownership and permissions are fixtures here: these
+            // helpers build entries for tests about names, sizes and
+            // ordering, none of which read them.
+            mode: 0o644,
+            uid: 1000,
+            owner: Some("alex".to_string()),
         }
     }
 
@@ -99,15 +114,26 @@ mod tests {
         assert_eq!(kept[0].name, "readme.md");
     }
 
+    /// Through `filter_query` and not `matches_query`: case folding is
+    /// `filter_query`'s job (it does it once for the whole listing
+    /// rather than once per entry), so that is the level at which
+    /// "searching is case-insensitive" is actually a true statement.
     #[test]
     fn query_matching_is_case_insensitive_substring_on_name() {
-        assert!(matches_query(&entry("ReadMe.TXT"), "readme"));
-        assert!(matches_query(&entry("ReadMe.TXT"), "ME.tx"));
-        assert!(!matches_query(&entry("ReadMe.TXT"), "license"));
+        let names = |query| {
+            filter_query(vec![entry("ReadMe.TXT")], query)
+                .into_iter()
+                .map(|e| e.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names("readme"), ["ReadMe.TXT"]);
+        assert_eq!(names("ME.tx"), ["ReadMe.TXT"], "an upper-case query still matches");
+        assert!(names("license").is_empty());
     }
 
     #[test]
     fn an_empty_query_matches_everything() {
         assert!(matches_query(&entry("anything.txt"), ""));
+        assert_eq!(filter_query(vec![entry("anything.txt")], "").len(), 1);
     }
 }

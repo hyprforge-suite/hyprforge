@@ -129,6 +129,70 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for NavGlyph {
     }
 }
 
+/// The sidebar toggle's mark: a pane with its left rail picked out.
+///
+/// Drawn rather than typed for the same reason as every mark here — and
+/// the shape says what the control does, which `☰` does not: a hamburger
+/// is a menu everywhere else in the world, and this opens and closes a
+/// panel. The filled rail *is* the sidebar; the outline is the window
+/// around it.
+pub fn sidebar<'a, Message: 'a>(side: f32, color: iced::Color) -> Element<'a, Message> {
+    canvas(SidebarGlyph { color }).width(Length::Fixed(side)).height(Length::Fixed(side)).into()
+}
+
+struct SidebarGlyph {
+    color: iced::Color,
+}
+
+impl<Message> canvas::Program<Message, Theme, Renderer> for SidebarGlyph {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let side = bounds.width.min(bounds.height);
+        let extent = side * VIEW_EXTENT_FRACTION;
+        let left = bounds.width / 2.0 - extent / 2.0;
+        let top = bounds.height / 2.0 - extent / 2.0;
+        let stroke = (extent * 0.12).max(1.0);
+        let fill = canvas::Fill::from(self.color);
+
+        // The rail, filled: this is the panel the button shows and hides.
+        let rail = extent * 0.34;
+        frame.fill_rectangle(Point::new(left, top), iced::Size::new(rail, extent), fill);
+
+        // The rest of the pane, outlined — four thin rectangles rather
+        // than a stroked path, so the corners meet exactly at any size
+        // instead of depending on the join style.
+        let right = left + extent;
+        let bottom = top + extent;
+        let body_left = left + rail;
+        frame.fill_rectangle(
+            Point::new(body_left, top),
+            iced::Size::new(right - body_left, stroke),
+            fill,
+        );
+        frame.fill_rectangle(
+            Point::new(body_left, bottom - stroke),
+            iced::Size::new(right - body_left, stroke),
+            fill,
+        );
+        frame.fill_rectangle(
+            Point::new(right - stroke, top),
+            iced::Size::new(stroke, extent),
+            fill,
+        );
+
+        vec![frame.into_geometry()]
+    }
+}
+
 /// The view-mode marks: list, grid, columns.
 ///
 /// Drawn for the same reason as [`Nav`] — `☰`, `⊞` and `‖` are font

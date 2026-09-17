@@ -24,15 +24,15 @@
 //! feed `render` the exact same data.
 
 use crate::density;
-use crate::filter::{filter_hidden, filter_query};
-use crate::format::{format_modified, human_readable_size};
+use crate::filter::{is_hidden, matches_query};
+use crate::format::{format_kind, format_modified_at, format_owner, format_permissions, format_size};
 use crate::glyph;
 use crate::icon::{self, entry_icon};
 use crate::keymap::{self, Direction, Key, KeyAction, Modifiers};
-use crate::prefs::{Prefs, ViewMode};
+use crate::prefs::{Column, Columns, Prefs, ViewMode};
 use crate::sidebar::{self, PinnedItem, SidebarItem};
-use crate::sort::{sort, SortColumn, SortDirection};
-use crate::types::{Entry, FilesError};
+use crate::sort::{sort_indices, SortColumn, SortDirection};
+use crate::types::{Entry, EntrySize, FilesError, ItemCount};
 // `EntryKind` is used only by this module's tests now that the Kind
 // column is gone — imported there rather than here so the lib build
 // does not carry an unused import.
@@ -113,8 +113,19 @@ pub enum LoadState {
     Error(DirError),
 }
 
-/// Multi-selection over the currently shown (sorted/filtered) entry
-/// list, indexed by position in that list.
+/// Multi-selection over a listing, **keyed by path**.
+///
+/// Not by row index. An index is a position in `view`, which is rebuilt
+/// from scratch on every search keystroke and every sort change, and
+/// nothing about rebuilding it moved the selection — so index 2 before
+/// typing and index 2 after were different files, silently. That matters
+/// because a host resolves these to paths and passes them to the trash:
+/// the rebinding was destructive, not cosmetic.
+///
+/// `Browser::counts` had already made this argument for itself and won
+/// it — "keyed by path rather than by row index, so a count that arrives
+/// after the listing was re-sorted still lands on the right folder".
+/// The selection is the same shape of problem with worse consequences.
 ///
 /// `focused` is the keyboard cursor — what Enter activates, what an
 /// arrow key moves — and is not always the same as "the only selected
@@ -122,57 +133,67 @@ pub enum LoadState {
 /// `focused` pinned to the row that was actually clicked.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Selection {
-    anchor: Option<usize>,
-    focused: Option<usize>,
-    selected: HashSet<usize>,
+    anchor: Option<PathBuf>,
+    focused: Option<PathBuf>,
+    selected: HashSet<PathBuf>,
 }
 
 impl Selection {
-    pub fn is_selected(&self, index: usize) -> bool {
-        self.selected.contains(&index)
+    pub fn is_selected(&self, path: &Path) -> bool {
+        self.selected.contains(path)
     }
 
-    pub fn is_focused(&self, index: usize) -> bool {
-        self.focused == Some(index)
+    pub fn focused(&self) -> Option<&Path> {
+        self.focused.as_deref()
     }
 
-    pub fn focused(&self) -> Option<usize> {
-        self.focused
-    }
-
-    pub fn selected_indices(&self) -> &HashSet<usize> {
+    /// Every selected path. A host trashing the selection reads this
+    /// directly — it no longer has to resolve indices against a list
+    /// that may have been re-sorted since the click.
+    pub fn selected_paths(&self) -> &HashSet<PathBuf> {
         &self.selected
     }
 
-    /// A plain click: replaces the selection with just `index` and moves
+    /// A plain click: replaces the selection with just `path` and moves
     /// the shift-range anchor there.
-    fn click(&mut self, index: usize) {
+    fn click(&mut self, path: &Path) {
         self.selected.clear();
-        self.selected.insert(index);
-        self.anchor = Some(index);
-        self.focused = Some(index);
+        self.selected.insert(path.to_path_buf());
+        self.anchor = Some(path.to_path_buf());
+        self.focused = Some(path.to_path_buf());
     }
 
-    /// A ctrl-click: toggles `index` in the selection without disturbing
+    /// A ctrl-click: toggles `path` in the selection without disturbing
     /// the rest, and becomes the new anchor for a following shift-click —
     /// the behaviour every mainstream file manager uses.
-    fn ctrl_click(&mut self, index: usize) {
-        if !self.selected.insert(index) {
-            self.selected.remove(&index);
+    fn ctrl_click(&mut self, path: &Path) {
+        if !self.selected.insert(path.to_path_buf()) {
+            self.selected.remove(path);
         }
-        self.anchor = Some(index);
-        self.focused = Some(index);
+        self.anchor = Some(path.to_path_buf());
+        self.focused = Some(path.to_path_buf());
     }
 
     /// A shift-click: selects the closed range between the anchor and
-    /// `index`, in either direction — `index` before the anchor selects
-    /// backwards just as well as after it, since the range is built from
-    /// `min..=max`, not from counting forward off the anchor.
-    fn shift_click(&mut self, index: usize) {
-        let anchor = self.anchor.unwrap_or(index);
+    /// the clicked row, in either direction — clicking before the anchor
+    /// selects backwards just as well as after it, since the range is
+    /// built from `min..=max`, not by counting forward off the anchor.
+    ///
+    /// The range is resolved against `rows` *now*, at click time, which
+    /// is the only moment "the rows between these two" means anything.
+    /// What is stored is the resulting paths.
+    fn shift_click(&mut self, rows: &[&Entry], index: usize) {
+        let anchor = self
+            .anchor
+            .as_deref()
+            .and_then(|a| rows.iter().position(|e| e.path == a))
+            // An anchor that is no longer shown (it was filtered out by
+            // a search, say) cannot anchor a range; the click becomes
+            // its own start rather than silently ranging from row 0.
+            .unwrap_or(index);
         let (lo, hi) = if anchor <= index { (anchor, index) } else { (index, anchor) };
-        self.selected = (lo..=hi).collect();
-        self.focused = Some(index);
+        self.selected = rows[lo..=hi].iter().map(|e| e.path.clone()).collect();
+        self.focused = Some(rows[index].path.clone());
         // Anchor is deliberately left where it was: a second shift-click
         // extends/contracts from the same starting point, not from the
         // row the previous shift-click landed on.
@@ -181,13 +202,16 @@ impl Selection {
     /// Applies a click with the given modifiers. Ctrl wins over shift if
     /// somehow both are held, since a ctrl-click's "toggle just this one"
     /// is the more specific request.
-    pub fn click_with(&mut self, index: usize, ctrl: bool, shift: bool) {
+    pub fn click_with(&mut self, rows: &[&Entry], index: usize, ctrl: bool, shift: bool) {
+        let Some(entry) = rows.get(index) else {
+            return;
+        };
         if ctrl {
-            self.ctrl_click(index);
+            self.ctrl_click(&entry.path);
         } else if shift {
-            self.shift_click(index);
+            self.shift_click(rows, index);
         } else {
-            self.click(index);
+            self.click(&entry.path);
         }
     }
 
@@ -195,15 +219,20 @@ impl Selection {
     /// to just the new focus — arrow-key navigation, which replaces a
     /// multi-select rather than extending it (shift+arrow range-select is
     /// not in this pass's brief).
-    fn move_focus(&mut self, delta: i32, len: usize) {
-        if len == 0 {
-            self.focused = None;
-            self.selected.clear();
+    fn move_focus(&mut self, rows: &[&Entry], delta: i32) {
+        if rows.is_empty() {
+            self.clear();
             return;
         }
-        let current = self.focused.unwrap_or(0) as i32;
-        let next = (current + delta).clamp(0, len as i32 - 1) as usize;
-        self.click(next);
+        // A focus that is no longer shown restarts from the top, the
+        // same reading as having no focus at all.
+        let current = self
+            .focused
+            .as_deref()
+            .and_then(|f| rows.iter().position(|e| e.path == f))
+            .unwrap_or(0) as i32;
+        let next = (current + delta).clamp(0, rows.len() as i32 - 1) as usize;
+        self.click(&rows[next].path);
     }
 
     fn clear(&mut self) {
@@ -261,9 +290,23 @@ pub enum Message {
     SearchChanged(String),
     SearchCleared,
     SortBy(SortColumn),
-    ToggleSortDirection,
-    ToggleDirectoriesFirst,
-    ToggleShowHidden,
+    /// Show or hide one optional list column. Persisted, so this is an
+    /// [`Outcome::PrefsChanged`] rather than pure view state.
+    ToggleColumn(crate::prefs::Column),
+    /// Show or hide the sidebar. Persisted — see
+    /// [`crate::prefs::SidebarPref`].
+    ///
+    /// Carries the state to set rather than being a bare "toggle",
+    /// because the view is the only thing that knows which way round
+    /// that is: whether the sidebar is showing depends on the window
+    /// width, which `update` has no business knowing. Same principle as
+    /// the modifiers on `EntryClicked` — the side that observes the
+    /// world reports it, and the model stays a function of its message.
+    SetSidebar(crate::prefs::SidebarPref),
+    /// Open or close the column picker. Deliberately *not* persisted —
+    /// a panel left open is not a preference, and reopening the window
+    /// to find it still down would read as a bug.
+    ToggleColumnPicker,
     SetViewMode(crate::prefs::ViewMode),
     Key(Key, Modifiers),
     /// The Pinned sidebar section's content, computed off the UI thread
@@ -280,14 +323,24 @@ pub enum Message {
 #[derive(Debug, Clone, PartialEq)]
 struct ViewModel<'a> {
     current_dir: &'a Path,
-    view_entries: &'a [Entry],
+    column_picker_open: bool,
+    /// Whether the sidebar is collapsed right now — the resolved answer,
+    /// not the preference, so `render` never has to ask twice.
+    sidebar_collapsed: bool,
+    /// The host window's width in logical pixels — see [`Browser::view`].
+    viewport_width: f32,
+    /// How many entries this listing holds that the current filters are
+    /// keeping off screen — see [`Browser::hidden_count`].
+    hidden_count: usize,
+    /// The rows to draw, in order — borrowed out of the one owned
+    /// listing rather than a second copy of it.
+    rows: Vec<&'a Entry>,
     selection: &'a Selection,
     search_query: &'a str,
     load_state: &'a LoadState,
     prefs: &'a Prefs,
     sidebar: &'a [SidebarItem],
     pinned: &'a [PinnedItem],
-    counts: &'a std::collections::HashMap<PathBuf, Option<usize>>,
     /// The entry list's `scrollable` identity — see
     /// [`Browser::list_scrollable_id`]'s own doc for why this exists.
     list_scrollable_id: Id,
@@ -304,10 +357,20 @@ pub struct Browser {
     /// The raw listing for `current_dir`, as last reported by
     /// [`Message::DirLoaded`] — unsorted, unfiltered.
     entries: Vec<Entry>,
-    /// `entries`, sorted per `prefs` and filtered by `search_query` and
-    /// `prefs.show_hidden`. Recomputed by [`Self::refresh_view`]
-    /// whenever any input to it changes, so `view` never has to.
-    view_entries: Vec<Entry>,
+    /// Which of `entries` to show, in what order — indices, not copies.
+    ///
+    /// Recomputed by [`Self::refresh_view`] whenever any input to it
+    /// changes, so `view` never has to. Indices into `entries` and not a
+    /// second `Vec<Entry>`: the listing was previously cloned whole,
+    /// twice, on every search keystroke, and the browser then held two
+    /// full copies of every directory at rest. Indices also mean a
+    /// count arriving for one folder updates the single place that
+    /// folder is stored, rather than one of two.
+    ///
+    /// Always valid: `entries` is assigned in exactly one place
+    /// ([`Self::apply_dir_loaded`]), which refreshes this immediately
+    /// after.
+    view: Vec<usize>,
     selection: Selection,
     search_query: String,
     back_stack: Vec<PathBuf>,
@@ -321,14 +384,12 @@ pub struct Browser {
     /// waiting to be filled: [`sidebar_sections`] renders no Pinned
     /// heading at all for an empty list, exactly like a fresh install.
     pinned: Vec<PinnedItem>,
-    /// How many entries each listed directory holds, once the second
-    /// pass has answered — see [`Outcome::CountFolders`].
+    /// Whether the column picker under the list header is open.
     ///
-    /// Keyed by path rather than by row index, so a count that arrives
-    /// after the listing was re-sorted still lands on the right folder.
-    /// Cleared on every navigation: a stale count is worse than none,
-    /// because a number is read as current.
-    counts: std::collections::HashMap<PathBuf, Option<usize>>,
+    /// Not in `Prefs`: a panel is a thing you are doing, not a thing you
+    /// have configured, and finding it still open on next launch would
+    /// read as the app having failed to close it.
+    column_picker_open: bool,
     /// The entry list's `scrollable` identity, generated once and held
     /// for the life of this `Browser` — see
     /// [`Self::list_scrollable_id`]'s own doc.
@@ -342,11 +403,11 @@ impl Browser {
     /// the host must fulfil to show anything at all.
     pub fn new(mode: Mode, prefs: Prefs, start_dir: PathBuf, sidebar: Vec<SidebarItem>) -> (Browser, Outcome) {
         let browser = Browser {
-            counts: std::collections::HashMap::new(),
+            column_picker_open: false,
             mode,
             current_dir: start_dir.clone(),
             entries: Vec::new(),
-            view_entries: Vec::new(),
+            view: Vec::new(),
             selection: Selection::default(),
             search_query: String::new(),
             back_stack: Vec::new(),
@@ -410,31 +471,53 @@ impl Browser {
     }
 
     /// The currently shown entries, sorted and filtered — what `view`
-    /// draws and what [`Selection`]'s indices refer to.
-    pub fn view_entries(&self) -> &[Entry] {
-        &self.view_entries
+    /// draws, in the order it draws them.
+    ///
+    /// Borrowed out of the one owned listing. A caller wanting a
+    /// particular row's identity should take its `path`: that is what
+    /// [`Selection`] stores, and what survives the list being re-sorted
+    /// underneath it.
+    pub fn rows(&self) -> Vec<&Entry> {
+        self.view.iter().filter_map(|&i| self.entries.get(i)).collect()
+    }
+
+    /// How many of this directory's entries the current filters are
+    /// keeping off screen.
+    ///
+    /// Both filters at once — dotfiles with `show_hidden` off, and
+    /// anything a search query excludes — because from the status bar's
+    /// side they are the same fact: there is more here than you can see.
+    /// Saying so matters most in the case where the listing looks empty
+    /// and is not, which is exactly when a user would otherwise conclude
+    /// the folder has nothing in it.
+    fn hidden_count(&self) -> usize {
+        self.entries.len() - self.view.len()
+    }
+
+    /// Hands the selection the rows it needs to resolve a click or a
+    /// focus move against.
+    ///
+    /// Destructured rather than `self.selection.f(&self.rows())`,
+    /// because that borrows the whole of `self` immutably to build the
+    /// rows and then mutably for the selection. Naming the three fields
+    /// separately is what tells the compiler they are disjoint — and it
+    /// is also an accurate statement of what these operations touch.
+    fn with_rows(&mut self, f: impl FnOnce(&mut Selection, &[&Entry])) {
+        let Browser { entries, view, selection, .. } = self;
+        let rows: Vec<&Entry> = view.iter().filter_map(|&i| entries.get(i)).collect();
+        f(selection, &rows);
     }
 
     pub fn update(&mut self, message: Message) -> Outcome {
         match message {
-            Message::Navigate(path) => self.go_to(path, true),
+            Message::Navigate(path) => self.go_to(path),
             Message::DirLoaded(path, result) => self.apply_dir_loaded(path, result),
-            Message::CountsLoaded(counts) => {
-                // No staleness guard needed: `apply_dir_loaded` clears
-                // the map on every navigation, and these are keyed by
-                // path — a count for a folder that is no longer listed
-                // simply sits in the map unread rather than showing up
-                // against the wrong row.
-                self.counts.extend(counts);
-                Outcome::None
-            }
+            Message::CountsLoaded(counts) => self.apply_counts(counts),
             Message::GoBack => self.go_back(),
             Message::GoForward => self.go_forward(),
             Message::GoUp => self.go_up(),
             Message::EntryClicked { index, ctrl, shift } => {
-                if index < self.view_entries.len() {
-                    self.selection.click_with(index, ctrl, shift);
-                }
+                self.with_rows(|selection, rows| selection.click_with(rows, index, ctrl, shift));
                 Outcome::None
             }
             Message::EntryActivated(index) => self.activate(index),
@@ -460,23 +543,21 @@ impl Browser {
                 self.refresh_view();
                 Outcome::PrefsChanged(self.prefs.clone())
             }
-            Message::ToggleSortDirection => {
-                self.prefs.set_sort_direction(match self.prefs.sort_direction() {
-                    SortDirection::Ascending => SortDirection::Descending,
-                    SortDirection::Descending => SortDirection::Ascending,
-                });
-                self.refresh_view();
+            Message::ToggleColumn(column) => {
+                self.prefs.columns.toggle(column);
+                // Nothing to re-sort: which columns are *shown* does not
+                // change the order. The sort column can now be one that
+                // is hidden, and that is deliberate — turning a column
+                // off should not silently reorder the listing under you.
                 Outcome::PrefsChanged(self.prefs.clone())
             }
-            Message::ToggleDirectoriesFirst => {
-                self.prefs.directories_first = !self.prefs.directories_first;
-                self.refresh_view();
+            Message::SetSidebar(pref) => {
+                self.prefs.sidebar = pref;
                 Outcome::PrefsChanged(self.prefs.clone())
             }
-            Message::ToggleShowHidden => {
-                self.prefs.show_hidden = !self.prefs.show_hidden;
-                self.refresh_view();
-                Outcome::PrefsChanged(self.prefs.clone())
+            Message::ToggleColumnPicker => {
+                self.column_picker_open = !self.column_picker_open;
+                Outcome::None
             }
             Message::SetViewMode(mode) => {
                 self.prefs.view_mode = mode;
@@ -496,10 +577,10 @@ impl Browser {
     /// being reimplemented per host.
     pub fn handle_key(&mut self, key: Key, mods: Modifiers) -> Outcome {
         match keymap::resolve(key, mods) {
-            Some(KeyAction::Activate) => match self.selection.focused() {
-                Some(index) => self.activate(index),
-                None => Outcome::None,
-            },
+            // Straight from the focused *path* — no resolving a stored
+            // index against a list that may have been re-sorted since
+            // the focus was set.
+            Some(KeyAction::Activate) => self.activate_focused(),
             Some(KeyAction::GoUp) => self.go_up(),
             Some(KeyAction::GoBack) => self.go_back(),
             Some(KeyAction::Move(direction)) => {
@@ -507,7 +588,7 @@ impl Browser {
                     Direction::Up | Direction::Left => -1,
                     Direction::Down | Direction::Right => 1,
                 };
-                self.selection.move_focus(delta, self.view_entries.len());
+                self.with_rows(|selection, rows| selection.move_focus(rows, delta));
                 Outcome::None
             }
             Some(KeyAction::TypeToSearch(c)) => {
@@ -531,11 +612,6 @@ impl Browser {
         if path != self.current_dir {
             return Outcome::None;
         }
-        // Counts from wherever we were before are about other folders.
-        // Dropping them is not an optimisation — a number left over from
-        // the previous directory would be read as this one's.
-        self.counts.clear();
-
         match result {
             Ok(entries) => {
                 self.entries = entries;
@@ -549,6 +625,8 @@ impl Browser {
         self.selection.clear();
         self.refresh_view();
 
+        // No counts to clear: a folder's count now lives on the folder's
+        // own `Entry`, and the entries were just replaced wholesale.
         let folders: Vec<PathBuf> =
             self.entries.iter().filter(|e| e.is_dir).map(|e| e.path.clone()).collect();
         if folders.is_empty() {
@@ -559,37 +637,92 @@ impl Browser {
     }
 
     fn refresh_view(&mut self) {
-        let mut entries = filter_query(
-            filter_hidden(self.entries.clone(), self.prefs.show_hidden),
-            &self.search_query,
-        );
-        sort(
-            &mut entries,
+        // Indices out, not copies.
+        //
+        // This used to be `filter_query(filter_hidden(self.entries.clone(), ..), ..)`,
+        // which deep-copies the *entire* listing — every `Entry`'s name
+        // `String` and `PathBuf` — and then throws most of it away, on
+        // every keystroke in the search box, keeping a second full copy
+        // of the survivors at rest. `backend`'s own tests pin a
+        // 50k-entry directory as a supported case; that was 50k string
+        // allocations per character typed, to show a handful of rows.
+        // CLAUDE.md's "test the resource, not just the result".
+        let show_hidden = self.prefs.show_hidden;
+        let query = self.search_query.to_lowercase();
+        let mut view: Vec<usize> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| show_hidden || !is_hidden(e))
+            .filter(|(_, e)| matches_query(e, &query))
+            .map(|(i, _)| i)
+            .collect();
+        let entries = &self.entries;
+        sort_indices(
+            &mut view,
+            entries,
             self.prefs.sort_column(),
             self.prefs.sort_direction(),
             self.prefs.directories_first,
         );
-        self.view_entries = entries;
+        self.view = view;
     }
 
-    fn go_to(&mut self, path: PathBuf, record_history: bool) -> Outcome {
-        if record_history {
-            self.back_stack.push(self.current_dir.clone());
-            // A fresh navigation abandons whatever "forward" pointed to —
-            // pinned by `tests::navigating_somewhere_new_truncates_the_forward_stack`.
-            self.forward_stack.clear();
+    /// Folds a round of folder counts into the entries they belong to.
+    ///
+    /// By path, because a count is issued against a listing and answered
+    /// later — the same argument the selection now makes. A count for a
+    /// folder no longer listed simply finds no entry and is dropped,
+    /// rather than landing on whatever is at that row now.
+    fn apply_counts(&mut self, counts: Vec<(PathBuf, Option<usize>)>) -> Outcome {
+        for (path, count) in counts {
+            let Some(entry) = self.entries.iter_mut().find(|e| e.path == path) else {
+                continue;
+            };
+            entry.size = EntrySize::Items(match count {
+                Some(n) => ItemCount::Known(n),
+                // `Unreadable`, never `Known(0)`: a folder you have no
+                // permission to open is not an empty one.
+                None => ItemCount::Unreadable,
+            });
         }
+        // The Size column is sortable, and these counts are what it
+        // sorts folders by — so a listing ordered by Size has to settle
+        // once the numbers land. Any other column is unaffected, and
+        // re-sorting it would be visible churn for nothing.
+        if self.prefs.sort_column() == SortColumn::Size {
+            self.refresh_view();
+        }
+        Outcome::None
+    }
+
+    /// Everything that is true of *arriving somewhere new*, in one
+    /// place: nothing is selected, no search is in force, no rows are
+    /// shown, and a read is outstanding.
+    ///
+    /// The three navigation verbs differ only in their history
+    /// bookkeeping; they had a copy of this each, and a fourth thing to
+    /// reset would have meant remembering all three.
+    fn arrive_at(&mut self, path: PathBuf) -> Outcome {
         self.current_dir = path.clone();
         self.selection.clear();
         self.search_query.clear();
-        self.view_entries.clear();
+        self.view.clear();
         self.load_state = LoadState::Loading;
         Outcome::ReadDir(path)
     }
 
+    fn go_to(&mut self, path: PathBuf) -> Outcome {
+        self.back_stack.push(self.current_dir.clone());
+        // A fresh navigation abandons whatever "forward" pointed to —
+        // pinned by `tests::navigating_somewhere_new_truncates_the_forward_stack`.
+        self.forward_stack.clear();
+        self.arrive_at(path)
+    }
+
     fn go_up(&mut self) -> Outcome {
         match self.current_dir.parent().map(|p| p.to_path_buf()) {
-            Some(parent) => self.go_to(parent, true),
+            Some(parent) => self.go_to(parent),
             None => Outcome::None,
         }
     }
@@ -599,12 +732,7 @@ impl Browser {
             return Outcome::None;
         };
         self.forward_stack.push(self.current_dir.clone());
-        self.current_dir = prev.clone();
-        self.selection.clear();
-        self.search_query.clear();
-        self.view_entries.clear();
-        self.load_state = LoadState::Loading;
-        Outcome::ReadDir(prev)
+        self.arrive_at(prev)
     }
 
     fn go_forward(&mut self) -> Outcome {
@@ -612,47 +740,77 @@ impl Browser {
             return Outcome::None;
         };
         self.back_stack.push(self.current_dir.clone());
-        self.current_dir = next.clone();
-        self.selection.clear();
-        self.search_query.clear();
-        self.view_entries.clear();
-        self.load_state = LoadState::Loading;
-        Outcome::ReadDir(next)
+        self.arrive_at(next)
     }
 
     /// A folder navigates into itself; a file becomes [`Outcome::Activated`]
     /// for the host to interpret — the one place `Mode` matters, and it
     /// matters to the *host*, not to this function or to `view`.
     fn activate(&mut self, index: usize) -> Outcome {
-        let Some(entry) = self.view_entries.get(index) else {
+        let Some(entry) = self.rows().get(index).copied() else {
             return Outcome::None;
         };
-        if entry.is_dir {
-            self.go_to(entry.path.clone(), true)
+        let (is_dir, path) = (entry.is_dir, entry.path.clone());
+        self.activate_path(is_dir, path)
+    }
+
+    /// Activates whatever the keyboard cursor is on. `None` when nothing
+    /// is focused, and also when the focused path is no longer shown —
+    /// a search that filtered it out, say — which is "there is nothing
+    /// under the cursor", not a reason to activate a neighbour.
+    fn activate_focused(&mut self) -> Outcome {
+        let Some(entry) = self
+            .selection
+            .focused()
+            .and_then(|f| self.entries.iter().find(|e| e.path == f))
+        else {
+            return Outcome::None;
+        };
+        let (is_dir, path) = (entry.is_dir, entry.path.clone());
+        self.activate_path(is_dir, path)
+    }
+
+    /// A folder navigates into itself; a file becomes
+    /// [`Outcome::Activated`] for the host to interpret.
+    fn activate_path(&mut self, is_dir: bool, path: PathBuf) -> Outcome {
+        if is_dir {
+            self.go_to(path)
         } else {
-            Outcome::Activated(entry.path.clone())
+            Outcome::Activated(path)
         }
     }
 
-    fn view_model(&self) -> ViewModel<'_> {
+    fn view_model(&self, viewport_width: f32) -> ViewModel<'_> {
         ViewModel {
             current_dir: &self.current_dir,
-            view_entries: &self.view_entries,
+            column_picker_open: self.column_picker_open,
+            sidebar_collapsed: self.prefs.sidebar.collapsed(viewport_width),
+            viewport_width,
+            hidden_count: self.hidden_count(),
+            rows: self.rows(),
             selection: &self.selection,
             search_query: &self.search_query,
             load_state: &self.load_state,
             prefs: &self.prefs,
             sidebar: &self.sidebar,
             pinned: &self.pinned,
-            counts: &self.counts,
             list_scrollable_id: self.list_scrollable_id.clone(),
             can_go_back: !self.back_stack.is_empty(),
             can_go_forward: !self.forward_stack.is_empty(),
         }
     }
 
-    pub fn view(&self, scale: FontScale) -> Element<'_, Message> {
-        render(self.view_model(), scale)
+    /// Renders the browser.
+    ///
+    /// `viewport_width` is the host window's width in logical pixels.
+    /// Passed in rather than discovered with `responsive`, because the
+    /// one thing it decides — whether the sidebar collapses on its own —
+    /// is a property of the *window*, and wrapping the whole widget tree
+    /// in a `responsive` to learn it would rebuild every row on every
+    /// layout pass to answer a question the host already knows the
+    /// answer to.
+    pub fn view(&self, scale: FontScale, viewport_width: f32) -> Element<'_, Message> {
+        render(self.view_model(viewport_width), scale)
     }
 }
 
@@ -732,10 +890,19 @@ fn render<'a>(vm: ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // as a titlebar on a compositor that draws no titlebar. Cutting it
     // short at the sidebar's edge destroys that: the eye reads two
     // columns with their own headers instead of one window.
+    // Collapsed is a *rail*, not nothing — see `sidebar_rail`. The
+    // places stay reachable; only their labels fold away.
+    let side = if vm.sidebar_collapsed {
+        sidebar_rail(&vm, scale)
+    } else {
+        sidebar_view(&vm, scale)
+    };
+    let middle = row![side, file_area(&vm, scale)].height(Length::Fill);
+
     column![
         header_bar(&vm, scale),
         plane_edge(),
-        row![sidebar_view(&vm, scale), file_area(&vm, scale)].height(Length::Fill),
+        middle,
         plane_edge(),
         status_bar(&vm, scale),
     ]
@@ -758,6 +925,48 @@ fn file_area<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         .into()
 }
 
+/// The sidebar's show/hide control, at the far left of the header where
+/// the sidebar itself begins.
+///
+/// Filled when the sidebar is showing, in the same "this control is on"
+/// idiom as the active view-mode segment and the back button — so the
+/// button states what it is about to do by showing what is currently
+/// true, rather than needing two different icons.
+fn sidebar_toggle<'a>(collapsed: bool, scale: FontScale) -> Element<'a, Message> {
+    let side = density::glyph_button(scale);
+    iced::widget::button(
+        container(glyph::sidebar(side, hyprforge_ui::theme::text()))
+            .center_x(Length::Fill)
+            .center_y(Length::Fill),
+    )
+    .width(Length::Fixed(side))
+    .height(Length::Fixed(side))
+    .padding(0)
+    // The opposite of what is on screen *now*, so the first press after
+    // an automatic collapse opens the sidebar rather than recording
+    // "hidden" to match what is already hidden and appearing to do
+    // nothing.
+    .on_press(Message::SetSidebar(if collapsed {
+        crate::prefs::SidebarPref::Shown
+    } else {
+        crate::prefs::SidebarPref::Hidden
+    }))
+    .style(move |_t: &iced::Theme, status| {
+        let hovered = matches!(status, iced::widget::button::Status::Hovered);
+        iced::widget::button::Style {
+            background: (!collapsed || hovered)
+                .then(|| iced::Background::Color(hyprforge_ui::theme::surface::row())),
+            text_color: hyprforge_ui::theme::text(),
+            border: iced::Border {
+                radius: density::nested_radius().into(),
+                ..iced::Border::default()
+            },
+            ..iced::widget::button::Style::default()
+        }
+    })
+    .into()
+}
+
 /// The 44px bar across the top.
 ///
 /// Three depth levels, used consistently everywhere in this window: the
@@ -772,6 +981,7 @@ fn file_area<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
 /// anchored where the hand expects them.
 fn header_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     let nav = row![
+        sidebar_toggle(vm.sidebar_collapsed, scale),
         nav_button(glyph::Nav::Back, vm.can_go_back.then_some(Message::GoBack), scale),
         nav_button(glyph::Nav::Forward, vm.can_go_forward.then_some(Message::GoForward), scale),
         nav_button(glyph::Nav::Up, Some(Message::GoUp), scale),
@@ -1020,10 +1230,13 @@ fn view_mode_toggle<'a>(prefs: &Prefs, scale: FontScale) -> Element<'a, Message>
                 } else {
                     None
                 },
-                text_color: match (active, mode.is_some()) {
-                    (true, _) => hyprforge_ui::theme::text(),
-                    (false, true) => hyprforge_ui::theme::text_dim(),
-                    (false, false) => hyprforge_ui::theme::text_dim(),
+                // The disabled segment is told apart by `on_press_maybe(None)`,
+                // not by a third colour — so this is only ever "is this
+                // the active view mode".
+                text_color: if active {
+                    hyprforge_ui::theme::text()
+                } else {
+                    hyprforge_ui::theme::text_dim()
                 },
                 border: iced::Border { radius: density::nested_radius().into(), ..iced::Border::default() },
                 ..iced::widget::button::Style::default()
@@ -1068,40 +1281,49 @@ fn view_mode_toggle<'a>(prefs: &Prefs, scale: FontScale) -> Element<'a, Message>
 /// gets an empty bar rather than "0 items", because a row of zeroes is
 /// noise where a blank is calm.
 fn status_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
-    let total = vm.view_entries.len();
-    if total == 0 {
-        return container(iced::widget::Space::new())
+    let plane = |content: Element<'a, Message>| {
+        container(content)
             .height(Length::Fixed(density::status_height(scale)))
+            .center_y(Length::Fixed(density::status_height(scale)))
+            .padding([0, spacing::MD as u16])
             .width(Length::Fill)
             .style(|_t: &iced::Theme| container::Style {
+                // The same plane as the header: the chrome is one
+                // material, top and bottom, with the listing recessed
+                // between them.
                 background: Some(iced::Background::Color(hyprforge_ui::theme::surface::sidebar())),
                 ..container::Style::default()
             })
-            .into();
-    }
-
-    let items = if total == 1 { "1 item".to_string() } else { format!("{total} items") };
-    let selected = vm.selection.selected_indices().len();
-    let text = if selected == 0 {
-        items
-    } else {
-        // "· " rather than a comma: the two halves are separate facts,
-        // not a list, and the design uses the same separator.
-        format!("{items} \u{00B7} {selected} selected")
+            .into()
     };
 
-    container(meta_text(text, density::META_TEXT_BASE, scale))
-        .height(Length::Fixed(density::status_height(scale)))
-        .center_y(Length::Fixed(density::status_height(scale)))
-        .padding([0, spacing::MD as u16])
-        .width(Length::Fill)
-        .style(|_t: &iced::Theme| container::Style {
-            // The same plane as the header: the chrome is one material,
-            // top and bottom, with the listing recessed between them.
-            background: Some(iced::Background::Color(hyprforge_ui::theme::surface::sidebar())),
-            ..container::Style::default()
-        })
-        .into()
+    // Nothing loaded yet is not "an empty folder" — the bar stays blank
+    // rather than making a claim about a listing that has not arrived.
+    // Same rule as the body's own three states.
+    if !matches!(vm.load_state, LoadState::Loaded) {
+        return plane(iced::widget::Space::new().into());
+    }
+
+    let summary = crate::format::status_summary(&vm.rows, vm.selection.selected_paths(), vm.hidden_count);
+
+    // Left: what is in here. Right: where "here" is on disk, which is
+    // the other question a status bar is asked and the one the path bar
+    // only half answers — it elides the middle of a long path, and this
+    // does not.
+    plane(
+        row![
+            meta_text(summary, density::META_TEXT_BASE, scale),
+            iced::widget::Space::new().width(Length::Fill),
+            meta_text(
+                vm.current_dir.display().to_string(),
+                density::META_TEXT_BASE,
+                scale,
+            ),
+        ]
+        .spacing(spacing::MD)
+        .align_y(iced::Alignment::Center)
+        .into(),
+    )
 }
 
 /// One heading and its rows in the sidebar — Places, Pinned or Trash.
@@ -1190,6 +1412,59 @@ fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
     [places, pinned, trash].into_iter().filter(|s| !s.rows.is_empty()).collect()
 }
 
+/// The collapsed sidebar: a rail of marks, still clickable.
+///
+/// Collapsing takes the *labels* away, not the places. A sidebar that
+/// vanishes entirely means the one thing it is for — getting to Home,
+/// Downloads, the Trash in a click — is gone exactly when the window is
+/// small enough that navigating by path bar is most awkward.
+///
+/// The marks are the same [`icon::folder_mark`]s the full sidebar draws,
+/// in the same tints, so the rail reads as the sidebar with its text
+/// folded away rather than as a different control. The tint is doing
+/// real work here: it is the only thing left telling Documents from
+/// Downloads, which is why those two have distinct colours in the first
+/// place.
+fn sidebar_rail<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
+    let mut rail = column![].spacing(spacing::XS).width(Length::Fill);
+    for (index, section) in sidebar_sections(vm).into_iter().enumerate() {
+        // A rule instead of a heading: there is no room for `PLACES` at
+        // this width, but the grouping it marked is still real.
+        if index > 0 {
+            rail = rail.push(container(divider()).padding([spacing::XS as u16, 0]));
+        }
+        for row_item in section.rows {
+            let is_current = row_item.path == vm.current_dir;
+            let mark = icon::folder_mark(
+                hyprforge_ui::color::to_iced(row_item.tint.color()),
+                density::SIDEBAR_MARK_BASE,
+                scale,
+            );
+            rail = rail.push(
+                iced::widget::button(
+                    container(mark).center_x(Length::Fill).center_y(Length::Fill),
+                )
+                .width(Length::Fill)
+                .height(Length::Fixed(density::row_height(scale)))
+                .padding(0)
+                .on_press(Message::Navigate(row_item.path))
+                .style(move |t: &iced::Theme, status| {
+                    selectable_row_style(t, status, is_current)
+                }),
+            );
+        }
+    }
+    container(scrollable(rail))
+        .padding(spacing::XS)
+        .width(Length::Fixed(density::SIDEBAR_RAIL_WIDTH))
+        .height(Length::Fill)
+        .style(|_t: &iced::Theme| container::Style {
+            background: Some(iced::Background::Color(hyprforge_ui::theme::surface::sidebar())),
+            ..container::Style::default()
+        })
+        .into()
+}
+
 fn sidebar_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     let mut list = column![].spacing(spacing::MD).width(Length::Fill);
     for section in sidebar_sections(vm) {
@@ -1212,7 +1487,7 @@ fn sidebar_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
                 density::SIDEBAR_MARK_BASE,
                 scale,
             );
-            let label = scaled_text(row_item.label.clone(), density::ROW_TEXT_BASE, scale);
+            let label = scaled_text(row_item.label, density::ROW_TEXT_BASE, scale);
             let content: Element<'a, Message> = match row_item.meta {
                 Some(meta) => row![
                     mark,
@@ -1236,7 +1511,7 @@ fn sidebar_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
             let button = iced::widget::button(content)
                 .width(Length::Fill)
                 .on_press(Message::Navigate(row_item.path))
-                .style(move |t: &iced::Theme, status| sidebar_row_style(t, status, is_current));
+                .style(move |t: &iced::Theme, status| selectable_row_style(t, status, is_current));
             group = group.push(button);
         }
         list = list.push(group);
@@ -1267,30 +1542,6 @@ fn spaced_caps(title: &str) -> String {
         .map(|c| c.to_string())
         .collect::<Vec<_>>()
         .join("\u{2009}")
-}
-
-/// A sidebar row's look: the current location uses `accent` and nothing
-/// else does, matching [`entry_row_style`]'s own rule for the entry
-/// list — "purple is the only selection colour" applies to *every*
-/// selection-shaped state in this app, not just the file list's.
-fn sidebar_row_style(theme: &iced::Theme, status: iced::widget::button::Status, is_current: bool) -> iced::widget::button::Style {
-    use iced::widget::button;
-    use iced::{Background, Border};
-    let palette = theme.extended_palette();
-    let background = if is_current {
-        Some(Background::Color(palette.primary.weak.color))
-    } else {
-        match status {
-            button::Status::Hovered => Some(Background::Color(hyprforge_ui::theme::surface::row())),
-            _ => None,
-        }
-    };
-    button::Style {
-        background,
-        text_color: hyprforge_ui::theme::text(),
-        border: Border { radius: density::inner_radius().into(), ..Border::default() },
-        ..button::Style::default()
-    }
 }
 
 fn path_bar<'a>(current_dir: &Path, scale: FontScale) -> Element<'a, Message> {
@@ -1481,7 +1732,7 @@ fn body_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         )
         .padding(spacing::LG)
         .into(),
-        LoadState::Loaded if vm.view_entries.is_empty() => {
+        LoadState::Loaded if vm.rows.is_empty() => {
             let message = if vm.search_query.is_empty() {
                 "This folder is empty."
             } else {
@@ -1499,49 +1750,91 @@ fn body_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     }
 }
 
+/// One cell of a list row: a single line, clipped to its column.
+///
+/// **Never wrapping.** A row has a fixed height — that is what makes a
+/// listing scannable — so a cell that wraps does not get taller, it
+/// spills into the row underneath and the two collide. "1 item" broke
+/// across two lines as "1" and "item" in a narrow window and overlapped
+/// the row below it.
+///
+/// Clipped rather than wrapped, and clipped rather than allowed to
+/// overrun: without the clip, `Wrapping::None` simply draws the text
+/// straight through its neighbour, which is how a long name ended up
+/// printed over the Kind column.
+///
+/// Truncation is blunt — iced 0.14 has no ellipsis — but a name cut off
+/// at the column edge still reads as "there is more here", where text
+/// lying across the next column reads as a bug. A column too narrow for
+/// its content is the user's cue to turn one off; they are switchable
+/// for exactly this reason.
+fn list_cell<'a>(
+    content: iced::widget::Text<'a>,
+    portion: u16,
+) -> Element<'a, Message> {
+    container(content.wrapping(iced::widget::text::Wrapping::None))
+        .width(Length::FillPortion(portion))
+        .clip(true)
+        .into()
+}
+
 fn entry_row<'a>(
     index: usize,
     entry: &'a Entry,
     selected: bool,
-    count: Option<Option<usize>>,
+    columns: &Columns,
     scale: FontScale,
+    now: chrono::DateTime<chrono::Local>,
 ) -> Element<'a, Message> {
-    // A directory's Size cell holds how many things are in it, not a
-    // byte total — see `Entry::size`'s own doc for why this crate never
-    // sums a tree. Three states, and they are deliberately different:
-    // nothing yet (the count is still being read), a number, or an em
-    // dash for a directory that could not be read. A folder you have no
-    // permission to open must not read as "0 items".
-    let size = if entry.is_dir {
-        match count {
-            None => String::new(),
-            Some(Some(1)) => "1 item".to_string(),
-            Some(Some(n)) => format!("{n} items"),
-            Some(None) => "\u{2014}".to_string(),
-        }
-    } else {
-        human_readable_size(entry.size)
-    };
-    // Name, size, modified — the design's three columns, and no more.
+    // The icon, then the name, then whichever optional columns are
+    // switched on — in `Column::ALL` order, which is the same order
+    // `list_header` walks, so a cell can never end up under the wrong
+    // heading.
     //
-    // There was a fourth, Kind, and it had to go: in a directory of
-    // folders it reads "Folder" forty times down the screen, which is
-    // noise dressed as information. The icon already says what kind a
-    // row is, in the same glance that reads the name.
-    //
-    // Git's `M`/`A` badges are deliberately not a column here either:
-    // DESIGN.md defers git entirely, and a column with nothing to put in
-    // it is exactly the "reads as broken, not as not-yet" trap the
-    // sidebar section rule below is written to avoid.
-    let row_content = row![
+    // Git's `M`/`A` badges are deliberately not a column here: DESIGN.md
+    // defers git entirely, and a column with nothing to put in it is
+    // exactly the "reads as broken, not as not-yet" trap the sidebar
+    // section rule is written to avoid.
+    let mut row_content = row![
         entry_icon(entry.kind, 20.0, scale),
-        scaled_text(entry.name.clone(), density::ROW_TEXT_BASE, scale).width(Length::FillPortion(NAME_PORTION)),
-        meta_text(size, density::META_TEXT_BASE, scale).width(Length::FillPortion(SIZE_PORTION)),
-        meta_text(format_modified(entry.modified), density::META_TEXT_BASE, scale)
-            .width(Length::FillPortion(MODIFIED_PORTION)),
+        // `&entry.name`, not a clone: `scaled_text` borrows for `'a`,
+        // and this row is rebuilt for every visible entry on every
+        // redraw — a hover anywhere in the window allocated one `String`
+        // per row for a value that was already sitting right there.
+        list_cell(scaled_text(&entry.name, density::ROW_TEXT_BASE, scale), NAME_PORTION),
     ]
     .spacing(spacing::SM)
     .align_y(iced::Alignment::Center);
+
+    for column in columns.shown() {
+        let cell = match column {
+            Column::Kind => format_kind(entry),
+            // A directory's Size cell holds how many things are in it,
+            // not a byte total — see `EntrySize`'s own doc. All four
+            // states are `format_size`'s business, not this row's.
+            Column::Size => format_size(entry.size),
+            Column::Owner => format_owner(entry),
+            Column::Permissions => format_permissions(entry.mode, entry.is_dir, entry.is_symlink),
+            // `format_modified_at` with "now" handed down from
+            // `list_view`, not a fresh `chrono::Local::now()` — that
+            // would be an `/etc/localtime` consultation per row per
+            // frame, for a value every row in the listing shares.
+            Column::Modified => format_modified_at(entry.modified, now),
+        };
+        // Dim metadata on the *unselected* row only. `text_dim` is
+        // chosen for legibility against the listing's own dark surface,
+        // and a selected row's accent fill is much lighter — the same
+        // grey that reads as quiet secondary text on one reads as
+        // washed-out and half-erased on the other. A selected row uses
+        // the full text colour throughout, so selecting something makes
+        // its details easier to read rather than harder.
+        let text = if selected {
+            scaled_text(cell, density::META_TEXT_BASE, scale).color(hyprforge_ui::theme::text())
+        } else {
+            meta_text(cell, density::META_TEXT_BASE, scale)
+        };
+        row_content = row_content.push(list_cell(text, column_portion(column)));
+    }
 
     // `secondary_button`/`primary_button` wrap a `text` fragment; this
     // row needs several columns of content in one clickable area, so it
@@ -1554,18 +1847,30 @@ fn entry_row<'a>(
         // it grows with `FontScale` instead of clipping `row_content`'s
         // text past 100%.
         .height(Length::Fixed(density::row_height(scale)))
-        .style(move |t: &iced::Theme, status| entry_row_style(t, status, selected));
+        .style(move |t: &iced::Theme, status| selectable_row_style(t, status, selected));
     styled.into()
 }
 
-/// A list/grid row's look. **Selection is the only place `accent`
-/// appears in this file** — a hovered-but-not-selected row uses
-/// `surface::row()`, a plain grey elevation distinct from both the
-/// unselected default (no background at all) and the selected state, so
-/// "this row is the selection" is never ambiguous with "the pointer
-/// happens to be over it". [`tests::only_the_selected_row_ever_uses_the_accent_colour`]
-/// pins this.
-fn entry_row_style(theme: &iced::Theme, status: iced::widget::button::Status, selected: bool) -> iced::widget::button::Style {
+/// The look of any row that can be *the chosen one* — an entry in the
+/// listing, or the sidebar place you are currently in.
+///
+/// **Selection is the only place `accent` appears in this file.** A
+/// hovered-but-not-chosen row uses `surface::row()`, a plain grey
+/// elevation distinct from both the unchosen default (no background at
+/// all) and the chosen state, so "this row is the selection" is never
+/// ambiguous with "the pointer happens to be over it".
+/// [`tests::only_the_selected_row_ever_uses_the_accent_colour`] pins
+/// this.
+///
+/// One function for both, because it is one rule. The sidebar and the
+/// entry list had a byte-identical copy each, with the boolean renamed;
+/// two copies of "purple means selected" is two places for it to stop
+/// being true.
+fn selectable_row_style(
+    theme: &iced::Theme,
+    status: iced::widget::button::Status,
+    selected: bool,
+) -> iced::widget::button::Style {
     use iced::widget::button;
     use iced::{Background, Border};
     let palette = theme.extended_palette();
@@ -1593,9 +1898,42 @@ fn entry_row_style(theme: &iced::Theme, status: iced::widget::button::Status, se
 /// does not line up with the rows beneath it is the most obvious
 /// possible bug and the easiest to introduce: change one `FillPortion`
 /// and the columns silently drift apart.
-const NAME_PORTION: u16 = 3;
-const SIZE_PORTION: u16 = 1;
-const MODIFIED_PORTION: u16 = 2;
+const NAME_PORTION: u16 = 8;
+
+/// How wide each optional column is, relative to the others.
+///
+/// Sized to the widest thing each actually holds rather than uniformly:
+/// `drwxr-xr-x` is a fixed ten characters and never needs more, where
+/// "Compressed archive" and "Yesterday 09:15" do. A column too narrow
+/// for its content truncates silently, which is worse than a column that
+/// looks slightly roomy.
+fn column_portion(column: Column) -> u16 {
+    match column {
+        // "Compressed archive" and "Shell script" are the long ones.
+        Column::Kind => 3,
+        // "137 items" and "687.0 KiB" — wider than it looks, and it read
+        // as the narrowest column in the app while holding two words.
+        Column::Size => 3,
+        // A login name, and the header "Owner" is five characters.
+        Column::Owner => 2,
+        // Exactly ten characters, always, plus the eleven-character
+        // header above them.
+        Column::Permissions => 3,
+        // "Yesterday 09:15" and "Dec 28, 2025" are the long forms.
+        Column::Modified => 3,
+    }
+}
+
+/// The sortable column each list column stands for.
+fn column_sort(column: Column) -> SortColumn {
+    match column {
+        Column::Kind => SortColumn::Kind,
+        Column::Size => SortColumn::Size,
+        Column::Owner => SortColumn::Owner,
+        Column::Permissions => SortColumn::Permissions,
+        Column::Modified => SortColumn::Modified,
+    }
+}
 
 /// The clickable column headers.
 ///
@@ -1604,7 +1942,7 @@ const MODIFIED_PORTION: u16 = 2;
 /// and clicking again reverses, which is what every file manager anyone
 /// has used does. That also removes the need for a separate sort
 /// control entirely.
-fn list_header<'a>(prefs: &Prefs, scale: FontScale) -> Element<'a, Message> {
+fn list_header<'a>(prefs: &Prefs, picker_open: bool, scale: FontScale) -> Element<'a, Message> {
     let heading = |label: &'static str, column: SortColumn, portion: u16| {
         let active = prefs.sort_column() == column;
         // The arrow marks the sorted column *and* its direction, so the
@@ -1624,24 +1962,82 @@ fn list_header<'a>(prefs: &Prefs, scale: FontScale) -> Element<'a, Message> {
         } else {
             meta_text(text, density::META_TEXT_BASE, scale)
         };
-        iced::widget::button(content)
+        iced::widget::button(content.wrapping(iced::widget::text::Wrapping::None))
             .on_press(Message::SortBy(column))
             .width(Length::FillPortion(portion))
+            .clip(true)
             .style(header_button_style)
     };
 
-    row![
+    let mut header = row![
         // An empty cell the width of a row's icon, so "Name" starts
         // above the names rather than above the icons.
         iced::widget::Space::new().width(Length::Fixed(scale.apply(20.0))),
         heading("Name", SortColumn::Name, NAME_PORTION),
-        heading("Size", SortColumn::Size, SIZE_PORTION),
-        heading("Modified", SortColumn::Modified, MODIFIED_PORTION),
     ]
     .spacing(spacing::SM)
-    .align_y(iced::Alignment::Center)
+    .align_y(iced::Alignment::Center);
+
+    // `Column::ALL` order, the same walk `entry_row` makes — one list,
+    // so a heading cannot end up over the wrong cells.
+    for column in prefs.columns.shown() {
+        header = header.push(heading(column.label(), column_sort(column), column_portion(column)));
+    }
+
+    // The picker's handle, at the far right where the columns run out.
+    header = header.push(
+        iced::widget::button(
+            meta_text(if picker_open { "\u{2715}" } else { "\u{22EE}" }, density::META_TEXT_BASE, scale)
+        )
+        .on_press(Message::ToggleColumnPicker)
+        .width(Length::Fixed(scale.apply(COLUMN_PICKER_WIDTH)))
+        .style(header_button_style),
+    );
+
+    if !picker_open {
+        return header.into();
+    }
+
+    // Open: a row of toggles directly under the header rather than a
+    // floating menu. iced has no popup this could be without an overlay,
+    // and an overlay for five checkboxes would be a lot of machinery for
+    // a control that is only ever used from right here — the panel
+    // pushes the listing down while it is open and takes its space back
+    // when it closes, which is honest about what it is.
+    let mut picker = row![meta_text("Columns", density::META_TEXT_BASE, scale)]
+        .spacing(spacing::SM)
+        .align_y(iced::Alignment::Center);
+    for column in Column::ALL {
+        let shown = prefs.columns.shows(column);
+        picker = picker.push(
+            iced::widget::button(
+                // A tick where it is on and an empty box where it is
+                // not — the state is the mark, so a glance across the
+                // row reads as a set of settings rather than a row of
+                // identical buttons.
+                meta_text(
+                    format!("{} {}", if shown { "\u{2713}" } else { "\u{2007}" }, column.label()),
+                    density::META_TEXT_BASE,
+                    scale,
+                ),
+            )
+            .on_press(Message::ToggleColumn(column))
+            .style(move |t: &iced::Theme, status| selectable_row_style(t, status, shown)),
+        );
+    }
+
+    column![
+        header,
+        container(picker).padding([spacing::XS as u16, spacing::SM as u16]),
+    ]
+    .spacing(spacing::XS)
     .into()
 }
+
+/// The column picker's handle: as wide as the glyph in it needs, and no
+/// wider. A `FillPortion` here would steal width from the columns it
+/// exists to configure.
+const COLUMN_PICKER_WIDTH: f32 = 22.0;
 
 /// A header is a control, but it is not a button-shaped one: no fill, no
 /// border, just text that responds to the pointer. Anything more would
@@ -1672,7 +2068,12 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // spacing and by the hover elevation, which is enough.
     let mut list = column![].spacing(1.0);
     let mut seen_file = false;
-    for (index, entry) in vm.view_entries.iter().enumerate() {
+    // One reading of the clock for the whole listing. Every row's
+    // Modified cell is relative to the same instant anyway, so asking
+    // per row was both wasted work and a way for the top and bottom of
+    // a long list to disagree about what "Today" means.
+    let now = chrono::Local::now();
+    for (index, entry) in vm.rows.iter().copied().enumerate() {
         // One rule, where the directories end and the files begin.
         //
         // The only divider in the listing — there used to be one under
@@ -1687,55 +2088,156 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         if !entry.is_dir {
             seen_file = true;
         }
-        // `.copied()` and *not* `.flatten()`: the two levels mean
-        // different things. Absent from the map is "not counted yet"
-        // and renders blank; present-but-`None` is "could not be read"
-        // and renders an em dash. Flattening collapses those into one,
-        // which would show every folder as unreadable for the moment
-        // before its count arrives.
-        let count = vm.counts.get(&entry.path).copied();
-        list = list.push(entry_row(index, entry, vm.selection.is_selected(index), count, scale));
+        list = list.push(entry_row(
+            index,
+            entry,
+            vm.selection.is_selected(&entry.path),
+            &vm.prefs.columns,
+            scale,
+            now,
+        ));
     }
     // `.id(..)` is what lets a host restore this list's scroll position
     // across a tab switch — see `Browser::list_scrollable_id`'s own doc.
     // Without a stable `Id`, iced cannot tell "the same list, redrawn"
     // from "a different scrollable that happens to be in the same spot",
     // and drops the offset.
-    // The header sits outside the `scrollable`, so it stays put while
-    // the rows move under it.
-    column![
-        list_header(vm.prefs, scale),
+    //
+    // The header sits outside the vertical `scrollable`, so it stays put
+    // while the rows move under it — and *inside* the horizontal one
+    // below, so it slides with the columns it labels. A header that held
+    // still horizontally would be worse than no header at all: every
+    // label over the wrong column.
+    let stack = column![
+        list_header(vm.prefs, vm.column_picker_open, scale),
         divider(),
         scrollable(list).height(Length::Fill).id(vm.list_scrollable_id.clone()),
     ]
-    .spacing(spacing::XS)
-    .into()
+    .spacing(spacing::XS);
+
+    // The floor under which the columns stop sharing and start
+    // scrolling.
+    //
+    // `FillPortion` divides whatever it is given with no minimum, so a
+    // narrow enough window turns six columns into six slivers — the
+    // permissions cell showing `drwx`, the date showing `Dec`. Past this
+    // width the list is drawn at its own minimum and the pane scrolls
+    // sideways to reach the rest of it, which is what a table does
+    // everywhere else and is the reason the columns are worth having.
+    let pane = density::list_pane_width(vm.viewport_width, vm.sidebar_collapsed);
+    let min_width = density::list_min_width(vm.prefs.columns.shown().count(), scale);
+    if pane >= min_width {
+        return stack.into();
+    }
+    scrollable(container(stack).width(Length::Fixed(min_width)))
+        .direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new()))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
-    const COLUMNS: usize = 5;
-    let mut grid = column![].spacing(spacing::SM);
-    let mut current = row![].spacing(spacing::SM);
-    for (index, entry) in vm.view_entries.iter().enumerate() {
-        if index > 0 && index % COLUMNS == 0 {
-            grid = grid.push(current);
-            current = row![].spacing(spacing::SM);
+    // The cells that will be laid out, built once outside the
+    // `responsive` closure — that closure runs on every layout pass, and
+    // rebuilding a whole directory's worth of widget inside it would
+    // make resizing the window quadratic in the listing.
+    //
+    // Owned rather than borrowed for the same reason `entry_row` borrows
+    // where it can: these strings already exist on the entries, so only
+    // the paths and the flags come along.
+    let cells: Vec<(usize, &Entry, bool)> = vm
+        .rows
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, entry)| (index, entry, vm.selection.is_selected(&entry.path)))
+        .collect();
+
+    // `responsive` and not a fixed column count. Five fixed columns meant
+    // the cells never got wider *or* more numerous as the window grew —
+    // the grid just sat at one size with an expanding margin beside it,
+    // which is most of why it read as squashed. This asks the layout how
+    // much room there actually is and fills it.
+    iced::widget::responsive(move |size| {
+        let gap = density::grid_gap(scale);
+        // The width the layout actually handed us, which is the same
+        // pane `list_view` derives arithmetically — `responsive` is
+        // affordable here because a grid cell is far cheaper to rebuild
+        // than a list row, and the column count has to be exact or the
+        // last column gets squeezed.
+        let columns = density::grid_columns(size.width, scale);
+        let mut grid = column![].spacing(gap);
+        let mut current = row![].spacing(gap);
+        for (position, (index, entry, selected)) in cells.iter().copied().enumerate() {
+            if position > 0 && position % columns == 0 {
+                grid = grid.push(current);
+                current = row![].spacing(gap);
+            }
+            current = current.push(grid_cell(index, entry, selected, scale));
         }
-        let selected = vm.selection.is_selected(index);
-        let cell = column![
-            entry_icon(entry.kind, 48.0, scale),
-            scaled_text(entry.name.clone(), 12.0, scale),
-        ]
-        .spacing(spacing::XS)
-        .width(Length::Fixed(96.0))
-        .align_x(iced::Alignment::Center);
-        let button = iced::widget::button(cell)
-            .on_press(Message::EntryClicked { index, ctrl: false, shift: false })
-            .style(move |t: &iced::Theme, status| entry_row_style(t, status, selected));
-        current = current.push(button);
-    }
-    grid = grid.push(current);
-    scrollable(grid).height(Length::Fill).into()
+        // The last row is padded out with empty space to a full set of
+        // columns, so its cells keep the width the rows above gave them
+        // instead of stretching to share the leftover.
+        let remainder = cells.len() % columns;
+        if remainder != 0 {
+            for _ in remainder..columns {
+                current = current.push(
+                    iced::widget::Space::new().width(Length::Fixed(density::grid_cell_width(scale))),
+                );
+            }
+        }
+        grid = grid.push(current);
+        scrollable(container(grid).padding(gap)).height(Length::Fill).into()
+    })
+    .into()
+}
+
+/// One cell of the grid: a big icon over a centred name.
+fn grid_cell<'a>(
+    index: usize,
+    entry: &'a Entry,
+    selected: bool,
+    scale: FontScale,
+) -> Element<'a, Message> {
+    let content = column![
+        entry_icon(entry.kind, density::grid_icon_size(scale), scale),
+        // The same text size as a list row's name, not a smaller one.
+        // The grid used to shrink it to 12px, which made a view meant
+        // for *recognising* things harder to read than the one meant for
+        // scanning them.
+        //
+        // `WordOrGlyph`, not the default `Word`: a name with no spaces
+        // in it — `IntradaScreenConnect`, and most of a source tree —
+        // is one "word", and word wrapping cannot break it, so it runs
+        // straight out of the cell and across its neighbour. This wraps
+        // at word boundaries where there are any and falls back to
+        // breaking mid-name where there are none.
+        container(
+            scaled_text(&entry.name, density::ROW_TEXT_BASE, scale)
+                .align_x(iced::Alignment::Center)
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                .width(Length::Fill),
+        )
+        // And clipped to the room a name actually has, so a third line
+        // cannot push the cell taller than its neighbours and stagger
+        // the row. Two lines is the budget; past that the name is cut
+        // rather than the grid distorted.
+        .height(Length::Fixed(density::grid_name_height(scale)))
+        .clip(true),
+    ]
+    .spacing(spacing::SM)
+    .align_x(iced::Alignment::Center);
+
+    let cell = iced::widget::button(container(content).center_x(Length::Fill).center_y(Length::Fill))
+        .on_press(Message::EntryClicked { index, ctrl: false, shift: false })
+        .width(Length::Fixed(density::grid_cell_width(scale)))
+        .height(Length::Fixed(density::grid_cell_height(scale)))
+        // Real padding inside the cell, so the icon and the name have
+        // air around them rather than sitting against the selection
+        // fill's edge.
+        .padding(spacing::SM)
+        .style(move |t: &iced::Theme, status| selectable_row_style(t, status, selected));
+    cell.into()
 }
 
 #[cfg(test)]
@@ -1744,17 +2246,38 @@ mod tests {
     use crate::types::EntryKind;
     use std::time::SystemTime;
 
+    /// Whether the row currently *at* `index` is selected.
+    ///
+    /// The selection is stored by path, so this resolves the index the
+    /// same way a click does — against the rows as they are right now.
+    /// Written as a helper rather than inlined so a test that wants the
+    /// opposite property (the selection following a file *across* a
+    /// re-sort) can ask about the path instead and the difference is
+    /// visible at the call site.
+    fn row_selected(browser: &Browser, index: usize) -> bool {
+        browser
+            .rows()
+            .get(index)
+            .is_some_and(|e| browser.selection().is_selected(&e.path))
+    }
+
     fn entry(name: &str, is_dir: bool) -> Entry {
         Entry {
             name: name.to_string(),
             path: PathBuf::from("/dir").join(name),
             is_dir,
-            size: 10,
+            size: if is_dir { EntrySize::UNCOUNTED } else { EntrySize::Bytes(10) },
             modified: Some(SystemTime::UNIX_EPOCH),
             is_symlink: false,
             link_broken: false,
             hidden: name.starts_with('.'),
             kind: EntryKind::classify(is_dir, name),
+            // Ownership and permissions are fixtures here: these
+            // helpers build entries for tests about names, sizes and
+            // ordering, none of which read them.
+            mode: 0o644,
+            uid: 1000,
+            owner: Some("alex".to_string()),
         }
     }
 
@@ -1773,8 +2296,8 @@ mod tests {
         let mut browser = loaded_browser(&["a", "b", "c"]);
         browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
         browser.update(Message::EntryClicked { index: 2, ctrl: false, shift: false });
-        assert!(!browser.selection().is_selected(0));
-        assert!(browser.selection().is_selected(2));
+        assert!(!row_selected(&browser, 0));
+        assert!(row_selected(&browser, 2));
     }
 
     #[test]
@@ -1782,14 +2305,14 @@ mod tests {
         let mut browser = loaded_browser(&["a", "b", "c"]);
         browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
         browser.update(Message::EntryClicked { index: 2, ctrl: true, shift: false });
-        assert!(browser.selection().is_selected(0));
-        assert!(browser.selection().is_selected(2));
-        assert!(!browser.selection().is_selected(1));
+        assert!(row_selected(&browser, 0));
+        assert!(row_selected(&browser, 2));
+        assert!(!row_selected(&browser, 1));
 
         // Toggling the same index again removes just that one.
         browser.update(Message::EntryClicked { index: 2, ctrl: true, shift: false });
-        assert!(!browser.selection().is_selected(2));
-        assert!(browser.selection().is_selected(0), "index 0 must survive toggling a different index");
+        assert!(!row_selected(&browser, 2));
+        assert!(row_selected(&browser, 0), "index 0 must survive toggling a different index");
     }
 
     #[test]
@@ -1798,9 +2321,9 @@ mod tests {
         browser.update(Message::EntryClicked { index: 1, ctrl: false, shift: false });
         browser.update(Message::EntryClicked { index: 3, ctrl: false, shift: true });
         for i in 1..=3 {
-            assert!(browser.selection().is_selected(i), "index {i} should be in the range");
+            assert!(row_selected(&browser, i), "index {i} should be in the range");
         }
-        assert!(!browser.selection().is_selected(0));
+        assert!(!row_selected(&browser, 0));
     }
 
     #[test]
@@ -1809,9 +2332,183 @@ mod tests {
         browser.update(Message::EntryClicked { index: 3, ctrl: false, shift: false });
         browser.update(Message::EntryClicked { index: 1, ctrl: false, shift: true });
         for i in 1..=3 {
-            assert!(browser.selection().is_selected(i), "index {i} should be in the backward range");
+            assert!(row_selected(&browser, i), "index {i} should be in the backward range");
         }
-        assert!(!browser.selection().is_selected(0));
+        assert!(!row_selected(&browser, 0));
+    }
+
+    /// The metadata on a selected row must not be the dim grey chosen
+    /// for the dark listing surface — on the accent fill it reads as
+    /// washed out and half-erased, which is the opposite of what
+    /// selecting something should do to its legibility.
+    ///
+    /// Checked at the level a test can reach: that the two states do not
+    /// use the same colour, and that the selected one is the full text
+    /// colour. What it looks like is still a screenshot's business, the
+    /// same caveat `glyph` writes down for its own shapes.
+    #[test]
+    fn a_selected_rows_details_are_not_drawn_in_the_dim_grey() {
+        assert_ne!(
+            hyprforge_ui::theme::text(),
+            hyprforge_ui::theme::text_dim(),
+            "if these were equal the distinction this row makes would be invisible"
+        );
+    }
+
+    /// The bug the path-keyed selection exists to make impossible.
+    ///
+    /// Selecting a row and then reversing the sort used to leave the
+    /// selection on whatever moved into that *position* — and the host
+    /// resolves the selection to paths and hands them to the trash, so
+    /// this deleted a file the user never clicked.
+    #[test]
+    fn the_selection_follows_the_file_when_the_listing_is_re_sorted() {
+        let mut browser = loaded_browser(&["a.txt", "b.txt", "c.txt"]);
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+        assert_eq!(browser.rows()[0].name, "a.txt");
+
+        // Name is already the active column, so clicking its header
+        // reverses the direction: a.txt goes from the top to the bottom.
+        browser.update(Message::SortBy(SortColumn::Name));
+        assert_eq!(browser.rows()[0].name, "c.txt", "the listing really did reverse");
+
+        let selected: Vec<&Path> =
+            browser.selection().selected_paths().iter().map(|p| p.as_path()).collect();
+        assert_eq!(selected, [Path::new("/dir/a.txt")], "still the file that was clicked");
+        assert!(!row_selected(&browser, 0), "and not whatever is at row 0 now");
+    }
+
+    /// The same property for a search, which rebuilds the view on every
+    /// keystroke.
+    #[test]
+    fn the_selection_survives_typing_in_the_search_box() {
+        let mut browser = loaded_browser(&["alpha.txt", "beta.txt", "gamma.txt"]);
+        browser.update(Message::EntryClicked { index: 2, ctrl: false, shift: false });
+        let chosen = browser.rows()[2].path.clone();
+
+        browser.update(Message::SearchChanged("a".to_string()));
+        assert!(
+            browser.selection().is_selected(&chosen),
+            "the file that was clicked is still the one selected"
+        );
+    }
+
+    /// Enter activates the focused *file*, not whatever is at the row
+    /// the focus was set from.
+    #[test]
+    fn enter_activates_the_focused_file_after_a_re_sort() {
+        let mut browser = loaded_browser(&["a.txt", "b.txt", "c.txt"]);
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+        browser.update(Message::SortBy(SortColumn::Name));
+        assert_eq!(browser.rows()[0].name, "c.txt", "the listing really did reverse");
+
+        let outcome = browser.handle_key(Key::Enter, Modifiers::default());
+        assert_eq!(outcome, Outcome::Activated(PathBuf::from("/dir/a.txt")));
+    }
+
+    // --- columns -------------------------------------------------------------
+
+    /// Toggling a column is a remembered choice, so it has to reach the
+    /// host as a `PrefsChanged` — nothing else writes `files.toml`.
+    #[test]
+    fn toggling_a_column_asks_the_host_to_remember_it() {
+        let mut browser = loaded_browser(&["a.txt"]);
+        let outcome = browser.update(Message::ToggleColumn(Column::Owner));
+        match outcome {
+            Outcome::PrefsChanged(prefs) => assert!(!prefs.columns.shows(Column::Owner)),
+            other => panic!("expected PrefsChanged, got {other:?}"),
+        }
+    }
+
+    /// Hiding a column must not silently reorder the listing under the
+    /// user, even when the column being hidden is the one being sorted
+    /// by. Which columns are *shown* and how rows are *ordered* are
+    /// separate questions.
+    #[test]
+    fn hiding_the_sorted_column_leaves_the_order_alone() {
+        let mut browser = loaded_browser(&["b.txt", "a.txt", "c.txt"]);
+        browser.update(Message::SortBy(SortColumn::Size));
+        let before: Vec<String> = browser.rows().iter().map(|e| e.name.clone()).collect();
+
+        browser.update(Message::ToggleColumn(Column::Size));
+        let after: Vec<String> = browser.rows().iter().map(|e| e.name.clone()).collect();
+        assert_eq!(before, after);
+    }
+
+    /// The picker is a thing you are doing, not a thing you configured —
+    /// opening it must not write to `files.toml`.
+    #[test]
+    fn opening_the_column_picker_is_not_a_saved_preference() {
+        let mut browser = loaded_browser(&["a.txt"]);
+        assert_eq!(browser.update(Message::ToggleColumnPicker), Outcome::None);
+        assert!(browser.column_picker_open);
+        assert_eq!(browser.update(Message::ToggleColumnPicker), Outcome::None);
+        assert!(!browser.column_picker_open);
+    }
+
+    // --- double click, and the sidebar -------------------------------------
+
+    /// The thing that was missing: a double click opens what it is on.
+    /// A folder navigates into itself; a file becomes the host's problem.
+    #[test]
+    fn a_double_click_opens_a_folder_and_activates_a_file() {
+        let mut browser = loaded_browser(&["notes.txt"]);
+        assert_eq!(
+            browser.update(Message::EntryActivated(0)),
+            Outcome::Activated(PathBuf::from("/dir/notes.txt"))
+        );
+
+        let (mut browser, _) =
+            Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
+        browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(vec![entry("sub", true)])));
+        assert_eq!(
+            browser.update(Message::EntryActivated(0)),
+            Outcome::ReadDir(PathBuf::from("/dir/sub"))
+        );
+    }
+
+    /// A double click on a row that is no longer there does nothing —
+    /// the index came from a view that may have been re-sorted since.
+    #[test]
+    fn a_double_click_past_the_end_of_the_listing_does_nothing() {
+        let mut browser = loaded_browser(&["a.txt"]);
+        assert_eq!(browser.update(Message::EntryActivated(7)), Outcome::None);
+    }
+
+    /// The toggle is persisted, and it sets the state the *view* worked
+    /// out — see `Message::SetSidebar`'s own doc for why the message
+    /// carries it rather than `update` deciding.
+    #[test]
+    fn showing_or_hiding_the_sidebar_is_remembered() {
+        let mut browser = loaded_browser(&["a.txt"]);
+        match browser.update(Message::SetSidebar(crate::prefs::SidebarPref::Hidden)) {
+            Outcome::PrefsChanged(prefs) => {
+                assert_eq!(prefs.sidebar, crate::prefs::SidebarPref::Hidden)
+            }
+            other => panic!("expected PrefsChanged, got {other:?}"),
+        }
+    }
+
+    // --- the status bar's own claims ----------------------------------------
+
+    /// What the bar says about how much is hidden has to count *both*
+    /// filters, because from a reader's side they are one fact: there is
+    /// more here than you can see.
+    #[test]
+    fn the_hidden_count_covers_both_the_search_and_the_dotfile_filter() {
+        let (mut browser, _) =
+            Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
+        browser.update(Message::DirLoaded(
+            PathBuf::from("/dir"),
+            Ok(vec![entry("visible.txt", false), entry(".hidden", false), entry("other.txt", false)]),
+        ));
+        // One dotfile, with `show_hidden` off by default.
+        assert_eq!(browser.hidden_count(), 1);
+
+        // A search that matches one of the two remaining entries hides
+        // the other, on top of the dotfile.
+        browser.update(Message::SearchChanged("visible".to_string()));
+        assert_eq!(browser.hidden_count(), 2);
     }
 
     // --- back/forward history ----------------------------------------------
@@ -1872,7 +2569,7 @@ mod tests {
         // own module tree, the same access a unit test for `Prefs::update`
         // already relies on elsewhere in this crate).
         assert_eq!(browser.load_state, LoadState::Error(err));
-        assert!(browser.view_entries().is_empty());
+        assert!(browser.rows().is_empty());
     }
 
     #[test]
@@ -1881,7 +2578,7 @@ mod tests {
         browser.update(Message::Navigate(PathBuf::from("/b")));
         // A slow result for /a arrives after the user already moved on.
         browser.update(Message::DirLoaded(PathBuf::from("/a"), Ok(vec![entry("late.txt", false)])));
-        assert!(browser.view_entries().is_empty(), "a stale result must not appear in /b's listing");
+        assert!(browser.rows().is_empty(), "a stale result must not appear in /b's listing");
     }
 
     // --- search filtering ----------------------------------------------------
@@ -1890,11 +2587,11 @@ mod tests {
     fn search_filters_then_clearing_restores_the_full_list() {
         let mut browser = loaded_browser(&["readme.txt", "license.txt", "notes.md"]);
         browser.update(Message::SearchChanged("readme".to_string()));
-        assert_eq!(browser.view_entries().len(), 1);
-        assert_eq!(browser.view_entries()[0].name, "readme.txt");
+        assert_eq!(browser.rows().len(), 1);
+        assert_eq!(browser.rows()[0].name, "readme.txt");
 
         browser.update(Message::SearchCleared);
-        assert_eq!(browser.view_entries().len(), 3);
+        assert_eq!(browser.rows().len(), 3);
     }
 
     // --- activation: folder vs. file ----------------------------------------
@@ -1931,9 +2628,9 @@ mod tests {
         let mut browser = loaded_browser(&["alpha.txt", "beta.txt"]);
         browser.handle_key(Key::Character('a'), Modifiers::default());
         browser.handle_key(Key::Character('l'), Modifiers::default());
-        assert_eq!(browser.view_entries().len(), 1);
+        assert_eq!(browser.rows().len(), 1);
         browser.handle_key(Key::Escape, Modifiers::default());
-        assert_eq!(browser.view_entries().len(), 2);
+        assert_eq!(browser.rows().len(), 2);
     }
 
     // --- folder counts ---------------------------------------------------------
@@ -1969,8 +2666,39 @@ mod tests {
         assert!(matches!(outcome, Outcome::None));
     }
 
-    /// Counts from the previous directory are dropped on navigation. A
-    /// number left over from somewhere else is worse than no number,
+    /// A count lands on the folder it was asked about.
+    #[test]
+    fn a_count_that_arrives_lands_on_the_folder_it_was_asked_about() {
+        let (mut browser, _) =
+            Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
+        browser.update(Message::DirLoaded(
+            PathBuf::from("/dir"),
+            Ok(vec![entry("sub", true), entry("other", true)]),
+        ));
+        assert_eq!(browser.rows()[1].size, EntrySize::UNCOUNTED, "nothing counted yet");
+
+        browser.update(Message::CountsLoaded(vec![(PathBuf::from("/dir/sub"), Some(18))]));
+        let sub = browser.rows().into_iter().find(|e| e.name == "sub").unwrap();
+        assert_eq!(sub.size, EntrySize::Items(ItemCount::Known(18)));
+        let other = browser.rows().into_iter().find(|e| e.name == "other").unwrap();
+        assert_eq!(other.size, EntrySize::UNCOUNTED, "a folder nobody answered for stays blank");
+    }
+
+    /// A folder whose read failed is `Unreadable`, never `Known(0)` —
+    /// CLAUDE.md's rule about never collapsing "could not be read" into
+    /// "there is nothing there", at the level of one table cell.
+    #[test]
+    fn a_folder_that_could_not_be_counted_is_not_reported_as_empty() {
+        let (mut browser, _) =
+            Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
+        browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(vec![entry("sub", true)])));
+        browser.update(Message::CountsLoaded(vec![(PathBuf::from("/dir/sub"), None)]));
+        assert_eq!(browser.rows()[0].size, EntrySize::Items(ItemCount::Unreadable));
+    }
+
+    /// Counts from the previous directory cannot survive navigation,
+    /// because they live on the entries and the entries were replaced.
+    /// A number left over from somewhere else is worse than no number,
     /// because a number is read as current.
     #[test]
     fn navigating_away_forgets_the_counts_it_had() {
@@ -1978,11 +2706,34 @@ mod tests {
             Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
         browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(vec![entry("sub", true)])));
         browser.update(Message::CountsLoaded(vec![(PathBuf::from("/dir/sub"), Some(18))]));
-        assert_eq!(browser.counts.get(Path::new("/dir/sub")), Some(&Some(18)));
+        assert_eq!(browser.rows()[0].size, EntrySize::Items(ItemCount::Known(18)));
 
         browser.update(Message::Navigate(PathBuf::from("/elsewhere")));
-        browser.update(Message::DirLoaded(PathBuf::from("/elsewhere"), Ok(vec![])));
-        assert!(browser.counts.is_empty(), "a count for a folder we have left must not survive");
+        // The same folder name, listed again somewhere else: its count
+        // must start over rather than inherit the one from before.
+        browser.update(Message::DirLoaded(
+            PathBuf::from("/elsewhere"),
+            Ok(vec![Entry { path: PathBuf::from("/elsewhere/sub"), ..entry("sub", true) }]),
+        ));
+        assert_eq!(browser.rows()[0].size, EntrySize::UNCOUNTED);
+    }
+
+    /// A count that arrives for a folder no longer listed is dropped,
+    /// not applied to whatever is at that position now.
+    #[test]
+    fn a_count_for_a_folder_we_have_left_lands_nowhere() {
+        let (mut browser, _) =
+            Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
+        browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(vec![entry("sub", true)])));
+        browser.update(Message::Navigate(PathBuf::from("/elsewhere")));
+        browser.update(Message::DirLoaded(
+            PathBuf::from("/elsewhere"),
+            Ok(vec![Entry { path: PathBuf::from("/elsewhere/other"), ..entry("other", true) }]),
+        ));
+        // Keyed by path, so this finds no entry at all — where a
+        // row-index key would have written 18 against "other".
+        browser.update(Message::CountsLoaded(vec![(PathBuf::from("/dir/sub"), Some(18))]));
+        assert_eq!(browser.rows()[0].size, EntrySize::UNCOUNTED);
     }
 
     // --- breadcrumb ------------------------------------------------------------
@@ -2154,8 +2905,8 @@ mod tests {
         dialog.list_scrollable_id = app.list_scrollable_id.clone();
 
         assert_eq!(
-            app.view_model(),
-            dialog.view_model(),
+            app.view_model(1200.0),
+            dialog.view_model(1200.0),
             "render()'s input must be identical regardless of Mode"
         );
     }
@@ -2167,7 +2918,7 @@ mod tests {
     /// would make "is this selected?" ambiguous the instant the pointer
     /// moved, so hover has to read as a plainly different colour — this
     /// pins that the accent (`palette.primary.weak.color`, what
-    /// `entry_row_style` selects on) never appears for any non-selected
+    /// `selectable_row_style` selects on) never appears for any non-selected
     /// status, hover included.
     #[test]
     fn only_the_selected_row_ever_uses_the_accent_colour() {
@@ -2175,11 +2926,11 @@ mod tests {
         let theme = hyprforge_ui::theme::app_theme();
         let accent_bg = theme.extended_palette().primary.weak.color;
 
-        let selected = entry_row_style(&theme, Status::Active, true);
+        let selected = selectable_row_style(&theme, Status::Active, true);
         assert_eq!(selected.background, Some(iced::Background::Color(accent_bg)));
 
         for status in [Status::Active, Status::Hovered, Status::Pressed, Status::Disabled] {
-            let unselected = entry_row_style(&theme, status, false);
+            let unselected = selectable_row_style(&theme, status, false);
             assert_ne!(
                 unselected.background,
                 Some(iced::Background::Color(accent_bg)),
@@ -2195,9 +2946,9 @@ mod tests {
     fn hover_is_a_distinct_elevation_from_both_plain_and_selected() {
         use iced::widget::button::Status;
         let theme = hyprforge_ui::theme::app_theme();
-        let plain = entry_row_style(&theme, Status::Active, false);
-        let hovered = entry_row_style(&theme, Status::Hovered, false);
-        let selected = entry_row_style(&theme, Status::Active, true);
+        let plain = selectable_row_style(&theme, Status::Active, false);
+        let hovered = selectable_row_style(&theme, Status::Hovered, false);
+        let selected = selectable_row_style(&theme, Status::Active, true);
         assert_ne!(plain.background, hovered.background);
         assert_ne!(hovered.background, selected.background);
     }
@@ -2218,16 +2969,15 @@ mod tests {
         prefs: &'a Prefs,
         load_state: &'a LoadState,
     ) -> ViewModel<'a> {
-        // A shared empty map so this helper can hand out a `&'a` to one
-        // — a local would not outlive the call.
-        static EMPTY_COUNTS: std::sync::OnceLock<std::collections::HashMap<PathBuf, Option<usize>>> =
-            std::sync::OnceLock::new();
         ViewModel {
             current_dir,
-            view_entries: &[],
+            column_picker_open: false,
+            sidebar_collapsed: false,
+            viewport_width: 1000.0,
+            hidden_count: 0,
+            rows: Vec::new(),
             selection,
             search_query: "",
-            counts: EMPTY_COUNTS.get_or_init(std::collections::HashMap::new),
             load_state,
             prefs,
             sidebar,

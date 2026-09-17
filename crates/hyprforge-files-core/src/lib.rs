@@ -11,6 +11,7 @@
 
 pub mod backend;
 pub mod browser;
+pub mod click;
 pub mod density;
 pub mod filter;
 pub mod format;
@@ -20,12 +21,16 @@ pub mod keymap;
 pub mod prefs;
 pub mod sidebar;
 pub mod sort;
+pub mod trash;
 pub mod types;
+pub mod users;
 pub mod xdg_user_dirs;
 
 pub use backend::{FsBackend, StdBackend};
+pub use click::{Click, ClickTracker};
+pub use trash::{RoutingBackend, TrashBackend};
 pub use browser::{Browser, DialogKind, DirError, DirErrorKind, LoadState, Message, Mode, Outcome, Selection};
-pub use format::human_readable_size;
+pub use format::{format_size, human_readable_size};
 pub use prefs::Prefs;
 pub use sidebar::{build as build_sidebar, build_pinned, trash_path, PinnedItem, SidebarItem};
-pub use types::{Entry, EntryKind, FilesError};
+pub use types::{Entry, EntryKind, EntrySize, FilesError, ItemCount};

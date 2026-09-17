@@ -8,6 +8,7 @@
 //! against the mock, the same reasoning `hyprforge-network::types` gives
 //! for keeping `zbus` out of its own shapes.
 
+use std::cmp::Ordering;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -18,13 +19,9 @@ pub struct Entry {
     pub name: String,
     pub path: PathBuf,
     pub is_dir: bool,
-    /// In bytes. `0` for a directory: this crate never sums a directory's
-    /// contents to get one, because doing that during a listing turns an
-    /// O(entries) operation into O(everything under every subdirectory),
-    /// and a size column that means "apparent size of this one inode" for
-    /// files and "recursive total" for directories is also two different
-    /// numbers wearing one label.
-    pub size: u64,
+    /// What the Size column is about for this entry — bytes for a file,
+    /// a count of children for a directory. See [`EntrySize`].
+    pub size: EntrySize,
     /// `None` when the filesystem would not say — `stat` failing on the
     /// timestamp specifically is rarer than the whole call failing, but
     /// treating it as "epoch" would sort a genuinely-unknown-time entry
@@ -45,6 +42,104 @@ pub struct Entry {
     /// on its own.
     pub hidden: bool,
     pub kind: EntryKind,
+    /// The permission bits (`mode & 0o7777`), as the Permissions column
+    /// shows them. Only the permissions: whether this is a directory or
+    /// a link is already `is_dir`/`is_symlink`, and keeping the file-type
+    /// bits here too would be the same fact in two places, free to
+    /// disagree.
+    pub mode: u32,
+    /// The owning user's id, always — `stat` answers with this and
+    /// nothing else.
+    pub uid: u32,
+    /// The owning user's login name, when this system can resolve one.
+    ///
+    /// `None` is ordinary rather than exceptional: a file copied from
+    /// another machine, or one inside a container whose ids do not map
+    /// here, genuinely has an owner this system cannot name. Both are
+    /// kept because the *number* is the useful thing to show in that
+    /// case — see [`crate::users`] and `format::format_owner`.
+    pub owner: Option<String>,
+}
+
+/// What "size" means for one entry, as one value.
+///
+/// A file has a byte count and a directory has a number of things in it,
+/// and those are different quantities — this crate never sums a
+/// directory's contents to get bytes, because doing that during a
+/// listing turns an O(entries) operation into O(everything under every
+/// subdirectory), and a column meaning "apparent size of this inode" for
+/// files and "recursive total" for directories is two numbers wearing
+/// one label.
+///
+/// The two used to be stored apart: `size: u64` (always `0` for a
+/// directory) on the entry, and the count the column actually *showed*
+/// in a separate map on `Browser`, filled by a later pass. The cost was
+/// that sorting and rendering disagreed — clicking the Size header
+/// ordered folders by their `0`, i.e. by name, while the column plainly
+/// showed counts — and a caller had to decode an `Option<Option<usize>>`
+/// to tell "not counted yet" from "could not be read". One value, so the
+/// thing shown and the thing sorted cannot come apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntrySize {
+    /// A file's apparent size, in bytes.
+    Bytes(u64),
+    /// A directory's child count. Arrives after the listing does — see
+    /// [`ItemCount`].
+    Items(ItemCount),
+}
+
+/// How many things are in a directory, including the two states that are
+/// not a number.
+///
+/// `Pending` and `Unreadable` are deliberately distinct, and neither is
+/// `Known(0)`. A folder that has not been counted yet renders blank; one
+/// whose read failed renders an em dash; one that is genuinely empty
+/// renders "0 items". A folder you have no permission to open must never
+/// read as an empty one — CLAUDE.md's rule about never collapsing "could
+/// not be read" into "there is nothing there", applied to a table cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemCount {
+    /// The second pass has not answered for this folder yet — or never
+    /// will, because the listing was longer than the counting budget.
+    Pending,
+    Known(usize),
+    /// The directory could not be read.
+    Unreadable,
+}
+
+impl EntrySize {
+    /// A directory's size before anything has counted it.
+    pub const UNCOUNTED: EntrySize = EntrySize::Items(ItemCount::Pending);
+}
+
+/// Ordering for the Size column.
+///
+/// Every directory sorts before every file, because "three items" and
+/// "three kilobytes" are not quantities that can be ranked against each
+/// other and pretending otherwise would put a folder somewhere its
+/// number does not justify. Within directories, a count orders by the
+/// number; the two non-numbers sort together at the low end, so a
+/// listing being counted does not reshuffle as each answer lands.
+impl Ord for EntrySize {
+    fn cmp(&self, other: &Self) -> Ordering {
+        fn rank(size: &EntrySize) -> (u8, u64) {
+            match size {
+                // `Pending`/`Unreadable` share a rank: neither is a
+                // number, and giving them different ones would order
+                // folders by *why* they have no count.
+                EntrySize::Items(ItemCount::Pending | ItemCount::Unreadable) => (0, 0),
+                EntrySize::Items(ItemCount::Known(n)) => (1, *n as u64),
+                EntrySize::Bytes(n) => (2, *n),
+            }
+        }
+        rank(self).cmp(&rank(other))
+    }
+}
+
+impl PartialOrd for EntrySize {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 /// A coarse category, used to pick a fallback icon badge when no
@@ -155,6 +250,38 @@ impl FilesError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_with_no_count_yet_is_not_the_same_size_as_an_empty_one() {
+        // The distinction the old `Option<Option<usize>>` at the call
+        // site existed to preserve, now in the type.
+        assert_ne!(EntrySize::UNCOUNTED, EntrySize::Items(ItemCount::Known(0)));
+        assert_ne!(EntrySize::Items(ItemCount::Unreadable), EntrySize::Items(ItemCount::Known(0)));
+    }
+
+    #[test]
+    fn every_folder_sorts_before_every_file_by_size() {
+        // Not a preference — "four items" cannot be ranked against
+        // "four bytes", so they are kept in separate bands rather than
+        // interleaved on a number that means different things.
+        assert!(EntrySize::Items(ItemCount::Known(9_000)) < EntrySize::Bytes(0));
+        assert!(EntrySize::UNCOUNTED < EntrySize::Bytes(0));
+    }
+
+    #[test]
+    fn a_counted_folder_sorts_by_its_count() {
+        assert!(EntrySize::Items(ItemCount::Known(2)) < EntrySize::Items(ItemCount::Known(10)));
+    }
+
+    #[test]
+    fn an_uncounted_and_an_unreadable_folder_sort_together() {
+        // Otherwise a listing visibly reshuffles as each count lands,
+        // and folders end up ordered by *why* they have no number.
+        assert_eq!(
+            EntrySize::UNCOUNTED.cmp(&EntrySize::Items(ItemCount::Unreadable)),
+            Ordering::Equal
+        );
+    }
 
     #[test]
     fn a_dotfile_with_no_further_extension_is_not_misread_as_all_extension() {

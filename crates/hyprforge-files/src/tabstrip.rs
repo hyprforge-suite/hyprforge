@@ -39,7 +39,12 @@ use iced::{mouse, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 /// It is also why the strip is taller than the tallest tab rather than
 /// exactly as tall: this space is the difference, so the two cannot
 /// drift apart when either number changes.
-pub const STRIP_TOP_PAD: f32 = 12.0;
+///
+/// Raised from 12: at that height the gap read as a hairline rather than
+/// as deliberate space, and the strip looked crowded against the top of
+/// the window — the tabs need enough room above them to read as sitting
+/// *in* the window rather than clinging to its edge.
+pub const STRIP_TOP_PAD: f32 = 20.0;
 
 /// The strip's own height: the tallest tab, plus the clear space above
 /// it. Tabs sit on the strip's bottom edge — see [`STRIP_ALIGNMENT`].
@@ -80,7 +85,12 @@ pub const TAB_WIDTH: f32 = 150.0;
 
 /// The corner radius on a tab's two top corners. The bottom two stay
 /// square: a tab meets the pane, it does not sit on it.
-const TAB_RADIUS: f32 = 8.0;
+///
+/// Public because the host paints the tab's *fill* while this module
+/// draws its *outline*, and a fill with a different radius from the
+/// outline over it is visible as a hairline of background in each
+/// corner. One constant, so they cannot drift.
+pub const TAB_RADIUS: f32 = 8.0;
 
 /// How much of the accent the active tab's outline carries.
 ///
@@ -158,38 +168,26 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for TabShape {
     }
 }
 
-/// A tab's identity mark: a folder, or a circle for a remote host.
+/// A tab's identity mark: the same folder shape the sidebar draws.
 ///
-/// Round means host, square means folder — so a tab tells you what kind
-/// of place it is before you read its label. The mark keeps full
+/// `icon::folder_mark` and not a second rounded rectangle here — the
+/// two were built independently and had already drifted (11x9 against
+/// the shared 0.8 aspect, a 0.2 corner against 0.17), so the folder in
+/// a tab was not the folder in the sidebar. The mark keeps full
 /// saturation even on an inactive tab whose text has dimmed, because
 /// that is exactly when a glance needs it.
-pub fn identity_mark<'a, Message: 'a>(
-    color: iced::Color,
-    remote: bool,
-    scale: FontScale,
-) -> Element<'a, Message> {
-    let w = scale.apply(if remote { MARK_HOST } else { MARK_FOLDER_W });
-    let h = scale.apply(if remote { MARK_HOST } else { MARK_FOLDER_H });
-    iced::widget::container(iced::widget::Space::new())
-        .width(Length::Fixed(w))
-        .height(Length::Fixed(h))
-        .style(move |_t: &Theme| iced::widget::container::Style {
-            background: Some(iced::Background::Color(color)),
-            border: iced::Border {
-                // Half the side is a circle; a fraction is a rounded
-                // rectangle. One number decides which shape this is.
-                radius: if remote { (w / 2.0).into() } else { (h * 0.2).into() },
-                ..iced::Border::default()
-            },
-            ..iced::widget::container::Style::default()
-        })
-        .into()
+///
+/// There was a `remote` flag here that drew a circle instead — round
+/// means host, square means folder. Nothing ever passed `true`: no tab
+/// carries a field that could say so. Worth having when there is a
+/// remote place to mark; it is not code until then.
+pub fn identity_mark<'a, Message: 'a>(color: iced::Color, scale: FontScale) -> Element<'a, Message> {
+    hyprforge_files_core::icon::folder_mark(color, MARK_FOLDER, scale)
 }
 
-const MARK_FOLDER_W: f32 = 11.0;
-const MARK_FOLDER_H: f32 = 9.0;
-const MARK_HOST: f32 = 8.0;
+/// The tab mark's width; its height follows from `icon`'s own folder
+/// aspect ratio.
+const MARK_FOLDER: f32 = 11.0;
 
 /// The size a tab's canvas reports for a given state, so the strip and
 /// the shape cannot disagree about how tall a tab is.
