@@ -26,6 +26,10 @@ pub enum MenuKind {
     /// Anything inside the Trash, where the everyday actions mostly do
     /// not apply.
     Trash,
+    /// A row in the sidebar's Places section.
+    Place,
+    /// A row in the sidebar's Pinned section.
+    Pinned,
 }
 
 impl MenuKind {
@@ -36,11 +40,20 @@ impl MenuKind {
             MenuKind::Folder => "folder",
             MenuKind::Empty => "empty",
             MenuKind::Trash => "trash",
+            MenuKind::Place => "place",
+            MenuKind::Pinned => "pinned",
         }
     }
 
-    pub fn all() -> [MenuKind; 4] {
-        [MenuKind::Entry, MenuKind::Folder, MenuKind::Empty, MenuKind::Trash]
+    pub fn all() -> [MenuKind; 6] {
+        [
+            MenuKind::Entry,
+            MenuKind::Folder,
+            MenuKind::Empty,
+            MenuKind::Trash,
+            MenuKind::Place,
+            MenuKind::Pinned,
+        ]
     }
 }
 
@@ -70,6 +83,8 @@ pub struct MenuConfig {
     pub folder: Vec<MenuEntry>,
     pub empty: Vec<MenuEntry>,
     pub trash: Vec<MenuEntry>,
+    pub place: Vec<MenuEntry>,
+    pub pinned: Vec<MenuEntry>,
 }
 
 impl Default for MenuConfig {
@@ -97,6 +112,7 @@ impl Default for MenuConfig {
             folder: vec![
                 A(Open),
                 A(OpenInNewTab),
+                A(Pin),
                 Sep,
                 A(Cut),
                 A(Copy),
@@ -115,9 +131,14 @@ impl Default for MenuConfig {
                 A(ToggleHidden),
                 A(Refresh),
                 Sep,
+                A(Pin),
+                A(Unpin),
+                Sep,
                 A(GoUp),
                 A(NewTab),
             ],
+            place: vec![A(OpenInNewTab), Sep, A(Pin)],
+            pinned: vec![A(OpenInNewTab), Sep, A(PinUp), A(PinDown), Sep, A(Unpin)],
             trash: vec![
                 A(Restore),
                 Sep,
@@ -141,6 +162,8 @@ impl MenuConfig {
             MenuKind::Folder => &self.folder,
             MenuKind::Empty => &self.empty,
             MenuKind::Trash => &self.trash,
+            MenuKind::Place => &self.place,
+            MenuKind::Pinned => &self.pinned,
         }
     }
 
@@ -150,6 +173,8 @@ impl MenuConfig {
             MenuKind::Folder => self.folder = entries,
             MenuKind::Empty => self.empty = entries,
             MenuKind::Trash => self.trash = entries,
+            MenuKind::Place => self.place = entries,
+            MenuKind::Pinned => self.pinned = entries,
         }
     }
 }
@@ -318,11 +343,11 @@ mod tests {
         assert!(matches!(&items[0], MenuItem::Action { hint: Some(h), .. } if h == "Delete"));
 
         let rebound = crate::config::keymap_with(
-            &[("trash".to_string(), vec!["Ctrl+D".to_string()])].into_iter().collect(),
+            &[("trash".to_string(), vec!["Ctrl+J".to_string()])].into_iter().collect(),
         )
         .0;
         let items = build(&entries, &ctx_with_selection(), &rebound);
-        assert!(matches!(&items[0], MenuItem::Action { hint: Some(h), .. } if h == "Ctrl+D"));
+        assert!(matches!(&items[0], MenuItem::Action { hint: Some(h), .. } if h == "Ctrl+J"));
 
         let unbound = crate::config::keymap_with(
             &[("trash".to_string(), vec![])].into_iter().collect(),

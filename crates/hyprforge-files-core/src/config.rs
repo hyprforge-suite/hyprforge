@@ -482,9 +482,9 @@ mod tests {
     /// the test checks the whole table rather than one neighbour.
     #[test]
     fn rebinding_one_action_leaves_every_other_default_bound() {
-        let (config, problems) = parsed("[keys]\ntrash = \"Ctrl+D\"\n");
+        let (config, problems) = parsed("[keys]\ntrash = \"Ctrl+J\"\n");
         assert!(problems.is_empty(), "{problems:?}");
-        assert_eq!(does(&config, "Ctrl+D"), Some(Action::Trash));
+        assert_eq!(does(&config, "Ctrl+J"), Some(Action::Trash));
         assert_eq!(does(&config, "Delete"), None, "the old key is released");
         for action in Action::all().into_iter().filter(|a| *a != Action::Trash) {
             for key in action.default_keys() {
@@ -538,9 +538,9 @@ mod tests {
 
     #[test]
     fn two_entries_on_one_key_keep_the_first_and_say_so() {
-        let (config, problems) = parsed("[keys]\ntrash = \"Ctrl+D\"\nclear-search = \"Ctrl+D\"\n");
+        let (config, problems) = parsed("[keys]\ntrash = \"Ctrl+J\"\nclear-search = \"Ctrl+J\"\n");
         // `clear-search` sorts before `trash`, so it keeps the key.
-        assert_eq!(does(&config, "Ctrl+D"), Some(Action::ClearSearch));
+        assert_eq!(does(&config, "Ctrl+J"), Some(Action::ClearSearch));
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].message.contains("trash"));
     }
@@ -565,9 +565,9 @@ mod tests {
     #[test]
     fn an_unknown_section_is_ignored_rather_than_fatal() {
         let (config, problems) =
-            parsed("[from-the-future]\nwidth = 3\n[keys]\ntrash = \"Ctrl+D\"\n");
+            parsed("[from-the-future]\nwidth = 3\n[keys]\ntrash = \"Ctrl+J\"\n");
         assert!(problems.is_empty(), "{problems:?}");
-        assert_eq!(does(&config, "Ctrl+D"), Some(Action::Trash));
+        assert_eq!(does(&config, "Ctrl+J"), Some(Action::Trash));
     }
 
     #[test]
@@ -611,11 +611,11 @@ mod tests {
     #[test]
     fn a_misspelled_conflict_policy_asks_and_keeps_the_rest_of_the_file() {
         let (config, problems) =
-            parsed("[keys]\ntrash = \"Ctrl+D\"\n[behaviour]\non-conflict = \"overwrite\"\n");
+            parsed("[keys]\ntrash = \"Ctrl+J\"\n[behaviour]\non-conflict = \"overwrite\"\n");
         assert_eq!(config.behaviour.on_conflict, OnConflict::Ask);
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].message.contains("overwrite"));
-        assert_eq!(does(&config, "Ctrl+D"), Some(Action::Trash), "the keys still applied");
+        assert_eq!(does(&config, "Ctrl+J"), Some(Action::Trash), "the keys still applied");
     }
 
     #[test]
@@ -668,7 +668,7 @@ mod tests {
     fn loading_leaves_the_file_exactly_as_written() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("files-config.toml");
-        let text = "# my bindings\n[keys]\ntrash = \"Ctrl+D\"  # muscle memory\n";
+        let text = "# my bindings\n[keys]\ntrash = \"Ctrl+J\"  # muscle memory\n";
         std::fs::write(&path, text).unwrap();
         let _ = load_from(&path);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);

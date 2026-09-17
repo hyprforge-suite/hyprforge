@@ -161,6 +161,41 @@ pub fn place_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// A change to the pinned list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PinChange {
+    Pin(PathBuf),
+    Unpin(PathBuf),
+    /// Move this pin up (`-1`) or down (`+1`) the list.
+    Move(PathBuf, i32),
+}
+
+/// The pinned list with `change` applied — pure, so the window's one
+/// list and every test agree on what a change does.
+///
+/// Pinning something already pinned leaves the list alone rather than
+/// adding a second row for it; unpinning something not pinned is
+/// likewise nothing. A move past either end stays at that end.
+pub fn apply_pin_change(pinned: &[PathBuf], change: &PinChange) -> Vec<PathBuf> {
+    let mut list = pinned.to_vec();
+    match change {
+        PinChange::Pin(path) => {
+            if !list.contains(path) {
+                list.push(path.clone());
+            }
+        }
+        PinChange::Unpin(path) => list.retain(|p| p != path),
+        PinChange::Move(path, delta) => {
+            if let Some(from) = list.iter().position(|p| p == path) {
+                let to = (from as i64 + i64::from(*delta)).clamp(0, list.len() as i64 - 1) as usize;
+                let item = list.remove(from);
+                list.insert(to, item);
+            }
+        }
+    }
+    list
+}
+
 /// One row in the sidebar's **Pinned** section: a user-chosen directory
 /// (see `crate::prefs::Prefs::pinned`) plus how many entries it holds
 /// right now.
@@ -197,7 +232,9 @@ pub fn build_pinned<B: FsBackend + ?Sized>(backend: &B, pinned: &[PathBuf]) -> V
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.to_string_lossy().into_owned());
-            let item_count = backend.read_dir(path).ok().map(|entries| entries.len());
+            // `count_children`, not `read_dir(..).len()`: that stats and
+            // builds an entry for every child only to keep the length.
+            let item_count = backend.count_children(path).ok();
             PinnedItem { label, path: path.clone(), item_count }
         })
         .collect()
@@ -207,6 +244,34 @@ pub fn build_pinned<B: FsBackend + ?Sized>(backend: &B, pinned: &[PathBuf]) -> V
 mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
+
+    fn paths(list: &[&str]) -> Vec<PathBuf> {
+        list.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn pinning_adds_to_the_end_once() {
+        let list = paths(&["/a"]);
+        let list = apply_pin_change(&list, &PinChange::Pin("/b".into()));
+        assert_eq!(list, paths(&["/a", "/b"]));
+        assert_eq!(apply_pin_change(&list, &PinChange::Pin("/a".into())), list, "no second row");
+    }
+
+    #[test]
+    fn unpinning_removes_only_that_one() {
+        let list = paths(&["/a", "/b", "/c"]);
+        assert_eq!(apply_pin_change(&list, &PinChange::Unpin("/b".into())), paths(&["/a", "/c"]));
+        assert_eq!(apply_pin_change(&list, &PinChange::Unpin("/zzz".into())), list);
+    }
+
+    #[test]
+    fn a_pin_moves_up_and_down_and_stops_at_the_ends() {
+        let list = paths(&["/a", "/b", "/c"]);
+        assert_eq!(apply_pin_change(&list, &PinChange::Move("/c".into(), -1)), paths(&["/a", "/c", "/b"]));
+        assert_eq!(apply_pin_change(&list, &PinChange::Move("/a".into(), 1)), paths(&["/b", "/a", "/c"]));
+        assert_eq!(apply_pin_change(&list, &PinChange::Move("/a".into(), -1)), list, "already first");
+        assert_eq!(apply_pin_change(&list, &PinChange::Move("/c".into(), 1)), list, "already last");
+    }
 
     #[test]
     fn home_is_always_present() {

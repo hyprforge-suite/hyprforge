@@ -296,7 +296,7 @@ impl Selection {
 }
 
 /// Where a context menu was asked for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuSpot {
     /// On this row (by position in the current view).
     Row(usize),
@@ -305,6 +305,8 @@ pub enum MenuSpot {
     /// Wherever the keyboard focus is — the Menu key and Shift+F10. The
     /// focused row if there is one, the background if not.
     Focused,
+    /// On a sidebar row, for the place it names.
+    Sidebar(PathBuf),
 }
 
 /// A name being edited in place.
@@ -328,6 +330,10 @@ struct OpenMenu {
     at: (f32, f32),
     /// The item the arrow keys are on, if any.
     highlighted: Option<usize>,
+    /// The folder a sidebar menu is about. A listing's menus act on the
+    /// selection; a sidebar row is not in the listing, so its menu
+    /// carries its own target.
+    target: Option<PathBuf>,
 }
 
 /// Everything a host must do in response to [`Browser::update`] or
@@ -378,6 +384,10 @@ pub enum Outcome {
     SetClipboard(crate::clipboard::FileClip),
     /// Put this text on the clipboard — the paths, for Copy Path.
     CopyText(String),
+    /// Change the pinned list. The window owns that list — every tab
+    /// shows the same one — so the change goes to it rather than into
+    /// this tab's own copy of the preferences.
+    Pins(crate::sidebar::PinChange),
     /// Paste the clipboard's files into this folder.
     Paste(PathBuf),
     /// Focus the rename field and select its first `select` characters —
@@ -559,6 +569,9 @@ pub struct Browser {
     renaming: Option<Renaming>,
     /// See [`Message::AfterListing`].
     after_listing: Option<(PathBuf, bool)>,
+    /// The folder a sidebar menu is acting on while one of its items
+    /// runs — see [`OpenMenu::target`].
+    menu_target: Option<PathBuf>,
 }
 
 impl Browser {
@@ -593,6 +606,7 @@ impl Browser {
             can_paste: false,
             renaming: None,
             after_listing: None,
+            menu_target: None,
         };
         (browser, Outcome::ReadDir(start_dir))
     }
@@ -803,7 +817,11 @@ impl Browser {
             .and_then(|f| rows.iter().find(|e| e.path == f));
         ActionContext {
             selected: self.selected_shown().len(),
-            focused_is_dir: focused.map(|e| e.is_dir),
+            focused_is_dir: if self.menu_target.is_some() {
+                Some(true)
+            } else {
+                focused.map(|e| e.is_dir)
+            },
             shown: rows.len(),
             can_go_back: !self.back_stack.is_empty(),
             can_go_forward: !self.forward_stack.is_empty(),
@@ -811,7 +829,37 @@ impl Browser {
             searching: !self.search_query.is_empty(),
             in_trash: self.in_trash(),
             can_paste: self.can_paste,
+            pin: {
+                let target = self.pin_target();
+                action::PinTarget {
+                    exists: target.is_some(),
+                    pinned_at: target.and_then(|t| self.prefs.pinned.iter().position(|p| *p == t)),
+                    pins: self.prefs.pinned.len(),
+                }
+            },
         }
+    }
+
+    /// The folder the pin actions act on: a sidebar menu's own row; else
+    /// one selected folder; else the folder being shown.
+    fn pin_target(&self) -> Option<PathBuf> {
+        if let Some(target) = &self.menu_target {
+            return Some(target.clone());
+        }
+        let selected = self.selected_shown();
+        if let [one] = selected.as_slice() {
+            if self.entries.iter().any(|e| &e.path == one && e.is_dir) {
+                return Some(one.clone());
+            }
+        }
+        (!self.in_trash()).then(|| self.current_dir.clone())
+    }
+
+    /// The window's pinned list changed; this tab's copy follows it.
+    /// Kept so the pin actions know what is pinned — the sidebar rows
+    /// themselves arrive as [`Message::PinnedLoaded`].
+    pub fn set_pins(&mut self, pinned: Vec<PathBuf>) {
+        self.prefs.pinned = pinned;
     }
 
     /// Tells the browser whether the clipboard holds files. The host owns
@@ -893,10 +941,22 @@ impl Browser {
             // index against a list that may have been re-sorted since
             // the focus was set.
             Action::Open => self.activate_focused(),
-            Action::OpenInNewTab => match self.selection.focused() {
-                Some(path) => Outcome::OpenInNewTab(path.to_path_buf()),
-                None => Outcome::None,
+            Action::OpenInNewTab => match (&self.menu_target, self.selection.focused()) {
+                (Some(target), _) => Outcome::OpenInNewTab(target.clone()),
+                (None, Some(path)) => Outcome::OpenInNewTab(path.to_path_buf()),
+                (None, None) => Outcome::None,
             },
+            Action::Pin | Action::Unpin | Action::PinUp | Action::PinDown => {
+                let Some(target) = self.pin_target() else {
+                    return Outcome::None;
+                };
+                Outcome::Pins(match action {
+                    Action::Pin => crate::sidebar::PinChange::Pin(target),
+                    Action::Unpin => crate::sidebar::PinChange::Unpin(target),
+                    Action::PinUp => crate::sidebar::PinChange::Move(target, -1),
+                    _ => crate::sidebar::PinChange::Move(target, 1),
+                })
+            }
             Action::GoUp => self.go_up(),
             Action::GoBack => self.go_back(),
             Action::GoForward => self.go_forward(),
@@ -1018,7 +1078,16 @@ impl Browser {
     /// menu there is about the folder, not about whatever was selected.
     fn open_menu(&mut self, spot: MenuSpot, at: (f32, f32)) {
         self.renaming = None;
+        if let MenuSpot::Sidebar(path) = spot {
+            let kind = if self.prefs.pinned.contains(&path) { MenuKind::Pinned } else { MenuKind::Place };
+            self.menu_target = Some(path.clone());
+            let items = menus::build(self.config.menus.get(kind), &self.action_context(), &self.config.keymap);
+            self.menu_target = None;
+            self.menu = (!items.is_empty()).then_some(OpenMenu { items, at, highlighted: None, target: Some(path) });
+            return;
+        }
         let row = match spot {
+            MenuSpot::Sidebar(_) => unreachable!("handled above"),
             MenuSpot::Row(i) => Some(i),
             MenuSpot::Background => None,
             MenuSpot::Focused => {
@@ -1053,7 +1122,7 @@ impl Browser {
             }
         };
         let items = menus::build(self.config.menus.get(kind), &self.action_context(), &self.config.keymap);
-        self.menu = (!items.is_empty()).then_some(OpenMenu { items, at, highlighted: None });
+        self.menu = (!items.is_empty()).then_some(OpenMenu { items, at, highlighted: None, target: None });
     }
 
     fn step_menu(&mut self, direction: i32) -> Outcome {
@@ -1071,7 +1140,12 @@ impl Browser {
             return Outcome::None;
         };
         match menu.items.get(index) {
-            Some(MenuItem::Action { action, enabled: true, .. }) => self.perform(*action),
+            Some(MenuItem::Action { action, enabled: true, .. }) => {
+                self.menu_target = menu.target;
+                let outcome = self.perform(*action);
+                self.menu_target = None;
+                outcome
+            }
             _ => Outcome::None,
         }
     }
@@ -1873,6 +1947,10 @@ struct SidebarRow {
     /// Which theme colour this row's folder mark takes — see
     /// [`sidebar::Tint`].
     tint: sidebar::Tint,
+    /// A pin whose folder cannot be read right now. It keeps its row —
+    /// the user pinned it, and it may only be unmounted — but reads as
+    /// unavailable, so a click that fails is not a surprise.
+    missing: bool,
 }
 
 /// Builds every section the sidebar could show, **already filtered** to
@@ -1894,6 +1972,7 @@ fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
                 path: item.path.clone(),
                 meta: None,
                 tint: item.tint,
+                missing: false,
             })
             .collect(),
     };
@@ -1914,8 +1993,9 @@ fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
                 }),
                 // A pin is a folder the user chose, so it takes the
                 // accent — the same colour Home does, because both are
-                // "somewhere you put yourself".
-                tint: sidebar::Tint::Accent,
+                // "somewhere you put yourself". Dim when it is gone.
+                tint: if item.item_count.is_some() { sidebar::Tint::Accent } else { sidebar::Tint::Dim },
+                missing: item.item_count.is_none(),
             })
             .collect(),
     };
@@ -1929,6 +2009,7 @@ fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
             path: sidebar::trash_path(),
             meta: None,
             tint: sidebar::Tint::Dim,
+            missing: false,
         }],
     };
     [places, pinned, trash].into_iter().filter(|s| !s.rows.is_empty()).collect()
@@ -1962,18 +2043,15 @@ fn sidebar_rail<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
                 density::SIDEBAR_MARK_BASE,
                 scale,
             );
-            rail = rail.push(
-                iced::widget::button(
-                    container(mark).center_x(Length::Fill).center_y(Length::Fill),
-                )
-                .width(Length::Fill)
-                .height(Length::Fixed(density::row_height(scale)))
-                .padding(0)
-                .on_press(Message::Navigate(row_item.path))
-                .style(move |t: &iced::Theme, status| {
-                    selectable_row_style(t, status, is_current)
-                }),
-            );
+            let button = iced::widget::button(
+                container(mark).center_x(Length::Fill).center_y(Length::Fill),
+            )
+            .width(Length::Fill)
+            .height(Length::Fixed(density::row_height(scale)))
+            .padding(0)
+            .on_press(Message::Navigate(row_item.path.clone()))
+            .style(move |t: &iced::Theme, status| selectable_row_style(t, status, is_current));
+            rail = rail.push(sidebar_menu_area(button, row_item.path));
         }
     }
     container(scrollable(rail))
@@ -2009,7 +2087,11 @@ fn sidebar_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
                 density::SIDEBAR_MARK_BASE,
                 scale,
             );
-            let label = scaled_text(row_item.label, density::ROW_TEXT_BASE, scale);
+            let label = if row_item.missing {
+                meta_text(row_item.label, density::ROW_TEXT_BASE, scale)
+            } else {
+                scaled_text(row_item.label, density::ROW_TEXT_BASE, scale)
+            };
             let content: Element<'a, Message> = match row_item.meta {
                 Some(meta) => row![
                     mark,
@@ -2032,9 +2114,9 @@ fn sidebar_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
             // instead of wrapping one of the two helpers.
             let button = iced::widget::button(content)
                 .width(Length::Fill)
-                .on_press(Message::Navigate(row_item.path))
+                .on_press(Message::Navigate(row_item.path.clone()))
                 .style(move |t: &iced::Theme, status| selectable_row_style(t, status, is_current));
-            group = group.push(button);
+            group = group.push(sidebar_menu_area(button, row_item.path));
         }
         list = list.push(group);
     }
@@ -2046,6 +2128,19 @@ fn sidebar_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
             background: Some(iced::Background::Color(hyprforge_ui::theme::surface::sidebar())),
             ..container::Style::default()
         })
+        .into()
+}
+
+/// A sidebar row that opens its own menu on a right-click. The button
+/// takes the left press; the right one passes through to this — the
+/// same arrangement the listing's rows use. The position is filled in
+/// by the host from the pointer.
+fn sidebar_menu_area<'a>(
+    button: impl Into<Element<'a, Message>>,
+    path: PathBuf,
+) -> Element<'a, Message> {
+    iced::widget::mouse_area(button)
+        .on_right_press(Message::OpenContextMenu { spot: MenuSpot::Sidebar(path), at: (0.0, 0.0) })
         .into()
 }
 
@@ -3394,6 +3489,27 @@ mod tests {
 
     // --- the context menu -----------------------------------------------------
 
+    fn enabled_labels(browser: &Browser) -> Vec<&'static str> {
+        let menu = browser.menu.as_ref().expect("a menu is open");
+        menu.items
+            .iter()
+            .filter_map(|i| match i {
+                MenuItem::Action { label, enabled: true, .. } => Some(*label),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn choose(browser: &mut Browser, label: &str) -> Outcome {
+        let menu = browser.menu.as_ref().expect("a menu is open");
+        let index = menu
+            .items
+            .iter()
+            .position(|i| matches!(i, MenuItem::Action { label: l, .. } if *l == label))
+            .unwrap_or_else(|| panic!("no {label} item"));
+        browser.update(Message::MenuChose(index))
+    }
+
     fn right_click(browser: &mut Browser, spot: MenuSpot) {
         browser.update(Message::OpenContextMenu { spot, at: (10.0, 10.0) });
     }
@@ -3507,6 +3623,37 @@ mod tests {
     }
 
     /// A disabled item does nothing when clicked, beyond closing.
+    /// A sidebar row is not in the listing, so its menu acts on the
+    /// place the row names — never on whatever is selected beside it.
+    #[test]
+    fn a_sidebar_menu_acts_on_its_own_row() {
+        use crate::sidebar::PinChange;
+        let mut browser = loaded_browser(&["a.txt"]);
+        browser.set_pins(vec!["/p1".into(), "/p2".into()]);
+        right_click(&mut browser, MenuSpot::Sidebar("/p2".into()));
+        let labels = enabled_labels(&browser);
+        assert!(labels.contains(&"Move Up"), "{labels:?}");
+        assert!(!labels.contains(&"Move Down"), "last pin: {labels:?}");
+        assert_eq!(choose(&mut browser, "Unpin"), Outcome::Pins(PinChange::Unpin("/p2".into())));
+
+        right_click(&mut browser, MenuSpot::Sidebar("/p1".into()));
+        assert_eq!(choose(&mut browser, "Open in New Tab"), Outcome::OpenInNewTab("/p1".into()));
+
+        right_click(&mut browser, MenuSpot::Sidebar("/music".into()));
+        assert_eq!(choose(&mut browser, "Pin to Sidebar"), Outcome::Pins(PinChange::Pin("/music".into())));
+    }
+
+    /// With nothing selected, Ctrl+D pins the folder being shown.
+    #[test]
+    fn pinning_from_the_keyboard_pins_the_folder_shown() {
+        use crate::sidebar::PinChange;
+        let mut browser = loaded_browser(&["a.txt"]);
+        let shown = browser.current_dir.clone();
+        assert_eq!(browser.perform(Action::Pin), Outcome::Pins(PinChange::Pin(shown.clone())));
+        browser.set_pins(vec![shown]);
+        assert!(!action::enabled(Action::Pin, &browser.action_context()), "already pinned");
+    }
+
     #[test]
     fn choosing_a_disabled_item_only_closes_the_menu() {
         let mut browser = loaded_browser(&["a.txt"]);
@@ -3521,6 +3668,7 @@ mod tests {
             ),
             at: (0.0, 0.0),
             highlighted: None,
+            target: None,
         });
         assert_eq!(browser.update(Message::MenuChose(0)), Outcome::None);
         assert!(!browser.menu_open());

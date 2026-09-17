@@ -69,6 +69,14 @@ pub enum Action {
     NewFolder,
     /// Open the right-click menu from the keyboard, for the focused row.
     ContextMenu,
+    /// Add a folder to the sidebar's Pinned section.
+    Pin,
+    /// Take a folder out of it.
+    Unpin,
+    /// Move a pin one place up the list.
+    PinUp,
+    /// Move a pin one place down the list.
+    PinDown,
     // Window scope: the tab strip, and undo — whose history spans tabs.
     /// Take back the most recent trash, rename, move, copy or new folder.
     Undo,
@@ -119,6 +127,10 @@ impl Action {
             Action::Paste,
             Action::CopyPath,
             Action::Refresh,
+            Action::Pin,
+            Action::Unpin,
+            Action::PinUp,
+            Action::PinDown,
             Action::Rename,
             Action::NewFolder,
             Action::ContextMenu,
@@ -158,6 +170,10 @@ impl Action {
             Action::Paste => "paste",
             Action::CopyPath => "copy-path",
             Action::Refresh => "refresh",
+            Action::Pin => "pin",
+            Action::Unpin => "unpin",
+            Action::PinUp => "pin-up",
+            Action::PinDown => "pin-down",
             Action::Rename => "rename",
             Action::NewFolder => "new-folder",
             Action::ContextMenu => "context-menu",
@@ -216,6 +232,10 @@ impl Action {
             Action::Paste => "Paste",
             Action::CopyPath => "Copy Path",
             Action::Refresh => "Refresh",
+            Action::Pin => "Pin to Sidebar",
+            Action::Unpin => "Unpin",
+            Action::PinUp => "Move Up",
+            Action::PinDown => "Move Down",
             Action::Rename => "Rename",
             Action::NewFolder => "New Folder",
             Action::ContextMenu => "Show Menu",
@@ -289,6 +309,11 @@ impl Action {
             Action::Paste => &["Ctrl+V"],
             Action::CopyPath => &["Ctrl+Shift+C"],
             Action::Refresh => &["F5", "Ctrl+R"],
+            // Ctrl+D is "bookmark this" in Nautilus and in every browser.
+            Action::Pin => &["Ctrl+D"],
+            Action::Unpin => &[],
+            Action::PinUp => &[],
+            Action::PinDown => &[],
             Action::Rename => &["F2"],
             Action::NewFolder => &["Ctrl+Shift+N"],
             // The two keys every desktop uses for "the menu a right click
@@ -341,6 +366,21 @@ pub struct ActionContext {
     /// Whether the clipboard holds files to paste. The host knows; the
     /// browser is told.
     pub can_paste: bool,
+    /// The folder the pin actions would act on, and where it sits in the
+    /// pinned list.
+    pub pin: PinTarget,
+}
+
+/// What the pin actions would act on — see
+/// `crate::browser::Browser::pin_target` for how it is chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PinTarget {
+    /// Whether there is a folder to act on at all.
+    pub exists: bool,
+    /// Its position in the pinned list, if it is pinned.
+    pub pinned_at: Option<usize>,
+    /// How many pins there are.
+    pub pins: usize,
 }
 
 /// Whether `action` would do anything in `ctx`.
@@ -374,6 +414,10 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         Action::Cut => ctx.selected > 0 && !ctx.in_trash,
         Action::Paste => ctx.can_paste && !ctx.in_trash,
         Action::Refresh => true,
+        Action::Pin => ctx.pin.exists && ctx.pin.pinned_at.is_none() && !ctx.in_trash,
+        Action::Unpin => ctx.pin.pinned_at.is_some(),
+        Action::PinUp => ctx.pin.pinned_at.is_some_and(|at| at > 0),
+        Action::PinDown => ctx.pin.pinned_at.is_some_and(|at| at + 1 < ctx.pin.pins),
         Action::Rename => ctx.selected == 1 && !ctx.in_trash,
         Action::NewFolder => !ctx.in_trash,
         Action::Undo
@@ -494,6 +538,24 @@ mod tests {
         let ctx = ActionContext { selected: 1, in_trash: true, ..ActionContext::default() };
         assert!(enabled(Action::Copy, &ctx));
         assert!(!enabled(Action::Cut, &ctx));
+    }
+
+    #[test]
+    fn pin_actions_follow_where_the_folder_sits() {
+        let unpinned = ActionContext {
+            pin: PinTarget { exists: true, pinned_at: None, pins: 2 },
+            ..ActionContext::default()
+        };
+        assert!(enabled(Action::Pin, &unpinned));
+        assert!(!enabled(Action::Unpin, &unpinned));
+        let first = ActionContext { pin: PinTarget { pinned_at: Some(0), ..unpinned.pin }, ..unpinned };
+        assert!(!enabled(Action::Pin, &first), "already pinned");
+        assert!(enabled(Action::Unpin, &first));
+        assert!(!enabled(Action::PinUp, &first), "already first");
+        assert!(enabled(Action::PinDown, &first));
+        let last = ActionContext { pin: PinTarget { pinned_at: Some(1), ..unpinned.pin }, ..unpinned };
+        assert!(enabled(Action::PinUp, &last));
+        assert!(!enabled(Action::PinDown, &last), "already last");
     }
 
     #[test]
