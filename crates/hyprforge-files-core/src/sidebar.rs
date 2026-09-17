@@ -82,50 +82,108 @@ impl Tint {
     }
 }
 
-/// Builds the **Places** section: Home, then each of Documents/Downloads/
-/// Pictures/Music/Videos/Desktop that [`resolve`](crate::xdg_user_dirs)
-/// found *and* that actually exists as a directory right now, in that
-/// fixed order.
+/// One place the Places section can offer. `[sidebar] places` in
+/// `files-config.toml` lists which, in what order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    Home,
+    Documents,
+    Downloads,
+    Pictures,
+    Music,
+    Videos,
+    Desktop,
+}
+
+impl Place {
+    /// Every place, in the order shown when nothing is configured.
+    pub const ALL: [Place; 7] = [
+        Place::Home,
+        Place::Documents,
+        Place::Downloads,
+        Place::Pictures,
+        Place::Music,
+        Place::Videos,
+        Place::Desktop,
+    ];
+
+    /// The name `files-config.toml` uses.
+    pub fn id(self) -> &'static str {
+        match self {
+            Place::Home => "home",
+            Place::Documents => "documents",
+            Place::Downloads => "downloads",
+            Place::Pictures => "pictures",
+            Place::Music => "music",
+            Place::Videos => "videos",
+            Place::Desktop => "desktop",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Place> {
+        Place::ALL.into_iter().find(|p| p.id() == id.trim())
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Place::Home => "Home",
+            Place::Documents => "Documents",
+            Place::Downloads => "Downloads",
+            Place::Pictures => "Pictures",
+            Place::Music => "Music",
+            Place::Videos => "Videos",
+            Place::Desktop => "Desktop",
+        }
+    }
+
+    /// A colour per place, so a row is findable before it is read. The
+    /// assignment is arbitrary but *fixed*: what matters is that
+    /// Downloads is always the same colour, not which colour it is.
+    /// Beyond the four the theme has distinct roles for, the rest share
+    /// the dim one rather than the palette repeating — two places in the
+    /// same green would be worse than several in plain grey, because the
+    /// eye would read the repeat as a grouping that means something.
+    /// The colour follows the place, not its position, so reordering
+    /// places does not repaint them.
+    fn tint(self) -> Tint {
+        match self {
+            Place::Home => Tint::Accent,
+            Place::Documents => Tint::Info,
+            Place::Downloads => Tint::Success,
+            Place::Pictures => Tint::Warning,
+            Place::Music | Place::Videos | Place::Desktop => Tint::Dim,
+        }
+    }
+}
+
+/// Builds the **Places** section: `places`, in that order, each one
+/// that [`resolve`](crate::xdg_user_dirs) found *and* that actually
+/// exists as a directory right now. Home is always offered when listed
+/// — it is where the window starts, and it cannot be missing.
 ///
 /// A user directory that `user-dirs.dirs` names but that has since been
 /// deleted or renamed is left out rather than shown as a shortcut to
 /// nowhere — checked with [`FsBackend::stat`], the same call
 /// [`crate::browser`] uses for everything else, so the mock backend
 /// tests this against is the one real code runs against too.
-pub fn build<B: FsBackend + ?Sized>(backend: &B, user_dirs: &UserDirs) -> Vec<SidebarItem> {
-    let mut items = vec![SidebarItem {
-        label: "Home".to_string(),
-        path: backend.home_dir(),
-        tint: Tint::Accent,
-    }];
-
-    // A colour per place, so a row is findable before it is read. The
-    // assignment is arbitrary but *fixed*: what matters is that
-    // Downloads is always the same colour, not which colour it is.
-    // Beyond the four the theme has distinct roles for, the rest share
-    // the dim one rather than the palette repeating — two places in the
-    // same green would be worse than several in plain grey, because the
-    // eye would read the repeat as a grouping that means something.
-    let candidates: [(&str, &Option<PathBuf>, Tint); 6] = [
-        ("Documents", &user_dirs.documents, Tint::Info),
-        ("Downloads", &user_dirs.download, Tint::Success),
-        ("Pictures", &user_dirs.pictures, Tint::Warning),
-        ("Music", &user_dirs.music, Tint::Dim),
-        ("Videos", &user_dirs.videos, Tint::Dim),
-        ("Desktop", &user_dirs.desktop, Tint::Dim),
-    ];
-    for (label, path, tint) in candidates {
-        if let Some(path) = path {
-            if exists_as_dir(backend, path) {
-                items.push(SidebarItem {
-                    label: label.to_string(),
-                    path: path.clone(),
-                    tint,
-                });
-            }
+pub fn build<B: FsBackend + ?Sized>(backend: &B, user_dirs: &UserDirs, places: &[Place]) -> Vec<SidebarItem> {
+    let mut items = Vec::new();
+    for &place in places {
+        let path = match place {
+            Place::Home => Some(backend.home_dir()),
+            Place::Documents => user_dirs.documents.clone(),
+            Place::Downloads => user_dirs.download.clone(),
+            Place::Pictures => user_dirs.pictures.clone(),
+            Place::Music => user_dirs.music.clone(),
+            Place::Videos => user_dirs.videos.clone(),
+            Place::Desktop => user_dirs.desktop.clone(),
+        };
+        let Some(path) = path else { continue };
+        if place != Place::Home && !exists_as_dir(backend, &path) {
+            continue;
         }
+        items.push(SidebarItem { label: place.label().to_string(), path, tint: place.tint() });
     }
-
     items
 }
 
@@ -249,6 +307,19 @@ mod tests {
         list.iter().map(PathBuf::from).collect()
     }
 
+    /// `[sidebar] places` picks and orders the places; a place's colour
+    /// goes with it.
+    #[test]
+    fn places_follow_the_configured_order() {
+        let backend = MockBackend::new();
+        let dirs = UserDirs::default();
+        let items = build(&backend, &dirs, &[Place::Home]);
+        assert_eq!(items.len(), 1);
+        assert!(build(&backend, &dirs, &[]).is_empty(), "an empty list shows no places");
+        assert_eq!(Place::from_id("downloads"), Some(Place::Downloads));
+        assert_eq!(Place::from_id("Trash"), None);
+    }
+
     #[test]
     fn pinning_adds_to_the_end_once() {
         let list = paths(&["/a"]);
@@ -276,7 +347,7 @@ mod tests {
     #[test]
     fn home_is_always_present() {
         let backend = MockBackend::new();
-        let items = build(&backend, &UserDirs::default());
+        let items = build(&backend, &UserDirs::default(), &Place::ALL);
         assert_eq!(items.first().unwrap().label, "Home");
     }
 
@@ -286,7 +357,7 @@ mod tests {
     #[test]
     fn build_no_longer_includes_trash() {
         let backend = MockBackend::new();
-        let items = build(&backend, &UserDirs::default());
+        let items = build(&backend, &UserDirs::default(), &Place::ALL);
         assert!(!items.iter().any(|i| i.label == "Trash"));
     }
 
@@ -304,7 +375,7 @@ mod tests {
             ..UserDirs::default()
         };
         // Never seeded, so `stat` reports NotFound.
-        let items = build(&backend, &user_dirs);
+        let items = build(&backend, &user_dirs, &Place::ALL);
         assert!(!items.iter().any(|i| i.label == "Documents"));
     }
 
@@ -320,7 +391,7 @@ mod tests {
             pictures: Some(pics),
             ..UserDirs::default()
         };
-        let items = build(&backend, &user_dirs);
+        let items = build(&backend, &user_dirs, &Place::ALL);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert_eq!(labels, vec!["Home", "Documents", "Pictures"]);
     }
@@ -339,7 +410,7 @@ mod tests {
             documents: Some(fake_docs),
             ..UserDirs::default()
         };
-        let items = build(&backend, &user_dirs);
+        let items = build(&backend, &user_dirs, &Place::ALL);
         assert!(!items.iter().any(|i| i.label == "Documents"));
     }
 

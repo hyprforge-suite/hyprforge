@@ -48,12 +48,14 @@ pub enum SidebarPref {
 }
 
 impl SidebarPref {
-    /// Whether the sidebar is collapsed, given how wide the window is.
-    pub fn collapsed(self, viewport_width: f32) -> bool {
+    /// Whether the sidebar is collapsed, given how wide the window is
+    /// and the width `Auto` collapses below (`[sidebar] collapse-below`;
+    /// `0` never collapses on its own).
+    pub fn collapsed(self, viewport_width: f32, collapse_below: f32) -> bool {
         match self {
             SidebarPref::Shown => false,
             SidebarPref::Hidden => true,
-            SidebarPref::Auto => viewport_width < crate::density::SIDEBAR_COLLAPSE_BELOW,
+            SidebarPref::Auto => viewport_width < collapse_below,
         }
     }
 }
@@ -342,8 +344,10 @@ mod tests {
     /// help you navigate has no room left.
     #[test]
     fn a_narrow_window_collapses_the_sidebar_and_a_wide_one_does_not() {
-        assert!(SidebarPref::Auto.collapsed(500.0));
-        assert!(!SidebarPref::Auto.collapsed(1200.0));
+        let below = crate::density::SIDEBAR_COLLAPSE_BELOW;
+        assert!(SidebarPref::Auto.collapsed(500.0, below));
+        assert!(!SidebarPref::Auto.collapsed(1200.0, below));
+        assert!(!SidebarPref::Auto.collapsed(500.0, 0.0), "0 never collapses on its own");
     }
 
     /// And an explicit choice beats the width in both directions. A
@@ -352,8 +356,8 @@ mod tests {
     /// window still has to be able to reach Downloads.
     #[test]
     fn an_explicit_choice_wins_over_the_width_in_both_directions() {
-        assert!(!SidebarPref::Shown.collapsed(320.0), "asked for it at any width");
-        assert!(SidebarPref::Hidden.collapsed(3000.0), "hidden at any width");
+        assert!(!SidebarPref::Shown.collapsed(320.0, 760.0), "asked for it at any width");
+        assert!(SidebarPref::Hidden.collapsed(3000.0, 760.0), "hidden at any width");
     }
 
     #[test]

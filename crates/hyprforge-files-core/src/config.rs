@@ -26,11 +26,17 @@
 //! trash  = "Delete"
 //! rename = ["F2", "Ctrl+R"]
 //! go-up  = []
+//!
+//! [sidebar]
+//! places = ["home", "downloads", "documents"]
+//! show-trash = true
+//! collapse-below = 760   # window width; 0 never collapses on its own
 //! ```
 
 use crate::action::Action;
 use crate::keymap::{Combo, Key, Keymap};
 use crate::menu::{MenuConfig, MenuEntry, MenuKind};
+use crate::sidebar::Place;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -44,7 +50,34 @@ pub struct Config {
     pub keymap: Keymap,
     pub menus: MenuConfig,
     pub behaviour: Behaviour,
+    pub sidebar: SidebarConfig,
 }
+
+/// `[sidebar]`: what the sidebar offers, and when it folds to a rail.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SidebarConfig {
+    /// The Places section, in order. A place whose folder does not exist
+    /// is still left out.
+    pub places: Vec<Place>,
+    pub show_trash: bool,
+    /// The window width below which the sidebar folds to its rail on its
+    /// own. `0` never folds it; the toggle still does.
+    pub collapse_below: f32,
+}
+
+impl Default for SidebarConfig {
+    fn default() -> Self {
+        SidebarConfig {
+            places: Place::ALL.to_vec(),
+            show_trash: true,
+            collapse_below: crate::density::SIDEBAR_COLLAPSE_BELOW,
+        }
+    }
+}
+
+// `f32` has no `Eq`; the width is a whole number of pixels from a TOML
+// integer, never NaN.
+impl Eq for SidebarConfig {}
 
 /// `[behaviour]`: how the file manager acts when there is a choice to
 /// make.
@@ -137,6 +170,16 @@ struct RawConfig {
     keys: BTreeMap<String, OneOrMany>,
     menu: BTreeMap<String, Vec<String>>,
     behaviour: RawBehaviour,
+    sidebar: RawSidebar,
+}
+
+/// `[sidebar]` as written — checked by hand, like `[behaviour]`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+struct RawSidebar {
+    places: Option<toml::Value>,
+    show_trash: Option<toml::Value>,
+    collapse_below: Option<toml::Value>,
 }
 
 /// `[behaviour]` as written. Values are strings checked by hand rather
@@ -154,7 +197,8 @@ struct RawBehaviour {
     undo_notice_seconds: Option<toml::Value>,
 }
 
-/// A `[behaviour]` number within `range`, or a problem naming it.
+/// A number within `range`, or a problem naming it. `name` includes
+/// its section, as in `[behaviour] undo-depth`.
 fn number(
     name: &str,
     value: &Option<toml::Value>,
@@ -168,7 +212,7 @@ fn number(
         Some(toml::Value::Integer(n)) if range.contains(n) => *n as u64,
         Some(other) => {
             problems.push(problem(format!(
-                "[behaviour] {name} = {other}: use {unit} from {} to {} — {current} until this is fixed",
+                "{name} = {other}: use {unit} from {} to {} — {current} until this is fixed",
                 range.start(),
                 range.end()
             )));
@@ -177,8 +221,9 @@ fn number(
     }
 }
 
-/// A `[behaviour]` switch: `true` or `false`, or a problem naming it —
-/// checked by hand for the same reason as the rest of this section.
+/// A switch: `true` or `false`, or a problem naming it — checked by
+/// hand for the same reason as the rest of `[behaviour]`. `name`
+/// includes its section.
 fn switch(
     name: &str,
     value: &Option<toml::Value>,
@@ -190,7 +235,7 @@ fn switch(
         Some(toml::Value::Boolean(on)) => *on,
         Some(other) => {
             problems.push(problem(format!(
-                "[behaviour] {name} = {other}: use true or false — {} until this is fixed",
+                "{name} = {other}: use true or false — {} until this is fixed",
                 if default { "on" } else { "off" }
             )));
             default
@@ -277,11 +322,11 @@ pub fn parse(text: &str, path: &Path) -> (Config, Vec<ConfigProblem>) {
         }
     }
     behaviour.confirm_trash =
-        switch("confirm-trash", &raw.behaviour.confirm_trash, behaviour.confirm_trash, &mut problems);
+        switch("[behaviour] confirm-trash", &raw.behaviour.confirm_trash, behaviour.confirm_trash, &mut problems);
     behaviour.confirm_delete =
-        switch("confirm-delete", &raw.behaviour.confirm_delete, behaviour.confirm_delete, &mut problems);
+        switch("[behaviour] confirm-delete", &raw.behaviour.confirm_delete, behaviour.confirm_delete, &mut problems);
     behaviour.progress_after_ms = number(
-        "progress-after-ms",
+        "[behaviour] progress-after-ms",
         &raw.behaviour.progress_after_ms,
         0..=60_000,
         behaviour.progress_after_ms,
@@ -289,16 +334,57 @@ pub fn parse(text: &str, path: &Path) -> (Config, Vec<ConfigProblem>) {
         &mut problems,
     );
     behaviour.undo_depth =
-        number("undo-depth", &raw.behaviour.undo_depth, 0..=1_000, behaviour.undo_depth, "a count", &mut problems);
+        number("[behaviour] undo-depth", &raw.behaviour.undo_depth, 0..=1_000, behaviour.undo_depth, "a count", &mut problems);
     behaviour.undo_notice_seconds = number(
-        "undo-notice-seconds",
+        "[behaviour] undo-notice-seconds",
         &raw.behaviour.undo_notice_seconds,
         0..=600,
         behaviour.undo_notice_seconds,
         "seconds",
         &mut problems,
     );
-    (Config { keymap, menus, behaviour }, problems)
+    let sidebar = sidebar_with(&raw.sidebar, &mut problems);
+    (Config { keymap, menus, behaviour, sidebar }, problems)
+}
+
+/// `[sidebar]` over the defaults. An unknown place is reported and left
+/// out; the others keep the file's order.
+fn sidebar_with(raw: &RawSidebar, problems: &mut Vec<ConfigProblem>) -> SidebarConfig {
+    let mut sidebar = SidebarConfig::default();
+    match &raw.places {
+        None => {}
+        Some(toml::Value::Array(items)) => {
+            let mut places = Vec::with_capacity(items.len());
+            for item in items {
+                match item.as_str().and_then(Place::from_id) {
+                    Some(place) if places.contains(&place) => problems.push(problem(format!(
+                        "[sidebar] places: \"{}\" is listed twice, so only the first is shown",
+                        place.id()
+                    ))),
+                    Some(place) => places.push(place),
+                    None => problems.push(problem(format!(
+                        "[sidebar] places: {item} is not a place (use {}), so it was left out",
+                        Place::ALL.map(Place::id).join(", ")
+                    ))),
+                }
+            }
+            sidebar.places = places;
+        }
+        Some(other) => problems.push(problem(format!(
+            "[sidebar] places = {other}: use a list, like [\"home\", \"downloads\"] — \
+             the usual places until this is fixed"
+        ))),
+    }
+    sidebar.show_trash = switch("[sidebar] show-trash", &raw.show_trash, sidebar.show_trash, problems);
+    sidebar.collapse_below = number(
+        "[sidebar] collapse-below",
+        &raw.collapse_below,
+        0..=10_000,
+        sidebar.collapse_below as u64,
+        "a width in pixels",
+        problems,
+    ) as f32;
+    sidebar
 }
 
 /// The default menus with `[menu]` applied.
@@ -637,6 +723,36 @@ mod tests {
         assert!(config.behaviour.confirm_delete, "still asks");
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].message.contains("confirm-delete"));
+    }
+
+    #[test]
+    fn the_sidebar_places_are_chosen_and_ordered_by_the_file() {
+        let (config, problems) = parsed("[sidebar]\nplaces = [\"downloads\", \"home\"]\nshow-trash = false\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(config.sidebar.places, vec![Place::Downloads, Place::Home]);
+        assert!(!config.sidebar.show_trash);
+        assert_eq!(config.sidebar.collapse_below, SidebarConfig::default().collapse_below);
+    }
+
+    /// One misspelled place costs that place, not the list.
+    #[test]
+    fn an_unknown_or_repeated_place_is_left_out_and_reported() {
+        let (config, problems) =
+            parsed("[sidebar]\nplaces = [\"home\", \"downlaods\", \"home\", \"music\"]\n");
+        assert_eq!(config.sidebar.places, vec![Place::Home, Place::Music]);
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems[0].message.contains("downlaods"), "{problems:?}");
+        assert!(problems[1].message.contains("twice"), "{problems:?}");
+    }
+
+    #[test]
+    fn the_collapse_width_is_configurable_and_zero_turns_it_off() {
+        let (config, problems) = parsed("[sidebar]\ncollapse-below = 0\n");
+        assert!(problems.is_empty());
+        assert_eq!(config.sidebar.collapse_below, 0.0);
+        let (config, problems) = parsed("[sidebar]\ncollapse-below = \"wide\"\nplaces = \"home\"\n");
+        assert_eq!(config.sidebar, SidebarConfig::default(), "both bad values keep their defaults");
+        assert_eq!(problems.len(), 2, "{problems:?}");
     }
 
     #[test]

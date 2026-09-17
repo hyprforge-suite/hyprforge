@@ -496,6 +496,11 @@ struct ViewModel<'a> {
     /// How many entries this listing holds that the current filters are
     /// keeping off screen — see [`Browser::hidden_count`].
     hidden_count: usize,
+    /// How many entries here are dotfiles, shown or not — whether the
+    /// status bar offers its show/hide switch.
+    dotfiles: usize,
+    /// `[sidebar] show-trash`.
+    show_trash: bool,
     /// The rows to draw, in order — borrowed out of the one owned
     /// listing rather than a second copy of it.
     rows: Vec<&'a Entry>,
@@ -1379,9 +1384,14 @@ impl Browser {
             in_trash: self.in_trash(),
             renaming: self.renaming.as_ref(),
             column_picker_open: self.column_picker_open,
-            sidebar_collapsed: self.prefs.sidebar.collapsed(viewport_width),
+            sidebar_collapsed: self
+                .prefs
+                .sidebar
+                .collapsed(viewport_width, self.config.sidebar.collapse_below),
             viewport_width,
             hidden_count: self.hidden_count(),
+            dotfiles: self.entries.iter().filter(|e| e.hidden).count(),
+            show_trash: self.config.sidebar.show_trash,
             rows: self.rows(),
             selection: &self.selection,
             search_query: &self.search_query,
@@ -1906,9 +1916,32 @@ fn status_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> 
     // the other question a status bar is asked and the one the path bar
     // only half answers — it elides the middle of a long path, and this
     // does not.
+    // The dotfile switch, where the count of what is hidden is — Ctrl+H
+    // is not something anyone finds by looking. Only offered when there
+    // are dotfiles here to show or hide.
+    let dotfile_switch: Element<'a, Message> = if vm.dotfiles > 0 {
+        let label = if vm.prefs.show_hidden {
+            "Hide dotfiles".to_string()
+        } else if vm.dotfiles == 1 {
+            "Show 1 dotfile".to_string()
+        } else {
+            format!("Show {} dotfiles", vm.dotfiles)
+        };
+        // `scaled_text`, not `meta_text`: a colour set on the text
+        // would override the button's, and the hover colour with it.
+        iced::widget::button(scaled_text(label, density::META_TEXT_BASE, scale))
+            .padding([0, spacing::XS as u16])
+            .on_press(Message::Perform(Action::ToggleHidden))
+            .style(quiet_link_style)
+            .into()
+    } else {
+        iced::widget::Space::new().into()
+    };
+
     plane(
         row![
             meta_text(summary, density::META_TEXT_BASE, scale),
+            dotfile_switch,
             iced::widget::Space::new().width(Length::Fill),
             meta_text(
                 vm.current_dir.display().to_string(),
@@ -1920,6 +1953,25 @@ fn status_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> 
         .align_y(iced::Alignment::Center)
         .into(),
     )
+}
+
+/// A button that reads as a line of status text until pointed at — a
+/// control in the status bar must not look like a toolbar.
+fn quiet_link_style(theme: &iced::Theme, status: iced::widget::button::Status) -> iced::widget::button::Style {
+    use iced::widget::button::Status;
+    let palette = theme.extended_palette();
+    let (text_color, background) = match status {
+        Status::Hovered | Status::Pressed => {
+            (palette.primary.base.color, Some(iced::Background::Color(hyprforge_ui::theme::surface::card())))
+        }
+        _ => (hyprforge_ui::theme::text_dim(), None),
+    };
+    iced::widget::button::Style {
+        background,
+        text_color,
+        border: iced::Border { radius: 4.0.into(), ..iced::Border::default() },
+        ..iced::widget::button::Style::default()
+    }
 }
 
 /// One heading and its rows in the sidebar — Places, Pinned or Trash.
@@ -1999,7 +2051,7 @@ fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
             })
             .collect(),
     };
-    let trash = SidebarSection {
+    let trash = vm.show_trash.then(|| SidebarSection {
         title: "Trash",
         // Dim: the trash is a destination, not one of your places, and
         // giving it a hue of its own would put it in the same visual
@@ -2011,8 +2063,8 @@ fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
             tint: sidebar::Tint::Dim,
             missing: false,
         }],
-    };
-    [places, pinned, trash].into_iter().filter(|s| !s.rows.is_empty()).collect()
+    });
+    [Some(places), Some(pinned), trash].into_iter().flatten().filter(|s| !s.rows.is_empty()).collect()
 }
 
 /// The collapsed sidebar: a rail of marks, still clickable.
@@ -4345,6 +4397,8 @@ mod tests {
             sidebar_collapsed: false,
             viewport_width: 1000.0,
             hidden_count: 0,
+            dotfiles: 0,
+            show_trash: true,
             rows: Vec::new(),
             selection,
             search_query: "",
@@ -4395,5 +4449,25 @@ mod tests {
         let sections = sidebar_sections(&vm);
         let trash = sections.iter().find(|s| s.title == "Trash").unwrap();
         assert_eq!(trash.rows[0].path, sidebar::trash_path());
+    }
+
+    #[test]
+    fn show_trash_off_leaves_the_trash_section_out() {
+        let (selection, prefs, load_state) = (Selection::default(), Prefs::default(), LoadState::Loaded);
+        let mut vm = view_model_with(&[], &[], Path::new("/x"), &selection, &prefs, &load_state);
+        vm.show_trash = false;
+        assert!(sidebar_sections(&vm).iter().all(|s| s.title != "Trash"));
+    }
+
+    /// A pin that cannot be read keeps its row, dimmed.
+    #[test]
+    fn a_missing_pin_is_shown_dimmed() {
+        let (selection, prefs, load_state) = (Selection::default(), Prefs::default(), LoadState::Loaded);
+        let pinned = vec![PinnedItem { label: "Gone".to_string(), path: PathBuf::from("/gone"), item_count: None }];
+        let vm = view_model_with(&[], &pinned, Path::new("/x"), &selection, &prefs, &load_state);
+        let sections = sidebar_sections(&vm);
+        let row = &sections.iter().find(|s| s.title == "Pinned").unwrap().rows[0];
+        assert!(row.missing);
+        assert_eq!(row.tint, sidebar::Tint::Dim);
     }
 }
