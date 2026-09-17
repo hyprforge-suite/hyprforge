@@ -9,6 +9,7 @@
 //! `backend`) stays exactly what phase 1 built: pure model code, testable
 //! without a window.
 
+pub mod action;
 pub mod backend;
 pub mod browser;
 pub mod click;
@@ -26,6 +27,7 @@ pub mod types;
 pub mod users;
 pub mod xdg_user_dirs;
 
+pub use action::{Action, ActionContext, Scope};
 pub use backend::{FsBackend, StdBackend};
 pub use click::{Click, ClickTracker};
 pub use trash::{RoutingBackend, TrashBackend};

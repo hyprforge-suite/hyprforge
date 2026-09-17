@@ -28,7 +28,7 @@ use crate::filter::{is_hidden, matches_query};
 use crate::format::{format_kind, format_modified_at, format_owner, format_permissions, format_size};
 use crate::glyph;
 use crate::icon::{self, entry_icon};
-use crate::keymap::{self, Direction, Key, KeyAction, Modifiers};
+use crate::action::{self, Action, ActionContext, Scope};
 use crate::prefs::{Column, Columns, Prefs, ViewMode};
 use crate::sidebar::{self, PinnedItem, SidebarItem};
 use crate::sort::{sort_indices, SortColumn, SortDirection};
@@ -235,13 +235,48 @@ impl Selection {
         self.click(&rows[next].path);
     }
 
+    /// Selects every shown row, leaving the focus where it was — or on
+    /// the first row if there was none, so a following arrow key has
+    /// somewhere to start from.
+    fn select_all(&mut self, rows: &[&Entry]) {
+        self.selected = rows.iter().map(|e| e.path.clone()).collect();
+        if self.focused.is_none() {
+            self.focused = rows.first().map(|e| e.path.clone());
+        }
+        if self.anchor.is_none() {
+            self.anchor = self.focused.clone();
+        }
+    }
+
+    /// Moves the focus by one row and selects everything between it and
+    /// the anchor — Shift+Arrow, the keyboard's shift-click.
+    fn extend(&mut self, rows: &[&Entry], delta: i32) {
+        if rows.is_empty() {
+            return;
+        }
+        let current = self
+            .focused
+            .as_deref()
+            .and_then(|f| rows.iter().position(|e| e.path == f));
+        let next = match current {
+            Some(i) => (i as i32 + delta).clamp(0, rows.len() as i32 - 1) as usize,
+            None => 0,
+        };
+        if self.anchor.is_none() {
+            // No anchor yet: the range starts where the focus was, or at
+            // the row we are arriving on.
+            self.anchor = Some(rows[current.unwrap_or(next)].path.clone());
+        }
+        self.shift_click(rows, next);
+    }
+
     fn clear(&mut self) {
         *self = Selection::default();
     }
 }
 
 /// Everything a host must do in response to [`Browser::update`] or
-/// [`Browser::handle_key`] — the outcomes `Browser` cannot carry out
+/// [`Browser::perform`] — the outcomes `Browser` cannot carry out
 /// itself because each one is either blocking I/O or a decision that
 /// belongs to the host (what "activating" a file means; where
 /// preferences get persisted).
@@ -272,6 +307,15 @@ pub enum Outcome {
     /// behind them, which is what every file manager that shows this
     /// column does.
     CountFolders(Vec<PathBuf>),
+    /// Move these to the trash. Only paths the user can currently see —
+    /// see [`Browser::perform`].
+    Trash(Vec<PathBuf>),
+    /// Open this folder in a new tab. A host without tabs ignores it.
+    OpenInNewTab(PathBuf),
+    /// A window-scope action — see [`crate::action::Scope`]. It reaches
+    /// the host this way so a menu item for one travels the same road as
+    /// every other action; a host without tabs ignores it.
+    Window(Action),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -308,7 +352,12 @@ pub enum Message {
     /// to find it still down would read as a bug.
     ToggleColumnPicker,
     SetViewMode(crate::prefs::ViewMode),
-    Key(Key, Modifiers),
+    /// Carry out an action — from a menu, a button, or a key the host
+    /// resolved through [`crate::keymap::Keymap`].
+    Perform(Action),
+    /// Type a character into the search box. The host decides a key
+    /// press means this; see [`crate::keymap::Resolved::Type`].
+    TypeToSearch(char),
     /// The Pinned sidebar section's content, computed off the UI thread
     /// via [`crate::sidebar::build_pinned`] — see that function's own doc
     /// for why this is a message rather than a `Browser::new` argument
@@ -563,7 +612,12 @@ impl Browser {
                 self.prefs.view_mode = mode;
                 Outcome::PrefsChanged(self.prefs.clone())
             }
-            Message::Key(key, mods) => self.handle_key(key, mods),
+            Message::Perform(action) => self.perform(action),
+            Message::TypeToSearch(c) => {
+                self.search_query.push(c);
+                self.refresh_view();
+                Outcome::None
+            }
             Message::PinnedLoaded(items) => {
                 self.pinned = items;
                 Outcome::None
@@ -571,37 +625,104 @@ impl Browser {
         }
     }
 
-    /// Resolves one key press through [`crate::keymap`] and applies it.
-    /// A host wires this to iced's keyboard subscription; see the
-    /// `keymap` module doc for why the grammar lives there instead of
-    /// being reimplemented per host.
-    pub fn handle_key(&mut self, key: Key, mods: Modifiers) -> Outcome {
-        match keymap::resolve(key, mods) {
+    /// What the listing looks like right now, for deciding which actions
+    /// make sense — see [`crate::action::enabled`].
+    pub fn action_context(&self) -> ActionContext {
+        let rows = self.rows();
+        let focused = self
+            .selection
+            .focused()
+            .and_then(|f| rows.iter().find(|e| e.path == f));
+        ActionContext {
+            selected: self.selected_shown().len(),
+            focused_is_dir: focused.map(|e| e.is_dir),
+            shown: rows.len(),
+            can_go_back: !self.back_stack.is_empty(),
+            can_go_forward: !self.forward_stack.is_empty(),
+            has_parent: self.current_dir.parent().is_some(),
+            searching: !self.search_query.is_empty(),
+        }
+    }
+
+    /// The selected paths that are actually on screen, in listing order.
+    ///
+    /// The selection survives a search or a hidden-files toggle — it is
+    /// keyed by path for exactly that reason — so it can hold files the
+    /// user cannot currently see. Nothing destructive may reach those:
+    /// select everything, type a search, press Delete, and only what the
+    /// search left visible goes to the trash. What you can see is what
+    /// you act on.
+    pub fn selected_shown(&self) -> Vec<PathBuf> {
+        self.rows()
+            .into_iter()
+            .filter(|e| self.selection.is_selected(&e.path))
+            .map(|e| e.path.clone())
+            .collect()
+    }
+
+    /// Carries out one action.
+    ///
+    /// The single place an action happens, whether it came from a key,
+    /// a menu or a button. A disabled action does nothing — the same
+    /// [`crate::action::enabled`] answer a menu uses to grey an item out,
+    /// so the two cannot disagree.
+    pub fn perform(&mut self, action: Action) -> Outcome {
+        if action.scope() == Scope::Window {
+            return Outcome::Window(action);
+        }
+        if !action::enabled(action, &self.action_context()) {
+            return Outcome::None;
+        }
+        match action {
             // Straight from the focused *path* — no resolving a stored
             // index against a list that may have been re-sorted since
             // the focus was set.
-            Some(KeyAction::Activate) => self.activate_focused(),
-            Some(KeyAction::GoUp) => self.go_up(),
-            Some(KeyAction::GoBack) => self.go_back(),
-            Some(KeyAction::Move(direction)) => {
-                let delta = match direction {
-                    Direction::Up | Direction::Left => -1,
-                    Direction::Down | Direction::Right => 1,
-                };
-                self.with_rows(|selection, rows| selection.move_focus(rows, delta));
+            Action::Open => self.activate_focused(),
+            Action::OpenInNewTab => match self.selection.focused() {
+                Some(path) => Outcome::OpenInNewTab(path.to_path_buf()),
+                None => Outcome::None,
+            },
+            Action::GoUp => self.go_up(),
+            Action::GoBack => self.go_back(),
+            Action::GoForward => self.go_forward(),
+            Action::FocusUp | Action::FocusLeft => {
+                self.with_rows(|selection, rows| selection.move_focus(rows, -1));
                 Outcome::None
             }
-            Some(KeyAction::TypeToSearch(c)) => {
-                self.search_query.push(c);
-                self.refresh_view();
+            Action::FocusDown | Action::FocusRight => {
+                self.with_rows(|selection, rows| selection.move_focus(rows, 1));
                 Outcome::None
             }
-            Some(KeyAction::ClearSearch) => {
+            Action::ExtendUp => {
+                self.with_rows(|selection, rows| selection.extend(rows, -1));
+                Outcome::None
+            }
+            Action::ExtendDown => {
+                self.with_rows(|selection, rows| selection.extend(rows, 1));
+                Outcome::None
+            }
+            Action::SelectAll => {
+                self.with_rows(|selection, rows| selection.select_all(rows));
+                Outcome::None
+            }
+            Action::ClearSearch => {
                 self.search_query.clear();
                 self.refresh_view();
                 Outcome::None
             }
-            None => Outcome::None,
+            Action::ToggleHidden => {
+                self.prefs.show_hidden = !self.prefs.show_hidden;
+                self.refresh_view();
+                Outcome::PrefsChanged(self.prefs.clone())
+            }
+            Action::Trash => Outcome::Trash(self.selected_shown()),
+            // Handled above; listed so a new window action is a compile
+            // error here rather than a silent fall-through.
+            Action::NewTab
+            | Action::CloseTab
+            | Action::NextTab
+            | Action::PreviousTab
+            | Action::Tab(_) => Outcome::Window(action),
         }
     }
 
@@ -2402,7 +2523,7 @@ mod tests {
         browser.update(Message::SortBy(SortColumn::Name));
         assert_eq!(browser.rows()[0].name, "c.txt", "the listing really did reverse");
 
-        let outcome = browser.handle_key(Key::Enter, Modifiers::default());
+        let outcome = browser.perform(Action::Open);
         assert_eq!(outcome, Outcome::Activated(PathBuf::from("/dir/a.txt")));
     }
 
@@ -2619,18 +2740,122 @@ mod tests {
     fn enter_activates_the_focused_entry_via_the_keymap() {
         let mut browser = loaded_browser(&["a.txt", "b.txt"]);
         browser.update(Message::EntryClicked { index: 1, ctrl: false, shift: false });
-        let outcome = browser.handle_key(Key::Enter, Modifiers::default());
+        let outcome = browser.perform(Action::Open);
         assert_eq!(outcome, Outcome::Activated(PathBuf::from("/dir/b.txt")));
     }
 
     #[test]
     fn typing_a_character_searches_and_escape_clears_it() {
         let mut browser = loaded_browser(&["alpha.txt", "beta.txt"]);
-        browser.handle_key(Key::Character('a'), Modifiers::default());
-        browser.handle_key(Key::Character('l'), Modifiers::default());
+        browser.update(Message::TypeToSearch('a'));
+        browser.update(Message::TypeToSearch('l'));
         assert_eq!(browser.rows().len(), 1);
-        browser.handle_key(Key::Escape, Modifiers::default());
+        browser.perform(Action::ClearSearch);
         assert_eq!(browser.rows().len(), 2);
+    }
+
+    // --- actions ---------------------------------------------------------------
+
+    /// The safety property the path-keyed selection makes necessary:
+    /// select everything, narrow the view, press Delete — only what is
+    /// still visible goes. Trashing a file the search had hidden would be
+    /// acting on something the user could not see.
+    #[test]
+    fn trash_only_takes_what_the_search_left_visible() {
+        let mut browser = loaded_browser(&["alpha.txt", "beta.txt", "gamma.txt"]);
+        browser.perform(Action::SelectAll);
+        assert_eq!(browser.selected_shown().len(), 3);
+
+        browser.update(Message::TypeToSearch('b'));
+        assert_eq!(
+            browser.perform(Action::Trash),
+            Outcome::Trash(vec![PathBuf::from("/dir/beta.txt")])
+        );
+    }
+
+    #[test]
+    fn trash_with_nothing_selected_does_nothing() {
+        let mut browser = loaded_browser(&["a.txt"]);
+        assert_eq!(browser.perform(Action::Trash), Outcome::None);
+    }
+
+    #[test]
+    fn select_all_takes_every_shown_row() {
+        let mut browser = loaded_browser(&["a.txt", "b.txt", "c.txt"]);
+        browser.perform(Action::SelectAll);
+        assert_eq!(browser.action_context().selected, 3);
+    }
+
+    #[test]
+    fn shift_arrow_extends_the_selection_from_where_the_focus_was() {
+        let mut browser = loaded_browser(&["a.txt", "b.txt", "c.txt", "d.txt"]);
+        browser.update(Message::EntryClicked { index: 1, ctrl: false, shift: false });
+        browser.perform(Action::ExtendDown);
+        browser.perform(Action::ExtendDown);
+        let names: Vec<String> = browser
+            .selected_shown()
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["b.txt", "c.txt", "d.txt"]);
+
+        // And back up past the anchor selects the other way.
+        for _ in 0..3 {
+            browser.perform(Action::ExtendUp);
+        }
+        assert_eq!(browser.selected_shown().len(), 2, "a.txt and b.txt");
+    }
+
+    #[test]
+    fn show_hidden_is_a_remembered_toggle() {
+        let (mut browser, _) =
+            Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
+        browser.update(Message::DirLoaded(
+            PathBuf::from("/dir"),
+            Ok(vec![entry("visible", false), entry(".secret", false)]),
+        ));
+        assert_eq!(browser.rows().len(), 1);
+        match browser.perform(Action::ToggleHidden) {
+            Outcome::PrefsChanged(prefs) => assert!(prefs.show_hidden),
+            other => panic!("expected PrefsChanged, got {other:?}"),
+        }
+        assert_eq!(browser.rows().len(), 2);
+    }
+
+    /// Alt+Right used to fall through to "move right". Forward is a real
+    /// action now, and it only works when there is somewhere to go.
+    #[test]
+    fn forward_goes_forward_and_only_when_there_is_history() {
+        let (mut browser, _) = Browser::new(Mode::App, Prefs::default(), PathBuf::from("/a"), vec![]);
+        assert_eq!(browser.perform(Action::GoForward), Outcome::None);
+        browser.update(Message::Navigate(PathBuf::from("/b")));
+        browser.perform(Action::GoBack);
+        assert_eq!(browser.perform(Action::GoForward), Outcome::ReadDir(PathBuf::from("/b")));
+    }
+
+    #[test]
+    fn open_in_new_tab_is_for_folders() {
+        let (mut browser, _) =
+            Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
+        browser.update(Message::DirLoaded(
+            PathBuf::from("/dir"),
+            Ok(vec![entry("sub", true), entry("f.txt", false)]),
+        ));
+        browser.update(Message::EntryClicked { index: 1, ctrl: false, shift: false });
+        assert_eq!(browser.perform(Action::OpenInNewTab), Outcome::None, "a file");
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+        assert_eq!(
+            browser.perform(Action::OpenInNewTab),
+            Outcome::OpenInNewTab(PathBuf::from("/dir/sub"))
+        );
+    }
+
+    /// A window action asked of the browser is handed back, not dropped —
+    /// that is how a menu item for one would reach the host.
+    #[test]
+    fn a_window_action_is_passed_back_to_the_host() {
+        let mut browser = loaded_browser(&["a.txt"]);
+        assert_eq!(browser.perform(Action::NewTab), Outcome::Window(Action::NewTab));
     }
 
     // --- folder counts ---------------------------------------------------------
