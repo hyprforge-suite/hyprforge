@@ -53,3 +53,6 @@ tempfile = "3"
 # owns an `Arc<dyn FsBackend>`, so its update loop (stale generations,
 # tab routing, folder counts) can be exercised without a real disk.
 hyprforge-files-core = { workspace = true, features = ["mock"] }
+# `MockFilesystem`, so undo's tests can trash into a temporary directory
+# rather than the real Trash of whoever runs them.
+hyprforge-fileops = { workspace = true, features = ["mock"] }
