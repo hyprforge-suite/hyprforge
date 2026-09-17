@@ -29,7 +29,7 @@
 
 use crate::backend::FsBackend;
 use crate::xdg_user_dirs::UserDirs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// One row in the sidebar.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +145,22 @@ pub fn trash_path() -> PathBuf {
     hyprforge_fileops::home_trash_dir().join("files")
 }
 
+/// What to call a place in a tab, a window title, a search box or a path
+/// bar: its folder name — or "Trash" for the Trash.
+///
+/// The Trash's storage directory is called `files`, which is what every
+/// one of those showed until this existed: a tab named "files" and a path
+/// bar reading `~ / … / files`, both technically true and neither telling
+/// anyone where they are.
+pub fn place_name(path: &Path) -> String {
+    if path == trash_path() {
+        return "Trash".to_string();
+    }
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 /// One row in the sidebar's **Pinned** section: a user-chosen directory
 /// (see `crate::prefs::Prefs::pinned`) plus how many entries it holds
 /// right now.
@@ -191,7 +207,6 @@ pub fn build_pinned<B: FsBackend + ?Sized>(backend: &B, pinned: &[PathBuf]) -> V
 mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
-    use std::path::PathBuf;
 
     #[test]
     fn home_is_always_present() {

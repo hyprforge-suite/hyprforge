@@ -98,6 +98,7 @@ impl TrashBackend {
         entry.hidden = name.starts_with('.');
         entry.kind = EntryKind::classify(entry.is_dir, &name);
         entry.name = name;
+        entry.origin = item.original_path.parent().map(Path::to_path_buf);
         Some(entry)
     }
 }
@@ -224,6 +225,7 @@ mod tests {
         assert_eq!(entries[0].path, dir.path().join("files").join("Monkey Around.2.mp4"));
         assert!(!entries[0].is_dir);
         assert_eq!(entries[0].size, crate::types::EntrySize::Bytes(1));
+        assert_eq!(entries[0].origin.as_deref(), Some(Path::new("/home/alex")), "where it came from");
     }
 
     /// The brief's own wording: the trash must be recognised "including

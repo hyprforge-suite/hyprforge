@@ -537,14 +537,18 @@ pub fn erase(item: &TrashedItem) -> Result<(), TrashError> {
         .map_err(|source| TrashError::RemoveInfo { path: item.info_file.clone(), source })
 }
 
-/// [`erase`], for a caller that only has the stored path — a listing of
-/// the trash shows those, not the records behind them.
-pub fn erase_stored(home_trash: &Path, trashed_file: &Path) -> Result<(), TrashError> {
-    let item = list(home_trash)?
+/// The record for a trashed item, found by its stored path — a listing
+/// of the trash shows those, not the records behind them.
+pub fn find_stored(home_trash: &Path, trashed_file: &Path) -> Result<TrashedItem, TrashError> {
+    list(home_trash)?
         .into_iter()
         .find(|item| item.trashed_file == trashed_file)
-        .ok_or_else(|| TrashError::NotInTrash { path: trashed_file.to_path_buf() })?;
-    erase(&item)
+        .ok_or_else(|| TrashError::NotInTrash { path: trashed_file.to_path_buf() })
+}
+
+/// [`erase`], for a caller that only has the stored path.
+pub fn erase_stored(home_trash: &Path, trashed_file: &Path) -> Result<(), TrashError> {
+    erase(&find_stored(home_trash, trashed_file)?)
 }
 
 /// Removes `path` for good, file or folder, without following a symlink

@@ -59,6 +59,10 @@ pub struct Entry {
     /// kept because the *number* is the useful thing to show in that
     /// case — see [`crate::users`] and `format::format_owner`.
     pub owner: Option<String>,
+    /// Where a trashed item came from — the Trash listing's "Original
+    /// Location". `None` for everything that is not in the Trash, which
+    /// is nearly everything.
+    pub origin: Option<PathBuf>,
 }
 
 /// What "size" means for one entry, as one value.

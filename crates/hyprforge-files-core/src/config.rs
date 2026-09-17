@@ -58,11 +58,20 @@ pub struct Behaviour {
     /// Ask before deleting for good. On by default, because there is no
     /// undo; turning it off is a choice somebody has to make.
     pub confirm_delete: bool,
+    /// How long a copy or move runs before its progress line appears. A
+    /// short job finishes before a bar could be read, and one that
+    /// flashes up and vanishes reads as something going wrong.
+    pub progress_after_ms: u64,
 }
 
 impl Default for Behaviour {
     fn default() -> Self {
-        Behaviour { on_conflict: OnConflict::Ask, confirm_trash: false, confirm_delete: true }
+        Behaviour {
+            on_conflict: OnConflict::Ask,
+            confirm_trash: false,
+            confirm_delete: true,
+            progress_after_ms: 500,
+        }
     }
 }
 
@@ -133,6 +142,7 @@ struct RawBehaviour {
     on_conflict: Option<String>,
     confirm_trash: Option<toml::Value>,
     confirm_delete: Option<toml::Value>,
+    progress_after_ms: Option<toml::Value>,
 }
 
 /// A `[behaviour]` switch: `true` or `false`, or a problem naming it —
@@ -238,6 +248,17 @@ pub fn parse(text: &str, path: &Path) -> (Config, Vec<ConfigProblem>) {
         switch("confirm-trash", &raw.behaviour.confirm_trash, behaviour.confirm_trash, &mut problems);
     behaviour.confirm_delete =
         switch("confirm-delete", &raw.behaviour.confirm_delete, behaviour.confirm_delete, &mut problems);
+    match &raw.behaviour.progress_after_ms {
+        None => {}
+        Some(toml::Value::Integer(ms)) if (0..=60_000).contains(ms) => {
+            behaviour.progress_after_ms = *ms as u64;
+        }
+        Some(other) => problems.push(problem(format!(
+            "[behaviour] progress-after-ms = {other}: use a number of milliseconds from 0 to 60000 — \
+             {} until this is fixed",
+            behaviour.progress_after_ms
+        ))),
+    }
     (Config { keymap, menus, behaviour }, problems)
 }
 
@@ -577,6 +598,17 @@ mod tests {
         assert!(config.behaviour.confirm_delete, "still asks");
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].message.contains("confirm-delete"));
+    }
+
+    #[test]
+    fn the_progress_delay_is_configurable_within_reason() {
+        assert_eq!(Config::default().behaviour.progress_after_ms, 500);
+        let (config, problems) = parsed("[behaviour]\nprogress-after-ms = 0\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(config.behaviour.progress_after_ms, 0);
+        let (config, problems) = parsed("[behaviour]\nprogress-after-ms = -5\n");
+        assert_eq!(config.behaviour.progress_after_ms, 500);
+        assert_eq!(problems.len(), 1);
     }
 
     /// The config is read, never written — this module has no function

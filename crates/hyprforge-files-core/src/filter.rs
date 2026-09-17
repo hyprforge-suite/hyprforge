@@ -84,6 +84,7 @@ mod tests {
             mode: 0o644,
             uid: 1000,
             owner: Some("alex".to_string()),
+            origin: None,
         }
     }
 

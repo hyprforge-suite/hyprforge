@@ -155,6 +155,21 @@ pub fn format_owner(entry: &Entry) -> String {
     }
 }
 
+/// A trashed item's Original Location cell: the folder it came from,
+/// with the home directory written `~` the way the path bar writes it —
+/// the part of a long path that tells two locations apart is the end,
+/// and `/home/alex/` in front of every row pushes it out of the column.
+pub fn format_origin(entry: &Entry, home: Option<&std::path::Path>) -> String {
+    let Some(origin) = &entry.origin else {
+        return String::new();
+    };
+    match home.and_then(|h| origin.strip_prefix(h).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => origin.display().to_string(),
+    }
+}
+
 /// One entry's Kind cell.
 ///
 /// Finer than [`EntryKind`], which is a handful of categories chosen to
@@ -363,6 +378,7 @@ mod column_tests {
             mode: 0o644,
             uid: 1000,
             owner: Some("alex".to_string()),
+            origin: None,
         }
     }
 
@@ -402,6 +418,20 @@ mod column_tests {
     #[test]
     fn a_resolvable_owner_shows_the_name() {
         assert_eq!(format_owner(&entry("thing.txt", false)), "alex");
+    }
+
+    #[test]
+    fn an_original_location_under_home_is_written_with_a_tilde() {
+        let mut e = entry("x.txt", false);
+        let home = std::path::Path::new("/home/alex");
+        e.origin = Some("/home/alex/projects/site".into());
+        assert_eq!(format_origin(&e, Some(home)), "~/projects/site");
+        e.origin = Some("/home/alex".into());
+        assert_eq!(format_origin(&e, Some(home)), "~");
+        e.origin = Some("/srv/data".into());
+        assert_eq!(format_origin(&e, Some(home)), "/srv/data");
+        e.origin = None;
+        assert_eq!(format_origin(&e, Some(home)), "", "not a trashed item");
     }
 
     /// The Kind column was removed once for reading "Folder" forty times
@@ -451,6 +481,7 @@ mod status_tests {
             mode: 0o644,
             uid: 1000,
             owner: Some("alex".to_string()),
+            origin: None,
         }
     }
 

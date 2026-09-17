@@ -211,6 +211,7 @@ fn build_entry_with(
             mode,
             uid,
             owner,
+            origin: None,
         };
     }
 
@@ -236,6 +237,7 @@ fn build_entry_with(
                 mode,
                 uid,
                 owner,
+                origin: None,
             }
         }
         Err(_) => Entry {
@@ -253,6 +255,7 @@ fn build_entry_with(
             mode,
             uid,
             owner,
+            origin: None,
         },
     }
 }
@@ -334,6 +337,7 @@ pub mod mock {
                 mode: 0o644,
                 uid: 1000,
                 owner: Some("alex".to_string()),
+                origin: None,
             }
         }
 
@@ -354,6 +358,7 @@ pub mod mock {
                 mode: 0o755,
                 uid: 1000,
                 owner: Some("alex".to_string()),
+                origin: None,
             }
         }
 
@@ -451,6 +456,7 @@ pub mod mock {
                     mode: 0o644,
                     uid: 1000,
                     owner: Some("alex".to_string()),
+                    origin: None,
                 });
             }
             for entries in tree.values() {

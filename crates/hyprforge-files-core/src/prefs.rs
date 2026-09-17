@@ -71,6 +71,11 @@ pub enum Column {
     Owner,
     Permissions,
     Modified,
+    /// Where a trashed item came from. Not one of the switchable columns
+    /// — it means nothing outside the Trash, and inside it is the column
+    /// that matters most — so the Trash listing always shows it and no
+    /// other listing ever does. Not in [`Column::ALL`].
+    Origin,
 }
 
 impl Column {
@@ -86,6 +91,7 @@ impl Column {
             Column::Owner => "Owner",
             Column::Permissions => "Permissions",
             Column::Modified => "Modified",
+            Column::Origin => "Original Location",
         }
     }
 }
@@ -124,6 +130,7 @@ impl Columns {
             Column::Owner => self.owner,
             Column::Permissions => self.permissions,
             Column::Modified => self.modified,
+            Column::Origin => false,
         }
     }
 
@@ -134,6 +141,8 @@ impl Columns {
             Column::Owner => &mut self.owner,
             Column::Permissions => &mut self.permissions,
             Column::Modified => &mut self.modified,
+            // Not switchable — see the variant's doc.
+            Column::Origin => return,
         };
         *slot = shown;
     }

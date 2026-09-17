@@ -25,14 +25,14 @@
 
 use crate::density;
 use crate::filter::{is_hidden, matches_query};
-use crate::format::{format_kind, format_modified_at, format_owner, format_permissions, format_size};
+use crate::format::{format_kind, format_modified_at, format_origin, format_owner, format_permissions, format_size};
 use crate::glyph;
 use crate::icon::{self, entry_icon};
 use crate::action::{self, Action, ActionContext, Scope};
 use crate::config::Config;
 use crate::menu::{self as menus, MenuItem, MenuKind};
 use std::sync::Arc;
-use crate::prefs::{Column, Columns, Prefs, ViewMode};
+use crate::prefs::{Column, Prefs, ViewMode};
 use crate::sidebar::{self, PinnedItem, SidebarItem};
 use crate::sort::{sort_indices, SortColumn, SortDirection};
 use crate::types::{Entry, EntrySize, FilesError, ItemCount};
@@ -367,6 +367,11 @@ pub enum Outcome {
     Trash(Vec<PathBuf>),
     /// Delete these for good. Only paths the user can currently see.
     DeletePermanently(Vec<PathBuf>),
+    /// Put these trashed items back where they came from. Stored paths,
+    /// as the Trash listing shows them.
+    Restore(Vec<PathBuf>),
+    /// Delete everything in the Trash, after asking.
+    EmptyTrash,
     /// Open this folder in a new tab. A host without tabs ignores it.
     OpenInNewTab(PathBuf),
     /// Put these files on the clipboard.
@@ -468,6 +473,8 @@ pub enum Message {
 #[derive(Debug, Clone, PartialEq)]
 struct ViewModel<'a> {
     current_dir: &'a Path,
+    /// Whether this listing is the Trash — which changes its columns.
+    in_trash: bool,
     /// The name being edited, if any.
     renaming: Option<&'a Renaming>,
     column_picker_open: bool,
@@ -925,6 +932,8 @@ impl Browser {
             }
             Action::Trash => Outcome::Trash(self.selected_shown()),
             Action::DeletePermanently => Outcome::DeletePermanently(self.selected_shown()),
+            Action::Restore => Outcome::Restore(self.selected_shown()),
+            Action::EmptyTrash => Outcome::EmptyTrash,
             Action::ContextMenu => Outcome::OpenContextMenuAtPointer(MenuSpot::Focused),
             Action::Copy | Action::Cut => Outcome::SetClipboard(crate::clipboard::FileClip {
                 paths: self.selected_shown(),
@@ -1292,6 +1301,7 @@ impl Browser {
     fn view_model(&self, viewport_width: f32) -> ViewModel<'_> {
         ViewModel {
             current_dir: &self.current_dir,
+            in_trash: self.in_trash(),
             renaming: self.renaming.as_ref(),
             column_picker_open: self.column_picker_open,
             sidebar_collapsed: self.prefs.sidebar.collapsed(viewport_width),
@@ -1328,6 +1338,11 @@ impl Browser {
 /// navigates to — root first. Pure and free of iced, so the path bar's
 /// own logic is testable without building a window.
 fn breadcrumb(path: &Path) -> Vec<(String, PathBuf)> {
+    // The Trash is one place, not a path to climb: its ancestors are
+    // storage details (`~/.local/share/Trash/files`) nobody navigates by.
+    if path == crate::sidebar::trash_path() {
+        return vec![(crate::sidebar::place_name(path), path.to_path_buf())];
+    }
     breadcrumb_from(path, home_dir().as_deref())
 }
 
@@ -1614,11 +1629,7 @@ fn nav_button<'a>(
 /// so what it will search is stated before anything is typed, rather
 /// than discovered afterwards.
 fn search_field<'a>(query: &str, current_dir: &Path, scale: FontScale) -> Element<'a, Message> {
-    let here = current_dir
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| current_dir.display().to_string());
-    let placeholder = format!("Search {here}");
+    let placeholder = format!("Search {}", crate::sidebar::place_name(current_dir));
 
     // The magnifier is a sibling widget rather than the input's own
     // `icon`, because iced's `text_input::Icon` wants a `Font` to take
@@ -2299,15 +2310,29 @@ fn list_cell<'a>(
         .into()
 }
 
+/// What every row in one listing shares — worked out once per listing,
+/// not once per row.
+struct RowContext<'a> {
+    columns: Vec<Column>,
+    renaming: Option<&'a Renaming>,
+    /// For shortening Original Location to `~/…`.
+    home: Option<PathBuf>,
+    scale: FontScale,
+    /// One reading of the clock for the whole listing. Every row's
+    /// Modified cell is relative to the same instant anyway, so asking
+    /// per row was both wasted work and a way for the top and bottom of a
+    /// long list to disagree about what "Today" means.
+    now: chrono::DateTime<chrono::Local>,
+}
+
 fn entry_row<'a>(
     index: usize,
     entry: &'a Entry,
     selected: bool,
-    columns: &Columns,
-    renaming: Option<&'a Renaming>,
-    scale: FontScale,
-    now: chrono::DateTime<chrono::Local>,
+    ctx: &RowContext<'a>,
 ) -> Element<'a, Message> {
+    let RowContext { columns, renaming, home, scale, now } = ctx;
+    let (renaming, scale, now) = (*renaming, *scale, *now);
     // The icon, then the name, then whichever optional columns are
     // switched on — in `Column::ALL` order, which is the same order
     // `list_header` walks, so a cell can never end up under the wrong
@@ -2337,7 +2362,7 @@ fn entry_row<'a>(
     .spacing(spacing::SM)
     .align_y(iced::Alignment::Center);
 
-    for column in columns.shown() {
+    for &column in columns {
         let cell = match column {
             Column::Kind => format_kind(entry),
             // A directory's Size cell holds how many things are in it,
@@ -2351,6 +2376,7 @@ fn entry_row<'a>(
             // would be an `/etc/localtime` consultation per row per
             // frame, for a value every row in the listing shares.
             Column::Modified => format_modified_at(entry.modified, now),
+            Column::Origin => format_origin(entry, home.as_deref()),
         };
         // Dim metadata on the *unselected* row only. `text_dim` is
         // chosen for legibility against the listing's own dark surface,
@@ -2555,6 +2581,31 @@ fn column_portion(column: Column) -> u16 {
         Column::Permissions => 3,
         // "Yesterday 09:15" and "Dec 28, 2025" are the long forms.
         Column::Modified => 3,
+        // A path: the widest thing any column holds.
+        Column::Origin => 5,
+    }
+}
+
+/// The columns this listing shows, left to right, after the name.
+///
+/// The configured ones — and, in the Trash, Original Location first,
+/// because "where did this come from" is the question the Trash is for.
+fn listing_columns(prefs: &Prefs, in_trash: bool) -> Vec<Column> {
+    let mut columns = Vec::with_capacity(Column::ALL.len() + 1);
+    if in_trash {
+        columns.push(Column::Origin);
+    }
+    columns.extend(prefs.columns.shown());
+    columns
+}
+
+/// A column's heading. In the Trash, the date is when something was
+/// deleted — `TrashBackend` puts the deletion date there — so the
+/// heading says so.
+fn column_heading(column: Column, in_trash: bool) -> &'static str {
+    match column {
+        Column::Modified if in_trash => "Deleted",
+        other => other.label(),
     }
 }
 
@@ -2566,6 +2617,7 @@ fn column_sort(column: Column) -> SortColumn {
         Column::Owner => SortColumn::Owner,
         Column::Permissions => SortColumn::Permissions,
         Column::Modified => SortColumn::Modified,
+        Column::Origin => SortColumn::Origin,
     }
 }
 
@@ -2576,7 +2628,7 @@ fn column_sort(column: Column) -> SortColumn {
 /// and clicking again reverses, which is what every file manager anyone
 /// has used does. That also removes the need for a separate sort
 /// control entirely.
-fn list_header<'a>(prefs: &Prefs, picker_open: bool, scale: FontScale) -> Element<'a, Message> {
+fn list_header<'a>(prefs: &Prefs, in_trash: bool, picker_open: bool, scale: FontScale) -> Element<'a, Message> {
     let heading = |label: &'static str, column: SortColumn, portion: u16| {
         let active = prefs.sort_column() == column;
         // The arrow marks the sorted column *and* its direction, so the
@@ -2614,8 +2666,8 @@ fn list_header<'a>(prefs: &Prefs, picker_open: bool, scale: FontScale) -> Elemen
 
     // `Column::ALL` order, the same walk `entry_row` makes — one list,
     // so a heading cannot end up over the wrong cells.
-    for column in prefs.columns.shown() {
-        header = header.push(heading(column.label(), column_sort(column), column_portion(column)));
+    for column in listing_columns(prefs, in_trash) {
+        header = header.push(heading(column_heading(column, in_trash), column_sort(column), column_portion(column)));
     }
 
     // The picker's handle, at the far right where the columns run out.
@@ -2702,11 +2754,13 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // spacing and by the hover elevation, which is enough.
     let mut list = column![].spacing(1.0);
     let mut seen_file = false;
-    // One reading of the clock for the whole listing. Every row's
-    // Modified cell is relative to the same instant anyway, so asking
-    // per row was both wasted work and a way for the top and bottom of
-    // a long list to disagree about what "Today" means.
-    let now = chrono::Local::now();
+    let ctx = RowContext {
+        columns: listing_columns(vm.prefs, vm.in_trash),
+        renaming: vm.renaming,
+        home: home_dir(),
+        scale,
+        now: chrono::Local::now(),
+    };
     for (index, entry) in vm.rows.iter().copied().enumerate() {
         // One rule, where the directories end and the files begin.
         //
@@ -2722,15 +2776,7 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         if !entry.is_dir {
             seen_file = true;
         }
-        list = list.push(entry_row(
-            index,
-            entry,
-            vm.selection.is_selected(&entry.path),
-            &vm.prefs.columns,
-            vm.renaming,
-            scale,
-            now,
-        ));
+        list = list.push(entry_row(index, entry, vm.selection.is_selected(&entry.path), &ctx));
     }
     // `.id(..)` is what lets a host restore this list's scroll position
     // across a tab switch — see `Browser::list_scrollable_id`'s own doc.
@@ -2744,7 +2790,7 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // still horizontally would be worse than no header at all: every
     // label over the wrong column.
     let stack = column![
-        list_header(vm.prefs, vm.column_picker_open, scale),
+        list_header(vm.prefs, vm.in_trash, vm.column_picker_open, scale),
         divider(),
         scrollable(list).height(Length::Fill).id(vm.list_scrollable_id.clone()),
     ]
@@ -2760,7 +2806,7 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // sideways to reach the rest of it, which is what a table does
     // everywhere else and is the reason the columns are worth having.
     let pane = density::list_pane_width(vm.viewport_width, vm.sidebar_collapsed);
-    let min_width = density::list_min_width(vm.prefs.columns.shown().count(), scale);
+    let min_width = density::list_min_width(listing_columns(vm.prefs, vm.in_trash).len(), scale);
     if pane >= min_width {
         return stack.into();
     }
@@ -2968,6 +3014,7 @@ mod tests {
             mode: 0o644,
             uid: 1000,
             owner: Some("alex".to_string()),
+            origin: None,
         }
     }
 
@@ -3512,6 +3559,37 @@ mod tests {
         browser.set_config(Arc::new(config));
         right_click(&mut browser, MenuSpot::Row(0));
         assert_eq!(menu_labels(&browser), ["Move to Trash"]);
+    }
+
+    /// The Trash listing shows where things came from, first, and calls
+    /// its date column what it is.
+    #[test]
+    fn the_trash_listing_shows_original_location_and_deleted() {
+        let prefs = Prefs::default();
+        let columns = listing_columns(&prefs, true);
+        assert_eq!(columns.first(), Some(&Column::Origin));
+        assert_eq!(column_heading(Column::Modified, true), "Deleted");
+        assert!(!listing_columns(&prefs, false).contains(&Column::Origin), "only in the Trash");
+        assert_eq!(column_heading(Column::Modified, false), "Modified");
+    }
+
+    #[test]
+    fn the_trash_is_called_the_trash_everywhere_it_is_named() {
+        let trash = crate::sidebar::trash_path();
+        assert_eq!(crate::sidebar::place_name(&trash), "Trash");
+        assert_eq!(breadcrumb(&trash), [("Trash".to_string(), trash.clone())]);
+        assert_eq!(crate::sidebar::place_name(Path::new("/srv/files")), "files", "only the Trash");
+    }
+
+    #[test]
+    fn restore_hands_the_host_the_stored_paths() {
+        let trash = crate::sidebar::trash_path();
+        let (mut browser, _) = Browser::new(Mode::App, Prefs::default(), trash.clone(), vec![]);
+        let mut item = entry("old.txt", false);
+        item.path = trash.join("old.txt");
+        browser.update(Message::DirLoaded(trash.clone(), Ok(vec![item])));
+        browser.perform(Action::SelectAll);
+        assert_eq!(browser.perform(Action::Restore), Outcome::Restore(vec![trash.join("old.txt")]));
     }
 
     #[test]
@@ -4112,6 +4190,7 @@ mod tests {
     ) -> ViewModel<'a> {
         ViewModel {
             current_dir,
+            in_trash: false,
             renaming: None,
             column_picker_open: false,
             sidebar_collapsed: false,

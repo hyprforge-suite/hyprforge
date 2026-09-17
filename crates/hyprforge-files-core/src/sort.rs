@@ -24,6 +24,8 @@ pub enum SortColumn {
     Kind,
     Owner,
     Permissions,
+    /// A trashed item's original folder.
+    Origin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +120,7 @@ fn compare(a: &Entry, b: &Entry, column: SortColumn) -> Ordering {
         // permission and put every directory in one lump whichever way
         // the arrow points.
         SortColumn::Permissions => a.mode.cmp(&b.mode).then_with(|| natural_compare(&a.name, &b.name)),
+        SortColumn::Origin => a.origin.cmp(&b.origin).then_with(|| natural_compare(&a.name, &b.name)),
     }
 }
 
@@ -286,6 +289,7 @@ mod tests {
             mode: 0o644,
             uid: 1000,
             owner: Some("alex".to_string()),
+            origin: None,
         }
     }
 

@@ -118,7 +118,18 @@ impl Default for MenuConfig {
                 A(GoUp),
                 A(NewTab),
             ],
-            trash: vec![A(Open), Sep, A(Copy), A(CopyPath), Sep, A(SelectAll), Sep, A(DeletePermanently)],
+            trash: vec![
+                A(Restore),
+                Sep,
+                A(Open),
+                A(Copy),
+                A(CopyPath),
+                Sep,
+                A(SelectAll),
+                Sep,
+                A(DeletePermanently),
+                A(EmptyTrash),
+            ],
         }
     }
 }

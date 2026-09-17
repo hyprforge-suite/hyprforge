@@ -49,6 +49,10 @@ pub enum Action {
     Trash,
     /// Delete the selection for good, bypassing the trash.
     DeletePermanently,
+    /// Put the selected trashed items back where they came from.
+    Restore,
+    /// Delete everything in the Trash for good.
+    EmptyTrash,
     /// Put the selection on the clipboard, to be copied when pasted.
     Copy,
     /// Put the selection on the clipboard, to be moved when pasted.
@@ -106,6 +110,8 @@ impl Action {
             Action::ToggleHidden,
             Action::Trash,
             Action::DeletePermanently,
+            Action::Restore,
+            Action::EmptyTrash,
             Action::Copy,
             Action::Cut,
             Action::Paste,
@@ -142,6 +148,8 @@ impl Action {
             Action::ToggleHidden => "show-hidden",
             Action::Trash => "trash",
             Action::DeletePermanently => "delete-permanently",
+            Action::Restore => "restore",
+            Action::EmptyTrash => "empty-trash",
             Action::Copy => "copy",
             Action::Cut => "cut",
             Action::Paste => "paste",
@@ -197,6 +205,8 @@ impl Action {
             Action::ToggleHidden => "Show Hidden Files",
             Action::Trash => "Move to Trash",
             Action::DeletePermanently => "Delete Permanently",
+            Action::Restore => "Restore",
+            Action::EmptyTrash => "Empty Trash",
             Action::Copy => "Copy",
             Action::Cut => "Cut",
             Action::Paste => "Paste",
@@ -264,6 +274,10 @@ impl Action {
             // slip away from losing a file for good; anyone who wants
             // Shift+Delete can bind it in `files-config.toml`.
             Action::DeletePermanently => &[],
+            // Reached from the Trash's menu. Neither is common enough to
+            // spend a key on by default.
+            Action::Restore => &[],
+            Action::EmptyTrash => &[],
             Action::Copy => &["Ctrl+C"],
             Action::Cut => &["Ctrl+X"],
             Action::Paste => &["Ctrl+V"],
@@ -345,6 +359,8 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         Action::ToggleHidden | Action::ContextMenu => true,
         Action::Trash => ctx.selected > 0 && !ctx.in_trash,
         Action::DeletePermanently => ctx.selected > 0,
+        Action::Restore => ctx.in_trash && ctx.selected > 0,
+        Action::EmptyTrash => ctx.in_trash && ctx.shown > 0,
         Action::Copy | Action::CopyPath => ctx.selected > 0,
         // Moving something out of the Trash by hand would leave its
         // record behind; restoring is the way out, and it comes later.
@@ -436,6 +452,18 @@ mod tests {
     fn nothing_in_the_trash_can_be_trashed_again() {
         let ctx = ActionContext { selected: 2, shown: 2, in_trash: true, ..ActionContext::default() };
         assert!(!enabled(Action::Trash, &ctx));
+    }
+
+    #[test]
+    fn restoring_and_emptying_belong_to_the_trash() {
+        let elsewhere = ActionContext { selected: 1, shown: 1, ..ActionContext::default() };
+        assert!(!enabled(Action::Restore, &elsewhere));
+        assert!(!enabled(Action::EmptyTrash, &elsewhere));
+        let trash = ActionContext { in_trash: true, ..elsewhere };
+        assert!(enabled(Action::Restore, &trash));
+        assert!(enabled(Action::EmptyTrash, &trash));
+        let empty_trash = ActionContext { in_trash: true, ..ActionContext::default() };
+        assert!(!enabled(Action::EmptyTrash, &empty_trash), "nothing to empty");
     }
 
     #[test]
