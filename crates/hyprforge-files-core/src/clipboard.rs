@@ -3,11 +3,13 @@
 //! Two halves, kept apart.
 //!
 //! **Where the copied files are kept** is [`FileClipboard`], a trait —
-//! the same "seam before the client" shape as `backend::FsBackend`. The
-//! in-app [`MemoryClipboard`] is what exists today; a Wayland one that
-//! puts files on the *system* clipboard, so a copy in Files pastes into
-//! another file manager and back, plugs in behind the same trait. Nothing
-//! above the trait changes when it does.
+//! the same "seam before the client" shape as `backend::FsBackend`.
+//! [`MemoryClipboard`] keeps them in this process; the app's own
+//! `SystemClipboard` puts them on the Wayland clipboard, so a copy in
+//! Files pastes into another file manager and back. That one lives in
+//! the app crate, because this one — shared with the open/save dialog —
+//! stays free of Wayland. The formats both sides of that exchange use are
+//! here, and pure: [`clip_offers`] and [`clip_from`].
 //!
 //! **What a paste will do** is [`plan`], a pure function from what was
 //! copied and where it is going to a list of copy/move steps plus
@@ -45,6 +47,19 @@ pub trait FileClipboard: Send + Sync {
     /// Empties it — after a cut has been pasted, since the files are no
     /// longer where the clipboard says they are.
     fn clear(&self);
+
+    /// Whether Paste should be offered, answered without waiting on
+    /// anything.
+    ///
+    /// Separate from [`Self::get`] because `get` may have to ask another
+    /// process, and this is asked every time a menu opens. A clipboard
+    /// that cannot know cheaply answers `true`, and the paste itself
+    /// finds out — "nothing to paste" after pressing Paste is a lesser
+    /// failure than a Paste that stays greyed out while files are
+    /// sitting on the clipboard.
+    fn may_hold_files(&self) -> bool {
+        self.get().is_some()
+    }
 }
 
 /// A clipboard that lives in this process.
@@ -75,6 +90,100 @@ impl FileClipboard for MemoryClipboard {
     fn clear(&self) {
         *self.held.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
+}
+
+// ---------------------------------------------------------------------
+// The formats other file managers read and write
+// ---------------------------------------------------------------------
+
+/// GNOME's (and Nautilus's, Thunar's, Nemo's) copied-files type: a verb
+/// line, then one URI per line.
+pub const GNOME_COPIED_FILES: &str = "x-special/gnome-copied-files";
+
+/// The standard list of URIs (RFC 2483). Every file manager reads it;
+/// on its own it cannot say "cut", so it always means copy.
+pub const URI_LIST: &str = "text/uri-list";
+
+/// KDE's (Dolphin's) way of saying a `text/uri-list` was cut: this type
+/// offered alongside it, with the content `1`.
+pub const KDE_CUT_SELECTION: &str = "application/x-kde-cutselection";
+
+/// What a copy of files offers, most specific first, as
+/// `(type, content)`: GNOME's type, the URI list, KDE's cut marker when
+/// it is a cut, and the paths as plain text — so pasting into a
+/// terminal or an editor gives paths rather than nothing.
+pub fn clip_offers(clip: &FileClip) -> Vec<(&'static str, String)> {
+    let uris: Vec<String> = clip.paths.iter().map(|p| file_uri(p)).collect();
+    let verb = match clip.verb {
+        ClipVerb::Copy => "copy",
+        ClipVerb::Cut => "cut",
+    };
+    let mut offers = vec![
+        // No trailing newline: Nautilus writes none, and some readers
+        // take a trailing empty line as an empty URI.
+        (GNOME_COPIED_FILES, format!("{verb}\n{}", uris.join("\n"))),
+        // RFC 2483: CRLF after every line, the last included.
+        (URI_LIST, uris.iter().map(|u| format!("{u}\r\n")).collect()),
+    ];
+    if clip.verb == ClipVerb::Cut {
+        offers.push((KDE_CUT_SELECTION, "1".to_string()));
+    }
+    let text: Vec<String> = clip.paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    offers.push(("text/plain;charset=utf-8", text.join("\n")));
+    offers.push(("text/plain", text.join("\n")));
+    offers
+}
+
+/// The types worth asking for when pasting, best first.
+pub const PASTE_TYPES: [&str; 2] = [GNOME_COPIED_FILES, URI_LIST];
+
+/// Reads what another application put on the clipboard, given the type
+/// it came as. `None` when it holds no local files.
+pub fn clip_from(mime: &str, content: &[u8]) -> Option<FileClip> {
+    let text = String::from_utf8_lossy(content);
+    match mime {
+        GNOME_COPIED_FILES => {
+            let mut lines = text.lines();
+            let verb = match lines.next()?.trim() {
+                "cut" => ClipVerb::Cut,
+                "copy" => ClipVerb::Copy,
+                _ => return None,
+            };
+            clip_of(verb, lines)
+        }
+        URI_LIST => clip_of(ClipVerb::Copy, text.lines()),
+        _ => None,
+    }
+}
+
+fn clip_of<'a>(verb: ClipVerb, lines: impl Iterator<Item = &'a str>) -> Option<FileClip> {
+    let paths: Vec<PathBuf> = lines
+        .map(str::trim)
+        // RFC 2483 comment lines.
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(path_of_uri)
+        .collect();
+    (!paths.is_empty()).then_some(FileClip { paths, verb })
+}
+
+/// `file:///home/a%20b` as `/home/a b`.
+///
+/// Only local files: a `file://` URI with no host or with `localhost`.
+/// Anything else — `sftp://`, `smb://`, `file://otherhost/…` — is a place
+/// this app cannot copy from, and is left out rather than misread as a
+/// local path.
+pub fn path_of_uri(uri: &str) -> Option<PathBuf> {
+    let rest = uri.strip_prefix("file://")?;
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    if !rest.starts_with('/') {
+        return None;
+    }
+    hyprforge_fileops::percent::decode_path(rest).ok()
+}
+
+/// `/home/a b` as `file:///home/a%20b`.
+pub fn file_uri(path: &Path) -> String {
+    format!("file://{}", hyprforge_fileops::percent::encode_path(path))
 }
 
 /// One file or folder to put somewhere.
@@ -216,6 +325,82 @@ mod tests {
         let p = plan(&clip(ClipVerb::Copy, &["/"]), Path::new("/tmp"));
         assert!(p.steps.is_empty());
         assert_eq!(p.refused.len(), 1);
+    }
+
+    // --- formats -------------------------------------------------------------
+
+    /// What Nautilus writes, byte for byte: the verb, then URIs, newline
+    /// separated, no trailing newline.
+    #[test]
+    fn a_copy_offers_nautilus_its_own_format() {
+        let offers = clip_offers(&clip(ClipVerb::Copy, &["/home/a b/x.txt", "/tmp/y"]));
+        let gnome = offers.iter().find(|(m, _)| *m == GNOME_COPIED_FILES).unwrap();
+        assert_eq!(gnome.1, "copy\nfile:///home/a%20b/x.txt\nfile:///tmp/y");
+        assert!(!offers.iter().any(|(m, _)| *m == KDE_CUT_SELECTION), "no cut marker on a copy");
+    }
+
+    #[test]
+    fn a_uri_list_ends_every_line_with_crlf() {
+        let offers = clip_offers(&clip(ClipVerb::Copy, &["/a", "/b"]));
+        let list = offers.iter().find(|(m, _)| *m == URI_LIST).unwrap();
+        assert_eq!(list.1, "file:///a\r\nfile:///b\r\n");
+    }
+
+    #[test]
+    fn a_cut_says_so_to_gnome_and_to_kde() {
+        let offers = clip_offers(&clip(ClipVerb::Cut, &["/a"]));
+        assert!(offers.iter().any(|(m, c)| *m == GNOME_COPIED_FILES && c.starts_with("cut\n")));
+        assert!(offers.iter().any(|(m, c)| *m == KDE_CUT_SELECTION && c == "1"));
+    }
+
+    /// Pasting into a terminal gives the paths.
+    #[test]
+    fn plain_text_is_offered_as_the_paths() {
+        let offers = clip_offers(&clip(ClipVerb::Copy, &["/a b", "/c"]));
+        assert!(offers.iter().any(|(m, c)| *m == "text/plain" && c == "/a b\n/c"));
+    }
+
+    #[test]
+    fn what_we_offer_reads_back_as_what_was_copied() {
+        for verb in [ClipVerb::Copy, ClipVerb::Cut] {
+            let original = clip(verb, &["/home/a b/ünïcödé.txt", "/tmp/100%.txt"]);
+            let offers = clip_offers(&original);
+            let gnome = offers.iter().find(|(m, _)| *m == GNOME_COPIED_FILES).unwrap();
+            assert_eq!(clip_from(GNOME_COPIED_FILES, gnome.1.as_bytes()), Some(original.clone()));
+            let list = offers.iter().find(|(m, _)| *m == URI_LIST).unwrap();
+            assert_eq!(
+                clip_from(URI_LIST, list.1.as_bytes()),
+                Some(FileClip { verb: ClipVerb::Copy, ..original }),
+                "a plain URI list cannot say cut"
+            );
+        }
+    }
+
+    /// Nautilus terminates with nothing, some tools with a newline, and
+    /// RFC 2483 allows comments — all read the same.
+    #[test]
+    fn other_applications_spellings_are_read() {
+        let from_nautilus = b"cut\nfile:///x";
+        assert_eq!(clip_from(GNOME_COPIED_FILES, from_nautilus), Some(clip(ClipVerb::Cut, &["/x"])));
+        let trailing = b"copy\nfile:///x\n";
+        assert_eq!(clip_from(GNOME_COPIED_FILES, trailing), Some(clip(ClipVerb::Copy, &["/x"])));
+        let with_comment = b"# from somewhere\r\nfile://localhost/x\r\n";
+        assert_eq!(clip_from(URI_LIST, with_comment), Some(clip(ClipVerb::Copy, &["/x"])));
+    }
+
+    /// A remote file is not a local path with a funny prefix.
+    #[test]
+    fn remote_uris_are_left_out() {
+        assert_eq!(path_of_uri("sftp://host/x"), None);
+        assert_eq!(path_of_uri("file://otherhost/x"), None);
+        assert_eq!(clip_from(URI_LIST, b"https://example.com/\r\n"), None, "nothing local to paste");
+        let mixed = b"https://example.com/\r\nfile:///keep\r\n";
+        assert_eq!(clip_from(URI_LIST, mixed), Some(clip(ClipVerb::Copy, &["/keep"])));
+    }
+
+    #[test]
+    fn a_verb_we_do_not_know_is_not_guessed_at() {
+        assert_eq!(clip_from(GNOME_COPIED_FILES, b"link\nfile:///x"), None);
     }
 
     #[test]

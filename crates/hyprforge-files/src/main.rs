@@ -46,7 +46,7 @@
 
 use hyprforge_files::jobs::{self, JobControl, JobEvent, JobId, JobSummary};
 use hyprforge_files_core::backend::FsBackend;
-use hyprforge_files_core::clipboard::{self as file_clipboard, ClipVerb, FileClipboard, MemoryClipboard};
+use hyprforge_files_core::clipboard::{self as file_clipboard, ClipVerb, FileClipboard};
 use hyprforge_fileops::{Collision, CollisionDecision, CollisionPolicy, Progress};
 use hyprforge_files_core::trash::RoutingBackend;
 use hyprforge_files_core::browser::Message as BrowserMessage;
@@ -162,7 +162,7 @@ fn main() -> iced::Result {
         status: startup_status(prefs_status, &config_problems),
         last_window_size,
         resize_generation: 0,
-        clipboard: Arc::new(MemoryClipboard::new()),
+        clipboard: Arc::new(hyprforge_files::system_clipboard::SystemClipboard::new()),
         jobs: Vec::new(),
         confirm: None,
         next_job_id: 1,
@@ -376,8 +376,13 @@ enum Message {
     /// same assumption every other index-carrying message in this file
     /// already makes).
     CloseTab(usize),
+    /// The clipboard was read for a paste into this folder: the files it
+    /// held, if any.
+    PasteFrom(PathBuf, Option<hyprforge_files_core::clipboard::FileClip>),
     /// Something a paste job reported.
     Job(JobEvent),
+    /// A finished move emptied the clipboard.
+    ClipboardCleared,
     /// A rename finished: the tab it was asked from, the new path, and
     /// how it went.
     Renamed(u64, PathBuf, Result<(), String>),
@@ -651,7 +656,7 @@ impl App {
                 Task::none()
             }
             Outcome::CopyText(text) => iced::clipboard::write(text),
-            Outcome::Paste(into) => self.paste_into(into),
+            Outcome::Paste(into) => self.read_clipboard_for(into),
             Outcome::FocusRename { id, select } => Task::batch([
                 iced::widget::operation::focus(id.clone()),
                 iced::widget::operation::select_range(id, 0, select),
@@ -702,7 +707,7 @@ impl App {
     /// Tells every tab whether there is something to paste. Called
     /// whenever the clipboard changes, and for every new tab.
     fn sync_can_paste(&mut self) {
-        let can = self.clipboard.get().is_some();
+        let can = self.clipboard.may_hold_files();
         for tab in &mut self.tabs {
             tab.browser.set_can_paste(can);
         }
@@ -723,9 +728,27 @@ impl App {
         }))
     }
 
-    /// Plans and starts pasting the clipboard into `into`.
-    fn paste_into(&mut self, into: PathBuf) -> Task<Message> {
-        let Some(clip) = self.clipboard.get() else {
+    /// Reads the clipboard for a paste, off the thread that paints: the
+    /// system clipboard's owner is another application, and it answers
+    /// when it answers.
+    fn read_clipboard_for(&self, into: PathBuf) -> Task<Message> {
+        let clipboard = self.clipboard.clone();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || clipboard.get()).await.unwrap_or(None)
+            },
+            move |clip| Message::PasteFrom(into.clone(), clip),
+        )
+    }
+
+    /// Plans and starts pasting `clip` into `into`.
+    fn paste_into(
+        &mut self,
+        into: PathBuf,
+        clip: Option<hyprforge_files_core::clipboard::FileClip>,
+    ) -> Task<Message> {
+        let Some(clip) = clip else {
+            self.status = Some("There are no files on the clipboard to paste.".to_string());
             return Task::none();
         };
         let plan = file_clipboard::plan(&clip, &into);
@@ -786,12 +809,21 @@ impl App {
                     self.status = Some(message);
                 }
                 // A cut that fully landed leaves the clipboard pointing at
-                // files that are no longer there.
+                // files that are no longer there. Emptied off the thread
+                // that paints: the system clipboard is asked first whether
+                // it still holds them.
+                let refresh = self.refresh_dirs(&finished.dirs);
                 if finished.verb == ClipVerb::Cut && summary.complete() {
-                    self.clipboard.clear();
-                    self.sync_can_paste();
+                    let clipboard = self.clipboard.clone();
+                    let cleared = Task::perform(
+                        async move {
+                            let _ = tokio::task::spawn_blocking(move || clipboard.clear()).await;
+                        },
+                        |()| Message::ClipboardCleared,
+                    );
+                    return Task::batch([refresh, cleared]);
                 }
-                self.refresh_dirs(&finished.dirs)
+                refresh
             }
         }
     }
@@ -897,7 +929,7 @@ impl App {
         let (mut browser, outcome) =
             Browser::new(Mode::App, self.last_prefs.clone(), start_dir, self.sidebar_items.clone());
         browser.set_config(self.config.clone());
-        browser.set_can_paste(self.clipboard.get().is_some());
+        browser.set_can_paste(self.clipboard.may_hold_files());
         self.tabs.push(Tab::new(id, browser));
         self.active = self.tabs.len() - 1;
         let index = self.active;
@@ -1070,6 +1102,11 @@ impl App {
                     Task::batch([task, shown])
                 };
                 task
+            }
+            Message::PasteFrom(into, clip) => self.paste_into(into, clip),
+            Message::ClipboardCleared => {
+                self.sync_can_paste();
+                Task::none()
             }
             Message::Job(event) => self.job_event(event),
             Message::Renamed(tab_id, to, result) => self.name_changed(tab_id, to, result, false),
@@ -2145,6 +2182,7 @@ mod tests {
     // --- tabs: per-tab state, generation guard, close/cycle/jump ----------
 
     use hyprforge_files_core::backend::mock::MockBackend;
+    use hyprforge_files_core::clipboard::MemoryClipboard;
     // Test-only: the window builds no `Entry` of its own any more —
     // every listing comes from a backend.
     use hyprforge_files_core::{EntryKind, EntrySize};
@@ -2756,6 +2794,15 @@ mod tests {
         app
     }
 
+    /// Presses Ctrl+V and delivers what the off-thread clipboard read
+    /// would have — iced runs that task; a test stands in for it.
+    fn paste(app: &mut App) {
+        let _ = app.update(key("Ctrl+V"));
+        let into = app.active_tab().browser.current_dir().to_path_buf();
+        let clip = app.clipboard.get();
+        let _ = app.update(Message::PasteFrom(into, clip));
+    }
+
     fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
         let deadline = Instant::now() + std::time::Duration::from_secs(10);
         while !done() {
@@ -2776,7 +2823,7 @@ mod tests {
         let _ = app.update(key("Ctrl+A"));
         let _ = app.update(key("Ctrl+C"));
         assert!(app.active_tab().browser.action_context().can_paste, "the tab knows there is something");
-        let _ = app.update(key("Ctrl+V"));
+        paste(&mut app);
         assert_eq!(app.jobs.len(), 1, "a paste job is running");
 
         wait_until("the copy", || std::fs::read_dir(dir.path()).unwrap().count() == 2);
@@ -2794,7 +2841,7 @@ mod tests {
         let _ = app.update(key("Ctrl+X"));
 
         let _ = app.update(Message::Browser(BrowserMessage::Navigate(to.path().to_path_buf())));
-        let _ = app.update(key("Ctrl+V"));
+        paste(&mut app);
         let id = app.jobs[0].id;
         assert_eq!(app.jobs[0].dirs, [to.path().to_path_buf(), from.path().to_path_buf()]);
 
@@ -2803,6 +2850,9 @@ mod tests {
             summary: JobSummary { done: 1, ..JobSummary::default() },
         }));
         assert!(app.jobs.is_empty());
+        // The clear runs as a task; stand in for it.
+        app.clipboard.clear();
+        let _ = app.update(Message::ClipboardCleared);
         assert_eq!(app.clipboard.get(), None);
         assert!(!app.active_tab().browser.action_context().can_paste);
         wait_until("the move", || to.path().join("a.txt").exists());
@@ -2852,6 +2902,16 @@ mod tests {
         });
         let _ = app.update(key("Escape"));
         assert!(app.jobs[0].conflict.is_none(), "the dialog is gone");
+    }
+
+    /// Paste with nothing file-shaped on the clipboard says so, rather
+    /// than doing nothing silently.
+    #[test]
+    fn pasting_when_the_clipboard_holds_no_files_says_so() {
+        let mut app = app_for_test(&["/dir"]);
+        let _ = app.update(Message::PasteFrom("/dir".into(), None));
+        assert!(app.jobs.is_empty());
+        assert!(app.status.as_deref().unwrap().contains("no files"));
     }
 
     #[test]
@@ -3022,7 +3082,7 @@ mod tests {
         let _ = app.update(key("Ctrl+A"));
         let _ = app.update(key("Ctrl+C"));
         let _ = app.update(Message::Browser(BrowserMessage::Navigate(sub.clone())));
-        let _ = app.update(key("Ctrl+V"));
+        paste(&mut app);
         assert!(app.jobs.is_empty());
         assert!(app.status.as_deref().unwrap().contains("inside itself"));
     }

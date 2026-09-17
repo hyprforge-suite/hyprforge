@@ -13,4 +13,5 @@
 
 pub mod jobs;
 pub mod launch;
+pub mod system_clipboard;
 pub mod tabstrip;

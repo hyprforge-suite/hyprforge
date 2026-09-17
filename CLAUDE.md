@@ -546,6 +546,13 @@ rule above about drift with no symptom.
 run in tier 1, but proving it locks, draws and unlocks needs the nested
 compositor, by hand.
 
+Nor does it cover Files' copy and paste *between applications*: those tests
+write a clipboard, so they run only against the nested compositor, and refuse
+the session's own display. Start it with `nested.sh`, then
+`HYPRFORGE_TEST_NESTED_DISPLAY=wayland-2 cargo test -p hyprforge-files --test
+nested_clipboard -- --ignored --test-threads=1`. The live clipboard tier that
+`check.sh` does run stays read-only.
+
 `./hyprforge --install` restarts a running user service whose binary it just
 replaced — see the rule above about an installed binary not being a
 restarted daemon. `--no-restart` opts out for anyone mid-something who wants
