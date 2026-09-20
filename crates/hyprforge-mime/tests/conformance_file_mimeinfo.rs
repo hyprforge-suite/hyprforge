@@ -234,6 +234,25 @@ fn subclasses_are_read_from_the_database() {
     assert!(!lookup.is_subclass_of("application/x-gzip", "text/plain"));
 }
 
+/// Only the first thirty-two bytes decide whether something with no
+/// other evidence is text — the reference's rule, kept deliberately.
+///
+/// A real file in a real Downloads folder turns on this: an OpenSCAD
+/// export with no extension, 3.7MB, beginning `MW 1.0 2734833 US&ML US
+/// OPENSCAD` and binary after that. The reference and this call it
+/// `text/plain`; `gio`, which reads further, calls it
+/// `application/octet-stream`. Neither is wrong, and agreeing with the
+/// tool `xdg-open` would have used is the point of this file.
+#[test]
+fn a_printable_header_over_a_binary_body_is_text_as_the_reference_has_it() {
+    let (dir, dirs) = fixture();
+    let lookup = Lookup::load_from(&dirs);
+    let mut contents = b"MW 1.0 2734833 US&ML US OPENSCAD 178880093252953977".to_vec();
+    contents.extend([0u8, 1, 2, 3, 0xff, 0xfe].repeat(64));
+    let path = write(&dir, "export-with-no-extension", &contents);
+    assert_eq!(lookup.of_file(&path, true).mime, "text/plain");
+}
+
 /// The one case where this deliberately differs, asserted rather than
 /// dropped: the reference has no answer at all for a file that is not
 /// there, and this answers from the name when the name says something.

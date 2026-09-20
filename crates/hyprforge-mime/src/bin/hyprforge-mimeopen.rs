@@ -24,6 +24,7 @@
 //! guessing at a command line.
 
 use hyprforge_mime::{App, MimeDb};
+use std::borrow::Cow;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
@@ -123,18 +124,18 @@ fn main() {
     let candidates = db.apps_for_including_parents(&mime);
     let default = db.default_for(&mime).filter(|app| app.installed);
 
-    let chosen: Option<&App> = if args.no_ask {
-        default.or_else(|| candidates.first().copied())
+    let chosen: Option<Cow<'_, App>> = if args.no_ask {
+        default.or_else(|| candidates.first().copied()).map(Cow::Borrowed)
     } else if args.ask {
         choose(&mime, false, &candidates)
     } else if args.ask_default {
         choose(&mime, true, &candidates)
     } else if default.is_some() {
-        default
+        default.map(Cow::Borrowed)
     } else {
         // Nothing is set: one candidate needs no question, several do.
         match candidates.as_slice() {
-            [only] => Some(*only),
+            [only] => Some(Cow::Borrowed(*only)),
             _ => choose(&mime, true, &candidates),
         }
     };
@@ -189,8 +190,13 @@ fn launch(entry: &Path, files: &[String]) -> Result<(), String> {
 /// `--no-ask` is what a script or `xdg-open` uses. Anything that is not
 /// a number in range is "cancelled", which is the reference's behaviour
 /// and the safe reading of a stray keypress.
-fn choose<'a>(mime: &str, set_default: bool, apps: &[&'a App]) -> Option<&'a App> {
-    if apps.is_empty() {
+///
+/// When a default is being set, the list ends with "Other…", which
+/// takes a command line and writes a desktop entry for it — the way to
+/// say "none of these, use *this*". Borrowed or owned, because that
+/// last option produces an application that did not exist a moment ago.
+fn choose<'a>(mime: &str, set_default: bool, apps: &[&'a App]) -> Option<Cow<'a, App>> {
+    if apps.is_empty() && !set_default {
         return None;
     }
     let mut out = std::io::stdout().lock();
@@ -202,6 +208,9 @@ fn choose<'a>(mime: &str, set_default: bool, apps: &[&'a App]) -> Option<&'a App
     for (index, app) in apps.iter().enumerate() {
         let entry = app.id.trim_end_matches(".desktop");
         let _ = writeln!(out, "\t{}) {}  ({entry})", index + 1, app.name);
+    }
+    if set_default {
+        let _ = writeln!(out, "\t{}) Other...", apps.len() + 1);
     }
     let _ = write!(out, "\nuse application #");
     let _ = out.flush();
@@ -215,11 +224,46 @@ fn choose<'a>(mime: &str, set_default: bool, apps: &[&'a App]) -> Option<&'a App
         eprintln!("Cancelled");
         std::process::exit(exit::CANCELLED);
     };
+    if set_default && number == apps.len() + 1 {
+        return custom();
+    }
     match number.checked_sub(1).and_then(|index| apps.get(index)) {
-        Some(app) => Some(*app),
+        Some(app) => Some(Cow::Borrowed(*app)),
         None => {
             eprintln!("Cancelled");
             std::process::exit(exit::CANCELLED);
+        }
+    }
+}
+
+/// "Other…": a command typed at the prompt, written out as a desktop
+/// entry so it can be launched and remembered like any other
+/// application.
+fn custom<'a>() -> Option<Cow<'a, App>> {
+    let mut out = std::io::stdout().lock();
+    let _ = write!(out, "use command: ");
+    let _ = out.flush();
+    let mut command = String::new();
+    if std::io::stdin().lock().read_line(&mut command).is_err() || command.trim().is_empty() {
+        eprintln!("Cancelled");
+        std::process::exit(exit::CANCELLED);
+    }
+    let command = command.trim().to_string();
+    let applications = hyprforge_paths::data_home().join("applications");
+    match hyprforge_mime::apps::write_custom_entry(&applications, &command) {
+        Ok(id) => {
+            let path = applications.join(&id);
+            Some(Cow::Owned(App {
+                name: command.split_whitespace().next().unwrap_or(&command).to_string(),
+                id,
+                icon: None,
+                path,
+                installed: true,
+            }))
+        }
+        Err(e) => {
+            eprintln!("mimeopen: couldn't record that command: {e}");
+            std::process::exit(exit::NO_APPLICATION);
         }
     }
 }
@@ -367,8 +411,11 @@ mod tests {
     }
 
     /// An empty list is not a prompt with nothing under it.
+    /// With nothing installed and no default to set, there is nothing
+    /// to ask about. (Setting a default still has "Other…" to offer,
+    /// which is why that case is not the same.)
     #[test]
     fn nothing_to_choose_from_is_not_a_question() {
-        assert!(choose("model/stl", true, &[]).is_none());
+        assert!(choose("model/stl", false, &[]).is_none());
     }
 }

@@ -12,8 +12,9 @@
 //! that keeps the Settings app's tests honest applies to a command that
 //! can change a default just as much.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 const MIMETYPE: &str = env!("CARGO_BIN_EXE_hyprforge-mimetype");
 const MIMEOPEN: &str = env!("CARGO_BIN_EXE_hyprforge-mimeopen");
@@ -197,6 +198,76 @@ fn mimeopen_remembers_a_choice_in_the_config_home_it_was_given() {
     let text = std::fs::read_to_string(&written).expect("a default was recorded");
     assert!(text.contains("[Default Applications]"), "{text}");
     assert!(text.contains("model/stl=viewer.desktop"), "{text}");
+}
+
+/// "Other…": none of the applications offered, run this instead. The
+/// command becomes a desktop entry in the user's own applications
+/// directory, and that entry is what gets launched and remembered.
+#[test]
+fn mimeopen_can_be_told_a_command_of_its_own() {
+    let fixture = fixture();
+    let path = write(fixture.path(), "part.stl", b"solid\n");
+    let config = fixture.path().join("config");
+    let data_home = fixture.path().join("home-data");
+    std::fs::create_dir_all(&config).unwrap();
+
+    // One application is offered, so "Other..." is item 2. The command
+    // is `true`, which exists everywhere and does nothing.
+    let mut child = Command::new(MIMEOPEN)
+        .arg("--database")
+        .arg(data_dir(&fixture))
+        .args(["-d", path.to_str().unwrap()])
+        .env("XDG_CONFIG_HOME", &config)
+        .env("XDG_DATA_HOME", &data_home)
+        .env("XDG_DATA_DIRS", fixture.path().join("empty-dirs"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"2\ntrue\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("Other..."), "the option is offered: {stdout}");
+    assert!(stdout.contains("Opening"), "and something was opened: {stdout}");
+
+    let entry = data_home.join("applications").join("true-usercreated-1.desktop");
+    let text = std::fs::read_to_string(&entry).expect("an entry was written for the command");
+    assert!(text.contains("Exec=true %f"), "{text}");
+    assert!(text.contains("NoDisplay=true"), "a one-off choice is not a menu entry");
+
+    let recorded = std::fs::read_to_string(config.join("mimeapps.list")).unwrap();
+    assert!(
+        recorded.contains("model/stl=true-usercreated-1.desktop"),
+        "and it became the default: {recorded}"
+    );
+}
+
+/// A prompt answered with anything but a number in range is cancelled,
+/// with the reference's own exit code and nothing launched.
+#[test]
+fn mimeopen_treats_a_stray_answer_as_cancelled() {
+    let fixture = fixture();
+    let path = write(fixture.path(), "part.stl", b"solid\n");
+    let config = fixture.path().join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    let mut child = Command::new(MIMEOPEN)
+        .arg("--database")
+        .arg(data_dir(&fixture))
+        .args(["-a", path.to_str().unwrap()])
+        .env("XDG_CONFIG_HOME", &config)
+        .env("XDG_DATA_HOME", fixture.path().join("home-data"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"nope\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(8));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Cancelled"));
+    assert!(!config.join("mimeapps.list").exists(), "nothing was remembered");
 }
 
 #[test]

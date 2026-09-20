@@ -133,6 +133,53 @@ pub fn on_path(program: &str) -> bool {
     std::env::split_paths(&path).any(|dir| dir.join(program).is_file())
 }
 
+/// Writes a desktop entry for a command a person typed, and hands back
+/// the entry's file name.
+///
+/// This is the "Other…" answer in a chooser: none of the applications
+/// offered, run *this* instead. The entry goes in the user's own
+/// applications directory, marked `NoDisplay=true` so it stays out of
+/// menus — it is a record of one person's one-off choice, not an
+/// application anybody installed.
+///
+/// The name follows the convention every other implementation uses
+/// (`word-usercreated-1.desktop`), counting up rather than overwriting,
+/// so two different commands beginning with the same word do not
+/// quietly become one.
+///
+/// `command` is written into `Exec=` as given. Nothing here parses it —
+/// see this module's doc — which does mean a command that is nonsense
+/// produces an entry that fails to launch. That is visible immediately
+/// and recoverable by choosing again; guessing at what somebody meant
+/// would not be.
+pub fn write_custom_entry(applications: &Path, command: &str) -> std::io::Result<String> {
+    let word = command
+        .split_whitespace()
+        .next()
+        .and_then(|first| first.rsplit('/').next())
+        .filter(|word| !word.is_empty())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "that command names no program")
+        })?;
+    let safe: String = word.chars().filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_').collect();
+    let stem = if safe.is_empty() { "command".to_string() } else { safe };
+
+    std::fs::create_dir_all(applications)?;
+    for attempt in 1..1000 {
+        let id = format!("{stem}-usercreated-{attempt}.desktop");
+        let path = applications.join(&id);
+        if path.exists() {
+            continue;
+        }
+        let entry = format!(
+            "[Desktop Entry]\nType=Application\nName={word}\nNoDisplay=true\nExec={command} %f\n"
+        );
+        hyprforge_paths::write_atomic(&path, &entry)?;
+        return Ok(id);
+    }
+    Err(std::io::Error::other("too many entries already exist for that command"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +255,43 @@ mod tests {
             &["BambuStudio.desktop", "plasticity.desktop", "view3d.desktop"]
         );
         assert_eq!(cache.get("text/plain"), None);
+    }
+
+    #[test]
+    fn a_typed_command_becomes_an_entry_that_stays_out_of_menus() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = write_custom_entry(dir.path(), "kate --new").unwrap();
+        assert_eq!(id, "kate-usercreated-1.desktop");
+        let text = std::fs::read_to_string(dir.path().join(&id)).unwrap();
+        assert!(text.contains("Exec=kate --new %f"), "{text}");
+        assert!(text.contains("NoDisplay=true"), "a one-off choice is not a menu entry");
+
+        // And it reads back as an application, which is the whole point.
+        let app = parse_entry(&dir.path().join(&id), &text, &everything_installed);
+        assert!(app.is_none(), "NoDisplay keeps it out of a chooser's own list");
+    }
+
+    /// Two different commands starting with the same word must not
+    /// become one entry.
+    #[test]
+    fn a_second_command_with_the_same_first_word_gets_its_own_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(write_custom_entry(dir.path(), "kate a").unwrap(), "kate-usercreated-1.desktop");
+        assert_eq!(write_custom_entry(dir.path(), "kate b").unwrap(), "kate-usercreated-2.desktop");
+    }
+
+    #[test]
+    fn a_command_with_a_path_is_named_by_its_program() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = write_custom_entry(dir.path(), "/usr/bin/zeditor --wait").unwrap();
+        assert_eq!(id, "zeditor-usercreated-1.desktop");
+        assert!(std::fs::read_to_string(dir.path().join(&id)).unwrap().contains("Exec=/usr/bin/zeditor --wait %f"));
+    }
+
+    #[test]
+    fn an_empty_command_is_refused_rather_than_written() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(write_custom_entry(dir.path(), "   ").is_err());
     }
 
     #[test]
