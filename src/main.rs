@@ -1377,6 +1377,21 @@ impl App {
                 }
                 self.handle_outcome(self.active, outcome)
             }
+            // The chooser has the keyboard while it is up. Escape
+            // closes it; everything else is swallowed rather than
+            // reaching the listing behind it, where a stray letter
+            // would start a type-to-search nobody can see.
+            //
+            // Enter deliberately does nothing: the first row is the
+            // current default, and "press Enter" would then mean "open
+            // with the thing that was already going to open it", which
+            // is never why this dialog is up.
+            Message::KeyPressed(press) if self.chooser.is_some() => {
+                if press.key == keymap::Key::Escape {
+                    self.chooser = None;
+                }
+                Task::none()
+            }
             // A confirmation has the keyboard. Escape says no. Enter says
             // yes to a trash, which can be undone, and nothing to a
             // permanent delete, which cannot — that one takes a click.
@@ -3009,6 +3024,33 @@ mod tests {
         let _ = app.update(Message::ChooserShowAll);
         assert!(app.chooser.as_ref().unwrap().all);
         let _ = app.update(Message::CloseChooser);
+        assert_eq!(app.chooser, None);
+    }
+
+    /// A dialog owns the keyboard while it is up — Escape closes it,
+    /// and nothing else leaks through to the listing behind.
+    #[test]
+    fn escape_closes_the_chooser_and_other_keys_do_not_reach_the_listing() {
+        let (_dir, mime) = mime_fixture();
+        let mut app = app_for_test(&["/a"]);
+        app.mime = mime;
+        let _ = app.handle_outcome(0, Outcome::OpenWith("/a/page.html".into()));
+
+        let typing = hyprforge_files_core::keymap::KeyPress {
+            key: keymap::Key::Char('n'),
+            mods: Default::default(),
+            text: Some('n'),
+        };
+        let _ = app.update(Message::KeyPressed(typing));
+        assert!(app.chooser.is_some(), "still up");
+        assert_eq!(app.tabs[0].browser.search_query(), "", "and nothing was typed behind it");
+
+        let escape = hyprforge_files_core::keymap::KeyPress {
+            key: keymap::Key::Escape,
+            mods: Default::default(),
+            text: None,
+        };
+        let _ = app.update(Message::KeyPressed(escape));
         assert_eq!(app.chooser, None);
     }
 
