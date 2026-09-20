@@ -1688,6 +1688,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyprforge-mime"
+version = "0.1.0"
+dependencies = [
+ "hyprforge-paths",
+ "hyprforge-process",
+ "tempfile",
+]
+
+[[package]]
 name = "hyprforge-network"
 version = "0.1.0"
 dependencies = [

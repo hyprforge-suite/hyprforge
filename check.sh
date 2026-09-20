@@ -580,6 +580,26 @@ else
         fi
     fi
 
+    step "The installed shared MIME database"
+    # Gated on the database itself, not on a compositor or a daemon:
+    # what these ask is whether this machine's own globs2 and desktop
+    # entries say what the parsers here expect.
+    if [[ ! -r /usr/share/mime/globs2 && ! -r "${XDG_DATA_HOME:-$HOME/.local/share}/mime/globs2" ]]; then
+        skip "mime database tests" "no shared MIME database installed (shared-mime-info)"
+    else
+        output=$(cargo test -p hyprforge-mime --test live_mime_database \
+            -- --ignored --test-threads=1 --nocapture 2>&1)
+        if grep -q "test result: FAILED" <<<"$output"; then
+            bad "mime tests failed — this machine's database disagrees with how these files are read"
+            grep -E '^test .* FAILED|should be|gio says' <<<"$output" | head -20
+        else
+            ok "$(count_tests <<<"$output") mime database tests passed"
+            while IFS= read -r reason; do
+                [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
+            done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^(]*\).*/\1/p' <<<"$output" | sort -u)
+        fi
+    fi
+
     step "Live tests against a tray host"
     if ! command -v busctl >/dev/null; then
         skip "tray tests" "busctl not available to ask"

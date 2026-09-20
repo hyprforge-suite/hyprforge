@@ -30,6 +30,7 @@ members = [
     "crates/hyprforge-network",
     "crates/hyprforge-power",
     "crates/hyprforge-settings",
+    "crates/hyprforge-mime",
     "crates/hyprforge-fileops",
     "crates/hyprforge-files-core",
     "crates/hyprforge-files",
