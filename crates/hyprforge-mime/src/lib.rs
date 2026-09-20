@@ -77,6 +77,10 @@ pub struct MimeDb {
     registered: std::collections::BTreeMap<String, Vec<String>>,
     /// Type to the chosen application, user's file first.
     chosen: std::collections::BTreeMap<String, Vec<String>>,
+    /// Applications a person added for a type themselves.
+    added: std::collections::BTreeMap<String, Vec<String>>,
+    /// Applications a person does not want offered for a type.
+    removed: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 impl MimeDb {
@@ -130,11 +134,17 @@ impl MimeDb {
         }
         for path in mimeapps {
             let Ok(text) = std::fs::read_to_string(path) else { continue };
-            for (mime, ids) in defaults::parse(&text) {
-                let chosen = db.chosen.entry(mime).or_default();
-                for id in ids {
-                    if !chosen.contains(&id) {
-                        chosen.push(id);
+            for (section, into) in [
+                (defaults::parse(&text), &mut db.chosen),
+                (defaults::parse_section(&text, defaults::ADDED_SECTION), &mut db.added),
+                (defaults::parse_section(&text, defaults::REMOVED_SECTION), &mut db.removed),
+            ] {
+                for (mime, ids) in section {
+                    let list = into.entry(mime).or_default();
+                    for id in ids {
+                        if !list.contains(&id) {
+                            list.push(id);
+                        }
                     }
                 }
             }
@@ -201,19 +211,45 @@ impl MimeDb {
     /// still reports a missing default, because "your default is gone"
     /// is worth saying out loud.
     pub fn apps_for(&self, mime: &str) -> Vec<&App> {
+        let mime = self.canonical(mime);
         let mut ids: Vec<&String> = Vec::new();
-        for id in self.chosen.get(mime).into_iter().flatten() {
-            ids.push(id);
-        }
-        for id in self.registered.get(mime).into_iter().flatten() {
-            if !ids.contains(&id) {
-                ids.push(id);
+        for source in [self.chosen.get(mime), self.added.get(mime), self.registered.get(mime)] {
+            for id in source.into_iter().flatten() {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
             }
         }
+        // A removal says "never offer this for that type", and a
+        // chooser that ignores it keeps putting back something somebody
+        // deliberately took away.
+        let removed = self.removed.get(mime);
         ids.into_iter()
+            .filter(|id| !removed.is_some_and(|list| list.contains(id)))
             .filter_map(|id| self.entries.get(id))
             .filter(|app| app.installed)
             .collect()
+    }
+
+    /// [`MimeDb::apps_for`], then the applications for every type this
+    /// one is a *kind of* — an archive manager can open a 3MF, and a
+    /// text editor can open a shell script.
+    ///
+    /// The reference implementation's `mime_applications_all`, and the
+    /// list `mimeopen` offers. Kept apart from [`MimeDb::apps_for`]
+    /// because the two answer different questions — "what is this type
+    /// for" and "what could open this file at all" — and a chooser
+    /// wants the first at the top with the second below it.
+    pub fn apps_for_including_parents(&self, mime: &str) -> Vec<&App> {
+        let mut apps = self.apps_for(mime);
+        for parent in self.lookup.types.ancestors(mime) {
+            for app in self.apps_for(&parent) {
+                if !apps.iter().any(|existing| existing.id == app.id) {
+                    apps.push(app);
+                }
+            }
+        }
+        apps
     }
 
     /// The application that opens `mime` today, whether or not it is
@@ -221,7 +257,7 @@ impl MimeDb {
     /// isn't installed any more" instead of quietly offering something
     /// else.
     pub fn default_for(&self, mime: &str) -> Option<&App> {
-        let id = self.chosen.get(mime)?.first()?;
+        let id = self.chosen.get(self.canonical(mime))?.first()?;
         self.entries.get(id)
     }
 
@@ -277,12 +313,13 @@ pub fn data_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Every `mimeapps.list` that applies, most specific first.
+/// Every `mimeapps.list` that applies, most specific first. Public
+/// because the `mimeopen` command loads the database the same way.
 ///
 /// The desktop-prefixed one (`hyprland-mimeapps.list`) comes before the
 /// plain one in each directory, which is the spec's way of letting a
 /// desktop differ from the machine's own choices.
-fn mimeapps_paths() -> Vec<PathBuf> {
+pub fn mimeapps_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let desktops: Vec<String> = std::env::var("XDG_CURRENT_DESKTOP")
         .unwrap_or_default()

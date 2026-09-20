@@ -26,6 +26,10 @@ readonly GREETD_DIR=/etc/greetd
 
 DRY_RUN=false
 FORCE_CLEANUP=false
+# See --provide-mimetype. Off by default: putting a `mimetype` on PATH
+# changes how every application on the machine opens files, which is not
+# something to do as a side effect of installing a file manager.
+PROVIDE_MIMETYPE=false
 ASSUME_YES=false
 ACTION=
 COMPONENTS=()
@@ -373,6 +377,10 @@ ${B}Components${N}
                    service, plus the popup its keybind launches.
   --settings       The Settings app and its launcher entry.
   --files          The file manager, and its launcher entry.
+  --mime           hyprforge-mimetype and hyprforge-mimeopen: what kind
+                   of file is this, and what opens it. See
+                   --provide-mimetype for the part that changes what the
+                   rest of the desktop does.
   --emoji          The emoji picker popup, bound from Settings ->
                    Shortcuts (it has no daemon and no service).
   --all            Every component above.
@@ -382,6 +390,13 @@ ${B}Options${N}
                    components or holding user data: the exported look,
                    the hyprforge group, /etc/greetd config. Off by
                    default because these are not yours alone.
+  --provide-mimetype
+                   With --mime, also provide the two commands under the
+                   plain names `mimetype` and `mimeopen`, which is what
+                   xdg-open looks for. This changes what happens when
+                   *any* application on the desktop opens a file, so it
+                   is off unless you ask. Uninstall removes the links
+                   only if they still point at Hyprforge's binaries.
   --no-restart     Do not restart a running daemon whose binary changed.
                    The install still happens; the old process keeps
                    running until you restart it yourself.
@@ -417,8 +432,10 @@ while [[ $# -gt 0 ]]; do
         --clipboard)     COMPONENTS+=(clipboard) ;;
         --emoji)         COMPONENTS+=(emoji) ;;
         --files)         COMPONENTS+=(files) ;;
+        --mime)          COMPONENTS+=(mime) ;;
+        --provide-mimetype) PROVIDE_MIMETYPE=true ;;
         --settings)      COMPONENTS+=(settings) ;;
-        --all)           COMPONENTS+=(greeter lock displayd tray clipboard emoji files settings) ;;
+        --all)           COMPONENTS+=(greeter lock displayd tray clipboard emoji files mime settings) ;;
         --force-cleanup) FORCE_CLEANUP=true ;;
         --dry-run)       DRY_RUN=true ;;
         --no-restart)    NO_RESTART=true ;;
@@ -893,6 +910,75 @@ uninstall_files() {
     # still there.
 }
 
+# ------------------------------------------------------------------ mime
+#
+# Two commands, and one decision about names.
+#
+# `xdg-open`, on a desktop it does not recognise (Hyprland is one), asks
+# `xdg-mime query filetype`, which runs `mimetype` if it is on PATH and
+# falls back to `file --mime-type` if it is not. That fallback reads
+# bytes and never names: an STL becomes application/octet-stream, has no
+# default application, and xdg-open — finding nothing — works down a
+# built-in list of web browsers. Installing these as `mimetype` and
+# `mimeopen` is what fixes that for every application, not just ours.
+#
+# It is also, unavoidably, taking over two command names that belong to
+# somebody else's package, so it happens only with --provide-mimetype.
+install_mime() {
+    COMPONENT_CHANGED=false
+    build hyprforge-mimetype
+    build hyprforge-mimeopen
+    step "Mime tools"
+    install_file target/release/hyprforge-mimetype "$PREFIX/hyprforge-mimetype" 755
+    install_file target/release/hyprforge-mimeopen "$PREFIX/hyprforge-mimeopen" 755
+
+    if ! $PROVIDE_MIMETYPE; then
+        skip "not providing \`mimetype\`/\`mimeopen\` (pass --provide-mimetype)"
+        flush_current
+        return 0
+    fi
+    for name in mimetype mimeopen; do
+        local target="$PREFIX/hyprforge-$name" link="$PREFIX/$name"
+        # An existing file that is not ours is another package's, and
+        # replacing it would leave that package's own files half
+        # present. Say so and leave it; PATH order is the user's to
+        # settle, not this script's.
+        if [[ -e $link && ! -L $link ]]; then
+            warn "$link exists and is not a link — leaving it alone"
+            continue
+        fi
+        if [[ -L $link && $(readlink -f "$link") == "$target" ]]; then
+            mark_current
+            continue
+        fi
+        run_root ln -sfn "$target" "$link"
+        $DRY_RUN || ok "linked $link -> $target"
+    done
+    flush_current
+    if command -v /usr/bin/mimetype >/dev/null && ! $DRY_RUN; then
+        warn "perl-file-mimeinfo is also installed; whichever of $PREFIX and /usr/bin comes first in PATH wins"
+    fi
+}
+
+uninstall_mime() {
+    step "Mime tools: removing"
+    # The links first, and only if they still point at ours — a link
+    # somebody re-pointed at the perl version is theirs now.
+    for name in mimetype mimeopen; do
+        local link="$PREFIX/$name"
+        if [[ -L $link && $(readlink -f "$link") == "$PREFIX/hyprforge-$name" ]]; then
+            remove_file "$link"
+        elif [[ -e $link ]]; then
+            skip "$link is not ours; leaving it"
+        fi
+    done
+    remove_file "$PREFIX/hyprforge-mimetype"
+    remove_file "$PREFIX/hyprforge-mimeopen"
+    # Nothing else: the mimeapps.list these can write is the user's own
+    # record of which application opens what, and uninstalling a command
+    # is not a reason to forget it.
+}
+
 uninstall_emoji() {
     step "Emoji picker: removing"
     remove_file "$PREFIX/hyprforge-emojimenu"
@@ -1099,6 +1185,21 @@ status_binary() {
     fi
 }
 
+# Whether the desktop-wide names point at ours — see --provide-mimetype.
+# A link pointing somewhere else is somebody else's and is reported as
+# such rather than as missing, because "not installed" and "installed,
+# and another package won" are different things to be told.
+status_mime_link() {
+    local name=$1 link="$PREFIX/$1" ours="$PREFIX/hyprforge-$1"
+    if [[ -L $link && $(readlink -f "$link") == "$ours" ]]; then
+        printf '  %s✓%s %-24s %s -> hyprforge-%s\n' "$G" "$N" "$name provided" "$link" "$name"
+    elif [[ -e $link ]]; then
+        printf '  %s!%s %-24s %s exists but is not ours%s\n' "$Y" "$N" "$name provided" "$link" "$N"
+    else
+        printf '  %s·%s %-24s %snot provided (--provide-mimetype)%s\n' "$D" "$N" "$name provided" "$D" "$N"
+    fi
+}
+
 status_path() {
     local label=$1 path=$2
     if [[ -e $path ]]; then
@@ -1189,6 +1290,9 @@ show_status() {
     status_binary hyprforge-clipd
     status_binary hyprforge-clipmenu
     status_binary hyprforge-emojimenu
+    status_binary hyprforge-files
+    status_binary hyprforge-mimetype
+    status_binary hyprforge-mimeopen
     status_binary hyprforge-settings
 
     step "Supporting files"
@@ -1198,6 +1302,8 @@ show_status() {
     status_path "exported look"      "$EXPORT_DIR/theme.toml"
     status_path "exported layout"    "$EXPORT_DIR/monitors.lua"
     status_path "launcher entry"     "$DESKTOP_DIR/hyprforge-settings.desktop"
+    status_mime_link mimetype
+    status_mime_link mimeopen
 
     step "Services"
     status_service --system greetd "this machine logs in through the greeter"
@@ -1240,6 +1346,7 @@ case $ACTION in
         has_component clipboard && install_clipboard
         has_component emoji && install_emoji
         has_component files && install_files
+        has_component mime && install_mime
         has_component settings && install_settings
         print_next_steps
         step "Done"
@@ -1251,6 +1358,7 @@ case $ACTION in
         has_component clipboard && uninstall_clipboard
         has_component emoji && uninstall_emoji
         has_component files && uninstall_files
+        has_component mime && uninstall_mime
         has_component tray && uninstall_tray
         has_component displayd && uninstall_displayd
         has_component settings && uninstall_settings

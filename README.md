@@ -102,6 +102,16 @@ Hyprland-facing
                             edge case, since btrfs subvolumes report
                             different device numbers. No Hyprland, no
                             async runtime: syscalls and arithmetic.
+  hyprforge-mime/          what kind of file this is, what opens it, and
+                            which one does by default — the freedesktop
+                            shared MIME database, read rather than
+                            guessed at. Ships hyprforge-mimetype and
+                            hyprforge-mimeopen, drop-ins for the commands
+                            of the same name in perl-file-mimeinfo: with
+                            neither installed, xdg-open falls back to
+                            content sniffing, which calls an STL a stream
+                            of bytes and opens 3D models in a browser.
+                            A leaf, like hyprforge-look.
   hyprforge-files-core/    the file browser's model, the FsBackend seam,
                             and the browsing view itself. The view lives
                             here rather than in the app because the

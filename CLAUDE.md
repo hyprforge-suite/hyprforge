@@ -577,6 +577,9 @@ hyprforge-process   a bounded subprocess wait (Command::output that gives up);
                     or systemd-logind needs this and nothing Hyprland-shaped
 hyprforge-look      Color + the runtime Theme; no iced, because the lock screen
                     and greeter paint into a raw Wayland buffer
+hyprforge-mime      the freedesktop shared MIME database: what a file is,
+                    what opens it, what the default is. A leaf; depends only
+                    on hyprforge-paths
 hyprforge-ui        the iced layer; knows nothing about Hyprland
 hyprforge-core      Hyprland config machinery — a new app should never need it
 ```

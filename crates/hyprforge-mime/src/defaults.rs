@@ -14,26 +14,44 @@
 //! silently reorder a person's file and drop their notes the first time
 //! they changed a default from a menu.
 //!
-//! A section this code does not know (`[Added Associations]`,
-//! `[Removed Associations]`, anything a future spec adds) is not
-//! understood and not touched, which is the only safe thing to do with
-//! it.
+//! `[Added Associations]` and `[Removed Associations]` are *read* —
+//! they change what a chooser may offer — and never written: adding or
+//! removing an association is not something this suite has a reason to
+//! do on anyone's behalf. A section beyond those three is neither read
+//! nor touched, which is the only safe thing to do with it.
 
 use std::collections::BTreeMap;
 
 const DEFAULTS_SECTION: &str = "[Default Applications]";
+/// Applications a user added for a type beyond what the desktop entries
+/// themselves registered.
+pub const ADDED_SECTION: &str = "[Added Associations]";
+/// Applications a user does not want offered for a type, whatever the
+/// desktop entry claims.
+pub const REMOVED_SECTION: &str = "[Removed Associations]";
 
 /// The `[Default Applications]` entries of one `mimeapps.list`.
 ///
 /// The value is a list because the spec allows fallbacks: the first
 /// entry that is actually installed wins.
 pub fn parse(text: &str) -> BTreeMap<String, Vec<String>> {
+    parse_section(text, DEFAULTS_SECTION)
+}
+
+/// Any one section of a `mimeapps.list`, in the same shape.
+///
+/// The three that matter are the defaults, the associations a person
+/// added, and the ones they removed — see [`ADDED_SECTION`] and
+/// [`REMOVED_SECTION`]. A removal is not a smaller kind of default: it
+/// says "never offer this for that type", and a chooser that ignores it
+/// keeps putting back something somebody deliberately took away.
+pub fn parse_section(text: &str, section: &str) -> BTreeMap<String, Vec<String>> {
     let mut defaults: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut in_section = false;
     for line in text.lines() {
         let line = line.trim();
         if line.starts_with('[') {
-            in_section = line == DEFAULTS_SECTION;
+            in_section = line == section;
             continue;
         }
         if !in_section || line.is_empty() || line.starts_with('#') {
@@ -134,6 +152,17 @@ model/3mf=fstl.desktop;
         assert_eq!(defaults.get("text/html").unwrap(), &["google-chrome.desktop"]);
         assert_eq!(defaults.get("model/stl").unwrap(), &["view3d.desktop"]);
         assert_eq!(defaults.get("model/3mf"), None, "that one is an association, not a default");
+    }
+
+    #[test]
+    fn the_other_two_sections_read_the_same_way() {
+        let added = parse_section(REAL, ADDED_SECTION);
+        assert_eq!(added.get("model/3mf").unwrap(), &["fstl.desktop"]);
+        assert!(parse_section(REAL, REMOVED_SECTION).is_empty(), "none in this file");
+        assert!(
+            !added.contains_key("text/html"),
+            "a default is not an association; the sections stay apart"
+        );
     }
 
     #[test]
