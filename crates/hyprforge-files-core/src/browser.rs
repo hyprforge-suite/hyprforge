@@ -499,6 +499,9 @@ struct ViewModel<'a> {
     /// How many entries here are dotfiles, shown or not — whether the
     /// status bar offers its show/hide switch.
     dotfiles: usize,
+    /// What key that switch names, as configured. `None` if the action
+    /// has been left unbound.
+    hidden_key: Option<String>,
     /// `[sidebar] show-trash`.
     show_trash: bool,
     /// The rows to draw, in order — borrowed out of the one owned
@@ -1391,6 +1394,12 @@ impl Browser {
             viewport_width,
             hidden_count: self.hidden_count(),
             dotfiles: self.entries.iter().filter(|e| e.hidden).count(),
+            hidden_key: self
+                .config
+                .keymap
+                .combos_for(Action::ToggleHidden)
+                .first()
+                .map(|combo| combo.to_string()),
             show_trash: self.config.sidebar.show_trash,
             rows: self.rows(),
             selection: &self.selection,
@@ -1919,13 +1928,14 @@ fn status_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> 
     // The dotfile switch, where the count of what is hidden is — Ctrl+H
     // is not something anyone finds by looking. Only offered when there
     // are dotfiles here to show or hide.
+    // The count is already in the summary beside it, so the switch says
+    // only what it does — and names its key, which is the half nobody
+    // can guess.
     let dotfile_switch: Element<'a, Message> = if vm.dotfiles > 0 {
-        let label = if vm.prefs.show_hidden {
-            "Hide dotfiles".to_string()
-        } else if vm.dotfiles == 1 {
-            "Show 1 dotfile".to_string()
-        } else {
-            format!("Show {} dotfiles", vm.dotfiles)
+        let verb = if vm.prefs.show_hidden { "Hide" } else { "Show" };
+        let label = match &vm.hidden_key {
+            Some(key) => format!("{verb} ({key})"),
+            None => verb.to_string(),
         };
         // `scaled_text`, not `meta_text`: a colour set on the text
         // would override the button's, and the hover colour with it.
@@ -3695,6 +3705,22 @@ mod tests {
         assert_eq!(choose(&mut browser, "Pin to Sidebar"), Outcome::Pins(PinChange::Pin("/music".into())));
     }
 
+    /// The switch names the key it is bound to, since a shortcut is the
+    /// half of a control nobody can guess — and follows a rebinding.
+    #[test]
+    fn the_dotfile_switch_names_its_configured_key() {
+        use crate::config::Config;
+        let mut browser = loaded_browser(&["a.txt"]);
+        let (config, problems) =
+            crate::config::parse("[keys]\nshow-hidden = \"Ctrl+J\"\n", Path::new("f.toml"));
+        assert!(problems.is_empty(), "{problems:?}");
+        browser.set_config(std::sync::Arc::new(config));
+        assert_eq!(browser.view_model(1000.0).hidden_key.as_deref(), Some("Ctrl+J"));
+
+        browser.set_config(std::sync::Arc::new(Config::default()));
+        assert_eq!(browser.view_model(1000.0).hidden_key.as_deref(), Some("Ctrl+H"));
+    }
+
     /// With nothing selected, Ctrl+D pins the folder being shown.
     #[test]
     fn pinning_from_the_keyboard_pins_the_folder_shown() {
@@ -4398,6 +4424,7 @@ mod tests {
             viewport_width: 1000.0,
             hidden_count: 0,
             dotfiles: 0,
+            hidden_key: Some("Ctrl+H".to_string()),
             show_trash: true,
             rows: Vec::new(),
             selection,
