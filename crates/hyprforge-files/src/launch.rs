@@ -83,6 +83,12 @@ pub enum Opened {
     NoOpener,
     /// It exists and could not be started.
     Failed(String),
+    /// A *particular* application was chosen and `gio` is not installed
+    /// to launch it. Distinct from [`Opened::NoOpener`]: opening the
+    /// file normally still works here, it is only the choice that
+    /// cannot be honoured, and the sentence has to say that rather than
+    /// claiming nothing can be opened at all.
+    NoChooser,
 }
 
 impl Opened {
@@ -103,6 +109,10 @@ impl Opened {
                  application directly."
             )),
             Opened::Failed(why) => Some(format!("Couldn't open {name}: {why}")),
+            Opened::NoChooser => Some(format!(
+                "Couldn't open {name} with that application because gio isn't \
+                 installed. Install glib2, or open it with the usual application."
+            )),
         }
     }
 }
@@ -172,6 +182,32 @@ fn open_with_args(opener: &str, args: &[&str], path: &Path) -> Opened {
     }
 }
 
+/// Opens `path` with one chosen application, named by its desktop
+/// entry.
+///
+/// `gio launch` rather than reading the entry's `Exec=` and running it:
+/// the field codes (`%f`, `%U`, `%c`), `TryExec`, `Terminal=true` and
+/// D-Bus activation are the desktop entry specification, and this file's
+/// whole position is that the suite does not reimplement it — see the
+/// module doc. There is no `xdg-open` equivalent to fall back to, since
+/// `xdg-open` takes a file and not an application, so a machine without
+/// `gio` cannot honour a *choice* of application. It is told so, rather
+/// than being quietly given the default instead.
+pub fn open_with_app(entry: &Path, path: &Path) -> Opened {
+    match std::process::Command::new("gio")
+        .arg("launch")
+        .arg(entry)
+        .arg(path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_child) => Opened::Spawned,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Opened::NoChooser,
+        Err(e) => Opened::Failed(e.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +261,16 @@ mod tests {
     fn the_first_installed_opener_is_the_one_used() {
         let openers: [&[&str]; 2] = [&["true"], &["xdg-open-does-not-exist-xyz"]];
         assert_eq!(open_first_of(&openers, Path::new("/tmp/x.txt")), Opened::Spawned);
+    }
+
+    /// Choosing an application needs gio, and a machine without it is
+    /// told what it can still do rather than that nothing works.
+    #[test]
+    fn a_chosen_application_without_gio_says_what_is_missing() {
+        let message = Opened::NoChooser.message(Path::new("/tmp/part.stl")).unwrap();
+        assert!(message.contains("part.stl"));
+        assert!(message.contains("glib2"), "names the package");
+        assert!(message.contains("usual application"), "and what still works");
     }
 
     /// A path with no file name at all (the filesystem root) must still

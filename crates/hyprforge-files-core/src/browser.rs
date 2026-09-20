@@ -384,6 +384,11 @@ pub enum Outcome {
     SetClipboard(crate::clipboard::FileClip),
     /// Put this text on the clipboard — the paths, for Copy Path.
     CopyText(String),
+    /// Ask the window which application should open this file. The
+    /// browser cannot answer: the mime database and the launching are
+    /// both the host's, and the open/save dialog has no business
+    /// launching anything at all.
+    OpenWith(PathBuf),
     /// Change the pinned list. The window owns that list — every tab
     /// shows the same one — so the change goes to it rather than into
     /// this tab's own copy of the preferences.
@@ -949,6 +954,10 @@ impl Browser {
             // index against a list that may have been re-sorted since
             // the focus was set.
             Action::Open => self.activate_focused(),
+            Action::OpenWith => match self.selected_shown().first() {
+                Some(path) => Outcome::OpenWith(path.clone()),
+                None => Outcome::None,
+            },
             Action::OpenInNewTab => match (&self.menu_target, self.selection.focused()) {
                 (Some(target), _) => Outcome::OpenInNewTab(target.clone()),
                 (None, Some(path)) => Outcome::OpenInNewTab(path.to_path_buf()),
@@ -2683,8 +2692,10 @@ fn menu_item_style(
 /// One function for both, because it is one rule. The sidebar and the
 /// entry list had a byte-identical copy each, with the boolean renamed;
 /// two copies of "purple means selected" is two places for it to stop
-/// being true.
-fn selectable_row_style(
+/// being true. Public for the same reason: the window's own
+/// application chooser is a third list of rows, and it must not become
+/// a third copy.
+pub fn selectable_row_style(
     theme: &iced::Theme,
     status: iced::widget::button::Status,
     selected: bool,

@@ -99,6 +99,7 @@ impl Default for MenuConfig {
         MenuConfig {
             entry: vec![
                 A(Open),
+                A(OpenWith),
                 Sep,
                 A(Cut),
                 A(Copy),

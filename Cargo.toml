@@ -85,6 +85,7 @@ hyprforge-emoji = { path = "crates/hyprforge-emoji", version = "0.1.0" }
 hyprforge-emojimenu = { path = "crates/hyprforge-emojimenu" }
 hyprforge-fileops = { path = "crates/hyprforge-fileops" }
 hyprforge-files-core = { path = "crates/hyprforge-files-core" }
+hyprforge-mime = { path = "crates/hyprforge-mime" }
 hyprforge-files = { path = "crates/hyprforge-files" }
 
 # Only hyprforge-lua-import depends on this — evaluating a user's own

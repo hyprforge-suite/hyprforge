@@ -69,6 +69,9 @@ pub enum Action {
     NewFolder,
     /// Open the right-click menu from the keyboard, for the focused row.
     ContextMenu,
+    /// Open a file with an application the user picks, and optionally
+    /// make that the default for its kind.
+    OpenWith,
     /// Add a folder to the sidebar's Pinned section.
     Pin,
     /// Take a folder out of it.
@@ -127,6 +130,7 @@ impl Action {
             Action::Paste,
             Action::CopyPath,
             Action::Refresh,
+            Action::OpenWith,
             Action::Pin,
             Action::Unpin,
             Action::PinUp,
@@ -170,6 +174,7 @@ impl Action {
             Action::Paste => "paste",
             Action::CopyPath => "copy-path",
             Action::Refresh => "refresh",
+            Action::OpenWith => "open-with",
             Action::Pin => "pin",
             Action::Unpin => "unpin",
             Action::PinUp => "pin-up",
@@ -232,6 +237,7 @@ impl Action {
             Action::Paste => "Paste",
             Action::CopyPath => "Copy Path",
             Action::Refresh => "Refresh",
+            Action::OpenWith => "Open With\u{2026}",
             Action::Pin => "Pin to Sidebar",
             Action::Unpin => "Unpin",
             Action::PinUp => "Move Up",
@@ -309,6 +315,9 @@ impl Action {
             Action::Paste => &["Ctrl+V"],
             Action::CopyPath => &["Ctrl+Shift+C"],
             Action::Refresh => &["F5", "Ctrl+R"],
+            // No default key: it opens a chooser, which is a thing you
+            // go looking for rather than reach for.
+            Action::OpenWith => &[],
             // Ctrl+D is "bookmark this" in Nautilus and in every browser.
             Action::Pin => &["Ctrl+D"],
             Action::Unpin => &[],
@@ -414,6 +423,10 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         Action::Cut => ctx.selected > 0 && !ctx.in_trash,
         Action::Paste => ctx.can_paste && !ctx.in_trash,
         Action::Refresh => true,
+        // One file at a time: "open these five in different
+        // applications" is not a question the chooser can ask, and a
+        // folder is opened by going into it.
+        Action::OpenWith => ctx.selected == 1 && ctx.focused_is_dir == Some(false) && !ctx.in_trash,
         Action::Pin => ctx.pin.exists && ctx.pin.pinned_at.is_none() && !ctx.in_trash,
         Action::Unpin => ctx.pin.pinned_at.is_some(),
         Action::PinUp => ctx.pin.pinned_at.is_some_and(|at| at > 0),
