@@ -15,6 +15,9 @@ path = "src/main.rs"
 # the file operations a dialog deliberately does not have.
 hyprforge-files-core.workspace = true
 hyprforge-fileops.workspace = true
+# What a file is, and which applications can open it — see
+# `launch.rs` for why the launching itself is still the desktop's.
+hyprforge-mime.workspace = true
 # The Wayland clipboard, so copied files reach other applications and
 # theirs reach this one. The library only — this app never needs the
 # clipboard history daemon to be installed or running.

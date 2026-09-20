@@ -164,6 +164,12 @@ fn main() -> iced::Result {
         last_window_size,
         resize_generation: 0,
         clipboard: Arc::new(hyprforge_files::system_clipboard::SystemClipboard::new()),
+        // A handful of small files, read once before the window opens —
+        // the same budget the sidebar's `stat`s already spend here. It
+        // is not the per-double-click cost it would be if a chooser
+        // loaded it each time.
+        mime: Arc::new(hyprforge_mime::MimeDb::load()),
+        chooser: None,
         jobs: Vec::new(),
         confirm: None,
         undo: hyprforge_files_core::undo::UndoHistory::new(config.behaviour.undo_depth as usize),
@@ -368,6 +374,16 @@ enum Message {
     PrefsSaved(Result<Prefs, String>),
     /// The pinned folders, read afresh — for every tab's sidebar.
     PinnedLoaded(Vec<PinnedItem>),
+    /// An application was picked in the chooser, by its desktop entry's
+    /// file name.
+    ChooseApp(String),
+    /// "Show all applications", for a file whose own kind has few.
+    ChooserShowAll,
+    /// The "always open this kind with it" tick.
+    ChooserSetDefault(bool),
+    CloseChooser,
+    /// A default was written, or could not be.
+    DefaultSet(Result<(), String>),
     WindowResized(Size),
     /// Ctrl/shift went down or came up. Tracked so a click on a row can
     /// be told what was held at the time — see [`App::modifiers`].
@@ -529,6 +545,11 @@ struct App {
     jobs: Vec<RunningJob>,
     /// A trash or delete waiting on the confirmation dialog.
     confirm: Option<PendingConfirm>,
+    /// What the desktop knows about file types and the applications
+    /// that open them. Read once at startup.
+    mime: Arc<hyprforge_mime::MimeDb>,
+    /// An open "which application?" chooser.
+    chooser: Option<Chooser>,
     /// What Ctrl+Z can take back.
     undo: hyprforge_files_core::undo::UndoHistory,
     /// "Moved 3 items to the Trash · Undo", with the number its expiry
@@ -601,6 +622,37 @@ struct PendingConfirm {
     paths: Vec<PathBuf>,
     tab_id: u64,
     dir: PathBuf,
+}
+
+/// A file waiting for someone to say what should open it.
+///
+/// Reached two ways, and the second is the one that matters: "Open
+/// With..." asks for it, and a double-click on a file whose kind has no
+/// application *at all* opens it rather than handing the file to a
+/// fallback that would end at a web browser. That second case is the
+/// dead end this whole piece of work came from.
+#[derive(Debug, Clone, PartialEq)]
+struct Chooser {
+    path: PathBuf,
+    /// The file's type, if the database knows the name. `None` is not
+    /// an error - nothing knows what a `.qqq` is - but it does mean
+    /// there is no kind to set a default for.
+    mime: Option<String>,
+    /// Whether the list is every installed application rather than the
+    /// ones registered for this kind.
+    all: bool,
+    /// Whether picking one should also make it the default.
+    set_default: bool,
+    /// Why the chooser opened, for the sentence at the top.
+    reason: ChooserReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChooserReason {
+    /// The user asked.
+    Asked,
+    /// Nothing on this machine is registered for the file's kind.
+    NothingHandlesIt,
 }
 
 /// The two ways a selection leaves.
@@ -703,8 +755,45 @@ impl App {
             Outcome::None => Task::none(),
             Outcome::ReadDir(path) => self.spawn_read_dir(tab_index, path),
             Outcome::Activated(path) => {
+                // A kind nothing is registered for would otherwise be
+                // handed to the desktop's fallback, which ends at a web
+                // browser - silently, and reporting success. Ask
+                // instead: that is the whole difference between a dead
+                // end and a choice.
+                //
+                // Only when the kind is actually *known* and has
+                // nothing: a name no rule matches is not a claim that
+                // nothing can open it, and on a machine with no shared
+                // MIME database at all that would divert every
+                // double-click into a chooser. Unknown goes to the
+                // desktop, same as before.
+                let mime = self.mime.type_of(&path).map(str::to_string);
+                if let Some(kind) = &mime {
+                    if self.mime.apps_for(kind).is_empty() {
+                        self.chooser = Some(Chooser {
+                            path,
+                            mime,
+                            all: true,
+                            set_default: false,
+                            reason: ChooserReason::NothingHandlesIt,
+                        });
+                        return Task::none();
+                    }
+                }
                 let opened = hyprforge_files::launch::open(&path);
                 self.status = opened.message(&path);
+                Task::none()
+            }
+            Outcome::OpenWith(path) => {
+                let mime = self.mime.type_of(&path).map(str::to_string);
+                // Straight to the full list when the file's own kind has
+                // nothing to show, rather than an empty list with a
+                // "show all" button under it.
+                let all = mime
+                    .as_deref()
+                    .is_none_or(|mime| self.mime.apps_for(mime).is_empty());
+                self.chooser =
+                    Some(Chooser { path, mime, all, set_default: false, reason: ChooserReason::Asked });
                 Task::none()
             }
             Outcome::PrefsChanged(prefs) => Task::perform(
@@ -1450,6 +1539,55 @@ impl App {
                 self.last_prefs.pinned = pinned;
                 Task::none()
             }
+            Message::ChooseApp(id) => {
+                let Some(chooser) = self.chooser.take() else { return Task::none() };
+                let Some(app) = self.mime.app(&id) else { return Task::none() };
+                let opened = hyprforge_files::launch::open_with_app(&app.path, &chooser.path);
+                self.status = opened.message(&chooser.path);
+                // Only when it actually started: recording a default
+                // that just failed to run would teach the machine the
+                // wrong thing.
+                match (&opened, chooser.set_default, chooser.mime) {
+                    (hyprforge_files::launch::Opened::Spawned, true, Some(mime)) => Task::perform(
+                        async move {
+                            tokio::task::spawn_blocking(move || {
+                                hyprforge_mime::set_default(&mime, &id).map_err(|e| e.to_string())
+                            })
+                            .await
+                            .unwrap_or_else(|e| Err(e.to_string()))
+                        },
+                        Message::DefaultSet,
+                    ),
+                    _ => Task::none(),
+                }
+            }
+            Message::ChooserShowAll => {
+                if let Some(chooser) = &mut self.chooser {
+                    chooser.all = true;
+                }
+                Task::none()
+            }
+            Message::ChooserSetDefault(on) => {
+                if let Some(chooser) = &mut self.chooser {
+                    chooser.set_default = on;
+                }
+                Task::none()
+            }
+            Message::CloseChooser => {
+                self.chooser = None;
+                Task::none()
+            }
+            Message::DefaultSet(Ok(())) => {
+                // The window's own copy of the database is a snapshot,
+                // so the change it just made has to be read back or the
+                // next chooser would show the old default.
+                self.mime = Arc::new(hyprforge_mime::MimeDb::load());
+                Task::none()
+            }
+            Message::DefaultSet(Err(e)) => {
+                self.status = Some(format!("Opened it, but couldn't remember that choice: {e}"));
+                Task::none()
+            }
             Message::PinnedLoaded(items) => {
                 // A list read before a later change is stale; the later
                 // change's own read is on its way.
@@ -1657,6 +1795,9 @@ impl App {
         if let Some(pending) = &self.confirm {
             return iced::widget::stack![window, confirm_dialog(pending, scale)].into();
         }
+        if let Some(chooser) = &self.chooser {
+            return iced::widget::stack![window, chooser_dialog(chooser, &self.mime, scale)].into();
+        }
         // A conflict is a question the job is paused on, so it goes
         // above everything, the context menu included.
         if let Some((job, conflict)) =
@@ -1818,6 +1959,142 @@ fn conflict_dialog<'a>(job: &RunningJob, conflict: &Collision, scale: FontScale)
 /// the confirming button is the *secondary* one and Enter does not press
 /// it: the easy path through this dialog should be the one that keeps
 /// the files.
+/// "What should open this?" — the applications for a file's kind, or
+/// every installed one.
+///
+/// The list is built from the desktop's own registrations, minus
+/// anything whose program is not installed: an entry that cannot run is
+/// a dead end rather than a choice, and offering one is how a person
+/// ends up clicking something that does nothing. A default that has
+/// gone that way is still *named*, because "your default is fstl, which
+/// isn't installed any more" is the sentence that explains what they
+/// are looking at.
+fn chooser_dialog<'a>(
+    chooser: &Chooser,
+    db: &hyprforge_mime::MimeDb,
+    scale: FontScale,
+) -> Element<'a, Message> {
+    let name = display_name(&chooser.path);
+    let kind = chooser.mime.clone();
+    let rows = chooser_rows(chooser, db);
+
+    let body = match (chooser.reason, &kind) {
+        (ChooserReason::NothingHandlesIt, Some(mime)) => {
+            format!("Nothing on this machine is set up to open {mime} files.")
+        }
+        (ChooserReason::NothingHandlesIt, None) => {
+            "Nothing here knows what kind of file this is.".to_string()
+        }
+        (ChooserReason::Asked, Some(mime)) if !chooser.all => format!("Applications for {mime}."),
+        (ChooserReason::Asked, _) => "Every application installed.".to_string(),
+    };
+
+    let mut list = column![].spacing(2.0);
+    for ChooserRow { id, name, is_default } in rows.iter().cloned() {
+        let label: Element<'a, Message> = if is_default {
+            row![
+                scaled_text(name, BASE_TEXT_SIZE, scale),
+                hyprforge_ui::widgets::meta_text("default", BASE_TEXT_SIZE, scale),
+            ]
+            .spacing(spacing::SM)
+            .into()
+        } else {
+            scaled_text(name, BASE_TEXT_SIZE, scale).into()
+        };
+        list = list.push(
+            button(label)
+                .width(Length::Fill)
+                .padding([spacing::XS as u16, spacing::SM as u16])
+                .on_press(Message::ChooseApp(id))
+                .style(|t: &Theme, status| {
+                    hyprforge_files_core::browser::selectable_row_style(t, status, false)
+                }),
+        );
+    }
+
+    let mut extra = column![].spacing(spacing::SM);
+    if rows.is_empty() {
+        extra = extra.push(hyprforge_ui::widgets::meta_text(
+            "No applications are installed to offer.",
+            BASE_TEXT_SIZE,
+            scale,
+        ));
+    } else {
+        extra = extra.push(
+            container(iced::widget::scrollable(list))
+                .max_height(scale.apply(260.0))
+                .width(Length::Fill),
+        );
+    }
+    // Only worth offering while the list is the narrow one.
+    if !chooser.all {
+        extra = extra.push(
+            button(hyprforge_ui::widgets::meta_text("Other applications\u{2026}", BASE_TEXT_SIZE, scale))
+                .padding([0, spacing::XS as u16])
+                .on_press(Message::ChooserShowAll)
+                .style(|t: &Theme, status| {
+                    hyprforge_files_core::browser::selectable_row_style(t, status, false)
+                }),
+        );
+    }
+    // A default is a change to the *machine*, not to this window, so it
+    // is never ticked for you — and there is nothing to tick when the
+    // file has no kind to record a default against.
+    if let Some(mime) = &kind {
+        extra = extra.push(
+            iced::widget::checkbox(chooser.set_default)
+                .label(format!("Always open {mime} files with this"))
+                .on_toggle(Message::ChooserSetDefault)
+                .text_size(scale.apply(BASE_TEXT_SIZE)),
+        );
+    }
+
+    dialog(
+        format!("Open \u{201C}{name}\u{201D} with"),
+        body,
+        Some(extra.into()),
+        row![
+            iced::widget::Space::new().width(Length::Fill),
+            secondary_button("Cancel").on_press(Message::CloseChooser),
+        ]
+        .spacing(spacing::SM)
+        .into(),
+        scale,
+    )
+}
+
+/// One row of the chooser: what to show, and what picking it means.
+///
+/// Plain data rather than widgets, so which application is marked as
+/// the default — and in what order they are offered — can be asserted
+/// without building a window. The same arrangement `sidebar_sections`
+/// uses in the browser, for the same reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChooserRow {
+    id: String,
+    name: String,
+    /// The one that opens this kind today. Marked rather than hidden:
+    /// picking it again is a normal thing to do, and knowing which one
+    /// you have been getting is half of why the chooser was opened.
+    is_default: bool,
+}
+
+/// The applications to offer for a chooser, in order.
+fn chooser_rows(chooser: &Chooser, db: &hyprforge_mime::MimeDb) -> Vec<ChooserRow> {
+    let apps = match (&chooser.mime, chooser.all) {
+        (Some(mime), false) => db.apps_for(mime),
+        _ => db.all_apps(),
+    };
+    let default = chooser.mime.as_deref().and_then(|mime| db.default_for(mime)).map(|app| app.id.clone());
+    apps.into_iter()
+        .map(|app| ChooserRow {
+            is_default: default.as_deref() == Some(app.id.as_str()),
+            id: app.id.clone(),
+            name: app.name.clone(),
+        })
+        .collect()
+}
+
 fn confirm_dialog<'a>(pending: &PendingConfirm, scale: FontScale) -> Element<'a, Message> {
     use hyprforge_ui::widgets::primary_button;
     let what = match pending.paths.as_slice() {
@@ -2002,6 +2279,11 @@ struct DebugShow {
     rename: bool,
     delete: bool,
     notice: bool,
+    /// Open the first row as if it had been double-clicked — the way
+    /// to see what a double-click does without synthesising one.
+    open: bool,
+    /// The application chooser for the first row.
+    open_with: bool,
 }
 
 #[cfg(debug_assertions)]
@@ -2024,6 +2306,10 @@ impl DebugShow {
                 show.delete = true;
             } else if item == "notice" {
                 show.notice = true;
+            } else if item == "open" {
+                show.open = true;
+            } else if item == "open-with" {
+                show.open_with = true;
             }
         }
         show
@@ -2071,6 +2357,16 @@ impl DebugShow {
         if std::mem::take(&mut self.rename) {
             browser.update(BrowserMessage::EntryClicked { index: 0, ctrl: false, shift: false });
             let outcome = browser.perform(Action::Rename);
+            return app.handle_outcome(index, outcome);
+        }
+        if std::mem::take(&mut self.open_with) {
+            browser.update(BrowserMessage::EntryClicked { index: 0, ctrl: false, shift: false });
+            let outcome = browser.perform(Action::OpenWith);
+            return app.handle_outcome(index, outcome);
+        }
+        if std::mem::take(&mut self.open) {
+            browser.update(BrowserMessage::EntryClicked { index: 0, ctrl: false, shift: false });
+            let outcome = browser.perform(Action::Open);
             return app.handle_outcome(index, outcome);
         }
         Task::none()
@@ -2611,6 +2907,12 @@ mod tests {
             last_window_size: (900, 600),
             resize_generation: 0,
             clipboard: Arc::new(MemoryClipboard::new()),
+            // Empty, not the machine's own: these tests are about the
+            // window's loop, and what happens to be installed here is
+            // none of their business. Tests that need a database build
+            // one.
+            mime: Arc::new(hyprforge_mime::MimeDb::default()),
+            chooser: None,
             jobs: Vec::new(),
             confirm: None,
             undo: hyprforge_files_core::undo::UndoHistory::new(20),
@@ -2623,6 +2925,153 @@ mod tests {
             #[cfg(debug_assertions)]
             debug_show: DebugShow::default(),
         }
+    }
+
+    // --- open with --------------------------------------------------------
+
+    /// A miniature desktop: one type nothing can open, one type an
+    /// installed application can.
+    fn mime_fixture() -> (tempfile::TempDir, Arc<hyprforge_mime::MimeDb>) {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(data.join("mime")).unwrap();
+        std::fs::create_dir_all(data.join("applications")).unwrap();
+        std::fs::write(data.join("mime/globs2"), "50:model/stl:*.stl\n50:text/html:*.html\n").unwrap();
+        std::fs::write(
+            data.join("applications/browser.desktop"),
+            "[Desktop Entry]\nName=A Browser\nExec=sh %u\n",
+        )
+        .unwrap();
+        std::fs::write(
+            data.join("applications/mimeinfo.cache"),
+            "[MIME Cache]\ntext/html=browser.desktop;\n",
+        )
+        .unwrap();
+        (dir, Arc::new(hyprforge_mime::MimeDb::load_from(&[data], &[])))
+    }
+
+    /// The dead end this work came from: a kind the machine has no
+    /// application for must ask, not hand the file to a fallback that
+    /// ends at a web browser.
+    #[test]
+    fn opening_a_kind_nothing_handles_asks_instead_of_guessing() {
+        let (_dir, mime) = mime_fixture();
+        let mut app = app_for_test(&["/a"]);
+        app.mime = mime;
+        let _ = app.handle_outcome(0, Outcome::Activated("/a/part.stl".into()));
+        let chooser = app.chooser.expect("a chooser, not a browser");
+        assert_eq!(chooser.mime.as_deref(), Some("model/stl"));
+        assert_eq!(chooser.reason, ChooserReason::NothingHandlesIt);
+        assert!(chooser.all, "with nothing registered, the full list is the only useful one");
+        assert!(app.status.is_none(), "nothing was launched to report on");
+    }
+
+    /// A kind that *is* handled opens as before — the chooser is for
+    /// the case with no answer, not an extra click on every file.
+    #[test]
+    fn opening_a_handled_kind_does_not_ask() {
+        let (_dir, mime) = mime_fixture();
+        let mut app = app_for_test(&["/a"]);
+        app.mime = mime;
+        let _ = app.handle_outcome(0, Outcome::Activated("/a/page.html".into()));
+        assert_eq!(app.chooser, None);
+    }
+
+    /// A name no rule matches is not a claim that nothing can open it.
+    /// On a machine with no MIME database at all, every double-click
+    /// would otherwise divert into a chooser.
+    #[test]
+    fn an_unknown_name_is_still_handed_to_the_desktop() {
+        let (_dir, mime) = mime_fixture();
+        let mut app = app_for_test(&["/a"]);
+        app.mime = mime;
+        let _ = app.handle_outcome(0, Outcome::Activated("/a/mystery.qqq".into()));
+        assert_eq!(app.chooser, None);
+
+        let mut bare = app_for_test(&["/a"]);
+        let _ = bare.handle_outcome(0, Outcome::Activated("/a/page.html".into()));
+        assert_eq!(bare.chooser, None, "no database means no opinion");
+    }
+
+    /// Asked for deliberately, the list starts as the applications for
+    /// that kind — the full list is a click away.
+    #[test]
+    fn open_with_starts_from_the_applications_for_that_kind() {
+        let (_dir, mime) = mime_fixture();
+        let mut app = app_for_test(&["/a"]);
+        app.mime = mime;
+        let _ = app.handle_outcome(0, Outcome::OpenWith("/a/page.html".into()));
+        let chooser = app.chooser.clone().expect("a chooser");
+        assert_eq!(chooser.reason, ChooserReason::Asked);
+        assert!(!chooser.all);
+        assert!(!chooser.set_default, "a default is never ticked for you");
+
+        let _ = app.update(Message::ChooserShowAll);
+        assert!(app.chooser.as_ref().unwrap().all);
+        let _ = app.update(Message::CloseChooser);
+        assert_eq!(app.chooser, None);
+    }
+
+    /// Picking an application closes the chooser, whatever happened
+    /// next — leaving it up over a launched application would be its
+    /// own dead end.
+    #[test]
+    fn picking_an_application_closes_the_chooser() {
+        let (_dir, mime) = mime_fixture();
+        let mut app = app_for_test(&["/a"]);
+        app.mime = mime;
+        let _ = app.handle_outcome(0, Outcome::OpenWith("/a/page.html".into()));
+        let _ = app.update(Message::ChooseApp("browser.desktop".to_string()));
+        assert_eq!(app.chooser, None);
+    }
+
+    /// The default is offered first and marked as such — including in
+    /// the full list, where it would otherwise be lost among everything
+    /// installed.
+    #[test]
+    fn the_current_default_is_named_in_the_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(data.join("mime")).unwrap();
+        std::fs::create_dir_all(data.join("applications")).unwrap();
+        std::fs::write(data.join("mime/globs2"), "50:model/stl:*.stl\n").unwrap();
+        for (file, name) in
+            [("view3d.desktop", "view3d"), ("slicer.desktop", "BambuStudio")]
+        {
+            std::fs::write(
+                data.join("applications").join(file),
+                format!("[Desktop Entry]\nName={name}\nExec=sh %f\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            data.join("applications/mimeinfo.cache"),
+            "[MIME Cache]\nmodel/stl=slicer.desktop;view3d.desktop;\n",
+        )
+        .unwrap();
+        let mimeapps = dir.path().join("mimeapps.list");
+        std::fs::write(&mimeapps, "[Default Applications]\nmodel/stl=view3d.desktop\n").unwrap();
+        let db = hyprforge_mime::MimeDb::load_from(&[data], &[mimeapps]);
+
+        let chooser = Chooser {
+            path: "/a/part.stl".into(),
+            mime: Some("model/stl".to_string()),
+            all: false,
+            set_default: false,
+            reason: ChooserReason::Asked,
+        };
+        let rows = chooser_rows(&chooser, &db);
+        assert_eq!(rows[0].name, "view3d", "the default is offered first");
+        assert!(rows[0].is_default);
+        assert!(!rows[1].is_default);
+
+        let all = Chooser { all: true, ..chooser };
+        let rows = chooser_rows(&all, &db);
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter().find(|r| r.name == "view3d").unwrap().is_default,
+            "still marked in the full list"
+        );
     }
 
     // --- pins: owned by the window ---------------------------------------
