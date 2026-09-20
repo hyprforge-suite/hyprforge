@@ -1786,6 +1786,7 @@ dependencies = [
  "hyprforge-input",
  "hyprforge-look",
  "hyprforge-lua-import",
+ "hyprforge-mime",
  "hyprforge-network",
  "hyprforge-paths",
  "hyprforge-power",

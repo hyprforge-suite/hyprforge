@@ -674,6 +674,13 @@ impl Browser {
     /// particular row's identity should take its `path`: that is what
     /// [`Selection`] stores, and what survives the list being re-sorted
     /// underneath it.
+    /// What has been typed into the search box, if anything. A host
+    /// with a modal of its own open needs to be able to prove nothing
+    /// leaked through to the listing behind it.
+    pub fn search_query(&self) -> &str {
+        &self.search_query
+    }
+
     pub fn rows(&self) -> Vec<&Entry> {
         self.view.iter().filter_map(|&i| self.entries.get(i)).collect()
     }
