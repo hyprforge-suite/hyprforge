@@ -7,6 +7,9 @@
 //! | Question | File | Module |
 //! |---|---|---|
 //! | What type is `part.3mf`? | `mime/globs2` | [`globs`] |
+//! | What is this file, with no name to go on? | `mime/magic` | [`magic`] |
+//! | Which of those two wins? | — | [`lookup`] |
+//! | What is a `model/3mf` a kind of? | `mime/subclasses`, `mime/aliases` | [`types`] |
 //! | What can open a `model/3mf`? | `applications/mimeinfo.cache` | [`apps`] |
 //! | Which one does, normally? | `mimeapps.list` | [`defaults`] |
 //!
@@ -44,9 +47,15 @@
 pub mod apps;
 pub mod defaults;
 pub mod globs;
+pub mod lookup;
+pub mod magic;
+pub mod types;
 
 pub use apps::App;
 pub use globs::Globs;
+pub use lookup::{Found, How, Lookup};
+pub use magic::Magic;
+pub use types::Types;
 
 use std::path::{Path, PathBuf};
 
@@ -59,7 +68,9 @@ use std::path::{Path, PathBuf};
 /// is open will not show up until [`MimeDb::load`] is called again.
 #[derive(Debug, Clone, Default)]
 pub struct MimeDb {
-    globs: Globs,
+    /// Names, contents and the type graph — everything about types, as
+    /// opposed to about applications.
+    lookup: Lookup,
     /// Every readable desktop entry, by file name.
     entries: std::collections::BTreeMap<String, App>,
     /// Type to the entries that registered for it.
@@ -83,7 +94,7 @@ impl MimeDb {
     /// and what lets a caller point this at a fixture instead of the
     /// machine it is running on.
     pub fn load_from(data_dirs: &[PathBuf], mimeapps: &[PathBuf]) -> MimeDb {
-        let mut db = MimeDb { globs: Globs::load_from(data_dirs), ..MimeDb::default() };
+        let mut db = MimeDb { lookup: Lookup::load_from(data_dirs), ..MimeDb::default() };
         for dir in data_dirs {
             let applications = dir.join("applications");
             if let Ok(text) = std::fs::read_to_string(applications.join("mimeinfo.cache")) {
@@ -135,13 +146,50 @@ impl MimeDb {
     /// machine has no `shared-mime-info`, which a chooser should say
     /// rather than reporting every file as unknown.
     pub fn knows_types(&self) -> bool {
-        !self.globs.is_empty()
+        !self.lookup.globs.is_empty()
     }
 
-    /// The type of a file, by name. `None` when no rule matches — see
-    /// [`globs::Globs::type_of`] for why that is not octet-stream.
+    /// The type of a file **by name alone**, doing no I/O. `None` when
+    /// no rule matches — see [`globs::Globs::type_of`] for why that is
+    /// not octet-stream.
+    ///
+    /// This is the one to call from a UI thread, and the one to call
+    /// about a file that may not exist yet (a save dialog's filename
+    /// box). [`MimeDb::sniff`] is the same question asked properly, at
+    /// the cost of reading the file.
     pub fn type_of(&self, path: &Path) -> Option<&str> {
-        self.globs.type_of(path)
+        self.lookup.globs.type_of(path)
+    }
+
+    /// What a file actually is: the name, its contents, and what kind
+    /// of thing it is on disk, in the order [`lookup`] documents.
+    ///
+    /// Reads the file, so it belongs off the UI thread for anything
+    /// that might be on a slow mount.
+    pub fn sniff(&self, path: &Path) -> Found {
+        self.lookup.of_file(path, true)
+    }
+
+    /// Every type a file matches, best first — the ambiguity, unresolved.
+    pub fn all_types_of(&self, path: &Path) -> Vec<String> {
+        self.lookup.all_of_file(path, true)
+    }
+
+    /// Whether an application registered for `parent` should be able to
+    /// open a `mime`.
+    pub fn is_subclass_of(&self, mime: &str, parent: &str) -> bool {
+        self.lookup.is_subclass_of(mime, parent)
+    }
+
+    /// The name the database uses for a type, resolving an alias.
+    pub fn canonical<'a>(&'a self, mime: &'a str) -> &'a str {
+        self.lookup.types.canonical(mime)
+    }
+
+    /// Everything about types, for a caller that needs the parts
+    /// directly — the `mimetype` command does.
+    pub fn lookup(&self) -> &Lookup {
+        &self.lookup
     }
 
     /// Every installed application registered for `mime`, the default
@@ -217,9 +265,10 @@ pub fn user_mimeapps_path() -> PathBuf {
 }
 
 /// `$XDG_DATA_HOME` then `$XDG_DATA_DIRS`, in the order the spec gives
-/// them — earlier is more specific. Flatpak puts its exported entries in
+/// them — public because the `mimetype` command needs the same list,
+/// and `--database` replaces exactly this — earlier is more specific. Flatpak puts its exported entries in
 /// here, which is how a flatpak application is offered at all.
-fn data_dirs() -> Vec<PathBuf> {
+pub fn data_dirs() -> Vec<PathBuf> {
     let mut dirs = vec![hyprforge_paths::data_home()];
     let system = std::env::var_os("XDG_DATA_DIRS")
         .filter(|value| !value.is_empty())

@@ -19,10 +19,10 @@
 //! The name knows. `part.3mf` is a 3MF model that happens to be stored
 //! as a zip, and that is exactly what `globs2` says.
 //!
-//! Content sniffing still has the cases the name cannot answer — a file
-//! with no extension at all — and is deliberately not implemented here
-//! rather than half-implemented: see [`type_of`]'s own doc for what
-//! happens instead.
+//! Content sniffing answers the cases a name cannot — a file with no
+//! extension at all — and lives in [`crate::magic`]. Which of the two
+//! wins, and when, is [`crate::lookup`]: a name beats a weak content
+//! guess, and a strong one beats a name.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -83,15 +83,50 @@ impl Globs {
         Globs { globs }
     }
 
+    /// The older `globs` format: `type:pattern`, with no weight and no
+    /// flags. Still shipped beside `globs2`, and the only one some
+    /// hand-made databases have.
+    ///
+    /// Everything in it is weight 50, which is what the format means
+    /// and what `update-mime-database` writes into `globs2` for a rule
+    /// that did not ask for anything else.
+    pub fn parse_legacy(text: &str) -> Globs {
+        let mut globs = Vec::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((mime, pattern)) = line.split_once(':') else { continue };
+            if pattern.is_empty() {
+                continue;
+            }
+            globs.push(Glob {
+                weight: 50,
+                mime: mime.to_string(),
+                pattern: pattern.to_string(),
+                case_sensitive: false,
+            });
+        }
+        Globs { globs }
+    }
+
     /// Every `globs2` under `dirs` (each a `XDG_DATA_DIRS` entry),
     /// merged. Earlier directories are more specific and are consulted
     /// first when two rules are otherwise equal.
+    ///
+    /// A directory with no `globs2` falls back to its `globs` — the
+    /// older file, which is what a hand-made database is most likely to
+    /// have. Never both from the same directory: they say the same
+    /// thing, and reading both would double every rule in it.
     pub fn load_from(dirs: &[std::path::PathBuf]) -> Globs {
         let mut globs = Vec::new();
         for dir in dirs {
-            let path = dir.join("mime").join("globs2");
-            if let Ok(text) = std::fs::read_to_string(&path) {
+            let mime = dir.join("mime");
+            if let Ok(text) = std::fs::read_to_string(mime.join("globs2")) {
                 globs.extend(Globs::parse(&text).globs);
+            } else if let Ok(text) = std::fs::read_to_string(mime.join("globs")) {
+                globs.extend(Globs::parse_legacy(&text).globs);
             }
         }
         Globs { globs }
@@ -128,6 +163,36 @@ impl Globs {
             // `*.tar.gz` beat `*.gz` at the same weight.
             .max_by_key(|glob| (glob.weight, glob.pattern.len()))
             .map(|glob| glob.mime.as_str())
+    }
+
+    /// Every type whose pattern matches this name, best first.
+    ///
+    /// For `mimetype --all`, and for a caller that would rather see an
+    /// ambiguity than have it resolved: `photo.jpg` matches one rule,
+    /// but `archive.tar.gz` matches both `*.tar.gz` and `*.gz` and a
+    /// person may want to know that.
+    pub fn all_matches(&self, path: &Path) -> Vec<&str> {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { return Vec::new() };
+        let lowered = name.to_lowercase();
+        let mut matched: Vec<&Glob> = self
+            .globs
+            .iter()
+            .filter(|glob| {
+                if glob.case_sensitive {
+                    matches(&glob.pattern, name)
+                } else {
+                    matches(&glob.pattern.to_lowercase(), &lowered)
+                }
+            })
+            .collect();
+        matched.sort_by_key(|glob| std::cmp::Reverse((glob.weight, glob.pattern.len())));
+        let mut out: Vec<&str> = Vec::new();
+        for glob in matched {
+            if !out.contains(&glob.mime.as_str()) {
+                out.push(&glob.mime);
+            }
+        }
+        out
     }
 
     /// Whether anything at all was loaded. An empty database is not an
@@ -259,6 +324,18 @@ mod tests {
         assert_eq!(db().type_of(&PathBuf::from("/d/no-extension")), None);
     }
 
+    /// Both rules are reported, best first, rather than one being
+    /// chosen for the caller.
+    #[test]
+    fn every_matching_rule_can_be_listed() {
+        assert_eq!(
+            db().all_matches(&PathBuf::from("backup.tar.gz")),
+            ["application/x-compressed-tar", "application/gzip"]
+        );
+        assert_eq!(db().all_matches(&PathBuf::from("a.png")), ["image/png", "image/apng"]);
+        assert!(db().all_matches(&PathBuf::from("mystery.qqq")).is_empty());
+    }
+
     #[test]
     fn matching_ignores_case_unless_the_rule_asks_otherwise() {
         assert_eq!(db().type_of(&PathBuf::from("SHOUTING.STL")), Some("model/stl"));
@@ -284,6 +361,21 @@ mod tests {
     #[test]
     fn a_type_with_its_globs_removed_carries_no_pattern() {
         assert!(db().types().keys().all(|t| *t != "application/x-modrinth-modpack+zip"));
+    }
+
+    #[test]
+    fn the_older_globs_format_is_read_when_that_is_all_there_is() {
+        let globs = Globs::parse_legacy(
+            "# a test file\napplication/x-perl:*.pl\napplication/x-compressed-tar:*.tar.gz\n\
+             application/x-gzip:*.gz\ntext/x-makefile:[Mm]akefile\n",
+        );
+        assert_eq!(globs.type_of(&PathBuf::from("script.pl")), Some("application/x-perl"));
+        assert_eq!(
+            globs.type_of(&PathBuf::from("script.tar.gz")),
+            Some("application/x-compressed-tar"),
+            "the longer pattern still wins at equal weight"
+        );
+        assert_eq!(globs.type_of(&PathBuf::from("Makefile")), Some("text/x-makefile"));
     }
 
     #[test]
