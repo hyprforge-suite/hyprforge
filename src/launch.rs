@@ -8,14 +8,42 @@
 //! interpret the same `Activated` outcome differently and only this one
 //! launches anything.
 //!
-//! `xdg-open` rather than reading `mimeapps.list` ourselves. It is the
-//! freedesktop entry point every other application already uses, which
-//! means the user's existing "always open .md in this editor" choice is
-//! honoured without this suite reimplementing the lookup and then
-//! disagreeing with the rest of the desktop about it. Reimplementing it
-//! would also mean owning the whole desktop-entry spec — `Exec` field
-//! codes, `TryExec`, terminal applications — to end up where `xdg-open`
-//! already is.
+//! The desktop's own opener rather than reading `mimeapps.list`
+//! ourselves. It is the entry point every other application already
+//! uses, which means the user's existing "always open .md in this
+//! editor" choice is honoured without this suite reimplementing the
+//! lookup and then disagreeing with the rest of the desktop about it.
+//! Reimplementing it would also mean owning the whole desktop-entry
+//! spec — `Exec` field codes, `TryExec`, terminal applications — to end
+//! up where the opener already is.
+//!
+//! # Why `gio open` first, and `xdg-open` only after
+//!
+//! Both read the same `mimeapps.list`. They disagree about one earlier
+//! step: what type the file *is*.
+//!
+//! On a desktop `xdg-open` does not recognise — Hyprland is one — it
+//! asks `xdg-mime query filetype`, which falls back to `file
+//! --mime-type` when the `mimetype` tool is absent. `file` reads
+//! content and never the name, so `model.stl` is `application/octet-
+//! stream`, `part.3mf` is `application/zip` and `scene.blend` is
+//! `application/zstd`. Nothing has a default for those, and `xdg-open`
+//! answers a lookup that found nothing by working down a built-in list
+//! of *browsers* — so a double-clicked STL opens in Firefox, silently
+//! and successfully. Measured on this machine: every `.stl`, `.3mf`,
+//! `.uf2`, `.blend` and `.sh` in a real Downloads folder went to the
+//! browser that way.
+//!
+//! `gio` uses the shared MIME database's filename rules, so the same
+//! files come back as `model/stl` and `model/3mf` and reach the
+//! application the user actually chose. It ships with glib2 and is
+//! therefore present almost everywhere, but "almost" is why `xdg-open`
+//! stays as the fallback rather than being replaced.
+//!
+//! What this must never become is a *third* opinion about which
+//! application opens a file. Both of these read the user's own
+//! `mimeapps.list`; the day this file starts consulting anything else,
+//! the rule above has been broken.
 //!
 //! # Why this does not wait
 //!
@@ -46,11 +74,12 @@ use std::path::Path;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Opened {
     Spawned,
-    /// `xdg-open` is not installed. Its own package (`xdg-utils`) is a
-    /// dependency of essentially every desktop, so this is rare — but
-    /// "rare" is not "impossible", and a file manager that silently does
-    /// nothing when you double-click is indistinguishable from one that
-    /// is broken. The UI says this sentence instead.
+    /// No opener is installed at all — neither `gio` (glib2) nor
+    /// `xdg-open` (xdg-utils), each a dependency of essentially every
+    /// desktop, so this is rare — but "rare" is not "impossible", and a
+    /// file manager that silently does nothing when you double-click is
+    /// indistinguishable from one that is broken. The UI says this
+    /// sentence instead.
     NoOpener,
     /// It exists and could not be started.
     Failed(String),
@@ -69,24 +98,55 @@ impl Opened {
         match self {
             Opened::Spawned => None,
             Opened::NoOpener => Some(format!(
-                "Couldn't open {name} because xdg-open isn't installed. \
-                 Install the xdg-utils package, or open it from an application directly."
+                "Couldn't open {name} because no desktop opener is installed. \
+                 Install glib2 (for gio) or xdg-utils, or open it from an \
+                 application directly."
             )),
             Opened::Failed(why) => Some(format!("Couldn't open {name}: {why}")),
         }
     }
 }
 
+/// The openers tried in order, each with the arguments that precede
+/// the path — see this module's doc for why `gio` leads.
+const OPENERS: [&[&str]; 2] = [&["gio", "open"], &["xdg-open"]];
+
 /// Hands `path` to the desktop's own opener.
 pub fn open(path: &Path) -> Opened {
-    open_with("xdg-open", path)
+    open_first_of(&OPENERS, path)
+}
+
+/// [`open`], over a given list of openers, so a test can exercise the
+/// fallback without either real one.
+///
+/// An opener that is not installed is not a failure: the next one is
+/// tried, and only a list with nothing installed in it is `NoOpener`.
+/// An opener that *is* installed and fails to start is reported as
+/// itself — it is a broken installation, not a missing one, and trying
+/// the next opener would bury it.
+pub fn open_first_of(openers: &[&[&str]], path: &Path) -> Opened {
+    let mut outcome = Opened::NoOpener;
+    for opener in openers {
+        let (program, args) = opener.split_first().expect("an opener names a program");
+        outcome = open_with_args(program, args, path);
+        if outcome != Opened::NoOpener {
+            return outcome;
+        }
+    }
+    outcome
 }
 
 /// [`open`], with the opener as a parameter so a test can point the
 /// whole sequence at something that is not the real one — the same
 /// arrangement `hyprforge_tray::launch` uses for `hyprforge-traymenu`.
 pub fn open_with(opener: &str, path: &Path) -> Opened {
+    open_with_args(opener, &[], path)
+}
+
+/// [`open_with`], with arguments before the path — `gio` needs `open`.
+fn open_with_args(opener: &str, args: &[&str], path: &Path) -> Opened {
     match std::process::Command::new(opener)
+        .args(args)
         .arg(path)
         // The child's output goes nowhere rather than inheriting this
         // window's. Same reasoning as `hyprforge-trayd`'s
@@ -127,7 +187,7 @@ mod tests {
 
         let message = outcome.message(Path::new("/tmp/x.txt")).expect("a failure must say something");
         assert!(message.contains("x.txt"), "the message names the file the user clicked");
-        assert!(message.contains("xdg-utils"), "and names the package that fixes it");
+        assert!(message.contains("xdg-utils"), "and names a package that fixes it");
     }
 
     /// Success is silent. A file manager that popped up "opened!" every
@@ -140,6 +200,31 @@ mod tests {
         let outcome = open_with("true", Path::new("/tmp/x.txt"));
         assert_eq!(outcome, Opened::Spawned);
         assert_eq!(outcome.message(Path::new("/tmp/x.txt")), None);
+    }
+
+    /// `gio` is tried first and `xdg-open` only if it is absent — see
+    /// the module doc. A missing opener must fall through rather than
+    /// being reported, or a machine without `gio` would stop opening
+    /// anything at all.
+    #[test]
+    fn a_missing_opener_falls_through_to_the_next_one() {
+        let openers: [&[&str]; 2] = [&["gio-does-not-exist-xyz", "open"], &["true"]];
+        assert_eq!(open_first_of(&openers, Path::new("/tmp/x.txt")), Opened::Spawned);
+
+        let none: [&[&str]; 2] = [&["gio-does-not-exist-xyz", "open"], &["xdg-open-does-not-exist-xyz"]];
+        assert_eq!(
+            open_first_of(&none, Path::new("/tmp/x.txt")),
+            Opened::NoOpener,
+            "with nothing installed the user still gets the sentence"
+        );
+    }
+
+    /// The first opener that is actually there is the one used; the
+    /// fallback is for absence, not for a second opinion.
+    #[test]
+    fn the_first_installed_opener_is_the_one_used() {
+        let openers: [&[&str]; 2] = [&["true"], &["xdg-open-does-not-exist-xyz"]];
+        assert_eq!(open_first_of(&openers, Path::new("/tmp/x.txt")), Opened::Spawned);
     }
 
     /// A path with no file name at all (the filesystem root) must still
