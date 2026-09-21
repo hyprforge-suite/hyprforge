@@ -45,6 +45,7 @@
 //! a fresh one). See [`tests::a_stale_dir_loaded_result_is_ignored`].
 
 use hyprforge_files::jobs::{self, JobControl, JobEvent, JobId, JobSummary};
+use hyprforge_files::launch::{self, Opened};
 use hyprforge_files_core::backend::FsBackend;
 use hyprforge_files_core::clipboard::{self as file_clipboard, ClipVerb, FileClipboard};
 use hyprforge_fileops::{Collision, CollisionDecision, CollisionPolicy, Progress};
@@ -170,6 +171,7 @@ fn main() -> iced::Result {
         // loaded it each time.
         mime: hyprforge_mime::MimeDb::load(),
         chooser: None,
+        opener: Opener::default(),
         jobs: Vec::new(),
         confirm: None,
         undo: hyprforge_files_core::undo::UndoHistory::new(config.behaviour.undo_depth as usize),
@@ -553,6 +555,16 @@ struct App {
     mime: hyprforge_mime::MimeDb,
     /// An open "which application?" chooser.
     chooser: Option<Chooser>,
+    /// How a file is actually opened.
+    ///
+    /// A seam, like `backend` and `clipboard` beside it, and for a
+    /// sharper reason than either: without it the tests below call the
+    /// real desktop opener, and `Outcome::Activated` is exercised by
+    /// several of them. They did — a test suite run left nineteen real
+    /// file-manager windows on the machine, named after the fixtures
+    /// that opened them. A test must not reach out of the process and
+    /// start applications on the desk of whoever ran it.
+    opener: Opener,
     /// What Ctrl+Z can take back.
     undo: hyprforge_files_core::undo::UndoHistory,
     /// "Moved 3 items to the Trash · Undo", with the number its expiry
@@ -625,6 +637,26 @@ struct PendingConfirm {
     paths: Vec<PathBuf>,
     tab_id: u64,
     dir: PathBuf,
+}
+
+/// How the window opens a file, and how it opens one with a chosen
+/// application.
+///
+/// Two functions rather than a trait: there are exactly two calls, both
+/// free functions, and a trait here would be a vocabulary for one
+/// implementation. `fn` pointers keep `App` `Debug`-free and cheap to
+/// clone into a test.
+#[derive(Clone, Copy)]
+struct Opener {
+    open: fn(&Path) -> Opened,
+    open_with: fn(&Path, &Path) -> Opened,
+}
+
+impl Default for Opener {
+    /// The desktop's own opener — see `hyprforge_files::launch`.
+    fn default() -> Self {
+        Opener { open: launch::open, open_with: launch::open_with_app }
+    }
 }
 
 /// A file waiting for someone to say what should open it.
@@ -806,7 +838,7 @@ impl App {
                         return Task::none();
                     }
                 }
-                let opened = hyprforge_files::launch::open(&path);
+                let opened = (self.opener.open)(&path);
                 self.status = opened.message(&path);
                 Task::none()
             }
@@ -1591,7 +1623,7 @@ impl App {
             Message::ChooseApp(id) => {
                 let Some(chooser) = self.chooser.take() else { return Task::none() };
                 let Some(app) = self.mime.app(&id) else { return Task::none() };
-                let opened = hyprforge_files::launch::open_with_app(&app.path, &chooser.path);
+                let opened = (self.opener.open_with)(&app.path, &chooser.path);
                 self.status = opened.message(&chooser.path);
                 // Only when it actually started: recording a default
                 // that just failed to run would teach the machine the
@@ -3010,6 +3042,12 @@ mod tests {
             // one.
             mime: hyprforge_mime::MimeDb::default(),
             chooser: None,
+            // Never the real one: a test that opens a file would start
+            // an application on the machine running the tests.
+            opener: Opener {
+                open: |_| Opened::Spawned,
+                open_with: |_, _| Opened::Spawned,
+            },
             jobs: Vec::new(),
             confirm: None,
             undo: hyprforge_files_core::undo::UndoHistory::new(20),

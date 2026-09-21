@@ -402,6 +402,79 @@ impl fmt::Debug for State {
     }
 }
 
+/// One press, as far as an authentication prompt is concerned.
+///
+/// Four cases, because that is all a password prompt has: commit, undo,
+/// rub out, or type. A host turns its own key type into this — iced's
+/// `Key`/`Named` for the greeter, xkb's `Keysym` for the lock screen —
+/// and everything after that is the same on both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Press {
+    Enter,
+    Escape,
+    Backspace,
+    /// What the press produced, which is the *only* thing that may
+    /// reach the entry. See CLAUDE.md: reading the key instead turns
+    /// `SHIFT + j` into `j`, so a password loses every capital and PAM
+    /// rejects one that was typed correctly.
+    Text(String),
+}
+
+/// Applies one press to a conversation.
+///
+/// This is the grammar, once. It had been written out in both hosts,
+/// and they had drifted in the way that matters: the lock screen
+/// learned that Escape and Backspace must dismiss a failed attempt, and
+/// the greeter did not. `clear` and `type_into` are both no-ops in
+/// `Failed`, so on the login screen those two keys did *nothing at all*
+/// after "Incorrect password" — the one screen where a person is most
+/// likely to press them, and where nothing happening reads as a frozen
+/// machine. Anything that is not these three keys already dismissed the
+/// error, which is why it went unnoticed: typing worked, backspacing
+/// did not.
+pub fn apply_press<B: Backend>(conversation: &mut Conversation<B>, press: Press) {
+    let failed = matches!(conversation.state(), State::Failed { .. });
+    match press {
+        Press::Enter => match conversation.state() {
+            State::Telling { .. } => conversation.acknowledge(),
+            State::Failed { .. } => conversation.retry(),
+            _ => conversation.submit(),
+        },
+        Press::Escape if failed => conversation.retry(),
+        Press::Escape => conversation.clear(),
+        Press::Backspace if failed => conversation.retry(),
+        Press::Backspace => {
+            let mut entered = conversation.typed().to_string();
+            entered.pop();
+            conversation.type_into(entered);
+        }
+        Press::Text(text) => {
+            // Any other key leaves the failed state, so someone can
+            // simply start typing again rather than work out which key
+            // dismisses the error.
+            //
+            // The character that does the dismissing is kept: `retry`
+            // puts the conversation into `Working` while the backend
+            // starts over, and `type_into` buffers there rather than
+            // dropping it. Losing it meant someone retyping a password
+            // after "incorrect password" submitted it short, was told it
+            // was wrong again, and spent a third `pam_faillock` attempt
+            // on a password that was right all along.
+            if failed {
+                conversation.retry();
+            }
+            // Control characters would otherwise count as typed
+            // characters and show a dot for nothing — Enter and
+            // Backspace both produce text as well as being keys.
+            if !text.is_empty() && !text.chars().any(char::is_control) {
+                let mut entered = conversation.typed().to_string();
+                entered.push_str(&text);
+                conversation.type_into(entered);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,6 +691,81 @@ mod tests {
 
     fn password_then(outcome: Response) -> Script {
         Script::new(vec![Response::Ask(Prompt::secret("Password:")), outcome])
+    }
+
+    /// Puts a conversation into `Failed` the way a wrong password does.
+    fn after_a_failure() -> Conversation<Script> {
+        let mut c = Conversation::new(
+            password_then(Response::Failure { reason: "Incorrect password".into() }),
+            "apost",
+        );
+        c.type_into("wrong".into());
+        c.submit();
+        assert!(matches!(c.state(), State::Failed { .. }), "the fixture must actually fail");
+        c
+    }
+
+    /// The bug this grammar exists to stop: on the greeter, Escape and
+    /// Backspace did nothing at all after a failed attempt, because
+    /// `clear` and `type_into` are both no-ops in `Failed`. The screen
+    /// looked frozen on the one screen where that is frightening.
+    #[test]
+    fn escape_and_backspace_dismiss_a_failure_rather_than_doing_nothing() {
+        for press in [Press::Escape, Press::Backspace] {
+            let mut c = after_a_failure();
+            apply_press(&mut c, press.clone());
+            assert!(
+                !matches!(c.state(), State::Failed { .. }),
+                "{press:?} left the failure on screen"
+            );
+        }
+    }
+
+    /// Away from a failure they do their ordinary jobs.
+    #[test]
+    fn escape_clears_and_backspace_rubs_out_one_character() {
+        let mut c = Conversation::new(password_then(Response::Success), "apost");
+        apply_press(&mut c, Press::Text("abc".into()));
+        assert_eq!(c.typed(), "abc");
+        apply_press(&mut c, Press::Backspace);
+        assert_eq!(c.typed(), "ab");
+        apply_press(&mut c, Press::Escape);
+        assert_eq!(c.typed(), "");
+    }
+
+    /// The character that dismisses a failure is kept, not eaten —
+    /// losing it made a retyped password submit short and spend another
+    /// faillock attempt.
+    #[test]
+    fn typing_after_a_failure_keeps_the_character_that_dismissed_it() {
+        let mut c = after_a_failure();
+        apply_press(&mut c, Press::Text("h".into()));
+        assert!(!matches!(c.state(), State::Failed { .. }));
+        assert_eq!(c.typed(), "h");
+    }
+
+    /// Enter is three different answers depending on what is on screen.
+    #[test]
+    fn enter_means_submit_acknowledge_or_retry_by_state() {
+        let mut failed = after_a_failure();
+        apply_press(&mut failed, Press::Enter);
+        assert!(!matches!(failed.state(), State::Failed { .. }), "retried");
+
+        let mut asking = Conversation::new(password_then(Response::Success), "apost");
+        apply_press(&mut asking, Press::Text("hunter2".into()));
+        apply_press(&mut asking, Press::Enter);
+        assert!(asking.state().is_authenticated(), "submitted");
+    }
+
+    /// A control character produces a dot for nothing — Enter and
+    /// Backspace arrive as text as well as as keys.
+    #[test]
+    fn a_control_character_is_not_typed_into_the_entry() {
+        let mut c = Conversation::new(password_then(Response::Success), "apost");
+        apply_press(&mut c, Press::Text("\r".into()));
+        apply_press(&mut c, Press::Text("\u{8}".into()));
+        apply_press(&mut c, Press::Text(String::new()));
+        assert_eq!(c.typed(), "");
     }
 
     #[test]
