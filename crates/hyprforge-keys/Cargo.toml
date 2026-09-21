@@ -1,0 +1,21 @@
+[package]
+name = "hyprforge-keys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# One dependency, and it is for the error type. This crate is the
+# suite's keyboard grammar — vision pillar 9, "one keyboard shortcut
+# grammar, enforced identically across every app" — and a grammar that
+# needed a GUI toolkit to describe itself would not be one.
+#
+# In particular: no iced. The adapter from `iced::keyboard::Event` to a
+# `KeyPress` lives in `hyprforge-ui`, which is the iced layer. Putting it
+# here behind an optional feature would not work and would not be honest:
+# cargo unifies features across the workspace, so any build containing one
+# app would switch iced on for every other consumer of this crate. The
+# root Cargo.toml documents that trap twice already (the `image` feature
+# table switching iced's decoders on everywhere, and zbus/notif). A leaf
+# whose leafness is conditional is not a leaf.
+[dependencies]
+thiserror.workspace = true

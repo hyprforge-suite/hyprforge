@@ -13,6 +13,7 @@ members = [
     "crates/hyprforge-system",
     "crates/hyprforge-authui",
     "crates/hyprforge-paths",
+    "crates/hyprforge-keys",
     "crates/hyprforge-look",
     "crates/hyprforge-ui",
     "crates/hyprforge-lock",
@@ -68,6 +69,10 @@ hyprforge-session = { path = "crates/hyprforge-session" }
 hyprforge-system = { path = "crates/hyprforge-system" }
 hyprforge-authui = { path = "crates/hyprforge-authui" }
 hyprforge-paths = { path = "crates/hyprforge-paths", version = "0.1.0" }
+# The suite's keyboard grammar — one parser and one merge policy, so
+# `Ctrl+Shift+N` means the same thing in every app that binds a key.
+# Deliberately iced-free; the toolkit adapter lives in hyprforge-ui.
+hyprforge-keys = { path = "crates/hyprforge-keys", version = "0.1.0" }
 hyprforge-look = { path = "crates/hyprforge-look", version = "0.1.0" }
 hyprforge-ui = { path = "crates/hyprforge-ui" }
 hyprforge-lock = { path = "crates/hyprforge-lock" }
