@@ -1883,6 +1883,7 @@ dependencies = [
 name = "hyprforge-ui"
 version = "0.1.0"
 dependencies = [
+ "hyprforge-keys",
  "hyprforge-look",
  "iced",
 ]
