@@ -62,7 +62,7 @@ pub struct Found {
 }
 
 /// The whole database: names, contents, and the type graph.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Lookup {
     pub globs: Globs,
     pub magic: Magic,

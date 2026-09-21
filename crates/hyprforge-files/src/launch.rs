@@ -146,14 +146,9 @@ pub fn open_first_of(openers: &[&[&str]], path: &Path) -> Opened {
     outcome
 }
 
-/// [`open`], with the opener as a parameter so a test can point the
-/// whole sequence at something that is not the real one — the same
-/// arrangement `hyprforge_tray::launch` uses for `hyprforge-traymenu`.
-pub fn open_with(opener: &str, path: &Path) -> Opened {
-    open_with_args(opener, &[], path)
-}
-
-/// [`open_with`], with arguments before the path — `gio` needs `open`.
+/// [`open`], with arguments before the path — `gio` needs `open`. The
+/// seam a test points at something that is not a real opener is
+/// [`open_first_of`], which is the whole sequence.
 fn open_with_args(opener: &str, args: &[&str], path: &Path) -> Opened {
     match std::process::Command::new(opener)
         .args(args)
@@ -218,7 +213,8 @@ mod tests {
     /// crash and never silence.
     #[test]
     fn a_missing_opener_is_reported_rather_than_failing_silently() {
-        let outcome = open_with("xdg-open-does-not-exist-xyz", Path::new("/tmp/x.txt"));
+        let openers: [&[&str]; 1] = [&["xdg-open-does-not-exist-xyz"]];
+        let outcome = open_first_of(&openers, Path::new("/tmp/x.txt"));
         assert_eq!(outcome, Opened::NoOpener);
 
         let message = outcome.message(Path::new("/tmp/x.txt")).expect("a failure must say something");
@@ -233,7 +229,8 @@ mod tests {
         // `true` ignores its argument and exits 0 — a stand-in for an
         // opener that starts fine, without launching a real application
         // on the machine running the tests.
-        let outcome = open_with("true", Path::new("/tmp/x.txt"));
+        let openers: [&[&str]; 1] = [&["true"]];
+        let outcome = open_first_of(&openers, Path::new("/tmp/x.txt"));
         assert_eq!(outcome, Opened::Spawned);
         assert_eq!(outcome.message(Path::new("/tmp/x.txt")), None);
     }

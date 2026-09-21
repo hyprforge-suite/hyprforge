@@ -67,7 +67,9 @@ use std::path::{Path, PathBuf};
 /// few small files per double-click, so a host builds one of these and
 /// keeps it. It is a snapshot: installing an application while a window
 /// is open will not show up until [`MimeDb::load`] is called again.
-#[derive(Debug, Clone, Default)]
+// `PartialEq` because a host's message type derives it — the file
+// manager hands a freshly-read database back to its update loop.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MimeDb {
     /// Names, contents and the type graph — everything about types, as
     /// opposed to about applications.

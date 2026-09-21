@@ -582,9 +582,16 @@ pub struct Browser {
     renaming: Option<Renaming>,
     /// See [`Message::AfterListing`].
     after_listing: Option<(PathBuf, bool)>,
-    /// The folder a sidebar menu is acting on while one of its items
-    /// runs — see [`OpenMenu::target`].
-    menu_target: Option<PathBuf>,
+    /// How many of `entries` are dotfiles, counted when the listing
+    /// arrives rather than in `view` — iced runs `view` every frame,
+    /// and a directory with 100,000 entries was being walked on each of
+    /// them for a number that only changes when the listing does.
+    dotfiles: usize,
+    /// The key bound to "show hidden files", as text for the status
+    /// bar. Resolved when the configuration is set: working it out
+    /// meant allocating a `Vec`, sorting it with a `String` per
+    /// comparison, and allocating the answer — per frame.
+    hidden_key: Option<String>,
 }
 
 impl Browser {
@@ -619,7 +626,13 @@ impl Browser {
             can_paste: false,
             renaming: None,
             after_listing: None,
-            menu_target: None,
+            dotfiles: 0,
+            // The shipped default, until `set_config` says otherwise.
+            hidden_key: Config::default()
+                .keymap
+                .combos_for(Action::ToggleHidden)
+                .first()
+                .map(|combo| combo.to_string()),
         };
         (browser, Outcome::ReadDir(start_dir))
     }
@@ -667,13 +680,6 @@ impl Browser {
         self.list_scrollable_id.clone()
     }
 
-    /// The currently shown entries, sorted and filtered — what `view`
-    /// draws, in the order it draws them.
-    ///
-    /// Borrowed out of the one owned listing. A caller wanting a
-    /// particular row's identity should take its `path`: that is what
-    /// [`Selection`] stores, and what survives the list being re-sorted
-    /// underneath it.
     /// What has been typed into the search box, if anything. A host
     /// with a modal of its own open needs to be able to prove nothing
     /// leaked through to the listing behind it.
@@ -681,6 +687,13 @@ impl Browser {
         &self.search_query
     }
 
+    /// The currently shown entries, sorted and filtered — what `view`
+    /// draws, in the order it draws them.
+    ///
+    /// Borrowed out of the one owned listing. A caller wanting a
+    /// particular row's identity should take its `path`: that is what
+    /// [`Selection`] stores, and what survives the list being re-sorted
+    /// underneath it.
     pub fn rows(&self) -> Vec<&Entry> {
         self.view.iter().filter_map(|&i| self.entries.get(i)).collect()
     }
@@ -819,6 +832,8 @@ impl Browser {
     /// calls this once per tab with the configuration it loaded; without
     /// it a browser uses the shipped defaults.
     pub fn set_config(&mut self, config: Arc<Config>) {
+        self.hidden_key =
+            config.keymap.combos_for(Action::ToggleHidden).first().map(|combo| combo.to_string());
         self.config = config;
     }
 
@@ -830,6 +845,22 @@ impl Browser {
     /// What the listing looks like right now, for deciding which actions
     /// make sense — see [`crate::action::enabled`].
     pub fn action_context(&self) -> ActionContext {
+        self.action_context_for(None)
+    }
+
+    /// [`Self::action_context`], for an action aimed at a folder that
+    /// is not in the listing at all — a sidebar row.
+    ///
+    /// The target is a parameter rather than a field set and cleared
+    /// around each call, which is what it used to be. That field made
+    /// `focused_is_dir` report `Some(true)` whenever it was set, so
+    /// this struct lied about the listing's focus to get the folder
+    /// actions enabled — invisibly to every reader of `ActionContext`
+    /// and to `action::enabled`, which believes it is describing the
+    /// listing. Any action consulting `focused_is_dir` silently
+    /// acquired sidebar behaviour, and a missed clear would have left
+    /// the lie in place permanently.
+    fn action_context_for(&self, target: Option<&Path>) -> ActionContext {
         let rows = self.rows();
         let focused = self
             .selection
@@ -837,10 +868,13 @@ impl Browser {
             .and_then(|f| rows.iter().find(|e| e.path == f));
         ActionContext {
             selected: self.selected_shown().len(),
-            focused_is_dir: if self.menu_target.is_some() {
-                Some(true)
-            } else {
-                focused.map(|e| e.is_dir)
+            // A sidebar row is a folder, and it is what the menu is
+            // about — so it answers "is the thing this menu acts on a
+            // folder" honestly, rather than the listing being asked a
+            // question that is not about it.
+            focused_is_dir: match target {
+                Some(_) => Some(true),
+                None => focused.map(|e| e.is_dir),
             },
             shown: rows.len(),
             can_go_back: !self.back_stack.is_empty(),
@@ -850,7 +884,7 @@ impl Browser {
             in_trash: self.in_trash(),
             can_paste: self.can_paste,
             pin: {
-                let target = self.pin_target();
+                let target = self.pin_target(target);
                 action::PinTarget {
                     exists: target.is_some(),
                     pinned_at: target.and_then(|t| self.prefs.pinned.iter().position(|p| *p == t)),
@@ -860,11 +894,11 @@ impl Browser {
         }
     }
 
-    /// The folder the pin actions act on: a sidebar menu's own row; else
-    /// one selected folder; else the folder being shown.
-    fn pin_target(&self) -> Option<PathBuf> {
-        if let Some(target) = &self.menu_target {
-            return Some(target.clone());
+    /// The folder the pin actions act on: the menu's own row when there
+    /// is one; else one selected folder; else the folder being shown.
+    fn pin_target(&self, target: Option<&Path>) -> Option<PathBuf> {
+        if let Some(target) = target {
+            return Some(target.to_path_buf());
         }
         let selected = self.selected_shown();
         if let [one] = selected.as_slice() {
@@ -922,6 +956,16 @@ impl Browser {
     /// [`crate::action::enabled`] answer a menu uses to grey an item out,
     /// so the two cannot disagree.
     pub fn perform(&mut self, action: Action) -> Outcome {
+        self.perform_on(action, None)
+    }
+
+    /// [`Self::perform`], aimed at a folder outside the listing — the
+    /// row a sidebar menu was opened on.
+    ///
+    /// Explicit, so that "what is this action about" is an argument
+    /// both the enabling check and the action itself read, rather than
+    /// a field that is briefly true and separately consulted by each.
+    fn perform_on(&mut self, action: Action, target: Option<PathBuf>) -> Outcome {
         // Any action ends an edit in progress. The field has the
         // keyboard while it is focused, so a key reaching here was not
         // typed into it.
@@ -953,7 +997,7 @@ impl Browser {
         if action.scope() == Scope::Window {
             return Outcome::Window(action);
         }
-        if !action::enabled(action, &self.action_context()) {
+        if !action::enabled(action, &self.action_context_for(target.as_deref())) {
             return Outcome::None;
         }
         match action {
@@ -961,17 +1005,21 @@ impl Browser {
             // index against a list that may have been re-sorted since
             // the focus was set.
             Action::Open => self.activate_focused(),
-            Action::OpenWith => match self.selected_shown().first() {
-                Some(path) => Outcome::OpenWith(path.clone()),
+            // The focused row, like `Open` beside it — and like the
+            // check that enables it, which reads `focused_is_dir`.
+            // Taking the selection here instead meant the two halves
+            // could name different files.
+            Action::OpenWith => match self.selection.focused() {
+                Some(path) => Outcome::OpenWith(path.to_path_buf()),
                 None => Outcome::None,
             },
-            Action::OpenInNewTab => match (&self.menu_target, self.selection.focused()) {
-                (Some(target), _) => Outcome::OpenInNewTab(target.clone()),
+            Action::OpenInNewTab => match (target, self.selection.focused()) {
+                (Some(target), _) => Outcome::OpenInNewTab(target),
                 (None, Some(path)) => Outcome::OpenInNewTab(path.to_path_buf()),
                 (None, None) => Outcome::None,
             },
             Action::Pin | Action::Unpin | Action::PinUp | Action::PinDown => {
-                let Some(target) = self.pin_target() else {
+                let Some(target) = self.pin_target(target.as_deref()) else {
                     return Outcome::None;
                 };
                 Outcome::Pins(match action {
@@ -1104,9 +1152,11 @@ impl Browser {
         self.renaming = None;
         if let MenuSpot::Sidebar(path) = spot {
             let kind = if self.prefs.pinned.contains(&path) { MenuKind::Pinned } else { MenuKind::Place };
-            self.menu_target = Some(path.clone());
-            let items = menus::build(self.config.menus.get(kind), &self.action_context(), &self.config.keymap);
-            self.menu_target = None;
+            let items = menus::build(
+                self.config.menus.get(kind),
+                &self.action_context_for(Some(&path)),
+                &self.config.keymap,
+            );
             self.menu = (!items.is_empty()).then_some(OpenMenu { items, at, highlighted: None, target: Some(path) });
             return;
         }
@@ -1165,10 +1215,7 @@ impl Browser {
         };
         match menu.items.get(index) {
             Some(MenuItem::Action { action, enabled: true, .. }) => {
-                self.menu_target = menu.target;
-                let outcome = self.perform(*action);
-                self.menu_target = None;
-                outcome
+                self.perform_on(*action, menu.target)
             }
             _ => Outcome::None,
         }
@@ -1212,10 +1259,12 @@ impl Browser {
         match result {
             Ok(entries) => {
                 self.entries = entries;
+                self.dotfiles = self.entries.iter().filter(|e| e.hidden).count();
                 self.load_state = LoadState::Loaded;
             }
             Err(e) => {
                 self.entries.clear();
+                self.dotfiles = 0;
                 self.load_state = LoadState::Error(e);
             }
         }
@@ -1409,13 +1458,8 @@ impl Browser {
                 .collapsed(viewport_width, self.config.sidebar.collapse_below),
             viewport_width,
             hidden_count: self.hidden_count(),
-            dotfiles: self.entries.iter().filter(|e| e.hidden).count(),
-            hidden_key: self
-                .config
-                .keymap
-                .combos_for(Action::ToggleHidden)
-                .first()
-                .map(|combo| combo.to_string()),
+            dotfiles: self.dotfiles,
+            hidden_key: self.hidden_key.clone(),
             show_trash: self.config.sidebar.show_trash,
             rows: self.rows(),
             selection: &self.selection,
@@ -2031,6 +2075,21 @@ struct SidebarRow {
     missing: bool,
 }
 
+impl SidebarRow {
+    /// The colour the mark is actually drawn in: the row's own, unless
+    /// the place is unavailable, which is dim whatever the row is for.
+    ///
+    /// Derived rather than stored beside `missing`, because two fields
+    /// set from one predicate can disagree — a dim mark beside a bright
+    /// label is exactly what that drift would look like.
+    fn shown_tint(&self) -> sidebar::Tint {
+        match self.missing {
+            true => sidebar::Tint::Dim,
+            false => self.tint,
+        }
+    }
+}
+
 /// Builds every section the sidebar could show, **already filtered** to
 /// the ones with content — see [`SidebarSection`]'s own doc. Places and
 /// Trash always have at least one row (Home always exists; Trash is a
@@ -2071,8 +2130,11 @@ fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
                 }),
                 // A pin is a folder the user chose, so it takes the
                 // accent — the same colour Home does, because both are
-                // "somewhere you put yourself". Dim when it is gone.
-                tint: if item.item_count.is_some() { sidebar::Tint::Accent } else { sidebar::Tint::Dim },
+                // "somewhere you put yourself". `missing` alone decides
+                // whether it reads as unavailable; the mark's colour is
+                // resolved from it at draw time, so the two cannot
+                // disagree.
+                tint: sidebar::Tint::Accent,
                 missing: item.item_count.is_none(),
             })
             .collect(),
@@ -2117,7 +2179,7 @@ fn sidebar_rail<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
         for row_item in section.rows {
             let is_current = row_item.path == vm.current_dir;
             let mark = icon::folder_mark(
-                hyprforge_ui::color::to_iced(row_item.tint.color()),
+                hyprforge_ui::color::to_iced(row_item.shown_tint().color()),
                 density::SIDEBAR_MARK_BASE,
                 scale,
             );
@@ -2161,7 +2223,7 @@ fn sidebar_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
         for row_item in section.rows {
             let is_current = row_item.path == vm.current_dir;
             let mark = icon::folder_mark(
-                hyprforge_ui::color::to_iced(row_item.tint.color()),
+                hyprforge_ui::color::to_iced(row_item.shown_tint().color()),
                 density::SIDEBAR_MARK_BASE,
                 scale,
             );
@@ -3703,6 +3765,28 @@ mod tests {
     }
 
     /// A disabled item does nothing when clicked, beyond closing.
+    /// The context never claims a focused folder that is not there.
+    ///
+    /// It used to: a field set around a sidebar menu made
+    /// `focused_is_dir` report `Some(true)` regardless of the listing,
+    /// so every action consulting it quietly behaved as though a folder
+    /// were focused.
+    #[test]
+    fn the_listings_context_describes_the_listing() {
+        let mut browser = loaded_browser(&["a.txt"]);
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+        assert_eq!(
+            browser.action_context().focused_is_dir,
+            Some(false),
+            "a file is focused, and the context says so"
+        );
+        assert_eq!(
+            browser.action_context_for(Some(Path::new("/music"))).focused_is_dir,
+            Some(true),
+            "asked about a sidebar row, it answers about that row"
+        );
+    }
+
     /// A sidebar row is not in the listing, so its menu acts on the
     /// place the row names — never on whatever is selected beside it.
     #[test]
@@ -4513,6 +4597,11 @@ mod tests {
         let sections = sidebar_sections(&vm);
         let row = &sections.iter().find(|s| s.title == "Pinned").unwrap().rows[0];
         assert!(row.missing);
-        assert_eq!(row.tint, sidebar::Tint::Dim);
+        assert_eq!(row.shown_tint(), sidebar::Tint::Dim, "drawn dim");
+        assert_eq!(
+            row.tint,
+            sidebar::Tint::Accent,
+            "the row's own colour is untouched — one field decides, and it is `missing`"
+        );
     }
 }
