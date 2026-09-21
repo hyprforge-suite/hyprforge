@@ -2005,7 +2005,20 @@ fn chooser_dialog<'a>(
     };
 
     let mut list = column![].spacing(2.0);
-    for ChooserRow { id, name, is_default } in rows.iter().cloned() {
+    let mut related_heading_shown = false;
+    for ChooserRow { id, name, is_default, related } in rows.iter().cloned() {
+        // One heading, before the first of them.
+        if related && !related_heading_shown {
+            related_heading_shown = true;
+            list = list.push(
+                container(hyprforge_ui::widgets::meta_text(
+                    "Made for a related kind",
+                    BASE_TEXT_SIZE,
+                    scale,
+                ))
+                .padding([spacing::XS as u16, spacing::SM as u16]),
+            );
+        }
         let label: Element<'a, Message> = if is_default {
             row![
                 scaled_text(name, BASE_TEXT_SIZE, scale),
@@ -2092,22 +2105,40 @@ struct ChooserRow {
     /// picking it again is a normal thing to do, and knowing which one
     /// you have been getting is half of why the chooser was opened.
     is_default: bool,
+    /// Registered for something this file *is a kind of*, rather than
+    /// for its own type — an archive manager for a 3MF, a text editor
+    /// for a shell script. Offered, but under their own heading, since
+    /// "can open it" and "is meant for it" are different claims.
+    related: bool,
 }
 
-/// The applications to offer for a chooser, in order.
+/// The applications to offer for a chooser, in order: the ones meant
+/// for this type, then the ones meant for types it is a kind of.
+///
+/// The second group is why a 3MF with no 3MF viewer is not a dead end —
+/// a 3MF is a zip, so an archive manager can open it, and the database
+/// already says so. It is kept separate rather than merged because an
+/// archive manager is a worse answer than a model viewer and should not
+/// sit above one.
 fn chooser_rows(chooser: &Chooser, db: &hyprforge_mime::MimeDb) -> Vec<ChooserRow> {
-    let apps = match (&chooser.mime, chooser.all) {
-        (Some(mime), false) => db.apps_for(mime),
-        _ => db.all_apps(),
-    };
     let default = chooser.mime.as_deref().and_then(|mime| db.default_for(mime)).map(|app| app.id.clone());
-    apps.into_iter()
-        .map(|app| ChooserRow {
-            is_default: default.as_deref() == Some(app.id.as_str()),
-            id: app.id.clone(),
-            name: app.name.clone(),
-        })
-        .collect()
+    let row = |app: &hyprforge_mime::App, related: bool| ChooserRow {
+        is_default: default.as_deref() == Some(app.id.as_str()),
+        id: app.id.clone(),
+        name: app.name.clone(),
+        related,
+    };
+    let Some(mime) = chooser.mime.as_deref().filter(|_| !chooser.all) else {
+        return db.all_apps().into_iter().map(|app| row(app, false)).collect();
+    };
+    let own = db.apps_for(mime);
+    let mut rows: Vec<ChooserRow> = own.iter().map(|app| row(app, false)).collect();
+    for app in db.apps_for_including_parents(mime) {
+        if !own.iter().any(|exact| exact.id == app.id) {
+            rows.push(row(app, true));
+        }
+    }
+    rows
 }
 
 fn confirm_dialog<'a>(pending: &PendingConfirm, scale: FontScale) -> Element<'a, Message> {
@@ -3065,6 +3096,51 @@ mod tests {
         let _ = app.handle_outcome(0, Outcome::OpenWith("/a/page.html".into()));
         let _ = app.update(Message::ChooseApp("browser.desktop".to_string()));
         assert_eq!(app.chooser, None);
+    }
+
+    /// An application registered for a type this one is a *kind of* is
+    /// offered, below the ones meant for it — a 3MF is a zip, so an
+    /// archive manager can open it when no model viewer is installed.
+    #[test]
+    fn applications_for_a_related_kind_are_offered_under_their_own_heading() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(data.join("mime")).unwrap();
+        std::fs::create_dir_all(data.join("applications")).unwrap();
+        std::fs::write(data.join("mime/globs2"), "50:model/3mf:*.3mf\n").unwrap();
+        std::fs::write(data.join("mime/subclasses"), "model/3mf application/zip\n").unwrap();
+        for (file, name) in [("viewer.desktop", "Model Viewer"), ("archiver.desktop", "Archive Manager")] {
+            std::fs::write(
+                data.join("applications").join(file),
+                format!("[Desktop Entry]\nName={name}\nExec=sh %f\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            data.join("applications/mimeinfo.cache"),
+            "[MIME Cache]\nmodel/3mf=viewer.desktop;\napplication/zip=archiver.desktop;\n",
+        )
+        .unwrap();
+        let db = hyprforge_mime::MimeDb::load_from(&[data], &[]);
+
+        let chooser = Chooser {
+            path: "/a/part.3mf".into(),
+            mime: Some("model/3mf".to_string()),
+            all: false,
+            set_default: false,
+            reason: ChooserReason::Asked,
+        };
+        let rows = chooser_rows(&chooser, &db);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "Model Viewer");
+        assert!(!rows[0].related, "meant for this type");
+        assert_eq!(rows[1].name, "Archive Manager");
+        assert!(rows[1].related, "a 3MF is a zip, so it can open it — but it is not for 3MFs");
+
+        // The full list is not grouped: everything there is "anything
+        // installed", so a heading would be claiming something.
+        let all = Chooser { all: true, ..chooser };
+        assert!(chooser_rows(&all, &db).iter().all(|row| !row.related));
     }
 
     /// The default is offered first and marked as such — including in
