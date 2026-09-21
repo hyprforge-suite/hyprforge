@@ -1,0 +1,30 @@
+[package]
+name = "hyprforge-image"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# What a picture is before anything draws it: how big, which way up, and
+# what it is safe to decode.
+#
+# A leaf, and deliberately not part of the viewer. The file manager's
+# `Prefs` has shipped a `preview_pane: bool` — defaulted on — with nothing
+# behind it since it was written, and the vision doc names a shared
+# spacebar preview as cross-cutting between the two apps. The second
+# consumer is already half-specified in a struct people's `files.toml`
+# already carries.
+#
+# No iced. The viewer hands the renderer decoded pixels, and a crate that
+# needed a GUI toolkit to answer "how big is this file" could not be used
+# by a thumbnailer, a preview pane, or a test without a window.
+[dependencies]
+# Format features are pinned at the workspace root, not here — cargo
+# unifies them, and that table is what decides which decoders exist for
+# every crate in the tree including iced's own. `format.rs` reads the
+# answer back out of `image` rather than keeping a second list.
+image.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

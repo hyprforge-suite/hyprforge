@@ -34,6 +34,7 @@ members = [
     "crates/hyprforge-mime",
     "crates/hyprforge-fileops",
     "crates/hyprforge-listing",
+    "crates/hyprforge-image",
     "crates/hyprforge-files-core",
     "crates/hyprforge-files",
 ]
@@ -94,6 +95,10 @@ hyprforge-fileops = { path = "crates/hyprforge-fileops" }
 # the leaf under both the file manager and the image viewer, so the two
 # cannot disagree about which picture comes next in a folder.
 hyprforge-listing = { path = "crates/hyprforge-listing", version = "0.1.0" }
+# Measuring, orienting and decoding a picture within a budget — the leaf
+# under the image viewer, and under the file manager's preview pane when
+# that grows one.
+hyprforge-image = { path = "crates/hyprforge-image", version = "0.1.0" }
 hyprforge-files-core = { path = "crates/hyprforge-files-core" }
 hyprforge-mime = { path = "crates/hyprforge-mime" }
 hyprforge-files = { path = "crates/hyprforge-files" }
@@ -140,7 +145,42 @@ iced_tiny_skia = { version = "0.14", default-features = false }
 # so without this there is no PNG decoder and every wallpaper fails to
 # load. Cargo unifies features across the dependency graph, so declaring
 # the formats here is what switches them on for iced.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+#
+# The list is every format `image` can *decode* in pure Rust, because the
+# image viewer opens whatever the file manager hands it and a viewer that
+# knows six formats is a viewer people stop using. It is a workspace-level
+# decision rather than one app's, for the unification reason above: these
+# switch on for the lock screen, the greeter, clipmenu and Settings too.
+#
+# Two that are deliberately absent, and both would be easy to add by
+# mistake:
+#
+# - `avif` is an *encoder* (ravif). Decoding AVIF needs `avif-native`,
+#   which links the system libdav1d — a C dependency for every one of the
+#   apps above, and a new `depends` line in the PKGBUILD. Worse, the check
+#   `hyprforge-image` uses to decide what it can open,
+#   `ImageFormat::reading_enabled()`, reports AVIF readable whenever
+#   `avif` is on — so enabling the encoder alone would have the viewer
+#   claim `image/avif` in its .desktop file and then fail to open one.
+# - `dds` has a feature but `reading_enabled()` answers `false` for it
+#   unconditionally: there is no DDS decoder to switch on.
+#
+# HEIC is not on the list because `image` cannot do it under any feature.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "webp",
+    "gif",
+    "tiff",
+    "bmp",
+    "ico",
+    "tga",
+    "qoi",
+    "pnm",
+    "hdr",
+    "exr",
+    "ff",
+] }
 # Run zbus on tokio rather than its default async-io executor. Without this
 # zbus polls connections on its own thread, so D-Bus method handlers execute
 # outside any tokio runtime and anything they spawn (the displayd revert
