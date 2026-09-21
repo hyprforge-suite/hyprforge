@@ -168,7 +168,7 @@ fn main() -> iced::Result {
         // the same budget the sidebar's `stat`s already spend here. It
         // is not the per-double-click cost it would be if a chooser
         // loaded it each time.
-        mime: Arc::new(hyprforge_mime::MimeDb::load()),
+        mime: hyprforge_mime::MimeDb::load(),
         chooser: None,
         jobs: Vec::new(),
         confirm: None,
@@ -384,6 +384,8 @@ enum Message {
     CloseChooser,
     /// A default was written, or could not be.
     DefaultSet(Result<(), String>),
+    /// The mime database, read again after a default changed.
+    MimeReloaded(hyprforge_mime::MimeDb),
     WindowResized(Size),
     /// Ctrl/shift went down or came up. Tracked so a click on a row can
     /// be told what was held at the time — see [`App::modifiers`].
@@ -546,8 +548,9 @@ struct App {
     /// A trash or delete waiting on the confirmation dialog.
     confirm: Option<PendingConfirm>,
     /// What the desktop knows about file types and the applications
-    /// that open them. Read once at startup.
-    mime: Arc<hyprforge_mime::MimeDb>,
+    /// that open them. Read once at startup, and again after this
+    /// window changes a default.
+    mime: hyprforge_mime::MimeDb,
     /// An open "which application?" chooser.
     chooser: Option<Chooser>,
     /// What Ctrl+Z can take back.
@@ -633,6 +636,12 @@ struct PendingConfirm {
 /// dead end this whole piece of work came from.
 #[derive(Debug, Clone, PartialEq)]
 struct Chooser {
+    /// The applications to offer, in order — built when the chooser
+    /// opens and when the list widens, never in `view`, which iced runs
+    /// every frame. Asking the database per frame meant an `apps_for`
+    /// per row plus a sort of every installed application with a
+    /// lowercased key allocated per comparison.
+    rows: Vec<ChooserRow>,
     path: PathBuf,
     /// The file's type, if the database knows the name. `None` is not
     /// an error - nothing knows what a `.qqq` is - but it does mean
@@ -645,6 +654,14 @@ struct Chooser {
     set_default: bool,
     /// Why the chooser opened, for the sentence at the top.
     reason: ChooserReason,
+}
+
+impl Chooser {
+    /// This chooser with its rows filled in from the database.
+    fn with_rows(mut self, db: &hyprforge_mime::MimeDb) -> Chooser {
+        self.rows = chooser_rows(&self, db);
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -770,13 +787,22 @@ impl App {
                 let mime = self.mime.type_of(&path).map(str::to_string);
                 if let Some(kind) = &mime {
                     if self.mime.apps_for(kind).is_empty() {
-                        self.chooser = Some(Chooser {
+                        // Not `all`: this is exactly the case the
+                        // related-kind list exists for — a 3MF with no
+                        // 3MF viewer, where the database knows an
+                        // archive manager can open it. Jumping to every
+                        // installed application would bury that under a
+                        // hundred rows and hide the heading that
+                        // explains it.
+                        let chooser = Chooser {
+                            rows: Vec::new(),
                             path,
                             mime,
-                            all: true,
+                            all: false,
                             set_default: false,
                             reason: ChooserReason::NothingHandlesIt,
-                        });
+                        };
+                        self.chooser = Some(chooser.with_rows(&self.mime));
                         return Task::none();
                     }
                 }
@@ -786,14 +812,22 @@ impl App {
             }
             Outcome::OpenWith(path) => {
                 let mime = self.mime.type_of(&path).map(str::to_string);
-                // Straight to the full list when the file's own kind has
-                // nothing to show, rather than an empty list with a
-                // "show all" button under it.
+                // Straight to the full list only when nothing at all —
+                // not even something for a related kind — could open
+                // it, rather than showing an empty list with a "show
+                // all" button under it.
                 let all = mime
                     .as_deref()
-                    .is_none_or(|mime| self.mime.apps_for(mime).is_empty());
-                self.chooser =
-                    Some(Chooser { path, mime, all, set_default: false, reason: ChooserReason::Asked });
+                    .is_none_or(|mime| self.mime.candidates(mime).is_empty());
+                let chooser = Chooser {
+                    rows: Vec::new(),
+                    path,
+                    mime,
+                    all,
+                    set_default: false,
+                    reason: ChooserReason::Asked,
+                };
+                self.chooser = Some(chooser.with_rows(&self.mime));
                 Task::none()
             }
             Outcome::PrefsChanged(prefs) => Task::perform(
@@ -1566,7 +1600,9 @@ impl App {
                     (hyprforge_files::launch::Opened::Spawned, true, Some(mime)) => Task::perform(
                         async move {
                             tokio::task::spawn_blocking(move || {
-                                hyprforge_mime::set_default(&mime, &id).map_err(|e| e.to_string())
+                                hyprforge_mime::MimeDb::load()
+                                    .set_default(&mime, &id)
+                                    .map_err(|e| e.to_string())
                             })
                             .await
                             .unwrap_or_else(|e| Err(e.to_string()))
@@ -1577,8 +1613,8 @@ impl App {
                 }
             }
             Message::ChooserShowAll => {
-                if let Some(chooser) = &mut self.chooser {
-                    chooser.all = true;
+                if let Some(chooser) = self.chooser.take() {
+                    self.chooser = Some(Chooser { all: true, ..chooser }.with_rows(&self.mime));
                 }
                 Task::none()
             }
@@ -1595,8 +1631,20 @@ impl App {
             Message::DefaultSet(Ok(())) => {
                 // The window's own copy of the database is a snapshot,
                 // so the change it just made has to be read back or the
-                // next chooser would show the old default.
-                self.mime = Arc::new(hyprforge_mime::MimeDb::load());
+                // next chooser would show the old default. Off the UI
+                // thread: a reload rescans every `.desktop` on the
+                // machine and walks `PATH` for each one.
+                Task::perform(
+                    async {
+                        tokio::task::spawn_blocking(hyprforge_mime::MimeDb::load)
+                            .await
+                            .unwrap_or_default()
+                    },
+                    Message::MimeReloaded,
+                )
+            }
+            Message::MimeReloaded(db) => {
+                self.mime = db;
                 Task::none()
             }
             Message::DefaultSet(Err(e)) => {
@@ -1811,7 +1859,7 @@ impl App {
             return iced::widget::stack![window, confirm_dialog(pending, scale)].into();
         }
         if let Some(chooser) = &self.chooser {
-            return iced::widget::stack![window, chooser_dialog(chooser, &self.mime, scale)].into();
+            return iced::widget::stack![window, chooser_dialog(chooser, scale)].into();
         }
         // A conflict is a question the job is paused on, so it goes
         // above everything, the context menu included.
@@ -1968,12 +2016,6 @@ fn conflict_dialog<'a>(job: &RunningJob, conflict: &Collision, scale: FontScale)
     )
 }
 
-/// Asks before a trash or a permanent delete.
-///
-/// Says what goes and whether it can come back. For a permanent delete
-/// the confirming button is the *secondary* one and Enter does not press
-/// it: the easy path through this dialog should be the one that keeps
-/// the files.
 /// "What should open this?" — the applications for a file's kind, or
 /// every installed one.
 ///
@@ -1984,14 +2026,10 @@ fn conflict_dialog<'a>(job: &RunningJob, conflict: &Collision, scale: FontScale)
 /// gone that way is still *named*, because "your default is fstl, which
 /// isn't installed any more" is the sentence that explains what they
 /// are looking at.
-fn chooser_dialog<'a>(
-    chooser: &Chooser,
-    db: &hyprforge_mime::MimeDb,
-    scale: FontScale,
-) -> Element<'a, Message> {
+fn chooser_dialog<'a>(chooser: &Chooser, scale: FontScale) -> Element<'a, Message> {
     let name = display_name(&chooser.path);
     let kind = chooser.mime.clone();
-    let rows = chooser_rows(chooser, db);
+    let rows = &chooser.rows;
 
     let body = match (chooser.reason, &kind) {
         (ChooserReason::NothingHandlesIt, Some(mime)) => {
@@ -2121,26 +2159,39 @@ struct ChooserRow {
 /// archive manager is a worse answer than a model viewer and should not
 /// sit above one.
 fn chooser_rows(chooser: &Chooser, db: &hyprforge_mime::MimeDb) -> Vec<ChooserRow> {
-    let default = chooser.mime.as_deref().and_then(|mime| db.default_for(mime)).map(|app| app.id.clone());
-    let row = |app: &hyprforge_mime::App, related: bool| ChooserRow {
-        is_default: default.as_deref() == Some(app.id.as_str()),
-        id: app.id.clone(),
-        name: app.name.clone(),
-        related,
-    };
     let Some(mime) = chooser.mime.as_deref().filter(|_| !chooser.all) else {
-        return db.all_apps().into_iter().map(|app| row(app, false)).collect();
+        let default = chooser.mime.as_deref().and_then(|mime| db.default_for(mime)).map(|app| app.id.clone());
+        return db
+            .all_apps()
+            .into_iter()
+            .map(|app| ChooserRow {
+                is_default: default.as_deref() == Some(app.id.as_str()),
+                id: app.id.clone(),
+                name: app.name.clone(),
+                related: false,
+            })
+            .collect();
     };
-    let own = db.apps_for(mime);
-    let mut rows: Vec<ChooserRow> = own.iter().map(|app| row(app, false)).collect();
-    for app in db.apps_for_including_parents(mime) {
-        if !own.iter().any(|exact| exact.id == app.id) {
-            rows.push(row(app, true));
-        }
-    }
-    rows
+    // One ranked answer from the database rather than two lists diffed
+    // here — `mimeopen` asks the same question and would otherwise
+    // order it differently.
+    db.candidates(mime)
+        .into_iter()
+        .map(|candidate| ChooserRow {
+            id: candidate.app.id.clone(),
+            name: candidate.app.name.clone(),
+            is_default: candidate.is_default,
+            related: !candidate.made_for,
+        })
+        .collect()
 }
 
+/// Asks before a trash or a permanent delete.
+///
+/// Says what goes and whether it can come back. For a permanent delete
+/// the confirming button is the *secondary* one and Enter does not press
+/// it: the easy path through this dialog should be the one that keeps
+/// the files.
 fn confirm_dialog<'a>(pending: &PendingConfirm, scale: FontScale) -> Element<'a, Message> {
     use hyprforge_ui::widgets::primary_button;
     let what = match pending.paths.as_slice() {
@@ -2957,7 +3008,7 @@ mod tests {
             // window's loop, and what happens to be installed here is
             // none of their business. Tests that need a database build
             // one.
-            mime: Arc::new(hyprforge_mime::MimeDb::default()),
+            mime: hyprforge_mime::MimeDb::default(),
             chooser: None,
             jobs: Vec::new(),
             confirm: None,
@@ -2977,7 +3028,7 @@ mod tests {
 
     /// A miniature desktop: one type nothing can open, one type an
     /// installed application can.
-    fn mime_fixture() -> (tempfile::TempDir, Arc<hyprforge_mime::MimeDb>) {
+    fn mime_fixture() -> (tempfile::TempDir, hyprforge_mime::MimeDb) {
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("data");
         std::fs::create_dir_all(data.join("mime")).unwrap();
@@ -2993,7 +3044,7 @@ mod tests {
             "[MIME Cache]\ntext/html=browser.desktop;\n",
         )
         .unwrap();
-        (dir, Arc::new(hyprforge_mime::MimeDb::load_from(&[data], &[])))
+        (dir, hyprforge_mime::MimeDb::load_from(&[data], &[]))
     }
 
     /// The dead end this work came from: a kind the machine has no
@@ -3008,7 +3059,11 @@ mod tests {
         let chooser = app.chooser.expect("a chooser, not a browser");
         assert_eq!(chooser.mime.as_deref(), Some("model/stl"));
         assert_eq!(chooser.reason, ChooserReason::NothingHandlesIt);
-        assert!(chooser.all, "with nothing registered, the full list is the only useful one");
+        assert!(
+            !chooser.all,
+            "this is the case the related-kind list exists for; jumping to every installed \
+             application would bury it"
+        );
         assert!(app.status.is_none(), "nothing was launched to report on");
     }
 
@@ -3124,6 +3179,7 @@ mod tests {
         let db = hyprforge_mime::MimeDb::load_from(&[data], &[]);
 
         let chooser = Chooser {
+            rows: Vec::new(),
             path: "/a/part.3mf".into(),
             mime: Some("model/3mf".to_string()),
             all: false,
@@ -3172,6 +3228,7 @@ mod tests {
         let db = hyprforge_mime::MimeDb::load_from(&[data], &[mimeapps]);
 
         let chooser = Chooser {
+            rows: Vec::new(),
             path: "/a/part.stl".into(),
             mime: Some("model/stl".to_string()),
             all: false,
