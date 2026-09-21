@@ -205,18 +205,10 @@ impl Magic {
             .map(|section| Match { mime: section.mime.clone(), priority: section.priority })
     }
 
-    /// The best content match for a file, reading only the first
-    /// [`SNIFF_BYTES`] of it.
-    ///
-    /// Bounded on purpose: this is asked about files a person just
-    /// pointed at, which can be a 40GB disk image on a slow mount, and
-    /// no magic rule in the database reaches anywhere near that far in.
+    /// The best content match for a file, reading only its first
+    /// [`SNIFF_BYTES`].
     pub fn of_file(&self, path: &std::path::Path) -> Option<Match> {
-        let mut file = std::fs::File::open(path).ok()?;
-        let mut buffer = vec![0u8; SNIFF_BYTES];
-        let read = read_up_to(&mut file, &mut buffer)?;
-        buffer.truncate(read);
-        self.of_data(&buffer)
+        self.of_data(&head(path)?)
     }
 
     /// Every content match, best first — `mimetype --all`.
@@ -231,6 +223,29 @@ impl Magic {
     pub fn is_empty(&self) -> bool {
         self.sections.is_empty()
     }
+}
+
+/// The first [`SNIFF_BYTES`] of a file, for content matching.
+///
+/// **The one way to read a file for typing.** Bounded on purpose: this
+/// is asked about files a person just pointed at, which can be a 40GB
+/// disk image on a slow mount, and no magic rule in the database
+/// reaches anywhere near that far in.
+///
+/// It exists as its own function because the bound was written once and
+/// then bypassed three times: `Lookup::of_file`, `Lookup::all_of_file`
+/// and the `mimetype` command each read the *whole* file instead, so
+/// nothing a person actually double-clicked was bounded at all. An
+/// 800MB file cost 766MB of resident memory to answer "what is this".
+/// That is the failure the project's own rule about testing the
+/// resource rather than the result is named after, and the tests here
+/// had asked only what type came back.
+pub fn head(path: &std::path::Path) -> Option<Vec<u8>> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut buffer = vec![0u8; SNIFF_BYTES];
+    let read = read_up_to(&mut file, &mut buffer)?;
+    buffer.truncate(read);
+    Some(buffer)
 }
 
 /// Fills `buffer` as far as the file goes, tolerating short reads.
@@ -505,15 +520,32 @@ mod tests {
         }
     }
 
+    /// The bound is the property, not an implementation detail: a file
+    /// far larger than the sniff window costs the window, not the file.
     #[test]
     fn a_files_contents_are_read_from_disk_and_bounded() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("anonymous");
         let mut contents = b"%PDF-1.7\n".to_vec();
-        contents.extend(std::iter::repeat_n(b'x', SNIFF_BYTES * 2));
+        contents.extend(std::iter::repeat_n(b'x', SNIFF_BYTES * 4));
         std::fs::write(&path, &contents).unwrap();
+
+        let read = head(&path).expect("readable");
+        assert_eq!(read.len(), SNIFF_BYTES, "a big file costs the window, not its size");
         assert_eq!(pdf_and_png().of_file(&path).unwrap().mime, "application/pdf");
         assert_eq!(pdf_and_png().of_file(&dir.path().join("missing")), None);
+        assert_eq!(head(&dir.path().join("missing")), None);
+    }
+
+    /// A file smaller than the window reads as itself, not as a
+    /// window-sized buffer of trailing zeroes — which would make every
+    /// short file look like padded binary.
+    #[test]
+    fn a_small_file_reads_as_exactly_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("small");
+        std::fs::write(&path, b"hello").unwrap();
+        assert_eq!(head(&path).unwrap(), b"hello");
     }
 
     impl Magic {

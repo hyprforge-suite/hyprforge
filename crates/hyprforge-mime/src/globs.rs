@@ -24,7 +24,6 @@
 //! wins, and when, is [`crate::lookup`]: a name beats a weak content
 //! guess, and a strong one beats a name.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
 /// One pattern from `globs2`.
@@ -34,9 +33,29 @@ struct Glob {
     weight: u32,
     mime: String,
     pattern: String,
+    /// The pattern's characters, and its length in them.
+    ///
+    /// Kept beside the pattern because matching walks characters, and
+    /// collecting them per rule per lookup is the whole cost of a
+    /// lookup: 1541 rules on this machine, ~40,000 on a full one, twice
+    /// each. Parsing happens once at load; matching happens on every
+    /// file anyone opens.
+    chars: Vec<char>,
     /// `cs` in the flags field: this pattern only matches with the
     /// letters exactly as written.
     case_sensitive: bool,
+}
+
+impl Glob {
+    fn new(weight: u32, mime: &str, pattern: &str, case_sensitive: bool) -> Glob {
+        Glob {
+            weight,
+            mime: mime.to_string(),
+            chars: pattern.chars().collect(),
+            pattern: pattern.to_string(),
+            case_sensitive,
+        }
+    }
 }
 
 /// The filename rules, loaded from every `globs2` on the system.
@@ -71,14 +90,9 @@ impl Globs {
             if pattern.is_empty() || pattern == "__NOGLOBS__" {
                 continue;
             }
-            globs.push(Glob {
-                weight,
-                mime: mime.to_string(),
-                pattern: pattern.to_string(),
-                case_sensitive: fields.next().is_some_and(|flags| {
-                    flags.split(':').any(|flag| flag == "cs")
-                }),
-            });
+            let case_sensitive =
+                fields.next().is_some_and(|flags| flags.split(':').any(|flag| flag == "cs"));
+            globs.push(Glob::new(weight, mime, pattern, case_sensitive));
         }
         Globs { globs }
     }
@@ -101,12 +115,7 @@ impl Globs {
             if pattern.is_empty() {
                 continue;
             }
-            globs.push(Glob {
-                weight: 50,
-                mime: mime.to_string(),
-                pattern: pattern.to_string(),
-                case_sensitive: false,
-            });
+            globs.push(Glob::new(50, mime, pattern, false));
         }
         Globs { globs }
     }
@@ -171,17 +180,20 @@ impl Globs {
     ///    is the answer everything else on the machine gives.
     pub fn type_of(&self, path: &Path) -> Option<&str> {
         let name = path.file_name()?.to_str()?;
-        self.best_match(name).or_else(|| {
-            let lowered = name.to_lowercase();
-            (lowered != name).then(|| self.best_match(&lowered)).flatten()
+        // Collected once for the whole sweep rather than once per rule
+        // — see [`Glob::chars`].
+        let chars: Vec<char> = name.chars().collect();
+        self.best_match(&chars).or_else(|| {
+            let lowered: Vec<char> = name.to_lowercase().chars().collect();
+            (lowered != chars).then(|| self.best_match(&lowered)).flatten()
         })
     }
 
     /// The best rule for a name, taken exactly as given.
-    fn best_match(&self, name: &str) -> Option<&str> {
+    fn best_match(&self, name: &[char]) -> Option<&str> {
         self.globs
             .iter()
-            .filter(|glob| matches(&glob.pattern, name))
+            .filter(|glob| matches_at(&glob.chars, name))
             // Folded rather than `max_by_key`, which keeps the *last* of
             // several equal maxima — the opposite of what is wanted.
             .fold(None, |best: Option<&Glob>, glob| match best {
@@ -199,16 +211,14 @@ impl Globs {
     /// person may want to know that.
     pub fn all_matches(&self, path: &Path) -> Vec<&str> {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else { return Vec::new() };
-        let lowered = name.to_lowercase();
+        let exact: Vec<char> = name.chars().collect();
+        let lowered: Vec<char> = name.to_lowercase().chars().collect();
         let mut matched: Vec<&Glob> = self
             .globs
             .iter()
             .filter(|glob| {
-                if glob.case_sensitive {
-                    matches(&glob.pattern, name)
-                } else {
-                    matches(&glob.pattern.to_lowercase(), &lowered)
-                }
+                matches_at(&glob.chars, &exact)
+                    || (!glob.case_sensitive && matches_at(&glob.chars, &lowered))
             })
             .collect();
         matched.sort_by_key(|glob| std::cmp::Reverse((glob.weight, glob.pattern.len())));
@@ -229,15 +239,6 @@ impl Globs {
         self.globs.is_empty()
     }
 
-    /// Every type the database knows a name rule for, with one example
-    /// pattern each — for a "what can this machine open" listing.
-    pub fn types(&self) -> BTreeMap<&str, &str> {
-        let mut types = BTreeMap::new();
-        for glob in &self.globs {
-            types.entry(glob.mime.as_str()).or_insert(glob.pattern.as_str());
-        }
-        types
-    }
 }
 
 /// How good a rule is: the database's weight, then the length of the
@@ -254,13 +255,7 @@ fn rank(glob: &Glob) -> (u32, usize, bool) {
 /// Written out rather than pulled in as a dependency because the subset
 /// is this small and the crate is a leaf on purpose. Recursion is on the
 /// pattern, so a pathological pattern costs pattern length, not file
-/// length.
-fn matches(pattern: &str, name: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let n: Vec<char> = name.chars().collect();
-    matches_at(&p, &n)
-}
-
+/// length. Both sides arrive as characters already — see [`Glob::chars`].
 fn matches_at(pattern: &[char], name: &[char]) -> bool {
     match pattern.first() {
         None => name.is_empty(),
@@ -429,11 +424,6 @@ mod tests {
         let globs = Globs::parse("nonsense\n50:text/plain:*.txt\nalso:nonsense\n\n");
         assert_eq!(globs.type_of(&PathBuf::from("a.txt")), Some("text/plain"));
         assert!(!globs.is_empty());
-    }
-
-    #[test]
-    fn a_type_with_its_globs_removed_carries_no_pattern() {
-        assert!(db().types().keys().all(|t| *t != "application/x-modrinth-modpack+zip"));
     }
 
     #[test]

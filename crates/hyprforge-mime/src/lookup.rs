@@ -96,7 +96,7 @@ impl Lookup {
         if let Some(inode) = types::inode_type(path, follow) {
             return Found { mime: inode.to_string(), how: How::Inode };
         }
-        match std::fs::read(path).ok().map(|data| self.of_data_and_name(&data, Some(path))) {
+        match crate::magic::head(path).map(|data| self.of_data_and_name(&data, Some(path))) {
             Some(found) => found,
             // Unreadable — no permission, or it went away between the
             // listing and the question. The name is all there is, and
@@ -124,45 +124,11 @@ impl Lookup {
         Found { mime: fallback(data).to_string(), how: How::Fallback }
     }
 
-    /// Every type that matches, best first — `mimetype --all`.
-    ///
-    /// The name's matches and the contents' matches both appear, in the
-    /// order above, without repeats. Useful when a caller would rather
-    /// see the ambiguity than have it resolved for them.
-    pub fn all_of_file(&self, path: &Path, follow: bool) -> Vec<String> {
-        if let Some(inode) = types::inode_type(path, follow) {
-            return vec![inode.to_string()];
-        }
-        let data = std::fs::read(path).unwrap_or_default();
-        let mut found: Vec<String> = Vec::new();
-        let magic = self.magic.all_of_data(&data);
-        for m in magic.iter().filter(|m| m.priority >= STRONG) {
-            push_once(&mut found, m.mime.clone());
-        }
-        for mime in self.globs.all_matches(path) {
-            push_once(&mut found, mime.to_string());
-        }
-        for m in magic.iter().filter(|m| m.priority < STRONG) {
-            push_once(&mut found, m.mime.clone());
-        }
-        if found.is_empty() {
-            found.push(fallback(&data).to_string());
-        }
-        found
-    }
-
     /// Whether an application registered for `parent` can be expected to
     /// open a `mime` — the subclass question, asked the way a caller
     /// means it.
     pub fn is_subclass_of(&self, mime: &str, parent: &str) -> bool {
         self.types.is_subclass_of(mime, parent)
-    }
-}
-
-/// Keeps the first mention of a type and drops later ones.
-fn push_once(found: &mut Vec<String>, mime: String) {
-    if !found.contains(&mime) {
-        found.push(mime);
     }
 }
 
@@ -347,13 +313,6 @@ mod tests {
             return;
         }
         assert_eq!(lookup().of_file(&path, true).mime, "model/3mf");
-    }
-
-    #[test]
-    fn every_match_can_be_listed_rather_than_resolved() {
-        let dir = tempfile::tempdir().unwrap();
-        let all = lookup().all_of_file(&write(&dir, "part.3mf", b"solid "), true);
-        assert_eq!(all, ["model/3mf", "model/stl"], "the name first, then the weak rule");
     }
 
     #[test]

@@ -103,23 +103,14 @@ fn first_word(exec: &str) -> Option<&str> {
 /// This is registration, not choice — every application that says it can
 /// open PNGs is in here, which is why a chooser shows several and why
 /// the *default* is a separate question (see [`crate::defaults`]).
+///
+/// The file has the same shape as `mimeapps.list` — a `[section]` of
+/// `type=one.desktop;two.desktop;` lines — so it is read by the same
+/// scanner. They were two near-copies that disagreed about whether a
+/// repeated key replaces or accumulates, which is the disagreement
+/// CLAUDE.md's rule about a last-one-wins format is about.
 pub fn parse_cache(text: &str) -> BTreeMap<String, Vec<String>> {
-    let mut by_type: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut in_cache = false;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            in_cache = line == "[MIME Cache]";
-            continue;
-        }
-        if !in_cache || line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((mime, entries)) = line.split_once('=') else { continue };
-        let entries = entries.split(';').filter(|e| !e.is_empty()).map(str::to_string);
-        by_type.entry(mime.trim().to_string()).or_default().extend(entries);
-    }
-    by_type
+    crate::defaults::parse_section(text, "[MIME Cache]")
 }
 
 /// Whether a program can be run, by walking `PATH`. The real
@@ -147,12 +138,18 @@ pub fn on_path(program: &str) -> bool {
 /// so two different commands beginning with the same word do not
 /// quietly become one.
 ///
+/// Returns the entry's file name and the name written inside it. Both,
+/// because a caller needs to show one and record the other, and working
+/// the name out a second time is how they came to disagree: the entry
+/// on disk said `zeditor` while the caller's copy said
+/// `/usr/bin/zeditor`.
+///
 /// `command` is written into `Exec=` as given. Nothing here parses it —
 /// see this module's doc — which does mean a command that is nonsense
 /// produces an entry that fails to launch. That is visible immediately
 /// and recoverable by choosing again; guessing at what somebody meant
 /// would not be.
-pub fn write_custom_entry(applications: &Path, command: &str) -> std::io::Result<String> {
+pub fn write_custom_entry(applications: &Path, command: &str) -> std::io::Result<(String, String)> {
     let word = command
         .split_whitespace()
         .next()
@@ -175,7 +172,7 @@ pub fn write_custom_entry(applications: &Path, command: &str) -> std::io::Result
             "[Desktop Entry]\nType=Application\nName={word}\nNoDisplay=true\nExec={command} %f\n"
         );
         hyprforge_paths::write_atomic(&path, &entry)?;
-        return Ok(id);
+        return Ok((id, word.to_string()));
     }
     Err(std::io::Error::other("too many entries already exist for that command"))
 }
@@ -260,8 +257,9 @@ mod tests {
     #[test]
     fn a_typed_command_becomes_an_entry_that_stays_out_of_menus() {
         let dir = tempfile::tempdir().unwrap();
-        let id = write_custom_entry(dir.path(), "kate --new").unwrap();
+        let (id, name) = write_custom_entry(dir.path(), "kate --new").unwrap();
         assert_eq!(id, "kate-usercreated-1.desktop");
+        assert_eq!(name, "kate", "the same name the entry itself carries");
         let text = std::fs::read_to_string(dir.path().join(&id)).unwrap();
         assert!(text.contains("Exec=kate --new %f"), "{text}");
         assert!(text.contains("NoDisplay=true"), "a one-off choice is not a menu entry");
@@ -276,15 +274,16 @@ mod tests {
     #[test]
     fn a_second_command_with_the_same_first_word_gets_its_own_entry() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(write_custom_entry(dir.path(), "kate a").unwrap(), "kate-usercreated-1.desktop");
-        assert_eq!(write_custom_entry(dir.path(), "kate b").unwrap(), "kate-usercreated-2.desktop");
+        assert_eq!(write_custom_entry(dir.path(), "kate a").unwrap().0, "kate-usercreated-1.desktop");
+        assert_eq!(write_custom_entry(dir.path(), "kate b").unwrap().0, "kate-usercreated-2.desktop");
     }
 
     #[test]
     fn a_command_with_a_path_is_named_by_its_program() {
         let dir = tempfile::tempdir().unwrap();
-        let id = write_custom_entry(dir.path(), "/usr/bin/zeditor --wait").unwrap();
+        let (id, name) = write_custom_entry(dir.path(), "/usr/bin/zeditor --wait").unwrap();
         assert_eq!(id, "zeditor-usercreated-1.desktop");
+        assert_eq!(name, "zeditor", "the path is stripped in both places, or neither");
         assert!(std::fs::read_to_string(dir.path().join(&id)).unwrap().contains("Exec=/usr/bin/zeditor --wait %f"));
     }
 

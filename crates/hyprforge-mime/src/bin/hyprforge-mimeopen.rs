@@ -23,15 +23,15 @@
 //! for the file manager. Without `gio` this says so rather than
 //! guessing at a command line.
 
+use hyprforge_mime::cli::{self, shown_name, Option_};
 use hyprforge_mime::{App, MimeDb};
 use std::borrow::Cow;
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
+/// This command's own codes, on top of the shared ones.
 mod exit {
-    pub const UNKNOWN_OPTION: i32 = 1;
-    pub const MISSING_ARGUMENT: i32 = 2;
-    pub const NO_FILES: i32 = 4;
+    pub use hyprforge_mime::cli::exit::NO_FILES;
     /// Nothing could say what the file is.
     pub const UNKNOWN_TYPE: i32 = 5;
     /// Nothing installed opens that type.
@@ -59,7 +59,7 @@ struct Args {
     version: bool,
 }
 
-const OPTIONS: &[(&str, Option<char>, bool)] = &[
+const OPTIONS: &[Option_] = &[
     ("help", Some('h'), false),
     ("usage", Some('u'), false),
     ("version", Some('v'), false),
@@ -96,10 +96,7 @@ fn main() {
         std::process::exit(exit::NO_FILES);
     }
 
-    let dirs: Vec<PathBuf> = match &args.database {
-        Some(list) => list.split(':').filter(|d| !d.is_empty()).map(PathBuf::from).collect(),
-        None => hyprforge_mime::data_dirs(),
-    };
+    let dirs: Vec<PathBuf> = cli::database_dirs(&args.database);
     if args.debug {
         let shown: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
         println!("> Data dirs are: {}", shown.join(", "));
@@ -115,7 +112,7 @@ fn main() {
         false => Some(db.lookup().of_file(&first, args.dereference).mime),
     };
     let Some(mime) = mime.filter(|mime| !mime.is_empty()) else {
-        eprintln!("Could not determine mimetype for file: {}", quoted(&args.files[0]));
+        eprintln!("Could not determine mimetype for file: {}", shown_name(&args.files[0]));
         std::process::exit(exit::UNKNOWN_TYPE);
     };
 
@@ -154,7 +151,7 @@ fn main() {
         }
     }
 
-    let names: Vec<String> = args.files.iter().map(|f| quoted(f)).collect();
+    let names: Vec<String> = args.files.iter().map(|f| shown_name(f)).collect();
     println!("Opening {} with {}  ({mime})", names.join(", "), chosen.name);
 
     match launch(&chosen.path, &args.files) {
@@ -167,15 +164,17 @@ fn main() {
 }
 
 /// Hands the files to one desktop entry, through `gio launch`.
+///
+/// Bounded, because nothing here may wait on another process without a
+/// bound: `gio launch` starts the application and returns, but a `gio`
+/// that wedges — a stalled D-Bus activation, an unresponsive mount —
+/// would otherwise hang this command forever with no way out.
 fn launch(entry: &Path, files: &[String]) -> Result<(), String> {
-    let status = std::process::Command::new("gio")
-        .arg("launch")
-        .arg(entry)
-        .args(files)
-        .status();
-    match status {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => Err(format!("the application exited with {status}")),
+    let mut command = std::process::Command::new("gio");
+    command.arg("launch").arg(entry).args(files);
+    match hyprforge_process::output(&mut command, hyprforge_process::TIMEOUT) {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => Err(format!("the application exited with {}", out.status)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(
             "gio isn't installed, so a chosen application can't be started. Install glib2."
                 .to_string(),
@@ -251,15 +250,9 @@ fn custom<'a>() -> Option<Cow<'a, App>> {
     let command = command.trim().to_string();
     let applications = hyprforge_paths::data_home().join("applications");
     match hyprforge_mime::apps::write_custom_entry(&applications, &command) {
-        Ok(id) => {
+        Ok((id, name)) => {
             let path = applications.join(&id);
-            Some(Cow::Owned(App {
-                name: command.split_whitespace().next().unwrap_or(&command).to_string(),
-                id,
-                icon: None,
-                path,
-                installed: true,
-            }))
+            Some(Cow::Owned(App { name, id, icon: None, path, installed: true }))
         }
         Err(e) => {
             eprintln!("mimeopen: couldn't record that command: {e}");
@@ -268,73 +261,14 @@ fn custom<'a>() -> Option<Cow<'a, App>> {
     }
 }
 
-/// A filename as printed: quoted on a terminal, raw when piped — the
-/// same rule `mimetype` follows.
-fn quoted(file: &str) -> String {
-    if std::io::stdout().is_terminal() {
-        format!("{file:?}")
-    } else {
-        file.to_string()
-    }
-}
-
+/// Parses the command line into this command's own `Args`, over the
+/// grammar both commands share — see [`hyprforge_mime::cli`].
 fn parse(raw: Vec<String>) -> Result<Args, (String, i32)> {
-    let mut args = Args::default();
-    let mut rest = raw.into_iter().peekable();
-    while let Some(argument) = rest.peek().cloned() {
-        if !argument.starts_with('-') || argument == "-" {
-            break;
-        }
-        rest.next();
-        if argument == "--" {
-            break;
-        }
-        if let Some(long) = argument.strip_prefix("--") {
-            let (name, inline) = match long.split_once('=') {
-                Some((name, value)) => (name, Some(value.to_string())),
-                None => (long, None),
-            };
-            let Some((_, _, takes_value)) = OPTIONS.iter().find(|(option, _, _)| *option == name)
-            else {
-                return Err((format!("mimeopen: unrecognized option '--{name}'"), exit::UNKNOWN_OPTION));
-            };
-            let value = match takes_value {
-                false => None,
-                true => match inline.or_else(|| rest.next()) {
-                    Some(value) => Some(value),
-                    None => {
-                        return Err((
-                            format!("mimeopen: option '--{name}' requires an argument"),
-                            exit::MISSING_ARGUMENT,
-                        ))
-                    }
-                },
-            };
-            set(&mut args, name, value);
-            continue;
-        }
-        for letter in argument.trim_start_matches('-').chars() {
-            let Some((name, _, takes_value)) =
-                OPTIONS.iter().find(|(_, short, _)| *short == Some(letter))
-            else {
-                return Err((format!("mimeopen: unrecognized option '{letter}'"), exit::UNKNOWN_OPTION));
-            };
-            let value = match takes_value {
-                false => None,
-                true => match rest.next() {
-                    Some(value) => Some(value),
-                    None => {
-                        return Err((
-                            format!("mimeopen: option '-{letter}' requires an argument"),
-                            exit::MISSING_ARGUMENT,
-                        ))
-                    }
-                },
-            };
-            set(&mut args, name, value);
-        }
+    let parsed = cli::parse("mimeopen", OPTIONS, raw)?;
+    let mut args = Args { files: parsed.files, ..Args::default() };
+    for (name, value) in parsed.options {
+        set(&mut args, name, value);
     }
-    args.files.extend(rest);
     Ok(args)
 }
 
@@ -400,14 +334,15 @@ mod tests {
         assert_eq!(args.files, ["/tmp/part.3mf"]);
     }
 
+
+    /// This command's own table still reaches the shared parser — the
+    /// form `xdg-open` calls is the one that must not drift.
     #[test]
-    fn options_and_files_are_told_apart_the_same_way_as_mimetype() {
-        assert_eq!(parsed(&["--", "-n"]).files, ["-n"]);
-        assert_eq!(parsed(&["-"]).files, ["-"]);
+    fn its_own_options_reach_the_shared_parser() {
         assert_eq!(parsed(&["--database", "/a:/b", "f"]).database.as_deref(), Some("/a:/b"));
         let (message, code) = parse(vec!["--nope".to_string()]).unwrap_err();
-        assert!(message.contains("--nope"));
-        assert_eq!(code, exit::UNKNOWN_OPTION);
+        assert!(message.starts_with("mimeopen:"), "{message}");
+        assert_eq!(code, hyprforge_mime::cli::exit::UNKNOWN_OPTION);
     }
 
     /// An empty list is not a prompt with nothing under it.

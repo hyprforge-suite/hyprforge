@@ -38,13 +38,20 @@ pub fn parse(text: &str) -> BTreeMap<String, Vec<String>> {
     parse_section(text, DEFAULTS_SECTION)
 }
 
-/// Any one section of a `mimeapps.list`, in the same shape.
+/// Any one section of a `mimeapps.list` — or of `mimeinfo.cache`,
+/// which has the same shape and is read by this too (see
+/// [`crate::apps::parse_cache`]).
 ///
-/// The three that matter are the defaults, the associations a person
-/// added, and the ones they removed — see [`ADDED_SECTION`] and
+/// The three that matter here are the defaults, the associations a
+/// person added, and the ones they removed — see [`ADDED_SECTION`] and
 /// [`REMOVED_SECTION`]. A removal is not a smaller kind of default: it
 /// says "never offer this for that type", and a chooser that ignores it
 /// keeps putting back something somebody deliberately took away.
+///
+/// A key that appears twice in one section keeps the entries of both,
+/// first occurrence first — the same "the earlier rule wins" the glob
+/// matcher settled on, so that a caller taking `.first()` gets the
+/// answer it would get from two files in directory order.
 pub fn parse_section(text: &str, section: &str) -> BTreeMap<String, Vec<String>> {
     let mut defaults: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut in_section = false;
@@ -58,10 +65,12 @@ pub fn parse_section(text: &str, section: &str) -> BTreeMap<String, Vec<String>>
             continue;
         }
         let Some((mime, entries)) = line.split_once('=') else { continue };
-        let entries: Vec<String> =
-            entries.split(';').map(str::trim).filter(|e| !e.is_empty()).map(str::to_string).collect();
-        if !entries.is_empty() {
-            defaults.insert(mime.trim().to_string(), entries);
+        let entries = entries.split(';').map(str::trim).filter(|e| !e.is_empty());
+        let known: &mut Vec<String> = defaults.entry(mime.trim().to_string()).or_default();
+        for entry in entries {
+            if !known.iter().any(|seen| seen == entry) {
+                known.push(entry.to_string());
+            }
         }
     }
     defaults
@@ -169,6 +178,26 @@ model/3mf=fstl.desktop;
     fn a_fallback_list_keeps_its_order() {
         let defaults = parse("[Default Applications]\nimage/png=a.desktop;b.desktop;\n");
         assert_eq!(defaults.get("image/png").unwrap(), &["a.desktop", "b.desktop"]);
+    }
+
+    /// A key written twice in one section keeps both, in the order
+    /// written, without repeating an entry that appears in both.
+    #[test]
+    fn a_repeated_key_accumulates_rather_than_replacing() {
+        let defaults = parse(
+            "[Default Applications]\nimage/png=a.desktop\nimage/png=b.desktop;a.desktop\n",
+        );
+        assert_eq!(defaults.get("image/png").unwrap(), &["a.desktop", "b.desktop"]);
+    }
+
+    /// `mimeinfo.cache` is the same shape and is read by the same
+    /// scanner — one implementation, one answer about repeats.
+    #[test]
+    fn the_registration_cache_reads_through_the_same_scanner() {
+        let cache = crate::apps::parse_cache(
+            "[MIME Cache]\nmodel/stl=viewer.desktop;slicer.desktop;\n",
+        );
+        assert_eq!(cache.get("model/stl").unwrap(), &["viewer.desktop", "slicer.desktop"]);
     }
 
     /// The property this module exists for: everything that is not the

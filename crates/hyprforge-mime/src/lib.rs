@@ -45,6 +45,7 @@
 //! the same three answers.
 
 pub mod apps;
+pub mod cli;
 pub mod defaults;
 pub mod globs;
 pub mod lookup;
@@ -180,11 +181,6 @@ impl MimeDb {
         self.lookup.of_file(path, true)
     }
 
-    /// Every type a file matches, best first — the ambiguity, unresolved.
-    pub fn all_types_of(&self, path: &Path) -> Vec<String> {
-        self.lookup.all_of_file(path, true)
-    }
-
     /// Whether an application registered for `parent` should be able to
     /// open a `mime`.
     pub fn is_subclass_of(&self, mime: &str, parent: &str) -> bool {
@@ -200,6 +196,18 @@ impl MimeDb {
     /// directly — the `mimetype` command does.
     pub fn lookup(&self) -> &Lookup {
         &self.lookup
+    }
+
+    /// Makes `app` the default for `mime`, resolving an alias first.
+    ///
+    /// A method rather than the free [`set_default`] because the read
+    /// half of this database canonicalizes (`default_for`, `apps_for`)
+    /// and the write half did not: a caller naming a type by an alias
+    /// wrote a line nothing would ever read back, and the next reload
+    /// showed the old default — which reads as "the setting didn't
+    /// take" with nothing anywhere reporting a failure.
+    pub fn set_default(&self, mime: &str, app: &str) -> std::io::Result<()> {
+        set_default(self.canonical(mime), app)
     }
 
     /// Every installed application registered for `mime`, the default
@@ -235,21 +243,42 @@ impl MimeDb {
     /// one is a *kind of* — an archive manager can open a 3MF, and a
     /// text editor can open a shell script.
     ///
-    /// The reference implementation's `mime_applications_all`, and the
-    /// list `mimeopen` offers. Kept apart from [`MimeDb::apps_for`]
-    /// because the two answer different questions — "what is this type
-    /// for" and "what could open this file at all" — and a chooser
-    /// wants the first at the top with the second below it.
+    /// The reference implementation's `mime_applications_all`. Most
+    /// callers want [`MimeDb::candidates`] instead, which says which of
+    /// the two each application is.
     pub fn apps_for_including_parents(&self, mime: &str) -> Vec<&App> {
-        let mut apps = self.apps_for(mime);
+        self.candidates(mime).into_iter().map(|candidate| candidate.app).collect()
+    }
+
+    /// Everything that could open this type, ranked, and labelled with
+    /// *why* it is offered.
+    ///
+    /// One query rather than a ranking each caller works out for
+    /// itself. The file manager's chooser and `mimeopen` both ask "what
+    /// can open this", and each used to diff `apps_for` against
+    /// `apps_for_including_parents` to recover the distinction — with
+    /// the result that the two already disagreed about the order they
+    /// offered. A third consumer (a viewer, a portal) would have made
+    /// it three.
+    pub fn candidates(&self, mime: &str) -> Vec<Candidate<'_>> {
+        let default = self.default_for(mime).map(|app| app.id.as_str());
+        let own = self.apps_for(mime);
+        let mut candidates: Vec<Candidate<'_>> = own
+            .iter()
+            .map(|app| Candidate { app, made_for: true, is_default: default == Some(app.id.as_str()) })
+            .collect();
         for parent in self.lookup.types.ancestors(mime) {
             for app in self.apps_for(&parent) {
-                if !apps.iter().any(|existing| existing.id == app.id) {
-                    apps.push(app);
+                if !candidates.iter().any(|seen| seen.app.id == app.id) {
+                    candidates.push(Candidate {
+                        app,
+                        made_for: false,
+                        is_default: default == Some(app.id.as_str()),
+                    });
                 }
             }
         }
-        apps
+        candidates
     }
 
     /// The application that opens `mime` today, whether or not it is
@@ -276,8 +305,25 @@ impl MimeDb {
     }
 }
 
+/// One application that could open a type, and why it is offered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate<'a> {
+    pub app: &'a App,
+    /// Registered for this type itself, rather than for something it is
+    /// a kind of. "Can open it" and "is meant for it" are different
+    /// claims, and a chooser should not put an archive manager above a
+    /// model viewer.
+    pub made_for: bool,
+    /// The one that opens this type today.
+    pub is_default: bool,
+}
+
 /// Makes `app` the default for `mime`, in the user's own
 /// `mimeapps.list`.
+///
+/// Prefer [`MimeDb::set_default`], which resolves an alias first. This
+/// one writes the name it is given, so a caller passing an alias
+/// records a line nothing will ever read back.
 ///
 /// Writes exactly one line of that file and copies the rest through —
 /// see [`defaults`]'s own doc. The write is atomic, so an interrupted
@@ -397,6 +443,41 @@ mod tests {
         assert_eq!(default.name, "fstl");
         assert!(!default.installed);
         assert!(db.apps_for("model/3mf").is_empty(), "and nothing is offered in its place");
+    }
+
+    /// One ranked answer, with "meant for this type" told apart from
+    /// "could open it" — rather than each caller diffing two lists.
+    #[test]
+    fn candidates_say_why_each_application_is_offered() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(data.join("mime")).unwrap();
+        std::fs::create_dir_all(data.join("applications")).unwrap();
+        std::fs::write(data.join("mime/globs2"), "50:model/3mf:*.3mf\n").unwrap();
+        std::fs::write(data.join("mime/subclasses"), "model/3mf application/zip\n").unwrap();
+        for (file, name) in [("viewer.desktop", "Viewer"), ("archiver.desktop", "Archiver")] {
+            std::fs::write(
+                data.join("applications").join(file),
+                format!("[Desktop Entry]\nName={name}\nExec=sh %f\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            data.join("applications/mimeinfo.cache"),
+            "[MIME Cache]\nmodel/3mf=viewer.desktop;\napplication/zip=archiver.desktop;\n",
+        )
+        .unwrap();
+        let mimeapps = dir.path().join("mimeapps.list");
+        std::fs::write(&mimeapps, "[Default Applications]\nmodel/3mf=viewer.desktop\n").unwrap();
+        let db = MimeDb::load_from(&[data], &[mimeapps]);
+
+        let candidates = db.candidates("model/3mf");
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].app.name, "Viewer");
+        assert!(candidates[0].made_for && candidates[0].is_default);
+        assert_eq!(candidates[1].app.name, "Archiver");
+        assert!(!candidates[1].made_for, "a 3MF is a zip, but an archiver is not for 3MFs");
+        assert!(!candidates[1].is_default);
     }
 
     #[test]

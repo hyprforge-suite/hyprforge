@@ -29,20 +29,11 @@
 //! this cannot read at all is reported by its name rather than by
 //! dying. The perl version returns nothing for it.
 
+use hyprforge_mime::cli::{self, exit, shown_name, Option_};
 use hyprforge_mime::lookup::{self, Lookup};
 use hyprforge_mime::types::Types;
-use std::io::{IsTerminal, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-
-/// Exit codes, which are the perl script's own.
-mod exit {
-    /// An option nothing here knows.
-    pub const UNKNOWN_OPTION: i32 = 1;
-    /// An option that takes an argument, without one.
-    pub const MISSING_ARGUMENT: i32 = 2;
-    /// Nothing to look at.
-    pub const NO_FILES: i32 = 4;
-}
 
 #[derive(Debug, Default)]
 struct Args {
@@ -133,10 +124,7 @@ fn main() {
         std::process::exit(exit::NO_FILES);
     }
 
-    let dirs: Vec<PathBuf> = match &args.database {
-        Some(list) => list.split(':').filter(|d| !d.is_empty()).map(PathBuf::from).collect(),
-        None => hyprforge_mime::data_dirs(),
-    };
+    let dirs: Vec<PathBuf> = cli::database_dirs(&args.database);
     if args.debug {
         let shown: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
         println!("> Data dirs are: {}", shown.join(", "));
@@ -212,8 +200,12 @@ fn answers(lookup: &Lookup, path: &Path, args: &Args) -> Vec<String> {
 /// The first part of a file, for content matching. An unreadable file
 /// gives nothing, which the fallback then calls text — the same answer
 /// the perl version reaches by a different route.
+///
+/// Bounded, through the one reader that is — this used to read the
+/// whole file, which on the command `xdg-open` now runs for every file
+/// the desktop opens meant an ISO cost its own size in memory.
 fn read_head(path: &Path) -> Vec<u8> {
-    std::fs::read(path).unwrap_or_default()
+    hyprforge_mime::magic::head(path).unwrap_or_default()
 }
 
 /// One output line.
@@ -254,20 +246,9 @@ fn format(
     format!("{name}{}{padding}{value}", args.separator)
 }
 
-/// A filename as printed. On a terminal the perl script quotes it (so a
-/// name with a space or a newline in it cannot be misread); piped, it
-/// prints the name raw, which is what a script downstream needs.
-fn shown_name(file: &str) -> String {
-    if std::io::stdout().is_terminal() {
-        format!("{file:?}")
-    } else {
-        file.to_string()
-    }
-}
-
 /// The option table, in the shape the perl script uses: long name,
 /// short name, and whether it takes an argument.
-const OPTIONS: &[(&str, Option<char>, bool)] = &[
+const OPTIONS: &[Option_] = &[
     ("help", Some('h'), false),
     ("usage", Some('u'), false),
     ("version", Some('v'), false),
@@ -288,72 +269,14 @@ const OPTIONS: &[(&str, Option<char>, bool)] = &[
     ("magic-only", Some('M'), false),
 ];
 
-/// Parses the command line, or says what was wrong and with what exit
-/// code.
-///
-/// Options stop at the first argument that is not one, and `--` ends
-/// them explicitly — so a file genuinely called `-b` can be asked about
-/// as `mimetype -- -b`.
+/// Parses the command line into this command's own `Args`, over the
+/// grammar both commands share — see [`hyprforge_mime::cli`].
 fn parse(raw: Vec<String>) -> Result<Args, (String, i32)> {
-    let mut args = Args { separator: ":".to_string(), ..Args::default() };
-    let mut rest = raw.into_iter().peekable();
-    while let Some(argument) = rest.peek().cloned() {
-        if !argument.starts_with('-') || argument == "-" {
-            break;
-        }
-        rest.next();
-        if argument == "--" {
-            break;
-        }
-        // --long, or --long=value
-        if let Some(long) = argument.strip_prefix("--") {
-            let (name, inline) = match long.split_once('=') {
-                Some((name, value)) => (name, Some(value.to_string())),
-                None => (long, None),
-            };
-            let Some((_, _, takes_value)) = OPTIONS.iter().find(|(option, _, _)| *option == name)
-            else {
-                return Err((format!("mimetype: unrecognized option '--{name}'"), exit::UNKNOWN_OPTION));
-            };
-            let value = match takes_value {
-                false => None,
-                true => match inline.or_else(|| rest.next()) {
-                    Some(value) => Some(value),
-                    None => {
-                        return Err((
-                            format!("mimetype: option '--{name}' requires an argument"),
-                            exit::MISSING_ARGUMENT,
-                        ))
-                    }
-                },
-            };
-            set(&mut args, name, value);
-            continue;
-        }
-        // -abc, where each letter is its own option and the last may
-        // take the next argument.
-        for letter in argument.trim_start_matches('-').chars() {
-            let Some((name, _, takes_value)) =
-                OPTIONS.iter().find(|(_, short, _)| *short == Some(letter))
-            else {
-                return Err((format!("mimetype: unrecognized option '{letter}'"), exit::UNKNOWN_OPTION));
-            };
-            let value = match takes_value {
-                false => None,
-                true => match rest.next() {
-                    Some(value) => Some(value),
-                    None => {
-                        return Err((
-                            format!("mimetype: option '-{letter}' requires an argument"),
-                            exit::MISSING_ARGUMENT,
-                        ))
-                    }
-                },
-            };
-            set(&mut args, name, value);
-        }
+    let parsed = cli::parse("mimetype", OPTIONS, raw)?;
+    let mut args = Args { separator: ":".to_string(), files: parsed.files, ..Args::default() };
+    for (name, value) in parsed.options {
+        set(&mut args, name, value);
     }
-    args.files.extend(rest);
     Ok(args)
 }
 
@@ -414,51 +337,11 @@ rules, then the filename, then weaker content rules, then a fallback.
 mod tests {
     use super::*;
 
-    fn parsed(argv: &[&str]) -> Args {
-        parse(argv.iter().map(|a| a.to_string()).collect()).expect("these parse")
-    }
 
-    #[test]
-    fn short_options_can_be_bundled_and_the_last_one_takes_the_argument() {
-        let args = parsed(&["-bl", "de", "part.3mf"]);
-        assert!(args.brief);
-        assert_eq!(args.language.as_deref(), Some("de"));
-        assert_eq!(args.files, ["part.3mf"]);
-    }
 
-    #[test]
-    fn a_long_option_takes_its_value_attached_or_apart() {
-        assert_eq!(parsed(&["--language=fr", "x"]).language.as_deref(), Some("fr"));
-        assert_eq!(parsed(&["--language", "fr", "x"]).language.as_deref(), Some("fr"));
-        assert_eq!(parsed(&["--database", "/a:/b", "x"]).database.as_deref(), Some("/a:/b"));
-    }
 
-    /// Options stop at the first thing that is not one, so a file
-    /// called `-b` can be asked about — and a filename that merely
-    /// starts with a dash after `--` is a filename.
-    #[test]
-    fn a_double_dash_ends_the_options() {
-        let args = parsed(&["--brief", "--", "-b", "--all"]);
-        assert!(args.brief);
-        assert!(!args.all, "past the --, it is a filename");
-        assert_eq!(args.files, ["-b", "--all"]);
-    }
 
-    #[test]
-    fn a_bare_dash_is_a_filename_not_an_option() {
-        assert_eq!(parsed(&["-"]).files, ["-"]);
-    }
 
-    #[test]
-    fn an_unknown_option_is_named_with_the_exit_code_the_script_uses() {
-        let (message, code) = parse(vec!["--nonsense".to_string()]).unwrap_err();
-        assert!(message.contains("--nonsense"), "{message}");
-        assert_eq!(code, exit::UNKNOWN_OPTION);
-
-        let (message, code) = parse(vec!["--language".to_string()]).unwrap_err();
-        assert!(message.contains("requires an argument"), "{message}");
-        assert_eq!(code, exit::MISSING_ARGUMENT);
-    }
 
     /// The column is as wide as the widest name plus one, which is what
     /// makes several files line up.

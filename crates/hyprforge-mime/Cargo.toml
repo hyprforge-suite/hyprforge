@@ -12,9 +12,9 @@ repository = "https://github.com/adamrpostjr/hyprforge"
 # same questions of the same files.
 [dependencies]
 hyprforge-paths = { path = "../hyprforge-paths" }
+# `mimeopen` waits for `gio launch`, and nothing here may wait on
+# another process without a bound (CLAUDE.md).
+hyprforge-process = { path = "../hyprforge-process" }
 
 [dev-dependencies]
 tempfile = "3"
-# The live tier asks `gio` what it thinks a file is, and nothing here
-# may wait on another process without a bound (CLAUDE.md).
-hyprforge-process = { path = "../hyprforge-process" }

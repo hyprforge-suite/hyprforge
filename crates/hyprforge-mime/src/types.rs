@@ -147,11 +147,6 @@ impl Types {
         out
     }
 
-    /// What to call this type in front of a person, if it has been read.
-    pub fn describe(&self, mime: &str) -> Option<&str> {
-        self.descriptions.get(self.canonical(mime)).map(String::as_str)
-    }
-
     /// Reads one type's description out of `<media>/<subtype>.xml`,
     /// remembering it.
     ///
