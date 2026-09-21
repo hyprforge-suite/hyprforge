@@ -269,37 +269,21 @@ struct NotifGeometry {
 // ── Frame cache ───────────────────────────────────────────────────────────────
 
 /// Identifies the content that affects layout/rendering.
-/// Hover state is intentionally excluded so that hover-only redraws are cache hits.
-#[derive(PartialEq)]
+///
+/// Hover state is intentionally excluded so that hover-only redraws are
+/// cache hits — which is what makes the fingerprint's own cost matter:
+/// a pointer moving across a notification recomputes this on every
+/// frame, twice (`measure` and `render`).
+///
+/// One `u64`, the same shape [`CenterCacheKey`] already uses. It used
+/// to be a `Vec<ItemKey>` holding cloned copies of the summary, the
+/// body, every action key and label, the image path and the app icon —
+/// allocating, per frame, exactly the strings the cache exists to avoid
+/// re-shaping.
+#[derive(Debug, PartialEq, Eq)]
 struct FrameCacheKey {
-    /// Per-item fingerprints (id, text, urgency, actions, image identity).
-    items: Vec<ItemKey>,
-    /// Scale factor bits (f64::to_bits for exact comparison).
-    scale_bits: u64,
-    /// Config fingerprint (all layout-affecting fields).
-    config_hash: u64,
-}
-
-/// Per-notification fingerprint.
-#[derive(PartialEq, Eq)]
-struct ItemKey {
-    id: u32,
-    summary: String,
-    body: String,
-    urgency: notif_types::Urgency,
-    /// Action key+label pairs (excluding "default").
-    actions: Vec<(String, String)>,
-    /// Image identity: None, Some(Path(…)), Some(Icon(…)), or Some(Data) (all raw images are equal).
-    image_id: ImageId,
-    app_icon: String,
-}
-
-#[derive(PartialEq, Eq)]
-enum ImageId {
-    None,
-    Data,
-    Path(String),
-    Icon(String),
+    /// Everything about the items, scale and config, folded together.
+    fingerprint: u64,
 }
 
 /// A cached rendered frame — geometries (including shaped text buffers) for all items.
@@ -548,6 +532,31 @@ pub fn clamp_spans_to_lines(
 ///
 /// The [`FontSystem`] and [`SwashCache`] are built once at construction (the
 /// system font scan takes ~100 ms) and reused for every frame.
+/// Copies a tiny-skia pixmap into a `wl_shm` ARGB8888 buffer.
+///
+/// **The single swizzle point for the whole crate.** tiny-skia writes
+/// RGBA and `wl_shm`'s ARGB8888 is BGRA on a little-endian machine, so
+/// the channels are reordered here and nowhere else — the lock screen
+/// documents the same distinction from the other side, where
+/// `iced_tiny_skia` writes BGRA already and *no* swizzle is correct.
+///
+/// Whole pixels at a time: this was two identical copies walking four
+/// bounds-checked `.get()` calls per channel per pixel, in the two
+/// render paths, which is ~800k checks a frame at 640x320.
+fn blit_rgba_to_bgra(pixmap: &Pixmap, buf: &mut [u8], stride: usize) {
+    let width = pixmap.width() as usize;
+    for (row, pixels) in pixmap.data().chunks_exact(width * 4).enumerate() {
+        let Some(out) = buf.get_mut(row * stride..) else { break };
+        for (dst, src) in out.chunks_exact_mut(4).zip(pixels.chunks_exact(4)) {
+            // Destructured rather than indexed: `chunks_exact(4)` yields
+            // exactly four bytes, and the pattern is how that is said to
+            // the compiler — this crate refuses `slice[i]` outright.
+            let &[r, g, b, a] = src else { continue };
+            dst.copy_from_slice(&[b, g, r, a]);
+        }
+    }
+}
+
 pub struct SkiaRenderer {
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -556,12 +565,43 @@ pub struct SkiaRenderer {
     frame_cache: Option<CachedFrame>,
     /// One-slot cache for the center panel geometry.
     center_cache: Option<CenterCachedFrame>,
+    /// The pixmap both render paths draw into, kept between frames.
+    ///
+    /// A fresh one per frame is ~820KB at 640x320, allocated and thrown
+    /// away on every redraw — including the ones a pointer moving over
+    /// a notification causes. The size changes only when the surface
+    /// does, so it is reallocated then and reused otherwise.
+    scratch: Option<Pixmap>,
     /// When `Some`, overrides `SystemTime::now()` in center age computation.
     /// Set in tests for deterministic golden output.
     pub now_override: Option<SystemTime>,
 }
 
 impl SkiaRenderer {
+    /// Takes the scratch pixmap out, cleared and `w` x `h`, reusing the
+    /// last one when it already has those dimensions.
+    ///
+    /// Taken rather than borrowed because drawing needs `&mut self` and
+    /// the pixmap lives in `self` — the same dance `frame_cache` does
+    /// three lines further down. **Every caller must put it back**, or
+    /// the next frame allocates a new one; that is a lost optimisation
+    /// rather than a bug, which is why this is not worth a guard type.
+    ///
+    /// `None` only when the allocation fails, which both callers
+    /// already treat as "skip this frame" — a renderer that panicked
+    /// here would take the daemon down over a transient.
+    fn take_scratch(&mut self, w: u32, h: u32) -> Option<Pixmap> {
+        let reusable = self.scratch.as_ref().is_some_and(|p| p.width() == w && p.height() == h);
+        if !reusable {
+            self.scratch = Pixmap::new(w, h);
+        }
+        let mut pixmap = self.scratch.take()?;
+        // A reused pixmap still holds the last frame, and every draw
+        // below assumes it starts from nothing.
+        pixmap.fill(tiny_skia::Color::TRANSPARENT);
+        Some(pixmap)
+    }
+
     /// Create a new `SkiaRenderer` with system fonts loaded.
     pub fn new() -> Self {
         Self {
@@ -570,6 +610,7 @@ impl SkiaRenderer {
             icon_cache: HashMap::new(),
             frame_cache: None,
             center_cache: None,
+            scratch: None,
             now_override: None,
         }
     }
@@ -593,6 +634,7 @@ impl SkiaRenderer {
             icon_cache: HashMap::new(),
             frame_cache: None,
             center_cache: None,
+            scratch: None,
             now_override: None,
         }
     }
@@ -609,39 +651,45 @@ impl SkiaRenderer {
 
         let mut hasher = DefaultHasher::new();
         cfg.hash(&mut hasher);
-        let config_hash = hasher.finish();
+        scale.to_bits().hash(&mut hasher);
+        // So that a list growing or shrinking is always a miss, even if
+        // the items that remain hash the same.
+        items.len().hash(&mut hasher);
 
-        let item_keys = items
-            .iter()
-            .map(|item| {
-                let n = &item.notification;
-                ItemKey {
-                    id: n.id,
-                    summary: n.summary.clone(),
-                    body: n.body.clone(),
-                    urgency: n.urgency,
-                    actions: n
-                        .actions
-                        .iter()
-                        .filter(|a| a.key != "default")
-                        .map(|a| (a.key.clone(), a.label.clone()))
-                        .collect(),
-                    image_id: match &n.image {
-                        None => ImageId::None,
-                        Some(ImageSource::Data(_)) => ImageId::Data,
-                        Some(ImageSource::Path(p)) => ImageId::Path(p.clone()),
-                        Some(ImageSource::Icon(name)) => ImageId::Icon(name.clone()),
-                    },
-                    app_icon: n.app_icon.clone(),
+        for item in items {
+            let n = &item.notification;
+            n.id.hash(&mut hasher);
+            // `as_str`, not `clone` — hashing borrows.
+            n.summary.as_str().hash(&mut hasher);
+            n.body.as_str().hash(&mut hasher);
+            n.urgency.hash(&mut hasher);
+            n.app_icon.as_str().hash(&mut hasher);
+            // "default" is the whole-notification click target rather
+            // than a button, so it changes nothing about the layout.
+            let buttons = n.actions.iter().filter(|a| a.key != "default");
+            buttons.clone().count().hash(&mut hasher);
+            for action in buttons {
+                action.key.as_str().hash(&mut hasher);
+                action.label.as_str().hash(&mut hasher);
+            }
+            // Image *identity*, not content: every raw image is equal to
+            // every other, because the layout only asks whether there is
+            // one and where it came from.
+            match &n.image {
+                None => 0u8.hash(&mut hasher),
+                Some(ImageSource::Data(_)) => 1u8.hash(&mut hasher),
+                Some(ImageSource::Path(p)) => {
+                    2u8.hash(&mut hasher);
+                    p.as_str().hash(&mut hasher);
                 }
-            })
-            .collect();
-
-        FrameCacheKey {
-            items: item_keys,
-            scale_bits: scale.to_bits(),
-            config_hash,
+                Some(ImageSource::Icon(name)) => {
+                    3u8.hash(&mut hasher);
+                    name.as_str().hash(&mut hasher);
+                }
+            }
         }
+
+        FrameCacheKey { fingerprint: hasher.finish() }
     }
 
     // ── Center-panel helpers ───────────────────────────────────────────────────
@@ -2175,11 +2223,6 @@ impl Renderer for SkiaRenderer {
             return;
         }
 
-        let mut pixmap = match Pixmap::new(buf_w, buf_h) {
-            Some(p) => p,
-            None => return,
-        };
-
         // Use the frame cache (filled by measure); recompute only on a miss
         // (e.g. render called without a preceding measure for these items).
         let new_key = Self::make_cache_key(items, scale, cfg);
@@ -2206,6 +2249,12 @@ impl Renderer for SkiaRenderer {
         let Some(cached) = self.frame_cache.take() else {
             return;
         };
+        // Taken out of `self` for the same reason the cache is: the
+        // draw calls below need `&mut self`, and the pixmap lives in it.
+        let Some(mut pixmap) = self.take_scratch(buf_w, buf_h) else {
+            self.frame_cache = Some(cached);
+            return;
+        };
         let gap_buf = (cfg.gap as f64 * scale).round() as i32;
         let mut y_cursor = 0i32;
         for (item, geo) in items.iter().zip(cached.geometries.iter()) {
@@ -2217,30 +2266,8 @@ impl Renderer for SkiaRenderer {
         let _ = y_cursor;
         self.frame_cache = Some(cached);
 
-        // Copy RGBA pixmap → BGRA output buffer (wl_shm ARGB8888 little-endian).
-        // This is the single swizzle point for the whole crate.
-        let pix_data = pixmap.data();
-        let pix_w = pixmap.width();
-
-        for row in 0..buf_h.min(pixmap.height()) {
-            let buf_row_start = row as usize * stride as usize;
-            let pix_row_start = row as usize * pix_w as usize * 4;
-
-            for col in 0..buf_w.min(pix_w) {
-                let pix_idx = pix_row_start + col as usize * 4;
-                let buf_idx = buf_row_start + col as usize * 4;
-
-                let r = pix_data.get(pix_idx).copied().unwrap_or(0);
-                let g = pix_data.get(pix_idx + 1).copied().unwrap_or(0);
-                let b = pix_data.get(pix_idx + 2).copied().unwrap_or(0);
-                let a = pix_data.get(pix_idx + 3).copied().unwrap_or(0);
-
-                // RGBA → BGRA
-                if let Some(px) = buf.get_mut(buf_idx..buf_idx + 4) {
-                    px.copy_from_slice(&[b, g, r, a]);
-                }
-            }
-        }
+        blit_rgba_to_bgra(&pixmap, buf, stride as usize);
+        self.scratch = Some(pixmap);
     }
 
     fn measure_center(&mut self, content: &CenterContent<'_>, cfg: &Config, scale: f64) -> Layout {
@@ -2328,36 +2355,13 @@ impl Renderer for SkiaRenderer {
             self.center_cache = Some(frame);
         }
 
-        let mut pixmap = match Pixmap::new(buf_w, buf_h) {
-            Some(p) => p,
-            None => return,
+        let Some(mut pixmap) = self.take_scratch(buf_w, buf_h) else {
+            return;
         };
-
         self.render_center_pixmap(&mut pixmap, cfg, scale, content, hover);
 
-        // Copy RGBA pixmap → BGRA output buffer (wl_shm ARGB8888 little-endian).
-        let pix_data = pixmap.data();
-        let pix_w = pixmap.width();
-
-        for row in 0..buf_h.min(pixmap.height()) {
-            let buf_row_start = row as usize * stride as usize;
-            let pix_row_start = row as usize * pix_w as usize * 4;
-
-            for col in 0..buf_w.min(pix_w) {
-                let pix_idx = pix_row_start + col as usize * 4;
-                let buf_idx = buf_row_start + col as usize * 4;
-
-                let r = pix_data.get(pix_idx).copied().unwrap_or(0);
-                let g = pix_data.get(pix_idx + 1).copied().unwrap_or(0);
-                let b = pix_data.get(pix_idx + 2).copied().unwrap_or(0);
-                let a = pix_data.get(pix_idx + 3).copied().unwrap_or(0);
-
-                // RGBA → BGRA
-                if let Some(px) = buf.get_mut(buf_idx..buf_idx + 4) {
-                    px.copy_from_slice(&[b, g, r, a]);
-                }
-            }
-        }
+        blit_rgba_to_bgra(&pixmap, buf, stride as usize);
+        self.scratch = Some(pixmap);
     }
 }
 
@@ -2528,6 +2532,81 @@ mod tests {
     // ── Frame cache / shape-deduplication regression test ─────────────────────
 
     /// Helper: build a `DisplayNotification` suitable for shape-count testing.
+    /// Every field the layout depends on must change the fingerprint.
+    ///
+    /// The risk a one-`u64` key carries is a *dropped* field: the cache
+    /// then hits when it should have missed, and the panel draws the
+    /// previous frame's geometry for this one's content. That failure is
+    /// silent and looks like a rendering bug anywhere but here, so each
+    /// field gets an assertion rather than the type being trusted.
+    #[test]
+    fn every_field_the_layout_reads_changes_the_cache_key() {
+        use notif_types::{Action, ImageSource, Urgency};
+        let cfg = Config::default();
+        let base = make_test_dn(1);
+        let key = |items: &[notif_types::DisplayNotification]| {
+            SkiaRenderer::make_cache_key(items, 1.0, &cfg)
+        };
+        // The notification is behind an `Arc`, so an edit rebuilds it.
+        let changed = |edit: &dyn Fn(&mut notif_types::Notification)| {
+            let mut n = (*base.notification).clone();
+            edit(&mut n);
+            notif_types::DisplayNotification::new(n)
+        };
+
+        assert_eq!(key(std::slice::from_ref(&base)), key(std::slice::from_ref(&base)), "the same frame hashes the same");
+
+        type Edit<'a> = (&'a str, &'a dyn Fn(&mut notif_types::Notification));
+        let edits: Vec<Edit<'_>> = vec![
+            ("id", &|n| n.id = 99),
+            ("summary", &|n| n.summary = "different".into()),
+            ("body", &|n| n.body = "different".into()),
+            ("urgency", &|n| n.urgency = Urgency::Critical),
+            ("app icon", &|n| n.app_icon = "other-icon".into()),
+            ("an action's label", &|n| n.actions[0].label = "Cancel".into()),
+            ("an action's key", &|n| n.actions[0].key = "cancel".into()),
+            ("an added action", &|n| {
+                n.actions.push(Action { key: "more".into(), label: "More".into() })
+            }),
+            ("an image appearing", &|n| n.image = Some(ImageSource::Icon("dialog".into()))),
+        ];
+        for (what, edit) in edits {
+            assert_ne!(
+                key(std::slice::from_ref(&base)),
+                key(&[changed(edit)]),
+                "changing {what} left the key alone, so a stale layout would be drawn"
+            );
+        }
+
+        // Scale and the number of items are part of it too.
+        assert_ne!(
+            SkiaRenderer::make_cache_key(std::slice::from_ref(&base), 1.0, &cfg),
+            SkiaRenderer::make_cache_key(std::slice::from_ref(&base), 2.0, &cfg),
+            "scale"
+        );
+        assert_ne!(
+            key(std::slice::from_ref(&base)),
+            key(&[base, make_test_dn(2)]),
+            "item count"
+        );
+    }
+
+    /// A "default" action is the whole-notification click target, not a
+    /// button, so it changes nothing that is drawn.
+    #[test]
+    fn a_default_action_does_not_change_the_cache_key() {
+        use notif_types::Action;
+        let cfg = Config::default();
+        let plain = make_test_dn(1);
+        let mut n = (*plain.notification).clone();
+        n.actions.push(Action { key: "default".into(), label: "Open".into() });
+        let with_default = notif_types::DisplayNotification::new(n);
+        assert_eq!(
+            SkiaRenderer::make_cache_key(&[plain], 1.0, &cfg),
+            SkiaRenderer::make_cache_key(&[with_default], 1.0, &cfg),
+        );
+    }
+
     fn make_test_dn(id: u32) -> notif_types::DisplayNotification {
         use notif_types::{Action, Notification, Timeout, Urgency};
         use std::{collections::HashMap, time::SystemTime};
