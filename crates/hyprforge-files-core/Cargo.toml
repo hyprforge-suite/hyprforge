@@ -21,6 +21,11 @@ license.workspace = true
 # also get it, and a feature that only works because a sibling happens to
 # be in the same build is a trap.
 iced = { workspace = true, features = ["canvas"] }
+# The suite's keyboard grammar. `keymap.rs` is now the binding of it to
+# this app's `Action` — the parser, the merge policy and the rules about
+# which keys may be bound are shared with every other app that has a
+# keyboard, so two apps cannot come to disagree about `Ctrl+Plus`.
+hyprforge-keys.workspace = true
 hyprforge-ui.workspace = true
 hyprforge-look.workspace = true
 hyprforge-paths.workspace = true

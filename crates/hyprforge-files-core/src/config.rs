@@ -33,8 +33,7 @@
 //! collapse-below = 760   # window width; 0 never collapses on its own
 //! ```
 
-use crate::action::Action;
-use crate::keymap::{Combo, Key, Keymap};
+use crate::keymap::Keymap;
 use crate::menu::{MenuConfig, MenuEntry, MenuKind};
 use crate::sidebar::Place;
 use serde::Deserialize;
@@ -161,6 +160,18 @@ impl fmt::Display for ConfigProblem {
 
 fn problem(message: impl Into<String>) -> ConfigProblem {
     ConfigProblem { message: message.into() }
+}
+
+/// A complaint from the shared keymap merge, in this file's own terms.
+///
+/// The two types are the same shape on purpose — both are a sentence for
+/// the person who wrote the file, not an error to branch on — so every
+/// problem from either half ends up in one list, in one place, and the
+/// caller never has to know which half found it.
+impl From<hyprforge_keys::Problem> for ConfigProblem {
+    fn from(p: hyprforge_keys::Problem) -> ConfigProblem {
+        ConfigProblem { message: p.message }
+    }
 }
 
 /// The file as written, before anything is checked.
@@ -421,113 +432,30 @@ pub fn menus_with(overrides: &BTreeMap<String, Vec<String>>) -> (MenuConfig, Vec
 
 /// The default keymap with `overrides` applied.
 ///
-/// For each action named: its default keys are dropped and the listed
-/// ones used instead (an empty list leaves it unbound). An entry that
-/// cannot be used is reported and skipped; the rest still apply.
+/// A thin wrapper now: the rules themselves — an entry replaces an
+/// action's defaults rather than adding to them, an empty list unbinds,
+/// two entries on one key are resolved by lowest id with the loser
+/// reported, and an action left with no key at all is reported — live in
+/// `hyprforge_keys::merge`, because they are decisions about a *file
+/// format* and the image viewer reads the same one. Two apps re-deriving
+/// them would produce two formats wearing one name.
 ///
-/// When two entries in the file claim one key, the one whose id sorts
-/// first keeps it and the other is reported. A TOML table carries no
-/// order this parser can rely on, so "the last one wins" would mean
-/// "whichever the map happened to list last" — the alphabetical rule is
-/// at least one a person can predict.
-///
-/// When an entry takes a key that belonged to a *default* binding, that
-/// is taken as meant — rebinding Ctrl+T is a normal thing to do. It is
-/// reported only if the action that lost the key is left with no key at
-/// all, since that action has then quietly become unreachable.
+/// What stays here is this app's answer to the one question that merge
+/// cannot answer for itself: whether a bare printable key may be bound.
+/// See [`crate::keymap::BARE_KEYS`].
 pub fn keymap_with(overrides: &BTreeMap<String, Vec<String>>) -> (Keymap, Vec<ConfigProblem>) {
-    let mut problems = Vec::new();
-    let mut bindings: BTreeMap<Combo, Action> = BTreeMap::new();
-    let mut from_file: BTreeMap<Combo, Action> = BTreeMap::new();
-
-    // The actions the file names, resolved first so a default binding
-    // for any of them is never installed.
-    let mut overridden: BTreeMap<Action, &Vec<String>> = BTreeMap::new();
-    for (id, combos) in overrides {
-        match Action::from_id(id) {
-            Some(action) => {
-                overridden.insert(action, combos);
-            }
-            None => problems.push(problem(format!(
-                "[keys] {id}: there is no action with that name"
-            ))),
-        }
-    }
-
-    for (action, combos) in &overridden {
-        for text in combos.iter() {
-            let combo = match Combo::parse(text) {
-                Ok(combo) => combo,
-                Err(e) => {
-                    problems.push(problem(format!("[keys] {} = \"{text}\": {e}", action.id())));
-                    continue;
-                }
-            };
-            if types_text(&combo) {
-                problems.push(problem(format!(
-                    "[keys] {} = \"{text}\": a key with no Ctrl, Alt or Super would stop that \
-                     character being typed into search, so it was not bound",
-                    action.id()
-                )));
-                continue;
-            }
-            if let Some(other) = from_file.get(&combo) {
-                problems.push(problem(format!(
-                    "[keys] {} = \"{text}\": {combo} is already bound to {} in this file, \
-                     which keeps it",
-                    action.id(),
-                    other.id()
-                )));
-                continue;
-            }
-            from_file.insert(combo, *action);
-        }
-    }
-
-    // The defaults for every action the file did not mention, minus any
-    // key the file has now given to something else.
-    for action in Action::all() {
-        if overridden.contains_key(&action) {
-            continue;
-        }
-        let mut kept = 0;
-        for text in action.default_keys() {
-            let Ok(combo) = Combo::parse(text) else { continue };
-            if from_file.contains_key(&combo) {
-                continue;
-            }
-            bindings.insert(combo, action);
-            kept += 1;
-        }
-        if kept == 0 && !action.default_keys().is_empty() {
-            problems.push(problem(format!(
-                "[keys] {} has no key any more: its default ({}) was given to another action",
-                action.id(),
-                action.default_keys().join(", ")
-            )));
-        }
-    }
-
-    bindings.extend(from_file);
-    (Keymap::from_bindings(bindings), problems)
-}
-
-/// Whether a binding would swallow a character a person meant to type.
-///
-/// Any key that produces text — a letter, a digit, a symbol, Space —
-/// is only safe to bind with Ctrl, Alt or Super held. Shift alone does
-/// not count: Shift+A is how a capital A gets typed.
-fn types_text(combo: &Combo) -> bool {
-    matches!(combo.key, Key::Char(_) | Key::Space)
-        && !combo.mods.ctrl
-        && !combo.mods.alt
-        && !combo.mods.logo
+    let (keymap, problems) = hyprforge_keys::merge::keymap_with(overrides, crate::keymap::BARE_KEYS);
+    (keymap, problems.into_iter().map(ConfigProblem::from).collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keymap::{KeyPress, Resolved};
+    // `Action` and `Combo` are the test module's own now: with the merge
+    // rules delegated to `hyprforge-keys`, nothing outside these tests
+    // names either one.
+    use crate::action::Action;
+    use crate::keymap::{Combo, KeyPress, Resolved};
 
     fn press(text: &str) -> KeyPress {
         let combo = Combo::parse(text).unwrap();

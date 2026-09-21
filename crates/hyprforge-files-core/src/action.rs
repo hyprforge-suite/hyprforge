@@ -442,6 +442,32 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
     }
 }
 
+/// What the shared keyboard grammar needs to know about an action, which
+/// is deliberately very little: an id the config file can name, and the
+/// keys it ships bound to. Everything else above — [`Scope`], [`enabled`],
+/// [`Action::label`] — is this app's business and stays here.
+///
+/// Every method delegates to the inherent one of the same name, which
+/// predates the trait. Inherent methods win name resolution, so
+/// `Action::all()` still reaches the one above and no call site changed.
+impl hyprforge_keys::Bindable for Action {
+    fn all() -> Vec<Action> {
+        Action::all()
+    }
+
+    fn id(self) -> &'static str {
+        Action::id(self)
+    }
+
+    fn default_keys(self) -> &'static [&'static str] {
+        Action::default_keys(self)
+    }
+
+    fn from_id(id: &str) -> Option<Action> {
+        Action::from_id(id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

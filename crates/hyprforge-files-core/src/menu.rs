@@ -322,7 +322,7 @@ mod tests {
     fn stray_separators_are_tidied_away() {
         use MenuEntry::{Action as A, Separator as Sep};
         let entries = [Sep, A(Action::Open), Sep, Sep, A(Action::Trash), Sep];
-        let items = build(&entries, &ctx_with_selection(), &Keymap::defaults());
+        let items = build(&entries, &ctx_with_selection(), &crate::keymap::defaults());
         assert_eq!(labels(&items), ["Open", "-", "Move to Trash"]);
     }
 
@@ -331,7 +331,7 @@ mod tests {
     #[test]
     fn a_disabled_item_is_greyed_not_removed() {
         let entries = [MenuEntry::Action(Action::Trash)];
-        let items = build(&entries, &ActionContext::default(), &Keymap::defaults());
+        let items = build(&entries, &ActionContext::default(), &crate::keymap::defaults());
         assert!(matches!(items[0], MenuItem::Action { enabled: false, .. }));
     }
 
@@ -340,7 +340,7 @@ mod tests {
     #[test]
     fn the_shortcut_hint_follows_the_keymap() {
         let entries = [MenuEntry::Action(Action::Trash)];
-        let items = build(&entries, &ctx_with_selection(), &Keymap::defaults());
+        let items = build(&entries, &ctx_with_selection(), &crate::keymap::defaults());
         assert!(matches!(&items[0], MenuItem::Action { hint: Some(h), .. } if h == "Delete"));
 
         let rebound = crate::config::keymap_with(
@@ -364,7 +364,7 @@ mod tests {
         let ctx = ActionContext { focused_is_dir: Some(false), shown: 2, ..ActionContext::default() };
         // Open (on), sep, Trash (off: nothing selected), sep, Select All (on)
         let entries = [A(Action::Open), Sep, A(Action::Trash), Sep, A(Action::SelectAll)];
-        let items = build(&entries, &ctx, &Keymap::defaults());
+        let items = build(&entries, &ctx, &crate::keymap::defaults());
         assert_eq!(step(&items, None, 1), Some(0), "Down starts at the top");
         assert_eq!(step(&items, Some(0), 1), Some(4), "skips the separator and the disabled item");
         assert_eq!(step(&items, Some(4), 1), Some(0), "wraps");
@@ -376,7 +376,7 @@ mod tests {
         let items = build(
             &[MenuEntry::Action(Action::Trash)],
             &ActionContext::default(),
-            &Keymap::defaults(),
+            &crate::keymap::defaults(),
         );
         assert_eq!(step(&items, None, 1), None);
     }

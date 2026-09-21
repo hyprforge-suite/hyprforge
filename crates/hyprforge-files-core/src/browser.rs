@@ -472,7 +472,7 @@ pub enum Message {
     /// Dismiss the menu — a click anywhere else.
     CloseMenu,
     /// Type a character into the search box. The host decides a key
-    /// press means this; see [`crate::keymap::Resolved::Type`].
+    /// press means this; see [`crate::keymap::Resolved::Text`].
     TypeToSearch(char),
     /// The Pinned sidebar section's content, computed off the UI thread
     /// via [`crate::sidebar::build_pinned`] — see that function's own doc
@@ -3844,7 +3844,7 @@ mod tests {
             items: menus::build(
                 &[crate::menu::MenuEntry::Action(Action::Trash)],
                 &browser.action_context(),
-                &crate::keymap::Keymap::defaults(),
+                &crate::keymap::defaults(),
             ),
             at: (0.0, 0.0),
             highlighted: None,
