@@ -9,14 +9,23 @@
 //! `backend`) stays exactly what phase 1 built: pure model code, testable
 //! without a window.
 
+// `backend`, `filter`, `sort`, `types` and `users` moved down into
+// `hyprforge-listing` when the image viewer needed them: paging through a
+// folder in the order the file manager was showing is a question about
+// listings, not about pictures, and the viewer has no use for a browser
+// widget.
+//
+// Re-exported under the names they already had, so nothing in this crate,
+// in the app, or in the portal's dialog changed by a line. A path like
+// `crate::types::Entry` still resolves, and still to the same type.
+pub use hyprforge_listing::{backend, filter, sort, types, users};
+
 pub mod action;
-pub mod backend;
 pub mod browser;
 pub mod click;
 pub mod clipboard;
 pub mod config;
 pub mod density;
-pub mod filter;
 pub mod format;
 pub mod glyph;
 pub mod icon;
@@ -25,11 +34,8 @@ pub mod menu;
 pub mod naming;
 pub mod prefs;
 pub mod sidebar;
-pub mod sort;
 pub mod trash;
-pub mod types;
 pub mod undo;
-pub mod users;
 pub mod xdg_user_dirs;
 
 pub use action::{Action, ActionContext, Scope};

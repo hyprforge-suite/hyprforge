@@ -33,6 +33,7 @@ members = [
     "crates/hyprforge-settings",
     "crates/hyprforge-mime",
     "crates/hyprforge-fileops",
+    "crates/hyprforge-listing",
     "crates/hyprforge-files-core",
     "crates/hyprforge-files",
 ]
@@ -89,6 +90,10 @@ hyprforge-clipmenu = { path = "crates/hyprforge-clipmenu" }
 hyprforge-emoji = { path = "crates/hyprforge-emoji", version = "0.1.0" }
 hyprforge-emojimenu = { path = "crates/hyprforge-emojimenu" }
 hyprforge-fileops = { path = "crates/hyprforge-fileops" }
+# What a directory listing is, how it is read and what order it is in —
+# the leaf under both the file manager and the image viewer, so the two
+# cannot disagree about which picture comes next in a folder.
+hyprforge-listing = { path = "crates/hyprforge-listing", version = "0.1.0" }
 hyprforge-files-core = { path = "crates/hyprforge-files-core" }
 hyprforge-mime = { path = "crates/hyprforge-mime" }
 hyprforge-files = { path = "crates/hyprforge-files" }

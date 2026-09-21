@@ -1602,6 +1602,7 @@ dependencies = [
  "chrono",
  "hyprforge-fileops",
  "hyprforge-keys",
+ "hyprforge-listing",
  "hyprforge-look",
  "hyprforge-paths",
  "hyprforge-ui",
@@ -1648,6 +1649,17 @@ name = "hyprforge-keys"
 version = "0.1.0"
 dependencies = [
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "hyprforge-listing"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tempfile",
+ "thiserror 2.0.19",
+ "toml",
+ "tracing",
 ]
 
 [[package]]

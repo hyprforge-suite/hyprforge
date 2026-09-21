@@ -1,0 +1,35 @@
+[package]
+name = "hyprforge-listing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# What a directory listing is, how it is read, and what order it is shown
+# in — extracted from `hyprforge-files-core` when the image viewer needed
+# to page through a folder in the same order the file manager was showing
+# it. Two windows onto one folder disagreeing about "the next one" is the
+# accent-drift failure again, in ordering instead of colour.
+#
+# The file manager's own crate could not be the home for it: that one is
+# one app's model *plus its view*, iced and all, and a viewer has no use
+# for a browser widget. This is the domain leaf underneath both.
+#
+# So: no iced, no toml, no async runtime, nothing Hyprland-shaped.
+# `read_dir` and arithmetic.
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+# Tests only. `Order` is what a second app reads out of `files.toml`, so
+# the test that pins its spelling on disk has to go through the real
+# serialiser — but nothing in this crate should need to know what TOML is.
+toml.workspace = true
+
+[features]
+# The fake `FsBackend`, so another crate's tests can drive a listing
+# without a real disk. `hyprforge-files-core` forwards its own `mock` to
+# this one, which is what keeps the file manager's test setup unchanged.
+mock = []

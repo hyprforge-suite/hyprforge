@@ -26,6 +26,10 @@ iced = { workspace = true, features = ["canvas"] }
 # which keys may be bound are shared with every other app that has a
 # keyboard, so two apps cannot come to disagree about `Ctrl+Plus`.
 hyprforge-keys.workspace = true
+# The listing itself — entries, the backend seam, sorting, filtering.
+# Moved out when the image viewer needed the same ordering; re-exported
+# from this crate's root under the names it used to have.
+hyprforge-listing.workspace = true
 hyprforge-ui.workspace = true
 hyprforge-look.workspace = true
 hyprforge-paths.workspace = true
@@ -41,7 +45,17 @@ chrono.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+# `MockBackend` used to be reachable from this crate's own tests through
+# `cfg(test)`, because it lived here. It lives in `hyprforge-listing` now,
+# where `cfg(test)` means *that* crate's tests — so the fake has to be
+# asked for by feature, exactly as the app and the portal dialog already
+# ask for it.
+hyprforge-listing = { workspace = true, features = ["mock"] }
 
 [features]
 # The fake `FsBackend`, for the app's and the portal's own tests later.
-mock = []
+# It lives in `hyprforge-listing` now, along with the backend seam it
+# fakes; forwarding rather than renaming is what keeps the app's
+# dev-dependency line — and every test that drives a window against
+# `MockBackend` — exactly as it was written.
+mock = ["hyprforge-listing/mock"]
