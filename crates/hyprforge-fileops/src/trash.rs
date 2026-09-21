@@ -631,11 +631,24 @@ mod tests {
         let item = trash_into(&fs, &home_trash, &source).unwrap();
 
         assert!(
-            item.trashed_file.to_string_lossy().contains(".Trash-1000"),
+            item.trashed_file.to_string_lossy().contains(&format!(".Trash-{}", this_uid())),
             "expected the .Trash-$uid fallback, got {:?}",
             item.trashed_file
         );
         assert!(!item.trashed_file.starts_with(&shared), "an unsafe .Trash must never be used");
+    }
+
+    /// The uid the code will actually use, asked for the same way
+    /// `current_uid` asks — not the 1000 of whoever wrote the test.
+    ///
+    /// These two assertions passed for two years and could only ever
+    /// have passed for a user with uid 1000: CI runs as root, where the
+    /// fallback directory is `.Trash-0`, and the failure read as a
+    /// trash-placement bug rather than as a test that had the author's
+    /// account baked into it.
+    fn this_uid() -> u32 {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata("/proc/self").expect("/proc/self is readable").uid()
     }
 
     #[test]
@@ -661,7 +674,7 @@ mod tests {
         let item = trash_into(&fs, &home_trash, &source).unwrap();
 
         assert!(
-            item.trashed_file.to_string_lossy().contains(".Trash-1000"),
+            item.trashed_file.to_string_lossy().contains(&format!(".Trash-{}", this_uid())),
             "a symlinked .Trash must be refused even though the real target is safe"
         );
     }
