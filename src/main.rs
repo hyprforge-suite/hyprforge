@@ -40,12 +40,6 @@ const POPUP_HEIGHT: f64 = 420.0;
 /// its own name.
 const LOCK_NAME: &str = "hyprforge-emojimenu.lock";
 
-/// A font size the renderer will not choke on — identical reasoning and
-/// bound to `hyprforge-clipmenu::main::sane_font_size`.
-fn sane_font_size(theme: &hyprforge_look::Theme) -> f32 {
-    let size = theme.font_size;
-    if size.is_finite() { size.clamp(6.0, 48.0) } else { 15.0 }
-}
 
 fn main() -> std::process::ExitCode {
     // Only one instance at a time — a keybind pressed twice while one is
@@ -94,7 +88,7 @@ fn main() -> std::process::ExitCode {
     };
 
     let mut theme = hyprforge_appearance::look::resolve();
-    theme.font_size = sane_font_size(&theme);
+    theme.font_size = theme.drawable_font_size();
 
     let mut model = Model::new(default_tone);
     model.set_paste_target(paste_target_label);
@@ -177,8 +171,8 @@ mod tests {
     #[test]
     fn a_non_finite_font_size_falls_back_rather_than_panicking_the_renderer() {
         let theme = hyprforge_look::Theme { font_size: f32::NAN, ..hyprforge_look::Theme::default() };
-        assert_eq!(sane_font_size(&theme), 15.0);
+        assert_eq!(theme.drawable_font_size(), 15.0);
         let theme = hyprforge_look::Theme { font_size: 0.0, ..hyprforge_look::Theme::default() };
-        assert!(sane_font_size(&theme) >= 6.0);
+        assert!(theme.drawable_font_size() >= 6.0);
     }
 }
