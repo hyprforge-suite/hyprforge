@@ -469,20 +469,36 @@ has_component() {
 #
 # Note that `--dry-run` cannot catch this — it skips the build, so the
 # proof never runs. The dry run for the tray component looked perfect.
+# build <package> [binary...]
+#
+# The binaries default to the package name, which is the usual case; a
+# package that ships more than one (hyprforge-mime: mimetype and
+# mimeopen) names them, and each is proved to exist afterwards.
 build() {
     local package=$1
-    local binary=${2:-$1}
+    shift
+    local binaries=("$@")
+    [[ ${#binaries[@]} -gt 0 ]] || binaries=("$package")
     # The header already says which package, so in a dry run there is
     # nothing left to add: "would run: cargo build --release -p X" under
     # a heading reading "Building X" is the same fact twice, and across
     # seven packages it was fourteen lines saying seven things.
     step "Building $package"
+    # A dry run does not build, so it cannot catch a package name that
+    # is wrong — and that is exactly the mistake a dry run is run to
+    # catch. `-p` takes a *package*, and naming a binary inside one
+    # instead fails only at the real install. One `test -f` closes that
+    # gap without a cargo invocation.
+    [[ -f crates/$package/Cargo.toml ]] ||
+        die "no crate at crates/$package — 'cargo build -p' takes a package name, not a binary name"
     if $DRY_RUN; then
         return 0
     fi
     cargo build --release -p "$package" 2>&1 | grep -vE "^\s*(Compiling|Finished)" || true
-    [[ -x target/release/${binary} ]] || die "cargo did not produce target/release/$binary"
-    ok "built target/release/$binary"
+    for binary in "${binaries[@]}"; do
+        [[ -x target/release/${binary} ]] || die "cargo did not produce target/release/$binary"
+        ok "built target/release/$binary"
+    done
 }
 
 # Installs a file only if it differs, then proves it landed.
@@ -926,8 +942,7 @@ uninstall_files() {
 # somebody else's package, so it happens only with --provide-mimetype.
 install_mime() {
     COMPONENT_CHANGED=false
-    build hyprforge-mimetype
-    build hyprforge-mimeopen
+    build hyprforge-mime hyprforge-mimetype hyprforge-mimeopen
     step "Mime tools"
     install_file target/release/hyprforge-mimetype "$PREFIX/hyprforge-mimetype" 755
     install_file target/release/hyprforge-mimeopen "$PREFIX/hyprforge-mimeopen" 755
