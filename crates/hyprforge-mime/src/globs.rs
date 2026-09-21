@@ -231,6 +231,18 @@ impl Globs {
         out
     }
 
+    /// Every type some rule can name a file after, in load order and
+    /// with repeats — one type usually has several patterns.
+    ///
+    /// This is as close to "the types this machine knows about" as the
+    /// database gets. It is deliberately the *glob* file and not the
+    /// union of everything mentioned anywhere: a type no filename can
+    /// produce is not one somebody will go looking for by name, and
+    /// `subclasses` alone names hundreds of them.
+    pub fn mimes(&self) -> impl Iterator<Item = &str> {
+        self.globs.iter().map(|glob| glob.mime.as_str())
+    }
+
     /// Whether anything at all was loaded. An empty database is not an
     /// error — a machine may genuinely have no `shared-mime-info` — but
     /// a caller that shows a chooser wants to say so rather than
