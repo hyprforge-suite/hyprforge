@@ -147,21 +147,47 @@ impl Globs {
     /// `archive.tar.gz` is a compressed tar rather than a gzip file,
     /// because `*.tar.gz` is longer than `*.gz`. A case-sensitive rule
     /// only matches the spelling it gives.
+    ///
+    /// **Case is tried exactly first, then folded.** `a.c` and `a.C`
+    /// are different files: the database has `*.c` for C and `*.C` for
+    /// C++, and a lookup that lowercases everything up front makes one
+    /// of them unreachable. So the name is matched as written, and only
+    /// if nothing matches is it tried again in lower case — which is
+    /// what makes `script.PL` still a perl script.
+    ///
+    /// **Beyond that the specification says the result is undefined**,
+    /// and implementations do differ. Two tie-breaks, in this order,
+    /// each chosen against what the rest of this machine answers:
+    ///
+    /// 1. A registered type beats an `x-` one. `*.obj` is claimed by
+    ///    `model/obj`, `application/x-coff` and `application/x-tgif` at
+    ///    the same weight; `x-` means unregistered, and a Wavefront
+    ///    model is the better reading of a `.obj` than a COFF object
+    ///    file. `gio` answers `model/obj` here too.
+    /// 2. Then the first rule wins, which is what the reference
+    ///    implementation does (it skips a second rule for an extension
+    ///    it has already seen). `*.json` is claimed by
+    ///    `application/json` and `application/schema+json`; the first
+    ///    is the answer everything else on the machine gives.
     pub fn type_of(&self, path: &Path) -> Option<&str> {
         let name = path.file_name()?.to_str()?;
-        let lowered = name.to_lowercase();
+        self.best_match(name).or_else(|| {
+            let lowered = name.to_lowercase();
+            (lowered != name).then(|| self.best_match(&lowered)).flatten()
+        })
+    }
+
+    /// The best rule for a name, taken exactly as given.
+    fn best_match(&self, name: &str) -> Option<&str> {
         self.globs
             .iter()
-            .filter(|glob| {
-                if glob.case_sensitive {
-                    matches(&glob.pattern, name)
-                } else {
-                    matches(&glob.pattern.to_lowercase(), &lowered)
-                }
+            .filter(|glob| matches(&glob.pattern, name))
+            // Folded rather than `max_by_key`, which keeps the *last* of
+            // several equal maxima — the opposite of what is wanted.
+            .fold(None, |best: Option<&Glob>, glob| match best {
+                Some(best) if rank(best) >= rank(glob) => Some(best),
+                _ => Some(glob),
             })
-            // Weight first, then the longer pattern, which is what makes
-            // `*.tar.gz` beat `*.gz` at the same weight.
-            .max_by_key(|glob| (glob.weight, glob.pattern.len()))
             .map(|glob| glob.mime.as_str())
     }
 
@@ -212,6 +238,14 @@ impl Globs {
         }
         types
     }
+}
+
+/// How good a rule is: the database's weight, then the length of the
+/// pattern, then whether the type is a registered one rather than an
+/// `x-` name. See [`Globs::type_of`] for where each comes from.
+fn rank(glob: &Glob) -> (u32, usize, bool) {
+    let registered = !glob.mime.split('/').nth(1).is_some_and(|sub| sub.starts_with("x-"));
+    (glob.weight, glob.pattern.len(), registered)
 }
 
 /// `fnmatch` over the subset `globs2` actually uses: `*`, `?`, and
@@ -306,6 +340,21 @@ mod tests {
         assert_eq!(db().type_of(&PathBuf::from("/d/archive.zip")), Some("application/zip"));
     }
 
+    /// Two rules, same weight, same pattern. The first one in the
+    /// database wins — `*.json` really is claimed twice, and picking
+    /// the second one made every `.json` on the machine a JSON
+    /// *schema*.
+    #[test]
+    fn the_first_of_two_equal_rules_wins() {
+        let globs = Globs::parse("50:application/json:*.json\n50:application/schema+json:*.json\n");
+        assert_eq!(globs.type_of(&PathBuf::from("package.json")), Some("application/json"));
+
+        // And the other way round, to prove it is the order and not the
+        // name that decides.
+        let reversed = Globs::parse("50:application/schema+json:*.json\n50:application/json:*.json\n");
+        assert_eq!(reversed.type_of(&PathBuf::from("package.json")), Some("application/schema+json"));
+    }
+
     #[test]
     fn the_heavier_rule_wins_and_then_the_longer_one() {
         assert_eq!(db().type_of(&PathBuf::from("a.png")), Some("image/png"), "50 beats 40");
@@ -341,6 +390,30 @@ mod tests {
         assert_eq!(db().type_of(&PathBuf::from("SHOUTING.STL")), Some("model/stl"));
         assert_eq!(db().type_of(&PathBuf::from("Makefile")), Some("text/x-makefile"));
         assert_eq!(db().type_of(&PathBuf::from("makefile")), None, "cs means exactly that");
+    }
+
+    /// `a.c` and `a.C` are different files, and the database says so:
+    /// one is C, the other C++. Lowercasing before matching makes the
+    /// second unreachable.
+    #[test]
+    fn an_exact_case_match_is_preferred_to_a_folded_one() {
+        let globs = Globs::parse("50:text/x-c++src:*.C\n50:text/x-csrc:*.c\n");
+        assert_eq!(globs.type_of(&PathBuf::from("main.c")), Some("text/x-csrc"));
+        assert_eq!(globs.type_of(&PathBuf::from("main.C")), Some("text/x-c++src"));
+        // Nothing matches `README.TXT` exactly, so it is folded and
+        // found — the rule that keeps `script.PL` a perl script.
+        let upper = Globs::parse("50:text/plain:*.txt\n");
+        assert_eq!(upper.type_of(&PathBuf::from("README.TXT")), Some("text/plain"));
+    }
+
+    /// Where the specification gives up — same weight, same pattern —
+    /// a registered type beats an `x-` one.
+    #[test]
+    fn a_registered_type_beats_an_unregistered_one_on_a_tie() {
+        let globs = Globs::parse(
+            "50:application/x-coff:*.obj\n50:application/x-tgif:*.obj\n50:model/obj:*.obj\n",
+        );
+        assert_eq!(globs.type_of(&PathBuf::from("bracket.obj")), Some("model/obj"));
     }
 
     #[test]

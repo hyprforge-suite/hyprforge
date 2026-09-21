@@ -90,6 +90,43 @@ fn the_type_matches_what_gio_says() {
     }
 }
 
+/// A spread of everyday extensions, every one compared against `gio`.
+///
+/// The narrow version of this test — four crafted files — passed while
+/// `.json` was being typed as `application/schema+json`, because both
+/// rules claim `*.json` at the same weight and this code kept the wrong
+/// one of the two. A tie-break is invisible until something ties, so
+/// the corpus is wide on purpose: one entry per *shape* of rule, not
+/// one per format anybody cares about.
+#[test]
+#[ignore]
+fn a_spread_of_ordinary_names_agrees_with_gio() {
+    let Some(db) = installed_db() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let names = [
+        "a.json", "a.yaml", "a.toml", "a.xml", "a.css", "a.js", "a.py", "a.sh", "a.pl", "a.rb",
+        "a.c", "a.h", "a.go", "a.sql", "a.log", "a.md", "a.csv", "a.pdf", "a.png", "a.jpg",
+        "a.svg", "a.zip", "a.tar.gz", "a.stl", "a.3mf", "a.obj", "a.mp3", "a.mp4", "a.html",
+        "Makefile", "Dockerfile",
+    ];
+    let mut disagreed = Vec::new();
+    for name in names {
+        let path = dir.path().join(name);
+        // Content that is plainly text, so neither implementation has a
+        // magic rule to fall back on and the comparison is about names.
+        std::fs::write(&path, b"some ordinary content\n").unwrap();
+        let Some(theirs) = gio_type(&path) else {
+            eprintln!("{SKIP_MARKER} gio is not installed — nothing to compare against");
+            return;
+        };
+        let ours = db.sniff(&path).mime;
+        if ours != theirs {
+            disagreed.push(format!("{name}: ours {ours}, gio {theirs}"));
+        }
+    }
+    assert!(disagreed.is_empty(), "disagreed on {}: {disagreed:#?}", disagreed.len());
+}
+
 /// An empty file is a real case — `contours.svg` in a real Downloads
 /// folder here was one — and this is where reading the name rather than
 /// the bytes is deliberately *better* than what the system's own tools
