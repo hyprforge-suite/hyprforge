@@ -50,7 +50,7 @@ where
     // The accent, not `card_border` — the popup's own outline is meant
     // to read, not just separate it from the desktop behind it.
     let popup_border = theme.accent;
-    let popup_radius = corner_radius(theme);
+    let popup_radius = theme.corner_radius();
 
     // A failed pin/unpin takes over this same fixed-height slot rather
     // than adding a banner above the rows: `geometry::RowLayout` derives
@@ -93,7 +93,7 @@ where
     // (background plus an accent outline) are new.
     let field_background = theme.surfaces.card;
     let field_border = theme.accent;
-    let field_radius = corner_radius(theme).min((header_text_height / 2.0) as f32);
+    let field_radius = theme.corner_radius().min((header_text_height / 2.0) as f32);
     let header: Element<'a, Message, iced_widget::Theme, Renderer> = container(header_inner)
         .width(Length::Fill)
         .height(Length::Fixed(header_text_height as f32))
@@ -210,20 +210,6 @@ where
     Stack::with_children([content, scrollbar]).width(Length::Fill).height(Length::Fill).into()
 }
 
-/// The theme's corner radius, bounded so it cannot describe a shape the
-/// renderer refuses to build.
-///
-/// `hyprforge-authui` clamps the same field for the lock screen and says
-/// why: the geometry ends in `tiny_skia` path builders that return
-/// `None` for degenerate shapes, and iced unwraps those. This popup
-/// reads the theme from the same file, so it inherits the same hazard
-/// and needs the same bound — `main.rs`'s `sane_font_size` covers only
-/// the font, because until rounding was honoured the font was the one
-/// field the fixed layout depended on.
-fn corner_radius(theme: &Theme) -> f32 {
-    const MAX_ROUNDING: u32 = 64;
-    theme.rounding.min(MAX_ROUNDING) as f32
-}
 
 /// A short, glanceable age for a copy, both `now` and `copied_at` in
 /// seconds since the Unix epoch — the same unit `Entry::copied_at` is
@@ -442,7 +428,7 @@ where
     // is a degenerate shape, and degenerate shapes are the reason
     // `hyprforge-authui` bounds this field at all: `tiny_skia`'s path
     // builders return `None` for them and iced unwraps that.
-    let row_radius = corner_radius(theme).min(layout.row_height as f32 / 2.0);
+    let row_radius = theme.corner_radius().min(layout.row_height as f32 / 2.0);
 
     container(content)
         .width(Length::Fill)
@@ -485,9 +471,9 @@ mod tests {
     #[test]
     fn the_corner_radius_comes_from_the_theme_rather_than_a_constant() {
         let theme = Theme { rounding: 12, ..Theme::default() };
-        assert_eq!(corner_radius(&theme), 12.0);
+        assert_eq!(theme.corner_radius(), 12.0);
         let square = Theme { rounding: 0, ..Theme::default() };
-        assert_eq!(corner_radius(&square), 0.0, "a theme may legitimately ask for square corners");
+        assert_eq!(square.corner_radius(), 0.0, "a theme may legitimately ask for square corners");
     }
 
     /// `hyprforge-authui` bounds the same field for the lock screen, and
@@ -498,7 +484,7 @@ mod tests {
     #[test]
     fn an_absurd_rounding_is_bounded_rather_than_handed_to_the_renderer() {
         let theme = Theme { rounding: u32::MAX, ..Theme::default() };
-        let radius = corner_radius(&theme);
+        let radius = theme.corner_radius();
         assert!(radius.is_finite());
         assert!(radius <= 64.0, "got {radius}");
     }

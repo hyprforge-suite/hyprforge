@@ -59,16 +59,6 @@ const POPUP_WIDTH: f64 = 220.0;
 /// a name match or a PID file.
 const LOCK_NAME: &str = "hyprforge-traymenu.lock";
 
-/// A font size the renderer will not choke on — same hazard, same bound,
-/// as `hyprforge-clipmenu::main::sane_font_size`.
-fn sane_font_size(theme: &hyprforge_look::Theme) -> f32 {
-    let size = theme.font_size;
-    if size.is_finite() {
-        size.clamp(6.0, 48.0)
-    } else {
-        15.0
-    }
-}
 
 /// Reads `--x <n> --y <n>` off argv — the icon's own global logical
 /// position, exactly as the host handed it to `ContextMenu`, with no
@@ -137,7 +127,7 @@ fn main() -> std::process::ExitCode {
     let rows: Vec<_> = menu.flatten().into_iter().cloned().collect();
 
     let mut theme = hyprforge_appearance::look::resolve();
-    theme.font_size = sane_font_size(&theme);
+    theme.font_size = theme.drawable_font_size();
     let row_layout = MenuLayout::for_font_size(theme.font_size);
     let popup_height = row_layout.popup_height(&rows);
 
@@ -240,8 +230,8 @@ mod tests {
     #[test]
     fn a_non_finite_font_size_falls_back_rather_than_panicking_the_renderer() {
         let theme = hyprforge_look::Theme { font_size: f32::NAN, ..hyprforge_look::Theme::default() };
-        assert_eq!(sane_font_size(&theme), 15.0);
+        assert_eq!(theme.drawable_font_size(), 15.0);
         let theme = hyprforge_look::Theme { font_size: 0.0, ..hyprforge_look::Theme::default() };
-        assert!(sane_font_size(&theme) >= 6.0);
+        assert!(theme.drawable_font_size() >= 6.0);
     }
 }

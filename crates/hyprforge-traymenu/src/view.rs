@@ -14,13 +14,6 @@ pub fn to_iced(c: hyprforge_look::Color) -> iced_runtime::core::Color {
     iced_runtime::core::Color::from_rgba8(c.r, c.g, c.b, c.a as f32 / 255.0)
 }
 
-/// The theme's corner radius, bounded so it cannot describe a shape the
-/// renderer refuses to build — same reasoning, and the same bound, as
-/// `hyprforge-clipmenu::view::corner_radius`.
-pub fn corner_radius(theme: &Theme) -> f32 {
-    const MAX_ROUNDING: u32 = 64;
-    theme.rounding.min(MAX_ROUNDING) as f32
-}
 
 /// Builds every row — separators included — in the same top-to-bottom
 /// order `MenuLayout::row_at` walks, so a hover or a click resolved

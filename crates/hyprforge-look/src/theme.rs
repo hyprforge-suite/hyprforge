@@ -256,6 +256,38 @@ impl Default for Theme {
 }
 
 impl Theme {
+    /// This theme's font size, clamped to something that can actually
+    /// be drawn.
+    ///
+    /// `iced_tiny_skia`/`cosmic-text` assert a non-zero line height, so
+    /// a font size of `0.0` panics on the first frame — and the theme is
+    /// read from a file a person can edit, so `0` is reachable.
+    ///
+    /// It lives here rather than in each host because it was copied into
+    /// three of them (the clipboard popup, the emoji popup and the tray
+    /// menu). The clipboard's own copy said so: "if a third host ever
+    /// needs these bounds, they belong beside `Theme` in
+    /// `hyprforge-look` rather than being copied a third time". The
+    /// third host arrived.
+    pub fn drawable_font_size(&self) -> f32 {
+        match self.font_size.is_finite() {
+            true => self.font_size.clamp(6.0, 48.0),
+            // Not the file's number at all, so the shipped default
+            // rather than a clamp of nonsense.
+            false => Theme::default().font_size,
+        }
+    }
+
+    /// This theme's corner rounding, bounded.
+    ///
+    /// Hyprland's own `decoration:rounding` has no upper limit, and a
+    /// huge one turns a popup into a lozenge or a circle. Same reason
+    /// and same three copies as [`Theme::drawable_font_size`].
+    pub fn corner_radius(&self) -> f32 {
+        const MAX_ROUNDING: u32 = 64;
+        self.rounding.min(MAX_ROUNDING) as f32
+    }
+
     /// Reads a theme from `path`.
     ///
     /// A missing file is the default theme, not an error: the greeter
@@ -371,6 +403,30 @@ impl Theme {
 
 #[cfg(test)]
 mod tests {
+    /// The theme is a file a person can edit, so every number in it can
+    /// be nonsense — and a zero font size panics on the first frame
+    /// rather than looking wrong.
+    #[test]
+    fn a_font_size_that_cannot_be_drawn_is_brought_into_range() {
+        let sized = |size: f32| Theme { font_size: size, ..Theme::default() }.drawable_font_size();
+        assert_eq!(sized(15.0), 15.0, "an ordinary size is left alone");
+        assert_eq!(sized(0.0), 6.0);
+        assert_eq!(sized(4000.0), 48.0);
+        assert_eq!(sized(-3.0), 6.0);
+        assert_eq!(sized(f32::NAN), Theme::default().font_size, "not a number at all");
+        assert_eq!(sized(f32::INFINITY), Theme::default().font_size);
+    }
+
+    /// Hyprland's `decoration:rounding` has no upper bound, and a large
+    /// one turns a popup into a lozenge.
+    #[test]
+    fn rounding_is_bounded_to_something_still_shaped_like_a_popup() {
+        let rounded = |r: u32| Theme { rounding: r, ..Theme::default() }.corner_radius();
+        assert_eq!(rounded(12), 12.0);
+        assert_eq!(rounded(0), 0.0, "square corners are a choice");
+        assert_eq!(rounded(9999), 64.0);
+    }
+
     use super::*;
 
     fn theme_with_wallpaper(path: &Path) -> Theme {

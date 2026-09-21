@@ -71,7 +71,7 @@ where
 
     let root_background = theme.surfaces.root;
     let popup_border = theme.accent;
-    let popup_radius = corner_radius(theme);
+    let popup_radius = theme.corner_radius();
 
     let header_inner: Element<'a, Message, iced_widget::Theme, Renderer> = if model.filter_text().is_empty() {
         let placeholder = match model.paste_target() {
@@ -84,7 +84,7 @@ where
     };
     let field_background = theme.surfaces.card;
     let field_border = theme.accent;
-    let field_radius = corner_radius(theme).min((header_text_height / 2.0) as f32);
+    let field_radius = theme.corner_radius().min((header_text_height / 2.0) as f32);
     let header: Element<'a, Message, iced_widget::Theme, Renderer> = container(header_inner)
         .width(Length::Fill)
         .height(Length::Fixed(header_text_height as f32))
@@ -243,7 +243,7 @@ where
     let border_color = to_iced(theme.accent);
     let cell_background = to_iced(if selected { theme.surfaces.row } else { theme.surfaces.card });
     let border_width = if selected { 1.5 } else { 0.0 };
-    let radius = corner_radius(theme).min(grid.cell_size as f32 / 2.0);
+    let radius = theme.corner_radius().min(grid.cell_size as f32 / 2.0);
 
     container(label)
         .width(Length::Fixed(grid.cell_size as f32))
@@ -289,7 +289,7 @@ where
 
     let glyph_size = (strip.cell_size * 0.55) as f32;
     let border_color = to_iced(theme.accent);
-    let radius = corner_radius(theme).min(strip.cell_size as f32 / 2.0);
+    let radius = theme.corner_radius().min(strip.cell_size as f32 / 2.0);
 
     let cells = variants.into_iter().enumerate().map(|(index, (_, glyph))| {
         let highlighted = index == cursor;
@@ -319,7 +319,7 @@ where
 
     let strip_background = theme.surfaces.card;
     let strip_border = theme.accent;
-    let strip_radius = corner_radius(theme);
+    let strip_radius = theme.corner_radius();
     // `width` set explicitly to `strip.width()` rather than left to
     // shrink around the five cells' own measured size — the same
     // discipline `grid_cell` follows for an individual cell, so this
@@ -340,15 +340,6 @@ where
         .into()
 }
 
-/// The theme's corner radius, bounded so it cannot describe a shape the
-/// renderer refuses to build — identical to
-/// `hyprforge-clipmenu::view::corner_radius`'s own reasoning: the
-/// geometry ends in `tiny_skia` path builders that return `None` for a
-/// degenerate radius, and iced unwraps that.
-fn corner_radius(theme: &Theme) -> f32 {
-    const MAX_ROUNDING: u32 = 64;
-    theme.rounding.min(MAX_ROUNDING) as f32
-}
 
 fn message<'a, Message, Renderer>(
     text_value: &str,
@@ -372,13 +363,13 @@ mod tests {
     #[test]
     fn the_corner_radius_comes_from_the_theme_rather_than_a_constant() {
         let theme = Theme { rounding: 12, ..Theme::default() };
-        assert_eq!(corner_radius(&theme), 12.0);
+        assert_eq!(theme.corner_radius(), 12.0);
     }
 
     #[test]
     fn an_absurd_rounding_is_bounded_rather_than_handed_to_the_renderer() {
         let theme = Theme { rounding: u32::MAX, ..Theme::default() };
-        let radius = corner_radius(&theme);
+        let radius = theme.corner_radius();
         assert!(radius.is_finite());
         assert!(radius <= 64.0, "got {radius}");
     }

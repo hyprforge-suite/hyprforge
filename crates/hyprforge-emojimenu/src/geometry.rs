@@ -156,15 +156,6 @@ impl GridLayout {
         hyprforge_popup::Scrollbar::new(track_x, track_top, viewport_height)
     }
 
-    /// The cell index (row-major: `row * columns + col`) under
-    /// `position`, among `visible_cells` currently built — the same
-    /// "which of the cells actually on screen" scoping
-    /// `RowLayout::row_at` applies with its own `visible_count`.
-    ///
-    /// `None` covers every way a position is not over a cell: above the
-    /// first row (still in the header), in a gap between cells, past the
-    /// last column, or past the last cell actually built — all of them
-    /// "do nothing", the same as an unrecognised key.
     /// Where the first column starts, horizontally.
     ///
     /// Whole cells rarely divide a popup's width exactly, and the
@@ -187,6 +178,16 @@ impl GridLayout {
         self.padding + (slack.max(0.0) / 2.0)
     }
 
+    /// The cell index (row-major: `row * columns + col`) under
+    /// `position`, among `visible_cells` currently built — the same
+    /// "which of the cells actually on screen" scoping
+    /// `RowLayout::row_at` applies with its own `visible_count`.
+    ///
+    /// `None` covers every way a position is not over a cell: above the
+    /// first row (still in the header), in a gap between cells, past the
+    /// last column, or past the last cell actually built — all of them
+    /// "do nothing", the same as an unrecognised key.
+    ///
     /// `scroll_remainder` is how many pixels of the first *built* row
     /// (`Model::scroll_remainder`) sit above the header — added to
     /// `position`'s own `y` before anything else, the same shift

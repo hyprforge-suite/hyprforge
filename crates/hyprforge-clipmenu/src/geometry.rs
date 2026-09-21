@@ -174,24 +174,6 @@ impl RowLayout {
         hyprforge_popup::Scrollbar::new(track_x, track_top, viewport_height)
     }
 
-    /// The row index under `local_y` — measured from the popup surface's
-    /// own top-left corner, exactly the coordinate space
-    /// `PointerEvent::position` reports — among `visible_count` rows
-    /// currently built (see `Model::visible_range`).
-    ///
-    /// `scroll_offset` is how many pixels of content sit above the first
-    /// *built* row (`Model::scroll_offset`, converted to "pixels within
-    /// the built window" the same way `Model::window_remainder` does) —
-    /// added to `local_y` before anything else so this and `view.rs`'s
-    /// own vertical shift of the rendered rows can never disagree about
-    /// where row 0 of the window actually is. Passing `0.0` reproduces
-    /// this method's pre-scrolling behaviour exactly.
-    ///
-    /// `None` covers every way a position is not over a row: above the
-    /// first row (still in the header or its padding), in the gap
-    /// between two rows, or past the last row that is actually on
-    /// screen. All three are "do nothing", the same as a keyboard press
-    /// this popup does not recognise.
     /// How many rows actually fit in a popup `height` tall.
     ///
     /// The inverse of [`Self::row_at`], and it has to stay that way. The
@@ -216,6 +198,24 @@ impl RowLayout {
         (((available + self.row_spacing) / stride).floor() as usize).max(1)
     }
 
+    /// The row index under `local_y` — measured from the popup surface's
+    /// own top-left corner, exactly the coordinate space
+    /// `PointerEvent::position` reports — among `visible_count` rows
+    /// currently built (see `Model::visible_range`).
+    ///
+    /// `scroll_offset` is how many pixels of content sit above the first
+    /// *built* row (`Model::scroll_offset`, converted to "pixels within
+    /// the built window" the same way `Model::window_remainder` does) —
+    /// added to `local_y` before anything else so this and `view.rs`'s
+    /// own vertical shift of the rendered rows can never disagree about
+    /// where row 0 of the window actually is. Passing `0.0` reproduces
+    /// this method's pre-scrolling behaviour exactly.
+    ///
+    /// `None` covers every way a position is not over a row: above the
+    /// first row (still in the header or its padding), in the gap
+    /// between two rows, or past the last row that is actually on
+    /// screen. All three are "do nothing", the same as a keyboard press
+    /// this popup does not recognise.
     pub fn row_at(&self, local_y: f64, visible_count: usize, scroll_remainder: f64) -> Option<usize> {
         if visible_count == 0 {
             return None;
