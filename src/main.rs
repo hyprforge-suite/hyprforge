@@ -44,6 +44,7 @@
 //! of the *same* directory racing each other (a stale reload landing after
 //! a fresh one). See [`tests::a_stale_dir_loaded_result_is_ignored`].
 
+use hyprforge_files::archive_jobs;
 use hyprforge_files::jobs::{self, JobControl, JobEvent, JobId, JobSummary};
 use hyprforge_files::launch::{self, Opened};
 use hyprforge_files_core::backend::FsBackend;
@@ -60,7 +61,7 @@ use hyprforge_files_core::{
 use hyprforge_ui::theme::{app_theme, spacing, FontScale, BASE_TEXT_SIZE};
 use std::sync::Arc;
 use std::time::Instant;
-use hyprforge_ui::widgets::{scaled_text, secondary_button};
+use hyprforge_ui::widgets::{primary_button, scaled_text, secondary_button};
 use iced::keyboard::{self, key, Key};
 use iced::widget::{button, column, container, row};
 use iced::{window, Background, Border, Color, Element, Length, Size, Subscription, Task, Theme};
@@ -171,6 +172,8 @@ fn main() -> iced::Result {
         // loaded it each time.
         mime: hyprforge_mime::MimeDb::load(),
         chooser: None,
+        compressing: None,
+        scratch: Arc::new(Scratch::default()),
         opener: Opener::default(),
         jobs: Vec::new(),
         confirm: None,
@@ -376,6 +379,19 @@ enum Message {
     PrefsSaved(Result<Prefs, String>),
     /// The pinned folders, read afresh — for every tab's sidebar.
     PinnedLoaded(Vec<PinnedItem>),
+    /// A member was unpacked out of an archive to a scratch directory,
+    /// and the copy there is ready to open — or could not be made.
+    ArchiveMemberReady(Result<PathBuf, String>),
+    /// Members were unpacked so they could go on the clipboard as real
+    /// files — see the `SetClipboard` arm in `handle_outcome`.
+    ArchiveCopiesReady(Result<Vec<PathBuf>, String>),
+    /// The name in the Compress dialog changed.
+    CompressNameChanged(String),
+    /// A format button in the Compress dialog.
+    CompressFormat(usize),
+    /// Compress, with what the dialog currently says.
+    CompressConfirm,
+    CompressCancel,
     /// An application was picked in the chooser, by its desktop entry's
     /// file name.
     ChooseApp(String),
@@ -555,6 +571,15 @@ struct App {
     mime: hyprforge_mime::MimeDb,
     /// An open "which application?" chooser.
     chooser: Option<Chooser>,
+    /// An open "Compress\u{2026}" dialog.
+    compressing: Option<Compressing>,
+    /// Where members opened out of an archive are unpacked to.
+    ///
+    /// One directory for the whole process, removed when it exits — see
+    /// [`App::open_from_archive`] on why not sooner. Made on the first
+    /// use rather than at startup, so a window that never opens anything
+    /// out of an archive never creates one.
+    scratch: Arc<Scratch>,
     /// How a file is actually opened.
     ///
     /// A seam, like `backend` and `clipboard` beside it, and for a
@@ -721,6 +746,11 @@ enum JobKind {
     /// its `.trashinfo` record: once the stored file has gone — moved back
     /// to where it came from — its record goes too.
     Restore { records: Vec<(PathBuf, PathBuf)> },
+    /// Extracting, compressing or rewriting an archive — see
+    /// [`crate::archive_jobs`]. Carries the word for the progress line
+    /// rather than the whole `Work`, because that is the only thing the
+    /// window still needs once the job is running.
+    Archive { doing: &'static str },
 }
 
 impl JobKind {
@@ -737,6 +767,7 @@ impl JobKind {
             JobKind::Copy => "Copying",
             JobKind::Move => "Moving",
             JobKind::Restore { .. } => "Restoring",
+            JobKind::Archive { doing } => doing,
         }
     }
 
@@ -746,7 +777,134 @@ impl JobKind {
             JobKind::Copy => "copied",
             JobKind::Move => "moved",
             JobKind::Restore { .. } => "restored",
+            // "extracted 12 items", "compressed 3 items" — the past
+            // tense of `doing`, which is what the report reads as.
+            JobKind::Archive { doing } => match *doing {
+                "Extracting" => "extracted",
+                "Compressing" => "compressed",
+                _ => "updated",
+            },
         }
+    }
+}
+
+/// The process's unpacking area, made the first time something needs
+/// it.
+///
+/// A `Mutex` around an `Option` rather than a `OnceLock`, because making
+/// it can *fail* — a full or read-only `/tmp` is a real machine state —
+/// and a failure has to be reportable rather than cached as a
+/// half-initialised value. A second attempt after a failure is fine; it
+/// may well work.
+#[derive(Default)]
+struct Scratch {
+    dir: std::sync::Mutex<Option<Arc<tempfile::TempDir>>>,
+}
+
+impl Scratch {
+    fn dir(&self) -> Result<PathBuf, String> {
+        let mut held = self.dir.lock().unwrap();
+        if let Some(dir) = held.as_ref() {
+            return Ok(dir.path().to_path_buf());
+        }
+        let made = tempfile::Builder::new()
+            .prefix("hyprforge-files-")
+            .tempdir()
+            .map_err(|e| format!("There's nowhere to unpack it to: {e}"))?;
+        let path = made.path().to_path_buf();
+        *held = Some(Arc::new(made));
+        Ok(path)
+    }
+}
+
+/// Unpacks one member into `scratch` and answers with where it landed.
+///
+/// Under the member's own path inside a folder named for the archive, so
+/// two archives holding a `README.md` do not overwrite each other's, and
+/// so the name in whatever opens it is the name from the archive.
+fn extract_one(archive: &Path, member: &str, scratch: &Path) -> Result<PathBuf, String> {
+    use hyprforge_archive::backend::{ArchiveBackend, Collision, ExtractRequest, NoProgress};
+
+    let holder = archive
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "archive".to_string());
+    let dest = scratch.join(holder);
+
+    let request = ExtractRequest {
+        members: vec![member.to_string()],
+        dest: dest.clone(),
+        strip_prefix: None,
+        // The scratch copy is this window's own, and a stale one from an
+        // earlier open is exactly what should be replaced: skipping
+        // would hand back yesterday's contents of a member that has
+        // since been edited.
+        collision: Collision::Overwrite,
+    };
+    let report = hyprforge_archive::StdArchives
+        .extract(archive, &request, &mut NoProgress)
+        .map_err(|e| e.to_string())?;
+    if let Some((_, why)) = report.failed.first() {
+        return Err(format!("{member} couldn't be read: {why}"));
+    }
+    Ok(dest.join(member))
+}
+
+/// A "Compress\u{2026}" in progress: what is going in, what it will be
+/// called, and in which format.
+///
+/// A dialog rather than the in-place rename `New Folder` uses, because
+/// there are two things to choose and only one of them is a name. The
+/// format cannot be left to the extension someone types, either: a
+/// mistyped `.tar.gz` would silently produce a zip called `.tar.gz`,
+/// which is exactly the "the name is a claim, the bytes are the thing"
+/// trap `hyprforge_archive::format` exists to keep on one side of this
+/// app.
+struct Compressing {
+    sources: Vec<PathBuf>,
+    into: PathBuf,
+    /// The name without any extension — the extension follows `format`,
+    /// so the two cannot disagree.
+    name: String,
+    format: hyprforge_archive::Format,
+}
+
+impl Compressing {
+    fn new(sources: Vec<PathBuf>, into: PathBuf) -> Compressing {
+        // One thing selected is named after it; several are named after
+        // the folder they are in, which is what every file manager does
+        // and is the only name that describes the set.
+        let name = match sources.as_slice() {
+            [only] => only
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Archive".to_string()),
+            _ => into
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Archive".to_string()),
+        };
+        Compressing {
+            sources,
+            into,
+            name,
+            format: hyprforge_archive::Format::Zip,
+        }
+    }
+
+    /// The file this would write.
+    fn dest(&self) -> PathBuf {
+        self.into.join(format!("{}.{}", self.name.trim(), self.format.extension()))
+    }
+
+    /// Whether the name is one this could actually write.
+    ///
+    /// A name with a slash in it is the one that matters: it would put
+    /// the archive somewhere other than the folder the person is looking
+    /// at, which is not what a name field is for.
+    fn valid(&self) -> bool {
+        let name = self.name.trim();
+        !name.is_empty() && !name.contains('/') && name != "." && name != ".."
     }
 }
 
@@ -803,6 +961,20 @@ impl App {
         match outcome {
             Outcome::None => Task::none(),
             Outcome::ReadDir(path) => self.spawn_read_dir(tab_index, path),
+            // A file *inside* an archive has no path any other program
+            // can open: `~/x.zip/notes.txt` is not a path the kernel
+            // knows. So it is unpacked to a scratch directory first and
+            // the copy there is what gets opened.
+            //
+            // Read-only in effect, and deliberately not advertised as
+            // anything else: edits made in whatever opens it land on the
+            // copy, not in the archive. Writing them back would mean
+            // watching the file and rewriting the archive behind
+            // someone's back — a thing that should be asked for, not
+            // assumed, and it is not in this change.
+            Outcome::Activated(path) if hyprforge_files_core::archive::split(&path).is_some() => {
+                self.open_from_archive(path)
+            }
             Outcome::Activated(path) => {
                 // A kind nothing is registered for would otherwise be
                 // handed to the desktop's fallback, which ends at a web
@@ -872,6 +1044,20 @@ impl App {
                     Message::Browser(BrowserMessage::CountsLoaded(counts))
                 })
             }
+            // Inside an archive these three are not filesystem
+            // operations at all — they are edits to one file, applied by
+            // rewriting it. The browser already decided they were
+            // allowed (see `ActionContext::in_archive`); this is where
+            // they turn into the right kind of work.
+            Outcome::DeletePermanently(paths)
+                if paths
+                    .first()
+                    .is_some_and(|p| hyprforge_files_core::archive::split(p).is_some()) =>
+            {
+                self.edit_archive(paths.first().cloned().unwrap_or_default(), |members| {
+                    members.into_iter().map(hyprforge_archive::Edit::Remove).collect()
+                }, paths)
+            }
             Outcome::Trash(paths) => {
                 let ask = self.config.behaviour.confirm_trash;
                 self.remove(tab_index, Removal::Trash, paths, ask)
@@ -898,7 +1084,86 @@ impl App {
                 let ask = self.config.behaviour.confirm_delete;
                 self.remove(tab_index, Removal::Delete, paths, ask)
             }
+            Outcome::Extract { archives, to } => {
+                self.start_archive_job(archive_jobs::Work::Extract { archives, into: to })
+            }
+            Outcome::ExtractMembers { members, from } => {
+                // `from` is the listing the person is standing in —
+                // somewhere inside an archive. Splitting it gives the
+                // real file and the folder within it, and the folder
+                // within it is exactly the prefix to drop so the
+                // members land loose rather than under a rebuilt copy
+                // of the path they came from.
+                let Some((archive, prefix)) = hyprforge_files_core::archive::split(&from) else {
+                    self.status =
+                        Some(format!("{} isn't inside an archive.", from.display()));
+                    return Task::none();
+                };
+                let Some(into) = archive.parent().map(Path::to_path_buf) else {
+                    self.status = Some("There's nowhere to extract to from here.".to_string());
+                    return Task::none();
+                };
+                let members = members
+                    .iter()
+                    .filter_map(|path| {
+                        hyprforge_files_core::archive::split(path).map(|(_, member)| member)
+                    })
+                    .filter(|member| !member.is_empty())
+                    .collect();
+                self.start_archive_job(archive_jobs::Work::ExtractMembers {
+                    archive,
+                    members,
+                    strip_prefix: (!prefix.is_empty()).then_some(prefix),
+                    into,
+                })
+            }
+            Outcome::Compress { sources, into } => {
+                self.compressing = Some(Compressing::new(sources, into));
+                Task::none()
+            }
             Outcome::OpenInNewTab(path) => self.open_tab(path),
+            // Copying *out of* an archive. The paths on a listing
+            // inside one are virtual — `~/x.zip/notes.txt` is nothing
+            // any other program can open — so what goes on the clipboard
+            // has to be a real file. The members are unpacked to the
+            // scratch directory first and those copies are what is
+            // offered, which is what makes pasting into another
+            // application work at all.
+            //
+            // Always a Copy, whatever the verb was: a Cut would have the
+            // paste delete the scratch copy and leave the archive
+            // untouched, which is the opposite of what anyone asked for.
+            // `Action::Cut` is off inside an archive for the same
+            // reason; this is the second half of the same decision.
+            Outcome::SetClipboard(clip)
+                if clip
+                    .paths
+                    .first()
+                    .is_some_and(|p| hyprforge_files_core::archive::split(p).is_some()) =>
+            {
+                let scratch = self.scratch.clone();
+                let paths = clip.paths.clone();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let dir = scratch.dir()?;
+                            let mut copies = Vec::with_capacity(paths.len());
+                            for path in &paths {
+                                let Some((archive, member)) =
+                                    hyprforge_files_core::archive::split(path)
+                                else {
+                                    continue;
+                                };
+                                copies.push(extract_one(&archive, &member, &dir)?);
+                            }
+                            Ok(copies)
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(format!("Copying was interrupted: {e}")))
+                    },
+                    Message::ArchiveCopiesReady,
+                )
+            }
             Outcome::SetClipboard(clip) => {
                 if let Err(e) = self.clipboard.set(clip) {
                     self.status = Some(format!("Couldn't copy: {e}"));
@@ -912,6 +1177,21 @@ impl App {
                 iced::widget::operation::focus(id.clone()),
                 iced::widget::operation::select_range(id, 0, select),
             ]),
+            Outcome::Rename { from, to }
+                if hyprforge_files_core::archive::split(&from).is_some() =>
+            {
+                let (Some((archive, member)), Some((_, target))) = (
+                    hyprforge_files_core::archive::split(&from),
+                    hyprforge_files_core::archive::split(&to),
+                ) else {
+                    self.status = Some("That name can't be used inside an archive.".to_string());
+                    return Task::none();
+                };
+                self.start_archive_job(archive_jobs::Work::Edit {
+                    archive,
+                    edits: vec![hyprforge_archive::Edit::Rename { from: member, to: target }],
+                })
+            }
             Outcome::Rename { from, to } => {
                 let tab_id = self.tabs[tab_index].id;
                 Task::perform(
@@ -1002,6 +1282,36 @@ impl App {
             self.status = Some("There are no files on the clipboard to paste.".to_string());
             return Task::none();
         };
+        // Pasting *into* an archive adds to it, rather than copying
+        // anything anywhere. The clipboard holds real paths either way,
+        // so the only difference is which kind of work it becomes.
+        if let Some((archive, prefix)) = hyprforge_files_core::archive::split(&into) {
+            let edits: Vec<hyprforge_archive::Edit> = clip
+                .paths
+                .iter()
+                .filter_map(|source| {
+                    let name = source.file_name()?.to_string_lossy().into_owned();
+                    Some(hyprforge_archive::Edit::Add {
+                        source: source.clone(),
+                        as_member: if prefix.is_empty() {
+                            name
+                        } else {
+                            format!("{prefix}/{name}")
+                        },
+                    })
+                })
+                .collect();
+            if edits.is_empty() {
+                self.status = Some("There are no files on the clipboard to paste.".to_string());
+                return Task::none();
+            }
+            // A cut is treated as a copy here: the source files are left
+            // alone. Removing them would mean deleting something on disk
+            // because an archive rewrite succeeded, and those two
+            // outcomes are not tied together anywhere this app could
+            // honestly promise they were.
+            return self.start_archive_job(archive_jobs::Work::Edit { archive, edits });
+        }
         let plan = file_clipboard::plan(&clip, &into);
         if !plan.refused.is_empty() {
             self.status = Some(
@@ -1086,6 +1396,87 @@ impl App {
         Task::run(events, Message::Job)
     }
 
+    /// Unpacks one member to a scratch directory and opens the copy.
+    ///
+    /// The scratch directory is the process's own and is cleaned up when
+    /// it exits, not when the file is closed: whatever opened it may
+    /// still have it open, and deleting the file out from under a viewer
+    /// is a worse bug than a temporary file living until the window is
+    /// shut.
+    fn open_from_archive(&mut self, path: PathBuf) -> Task<Message> {
+        let Some((archive, member)) = hyprforge_files_core::archive::split(&path) else {
+            return Task::none();
+        };
+        let scratch = self.scratch.clone();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let dir = scratch.dir()?;
+                    extract_one(&archive, &member, &dir)
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("Opening it was interrupted: {e}")))
+            },
+            Message::ArchiveMemberReady,
+        )
+    }
+
+    /// Rewrites an archive, turning the selected virtual paths into
+    /// member names first.
+    ///
+    /// The paths all come from one listing, so they are all inside the
+    /// same archive — `anchor` is whichever of them named it.
+    fn edit_archive(
+        &mut self,
+        anchor: PathBuf,
+        edits: impl FnOnce(Vec<String>) -> Vec<hyprforge_archive::Edit>,
+        paths: Vec<PathBuf>,
+    ) -> Task<Message> {
+        let Some((archive, _)) = hyprforge_files_core::archive::split(&anchor) else {
+            return Task::none();
+        };
+        let members: Vec<String> = paths
+            .iter()
+            .filter_map(|p| hyprforge_files_core::archive::split(p).map(|(_, member)| member))
+            .filter(|member| !member.is_empty())
+            .collect();
+        if members.is_empty() {
+            return Task::none();
+        }
+        self.start_archive_job(archive_jobs::Work::Edit {
+            archive,
+            edits: edits(members),
+        })
+    }
+
+    /// Starts an archive job — extracting, compressing or rewriting.
+    ///
+    /// The same shape as a paste: a `RunningJob` so the progress bar and
+    /// the cancel button find it, and `Task::run` over the same event
+    /// stream. Nothing in the window below this line knows an archive
+    /// was involved.
+    fn start_archive_job(&mut self, work: archive_jobs::Work) -> Task<Message> {
+        let id = self.next_job_id;
+        self.next_job_id += 1;
+        let dirs = work.touches();
+        let doing = work.doing();
+        let (control, events) =
+            archive_jobs::start(id, work, self.config.behaviour.on_conflict);
+        self.jobs.push(RunningJob {
+            id,
+            control,
+            kind: JobKind::Archive { doing },
+            started: Instant::now(),
+            dirs,
+            progress: None,
+            // An archive job never pauses to ask — see
+            // `archive_jobs`'s module doc on why.
+            conflict: None,
+            apply_to_rest: false,
+        });
+        Task::run(events, Message::Job)
+    }
+
     /// Updates the window for something a job reported.
     fn job_event(&mut self, event: JobEvent) -> Task<Message> {
         match event {
@@ -1122,6 +1513,15 @@ impl App {
                     // Undoing a restore would be trashing again, which is
                     // one keypress away already.
                     JobKind::Restore { .. } => None,
+                    // Nothing yet. Undoing an extraction means deleting
+                    // a folder someone may have added to since, and
+                    // undoing an edit means putting back an archive
+                    // this job rewrote — both are real, both need a
+                    // record this suite's `Undoable` does not have a
+                    // shape for, and offering a half-working undo for
+                    // an operation that rewrites a file is worse than
+                    // offering none.
+                    JobKind::Archive { .. } => None,
                 };
                 let noticed = done.map(|done| self.record(done)).unwrap_or_else(Task::none);
                 let refresh = Task::batch([refresh, noticed]);
@@ -1523,6 +1923,21 @@ impl App {
                 if generation != self.tabs[index].read_generation {
                     return Task::none();
                 }
+                // Whether this listing is inside an archive, decided
+                // before the browser sees it — the browser does no I/O
+                // and this answer needs a `stat`. See
+                // `ActionContext::in_archive`.
+                //
+                // From the path that was read rather than from the
+                // browser's current directory, because a listing that
+                // arrives for somewhere the person has since left must
+                // not change what the menus offer where they are now:
+                // `apply_dir_loaded` drops such a listing, and this
+                // would otherwise have already acted on it.
+                let in_archive = hyprforge_files_core::archive::split(&path).is_some();
+                if path == self.tabs[index].browser.current_dir() {
+                    self.tabs[index].browser.set_in_archive(in_archive);
+                }
                 let outcome = self.tabs[index].browser.update(BrowserMessage::DirLoaded(path, result));
                 let task = self.handle_outcome(index, outcome);
                 #[cfg(debug_assertions)]
@@ -1659,6 +2074,80 @@ impl App {
             Message::CloseChooser => {
                 self.chooser = None;
                 Task::none()
+            }
+            Message::ArchiveMemberReady(Ok(path)) => {
+                // Through the ordinary opening path from here, chooser
+                // and all: what is on disk now is a perfectly normal
+                // file, and which application opens it is the same
+                // question it always was.
+                let index = self.active;
+                self.handle_outcome(index, Outcome::Activated(path))
+            }
+            Message::ArchiveCopiesReady(Ok(paths)) => {
+                let clip = hyprforge_files_core::clipboard::FileClip {
+                    paths,
+                    verb: hyprforge_files_core::clipboard::ClipVerb::Copy,
+                };
+                if let Err(e) = self.clipboard.set(clip) {
+                    self.status = Some(format!("Couldn't copy: {e}"));
+                }
+                self.sync_can_paste();
+                Task::none()
+            }
+            Message::ArchiveCopiesReady(Err(why)) => {
+                self.status = Some(why);
+                Task::none()
+            }
+            Message::ArchiveMemberReady(Err(why)) => {
+                self.status = Some(why);
+                Task::none()
+            }
+            Message::CompressNameChanged(name) => {
+                if let Some(compressing) = &mut self.compressing {
+                    compressing.name = name;
+                }
+                Task::none()
+            }
+            Message::CompressFormat(index) => {
+                if let Some(compressing) = &mut self.compressing {
+                    if let Some((_, format)) = archive_jobs::OFFERED.get(index) {
+                        compressing.format = *format;
+                    }
+                }
+                Task::none()
+            }
+            Message::CompressCancel => {
+                self.compressing = None;
+                Task::none()
+            }
+            Message::CompressConfirm => {
+                let Some(compressing) = self.compressing.take() else {
+                    return Task::none();
+                };
+                if !compressing.valid() {
+                    self.status = Some("That isn't a name an archive can have.".to_string());
+                    return Task::none();
+                }
+                let dest = compressing.dest();
+                // Each source keeps its own name inside the archive —
+                // "compress these three files" makes an archive holding
+                // three things called what they are called, not a
+                // rebuilt copy of the path they came from.
+                let sources = compressing
+                    .sources
+                    .iter()
+                    .filter_map(|path| {
+                        path.file_name().map(|name| hyprforge_archive::Source {
+                            path: path.clone(),
+                            as_member: name.to_string_lossy().into_owned(),
+                        })
+                    })
+                    .collect();
+                self.start_archive_job(archive_jobs::Work::Compress {
+                    sources,
+                    dest,
+                    format: compressing.format,
+                })
             }
             Message::DefaultSet(Ok(())) => {
                 // The window's own copy of the database is a snapshot,
@@ -1889,6 +2378,9 @@ impl App {
         let size = (self.last_window_size.0 as f32, self.last_window_size.1 as f32);
         if let Some(pending) = &self.confirm {
             return iced::widget::stack![window, confirm_dialog(pending, scale)].into();
+        }
+        if let Some(compressing) = &self.compressing {
+            return iced::widget::stack![window, compress_dialog(compressing, scale)].into();
         }
         if let Some(chooser) = &self.chooser {
             return iced::widget::stack![window, chooser_dialog(chooser, scale)].into();
@@ -2154,6 +2646,79 @@ fn chooser_dialog<'a>(chooser: &Chooser, scale: FontScale) -> Element<'a, Messag
         row![
             iced::widget::Space::new().width(Length::Fill),
             secondary_button("Cancel").on_press(Message::CloseChooser),
+        ]
+        .spacing(spacing::SM)
+        .into(),
+        scale,
+    )
+}
+
+/// The "Compress\u{2026}" dialog: a name, a format, and what the two
+/// together will write.
+///
+/// The filename is shown assembled rather than typed whole, because the
+/// extension is not the person's to choose — it follows the format, and
+/// a name and a format that disagree is precisely the confusion
+/// `hyprforge_archive::format` spends a module resolving.
+fn compress_dialog<'a>(compressing: &Compressing, scale: FontScale) -> Element<'a, Message> {
+    let count = compressing.sources.len();
+    let body = match count {
+        1 => "One item will go into the new archive.".to_string(),
+        n => format!("{n} items will go into the new archive."),
+    };
+
+    let name_field = iced::widget::text_input("Name", &compressing.name)
+        .on_input(Message::CompressNameChanged)
+        .on_submit(Message::CompressConfirm)
+        .size(scale.apply(BASE_TEXT_SIZE))
+        .width(Length::Fill);
+
+    let mut formats = row![].spacing(spacing::XS);
+    for (index, (label, format)) in archive_jobs::OFFERED.iter().enumerate() {
+        let chosen = *format == compressing.format;
+        formats = formats.push(
+            button(scaled_text(*label, BASE_TEXT_SIZE, scale))
+                .padding([spacing::XS as u16, spacing::SM as u16])
+                .on_press(Message::CompressFormat(index))
+                .style(move |t: &Theme, status| {
+                    hyprforge_files_core::browser::selectable_row_style(t, status, chosen)
+                }),
+        );
+    }
+
+    let filename = compressing
+        .dest()
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let extra = column![
+        name_field,
+        formats,
+        hyprforge_ui::widgets::meta_text(
+            if compressing.valid() {
+                format!("Will make {filename}")
+            } else {
+                "Give it a name with no “/” in it.".to_string()
+            },
+            BASE_TEXT_SIZE,
+            scale,
+        ),
+    ]
+    .spacing(spacing::SM);
+
+    let mut confirm = primary_button("Compress");
+    if compressing.valid() {
+        confirm = confirm.on_press(Message::CompressConfirm);
+    }
+
+    dialog(
+        "Compress".to_string(),
+        body,
+        Some(extra.into()),
+        row![
+            iced::widget::Space::new().width(Length::Fill),
+            secondary_button("Cancel").on_press(Message::CompressCancel),
+            confirm,
         ]
         .spacing(spacing::SM)
         .into(),
@@ -3015,7 +3580,7 @@ mod tests {
 
     /// One tab per given directory, ids `0..n`, `next_tab_id` past the
     /// last one — the shape `main()` builds, minus the real I/O.
-    fn app_for_test(dirs: &[&str]) -> App {
+    pub(super) fn app_for_test(dirs: &[&str]) -> App {
         let tabs: Vec<Tab> =
             dirs.iter().enumerate().map(|(id, dir)| Tab::new(id as u64, browser_at(dir))).collect();
         let next_tab_id = tabs.len() as u64;
@@ -3042,6 +3607,8 @@ mod tests {
             // one.
             mime: hyprforge_mime::MimeDb::default(),
             chooser: None,
+            compressing: None,
+            scratch: Arc::new(Scratch::default()),
             // Never the real one: a test that opens a file would start
             // an application on the machine running the tests.
             opener: Opener {
@@ -4460,5 +5027,226 @@ mod tests {
             path: PathBuf::from("/home"),
             tint: hyprforge_files_core::sidebar::Tint::Accent,
         };
+    }
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::tests::app_for_test;
+    use super::*;
+    use hyprforge_archive::backend::{ArchiveBackend, NoProgress};
+    use hyprforge_archive::{Format, Source, StdArchives};
+
+    /// A real archive in a temporary directory. Real, because every
+    /// claim in this module is about the window and the archive crate
+    /// agreeing, and a mock on either side would let them agree about
+    /// nothing.
+    fn archive_with(dir: &Path, name: &str) -> PathBuf {
+        let tree = dir.join("payload");
+        std::fs::create_dir_all(tree.join("docs")).unwrap();
+        std::fs::write(tree.join("readme.md"), b"# hello").unwrap();
+        std::fs::write(tree.join("docs/guide.txt"), b"a guide").unwrap();
+
+        let archive = dir.join(name);
+        StdArchives
+            .create(
+                &archive,
+                Format::Zip,
+                &[Source {
+                    path: tree.clone(),
+                    as_member: "payload".to_string(),
+                }],
+                &mut NoProgress,
+            )
+            .unwrap();
+        std::fs::remove_dir_all(&tree).unwrap();
+        archive
+    }
+
+    /// Runs the window's jobs to completion. An archive job is a thread
+    /// reporting through a stream the iced runtime normally drains; in a
+    /// test there is no runtime, so the thread is simply waited for by
+    /// watching the file it is writing.
+    fn settle() {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    #[test]
+    fn extracting_an_archive_puts_it_in_a_folder_named_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_with(dir.path(), "sample.zip");
+        let mut app = app_for_test(&[dir.path().to_str().unwrap()]);
+
+        let _task = app.handle_outcome(
+            0,
+            Outcome::Extract {
+                archives: vec![archive.clone()],
+                to: None,
+            },
+        );
+        for _ in 0..40 {
+            if dir.path().join("sample/payload/readme.md").exists() {
+                break;
+            }
+            settle();
+        }
+
+        assert!(
+            dir.path().join("sample/payload/readme.md").is_file(),
+            "the archive's contents go into a folder of their own, not loose"
+        );
+    }
+
+    #[test]
+    fn compressing_a_selection_writes_the_archive_the_dialog_described() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"some notes").unwrap();
+        let mut app = app_for_test(&[dir.path().to_str().unwrap()]);
+
+        let _open = app.handle_outcome(
+            0,
+            Outcome::Compress {
+                sources: vec![dir.path().join("notes.txt")],
+                into: dir.path().to_path_buf(),
+            },
+        );
+        let compressing = app.compressing.as_ref().expect("the dialog opens rather than guessing");
+        assert_eq!(compressing.name, "notes.txt", "one item is named after itself");
+        assert_eq!(compressing.dest(), dir.path().join("notes.txt.zip"));
+
+        let _task = app.update(Message::CompressConfirm);
+        for _ in 0..40 {
+            if dir.path().join("notes.txt.zip").exists() {
+                break;
+            }
+            settle();
+        }
+
+        let index = StdArchives.index(&dir.path().join("notes.txt.zip")).unwrap();
+        assert!(index.get("notes.txt").is_some(), "the file goes in under its own name");
+    }
+
+    #[test]
+    fn a_name_that_would_write_somewhere_else_is_refused_before_anything_happens() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"x").unwrap();
+        let mut app = app_for_test(&[dir.path().to_str().unwrap()]);
+        let _open = app.handle_outcome(
+            0,
+            Outcome::Compress {
+                sources: vec![dir.path().join("notes.txt")],
+                into: dir.path().to_path_buf(),
+            },
+        );
+
+        let compressing = app.compressing.as_mut().unwrap();
+        compressing.name = "../escaped".to_string();
+        assert!(!compressing.valid(), "a name field is not a place to type a path");
+    }
+
+    #[test]
+    fn opening_a_file_inside_an_archive_unpacks_it_before_anything_is_asked_to_open_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_with(dir.path(), "sample.zip");
+        let scratch = tempfile::tempdir().unwrap();
+
+        let landed = extract_one(&archive, "payload/docs/guide.txt", scratch.path()).unwrap();
+        assert_eq!(std::fs::read(&landed).unwrap(), b"a guide");
+        assert!(
+            landed.ends_with("guide.txt"),
+            "the copy keeps the name it had in the archive: {}",
+            landed.display()
+        );
+    }
+
+    #[test]
+    fn renaming_a_member_rewrites_the_archive_rather_than_touching_the_filesystem() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_with(dir.path(), "sample.zip");
+        let mut app = app_for_test(&[archive.to_str().unwrap()]);
+
+        let _task = app.handle_outcome(
+            0,
+            Outcome::Rename {
+                from: archive.join("payload/readme.md"),
+                to: archive.join("payload/README.md"),
+            },
+        );
+        for _ in 0..60 {
+            if StdArchives
+                .index(&archive)
+                .is_ok_and(|i| i.get("payload/README.md").is_some())
+            {
+                break;
+            }
+            settle();
+        }
+
+        let index = StdArchives.index(&archive).unwrap();
+        assert!(index.get("payload/README.md").is_some(), "the member was not renamed");
+        assert!(index.get("payload/readme.md").is_none(), "the old name is still there");
+        assert!(
+            !dir.path().join("payload").exists(),
+            "nothing should have been written to the filesystem beside the archive"
+        );
+    }
+
+    #[test]
+    fn deleting_a_member_removes_it_from_the_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_with(dir.path(), "sample.zip");
+        let mut app = app_for_test(&[archive.to_str().unwrap()]);
+
+        let _task = app.handle_outcome(
+            0,
+            Outcome::DeletePermanently(vec![archive.join("payload/docs")]),
+        );
+        for _ in 0..60 {
+            if StdArchives
+                .index(&archive)
+                .is_ok_and(|i| i.get("payload/docs").is_none())
+            {
+                break;
+            }
+            settle();
+        }
+
+        let index = StdArchives.index(&archive).unwrap();
+        assert!(index.get("payload/docs/guide.txt").is_none(), "the folder's contents stayed");
+        assert!(index.get("payload/readme.md").is_some(), "too much was removed");
+    }
+
+    /// The window has to refresh the listing *inside* the archive as
+    /// well as the folder holding it: both are stale once the file has
+    /// been rewritten.
+    /// A virtual path is not something another application can open, so
+    /// copying out of an archive has to put a real file on the
+    /// clipboard — otherwise the paste lands on a path that does not
+    /// exist and fails for a reason nobody could guess from the screen.
+    #[test]
+    fn copying_out_of_an_archive_offers_a_real_file_rather_than_a_virtual_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_with(dir.path(), "sample.zip");
+        let scratch = tempfile::tempdir().unwrap();
+
+        let landed = extract_one(&archive, "payload/readme.md", scratch.path()).unwrap();
+        assert!(landed.is_file(), "nothing was written for the clipboard to point at");
+        assert!(
+            hyprforge_files_core::archive::split(&landed).is_none(),
+            "the copy must not itself be inside an archive: {}",
+            landed.display()
+        );
+        assert_eq!(std::fs::read(&landed).unwrap(), b"# hello");
+    }
+
+    #[test]
+    fn an_edit_marks_both_the_archive_and_its_folder_for_rereading() {
+        let work = archive_jobs::Work::Edit {
+            archive: PathBuf::from("/home/a/sample.zip"),
+            edits: vec![hyprforge_archive::Edit::Remove("x".to_string())],
+        };
+        let touched = work.touches();
+        assert!(touched.contains(&PathBuf::from("/home/a/sample.zip")));
+        assert!(touched.contains(&PathBuf::from("/home/a")));
     }
 }

@@ -75,6 +75,18 @@ pub struct JobControl {
 }
 
 impl JobControl {
+    /// Builds one over a decision channel and a cancel flag.
+    ///
+    /// For a job that runs somewhere other than [`start`] — see
+    /// [`crate::archive_jobs`], which reports the same events but does
+    /// its work through a different library.
+    pub fn new(
+        decisions: std::sync::mpsc::Sender<CollisionDecision>,
+        cancel: Arc<AtomicBool>,
+    ) -> JobControl {
+        JobControl { decisions, cancel }
+    }
+
     /// Answers the collision the job is paused on.
     pub fn answer(&self, decision: CollisionDecision) {
         // A job that already finished has dropped its receiver; an answer
