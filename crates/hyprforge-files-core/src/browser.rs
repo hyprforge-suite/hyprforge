@@ -25,7 +25,7 @@
 
 use crate::density;
 use crate::filter::{is_hidden, matches_query};
-use crate::format::{format_kind, format_modified_at, format_origin, format_owner, format_permissions, format_size};
+use crate::format::{format_kind, format_modified_at, format_origin, format_owner, format_packed, format_permissions, format_size};
 use crate::glyph;
 use crate::icon::{self, entry_icon};
 use crate::action::{self, Action, ActionContext, Scope};
@@ -523,6 +523,9 @@ struct ViewModel<'a> {
     current_dir: &'a Path,
     /// Whether this listing is the Trash — which changes its columns.
     in_trash: bool,
+    /// The archive this listing is inside, named by its format — which
+    /// adds the Packed column and heads the summary line.
+    archive: Option<&'a str>,
     /// The name being edited, if any.
     renaming: Option<&'a Renaming>,
     column_picker_open: bool,
@@ -611,9 +614,10 @@ pub struct Browser {
     menu: Option<OpenMenu>,
     /// Whether the clipboard holds files — see [`Self::set_can_paste`].
     can_paste: bool,
-    /// Whether this listing is inside an archive — see
-    /// [`Self::set_in_archive`].
-    in_archive: bool,
+    /// The archive this listing is inside, named by its format ("zip",
+    /// "zstd") — see [`Self::set_archive`]. `None` when this is an
+    /// ordinary directory.
+    archive: Option<String>,
     /// The name being edited in place, if any.
     renaming: Option<Renaming>,
     /// See [`Message::AfterListing`].
@@ -660,7 +664,7 @@ impl Browser {
             config: Arc::new(Config::default()),
             menu: None,
             can_paste: false,
-            in_archive: false,
+            archive: None,
             renaming: None,
             after_listing: None,
             dotfiles: 0,
@@ -919,7 +923,7 @@ impl Browser {
             has_parent: self.current_dir.parent().is_some(),
             searching: !self.search_query.is_empty(),
             in_trash: self.in_trash(),
-            in_archive: self.in_archive,
+            in_archive: self.in_archive(),
             // Every selected row is a file whose name this suite can
             // open as an archive. `!is_dir` is the half that matters:
             // a *folder* called `backup.zip` is a folder, and the name
@@ -971,19 +975,24 @@ impl Browser {
 
     /// Tells the browser whether the clipboard holds files. The host owns
     /// the clipboard and calls this whenever it changes.
-    /// Tells the browser whether this listing is inside an archive.
+    /// Tells the browser which archive this listing is inside, if any,
+    /// named by its format — `Some("zstd")`, `None` for a plain folder.
     ///
     /// Set by the host after each read, for the reason
     /// [`ActionContext::in_archive`] gives: deciding it needs one
     /// `stat`, and `Browser` does no I/O. The host is reading the
     /// directory anyway and already knows which backend answered.
-    pub fn set_in_archive(&mut self, in_archive: bool) {
-        self.in_archive = in_archive;
+    ///
+    /// The *name* and not just a flag, because the summary line owes it
+    /// — mockup `1j` reads "zstd · 3 entries · 20.3 MB → 7.0 MB", and
+    /// nothing in a listing of members says what compressed them.
+    pub fn set_archive(&mut self, format: Option<String>) {
+        self.archive = format;
     }
 
     /// Whether this listing is inside an archive.
     pub fn in_archive(&self) -> bool {
-        self.in_archive
+        self.archive.is_some()
     }
 
     pub fn set_can_paste(&mut self, can_paste: bool) {
@@ -1094,7 +1103,7 @@ impl Browser {
                 to: None,
             },
             Action::ExtractTo => {
-                if self.in_archive {
+                if self.in_archive() {
                     // Inside an archive the selection *is* the members,
                     // and the archive they came out of is where this
                     // listing is.
@@ -1282,7 +1291,7 @@ impl Browser {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                match (self.in_trash(), self.in_archive, is_dir) {
+                match (self.in_trash(), self.in_archive(), is_dir) {
                     (true, _, _) => MenuKind::Trash,
                     (_, true, _) => MenuKind::ArchiveMember,
                     (_, false, true) => MenuKind::Folder,
@@ -1589,6 +1598,7 @@ impl Browser {
         ViewModel {
             current_dir: &self.current_dir,
             in_trash: self.in_trash(),
+            archive: self.archive.as_deref(),
             renaming: self.renaming.as_ref(),
             column_picker_open: self.column_picker_open,
             sidebar_collapsed: self
@@ -2118,7 +2128,12 @@ fn status_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> 
         return plane(iced::widget::Space::new().into());
     }
 
-    let summary = crate::format::status_summary(&vm.rows, vm.selection.selected_paths(), vm.hidden_count);
+    let summary = crate::format::status_summary(
+        &vm.rows,
+        vm.selection.selected_paths(),
+        vm.hidden_count,
+        vm.archive,
+    );
 
     // Left: what is in here. Right: where "here" is on disk, which is
     // the other question a status bar is asked and the one the path bar
@@ -2752,6 +2767,7 @@ fn entry_row<'a>(
             // frame, for a value every row in the listing shares.
             Column::Modified => format_modified_at(entry.modified, now),
             Column::Origin => format_origin(entry, home.as_deref()),
+            Column::Packed => format_packed(entry),
         };
         // Dim metadata on the *unselected* row only. `text_dim` is
         // chosen for legibility against the listing's own dark surface,
@@ -2960,6 +2976,8 @@ fn column_portion(column: Column) -> u16 {
         Column::Modified => 3,
         // A path: the widest thing any column holds.
         Column::Origin => 5,
+        // The same shape of number as Size, beside it.
+        Column::Packed => 3,
     }
 }
 
@@ -2967,12 +2985,22 @@ fn column_portion(column: Column) -> u16 {
 ///
 /// The configured ones — and, in the Trash, Original Location first,
 /// because "where did this come from" is the question the Trash is for.
-fn listing_columns(prefs: &Prefs, in_trash: bool) -> Vec<Column> {
+fn listing_columns(prefs: &Prefs, in_trash: bool, in_archive: bool) -> Vec<Column> {
     let mut columns = Vec::with_capacity(Column::ALL.len() + 1);
     if in_trash {
         columns.push(Column::Origin);
     }
     columns.extend(prefs.columns.shown());
+    // After Size, not before it, because Packed only means anything
+    // beside the number it is a fraction of — which is how mockup `1j`
+    // draws it. Only when Size is actually shown, for the same reason:
+    // a compressed size with nothing to compare it to is a number with
+    // no question attached.
+    if in_archive {
+        if let Some(after) = columns.iter().position(|c| *c == Column::Size) {
+            columns.insert(after + 1, Column::Packed);
+        }
+    }
     columns
 }
 
@@ -2995,6 +3023,12 @@ fn column_sort(column: Column) -> SortColumn {
         Column::Permissions => SortColumn::Permissions,
         Column::Modified => SortColumn::Modified,
         Column::Origin => SortColumn::Origin,
+        // Sorted by the uncompressed size, which is the number beside
+        // it and the one a person means by "biggest". A second sort key
+        // that ordered by packed size would put a well-compressed
+        // gigabyte above a barely-compressed megabyte under a heading
+        // that says nothing about compression ratios.
+        Column::Packed => SortColumn::Size,
     }
 }
 
@@ -3005,7 +3039,13 @@ fn column_sort(column: Column) -> SortColumn {
 /// and clicking again reverses, which is what every file manager anyone
 /// has used does. That also removes the need for a separate sort
 /// control entirely.
-fn list_header<'a>(prefs: &Prefs, in_trash: bool, picker_open: bool, scale: FontScale) -> Element<'a, Message> {
+fn list_header<'a>(
+    prefs: &Prefs,
+    in_trash: bool,
+    in_archive: bool,
+    picker_open: bool,
+    scale: FontScale,
+) -> Element<'a, Message> {
     let heading = |label: &'static str, column: SortColumn, portion: u16| {
         let active = prefs.sort_column() == column;
         // The arrow marks the sorted column *and* its direction, so the
@@ -3043,7 +3083,7 @@ fn list_header<'a>(prefs: &Prefs, in_trash: bool, picker_open: bool, scale: Font
 
     // `Column::ALL` order, the same walk `entry_row` makes — one list,
     // so a heading cannot end up over the wrong cells.
-    for column in listing_columns(prefs, in_trash) {
+    for column in listing_columns(prefs, in_trash, in_archive) {
         header = header.push(heading(column_heading(column, in_trash), column_sort(column), column_portion(column)));
     }
 
@@ -3132,7 +3172,7 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     let mut list = column![].spacing(1.0);
     let mut seen_file = false;
     let ctx = RowContext {
-        columns: listing_columns(vm.prefs, vm.in_trash),
+        columns: listing_columns(vm.prefs, vm.in_trash, vm.archive.is_some()),
         renaming: vm.renaming,
         home: home_dir(),
         scale,
@@ -3167,7 +3207,7 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // still horizontally would be worse than no header at all: every
     // label over the wrong column.
     let stack = column![
-        list_header(vm.prefs, vm.in_trash, vm.column_picker_open, scale),
+        list_header(vm.prefs, vm.in_trash, vm.archive.is_some(), vm.column_picker_open, scale),
         divider(),
         scrollable(list).height(Length::Fill).id(vm.list_scrollable_id.clone()),
     ]
@@ -3183,7 +3223,8 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // sideways to reach the rest of it, which is what a table does
     // everywhere else and is the reason the columns are worth having.
     let pane = density::list_pane_width(vm.viewport_width, vm.sidebar_collapsed);
-    let min_width = density::list_min_width(listing_columns(vm.prefs, vm.in_trash).len(), scale);
+    let min_width =
+        density::list_min_width(listing_columns(vm.prefs, vm.in_trash, vm.archive.is_some()).len(), scale);
     if pane >= min_width {
         return stack.into();
     }
@@ -3380,6 +3421,7 @@ mod tests_support {
                 uid: 1000,
                 owner: Some("alex".to_string()),
                 origin: None,
+                packed: None,
             })
             .collect();
         browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(entries)));
@@ -3426,6 +3468,7 @@ mod tests {
             uid: 1000,
             owner: Some("alex".to_string()),
             origin: None,
+            packed: None,
         }
     }
 
@@ -4068,10 +4111,10 @@ mod tests {
     #[test]
     fn the_trash_listing_shows_original_location_and_deleted() {
         let prefs = Prefs::default();
-        let columns = listing_columns(&prefs, true);
+        let columns = listing_columns(&prefs, true, false);
         assert_eq!(columns.first(), Some(&Column::Origin));
         assert_eq!(column_heading(Column::Modified, true), "Deleted");
-        assert!(!listing_columns(&prefs, false).contains(&Column::Origin), "only in the Trash");
+        assert!(!listing_columns(&prefs, false, false).contains(&Column::Origin), "only in the Trash");
         assert_eq!(column_heading(Column::Modified, false), "Modified");
     }
 
@@ -4693,6 +4736,7 @@ mod tests {
         ViewModel {
             current_dir,
             in_trash: false,
+            archive: None,
             renaming: None,
             column_picker_open: false,
             sidebar_collapsed: false,
@@ -4897,7 +4941,7 @@ mod archive_tests {
     #[test]
     fn inside_an_archive_deleting_is_offered_and_the_trash_is_not() {
         let mut browser = loaded(&[("guide.txt", false)]);
-        browser.set_in_archive(true);
+        browser.set_archive(Some("zip".to_string()));
         browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
 
         let ctx = browser.action_context();
@@ -4922,7 +4966,7 @@ mod archive_tests {
     #[test]
     fn inside_an_archive_a_selection_can_be_extracted_out_of_it() {
         let mut browser = loaded(&[("guide.txt", false)]);
-        browser.set_in_archive(true);
+        browser.set_archive(Some("zip".to_string()));
         browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
 
         assert!(action::enabled(Action::ExtractTo, &browser.action_context()));
@@ -4932,6 +4976,44 @@ mod archive_tests {
                 members: vec![PathBuf::from("/dir/guide.txt")],
                 from: PathBuf::from("/dir"),
             }
+        );
+    }
+
+    // --- what mockup `1j` draws ---------------------------------------
+
+    /// `1j` puts Packed beside Size. It means nothing outside an
+    /// archive, so it appears nowhere else — the same arrangement
+    /// `Origin` has for the Trash.
+    #[test]
+    fn the_packed_column_appears_only_inside_an_archive() {
+        let prefs = Prefs::default();
+        let inside = listing_columns(&prefs, false, true);
+        let outside = listing_columns(&prefs, false, false);
+
+        assert!(inside.contains(&Column::Packed));
+        assert!(!outside.contains(&Column::Packed), "not in an ordinary folder");
+        assert!(
+            !Column::ALL.contains(&Column::Packed),
+            "and not in the column picker, which would offer it everywhere"
+        );
+    }
+
+    /// Beside the number it is a fraction of, which is how `1j` draws
+    /// it — and only when that number is showing, since a compressed
+    /// size with nothing to compare it to is a number with no question
+    /// attached.
+    #[test]
+    fn packed_sits_immediately_after_size_and_not_without_it() {
+        let prefs = Prefs::default();
+        let columns = listing_columns(&prefs, false, true);
+        let size = columns.iter().position(|c| *c == Column::Size).unwrap();
+        assert_eq!(columns[size + 1], Column::Packed);
+
+        let mut hidden = Prefs::default();
+        hidden.columns.set(Column::Size, false);
+        assert!(
+            !listing_columns(&hidden, false, true).contains(&Column::Packed),
+            "with Size off there is nothing for Packed to be beside"
         );
     }
 

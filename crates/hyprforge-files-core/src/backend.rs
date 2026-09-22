@@ -212,6 +212,7 @@ fn build_entry_with(
             uid,
             owner,
             origin: None,
+            packed: None,
         };
     }
 
@@ -238,6 +239,7 @@ fn build_entry_with(
                 uid,
                 owner,
                 origin: None,
+                packed: None,
             }
         }
         Err(_) => Entry {
@@ -256,6 +258,7 @@ fn build_entry_with(
             uid,
             owner,
             origin: None,
+            packed: None,
         },
     }
 }
@@ -338,6 +341,7 @@ pub mod mock {
                 uid: 1000,
                 owner: Some("alex".to_string()),
                 origin: None,
+                packed: None,
             }
         }
 
@@ -359,6 +363,7 @@ pub mod mock {
                 uid: 1000,
                 owner: Some("alex".to_string()),
                 origin: None,
+                packed: None,
             }
         }
 
@@ -457,6 +462,7 @@ pub mod mock {
                     uid: 1000,
                     owner: Some("alex".to_string()),
                     origin: None,
+                    packed: None,
                 });
             }
             for entries in tree.values() {

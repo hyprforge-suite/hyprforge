@@ -78,6 +78,11 @@ pub enum Column {
     /// that matters most — so the Trash listing always shows it and no
     /// other listing ever does. Not in [`Column::ALL`].
     Origin,
+    /// How much room a member takes up inside its archive. The same
+    /// arrangement as [`Column::Origin`] and for the same reason: it
+    /// means nothing outside an archive, so an archive listing always
+    /// shows it and no other listing ever does. Not in [`Column::ALL`].
+    Packed,
 }
 
 impl Column {
@@ -93,6 +98,7 @@ impl Column {
             Column::Owner => "Owner",
             Column::Permissions => "Permissions",
             Column::Modified => "Modified",
+            Column::Packed => "Packed",
             Column::Origin => "Original Location",
         }
     }
@@ -132,7 +138,7 @@ impl Columns {
             Column::Owner => self.owner,
             Column::Permissions => self.permissions,
             Column::Modified => self.modified,
-            Column::Origin => false,
+            Column::Origin | Column::Packed => false,
         }
     }
 
@@ -143,8 +149,8 @@ impl Columns {
             Column::Owner => &mut self.owner,
             Column::Permissions => &mut self.permissions,
             Column::Modified => &mut self.modified,
-            // Not switchable — see the variant's doc.
-            Column::Origin => return,
+            // Not switchable — see the variants' docs.
+            Column::Origin | Column::Packed => return,
         };
         *slot = shown;
     }

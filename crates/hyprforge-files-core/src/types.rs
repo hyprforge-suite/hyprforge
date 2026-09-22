@@ -63,6 +63,17 @@ pub struct Entry {
     /// Location". `None` for everything that is not in the Trash, which
     /// is nearly everything.
     pub origin: Option<PathBuf>,
+    /// How many bytes this member takes up *inside* an archive — the
+    /// "Packed" column mockup `1j` draws beside Size.
+    ///
+    /// `None` for everything that is not in an archive, and also for a
+    /// member in a **tar**: a compressed tar is one stream, so no
+    /// individual member in it has a compressed size to report. That is
+    /// the same distinction `hyprforge_archive::Member::compressed`
+    /// makes, carried through rather than flattened to zero — a member
+    /// whose packed size nobody can state must not render as one that
+    /// compresses to nothing.
+    pub packed: Option<u64>,
 }
 
 /// What "size" means for one entry, as one value.

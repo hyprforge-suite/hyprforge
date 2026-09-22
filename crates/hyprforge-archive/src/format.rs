@@ -136,6 +136,28 @@ impl Format {
         }
     }
 
+    /// What a listing calls this format — the `zstd` in mockup `1j`'s
+    /// summary line.
+    ///
+    /// The *codec*, not the file extension, for a tar: `release.tar.zst`
+    /// is a tar and what is interesting about it beside a byte count is
+    /// what compressed it. A zip and a 7z are named for themselves,
+    /// because the container is the answer there.
+    pub fn label(self) -> &'static str {
+        match self {
+            Format::Zip => "zip",
+            Format::SevenZ => "7z",
+            Format::Tar(Compression::None) => "tar",
+            Format::Tar(c) | Format::Compressed(c) => match c {
+                Compression::Gzip => "gzip",
+                Compression::Bzip2 => "bzip2",
+                Compression::Xz => "xz",
+                Compression::Zstd => "zstd",
+                Compression::None => "tar",
+            },
+        }
+    }
+
     /// Whether this crate can write this format — every one it can read,
     /// as it happens, but the two are separate questions and a caller
     /// offering a "Compress to…" list should ask this one.

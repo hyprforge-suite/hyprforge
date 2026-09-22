@@ -255,6 +255,9 @@ impl ArchiveFsBackend {
             uid: owner.0,
             owner: owner.1.clone(),
             origin: None,
+            // What mockup `1j` calls "Packed". `None` for a tar, where
+            // there is no per-member compressed size to report.
+            packed: member.compressed.filter(|_| !member.is_dir),
             name,
         }
     }

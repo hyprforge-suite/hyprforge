@@ -2296,9 +2296,19 @@ impl App {
                 // not change what the menus offer where they are now:
                 // `apply_dir_loaded` drops such a listing, and this
                 // would otherwise have already acted on it.
-                let in_archive = hyprforge_files_core::archive::split(&path).is_some();
+                // The format's name as well as the fact, because the
+                // summary line owes it — mockup `1j` reads
+                // "zstd · 3 entries · 20.3 MB → 7.0 MB". By name rather
+                // than by sniffing: this runs on the UI thread after
+                // every listing, and the archive has just been read
+                // through the backend anyway, so a second open of it
+                // here would be a file read per navigation to label a
+                // line.
+                let archive = hyprforge_files_core::archive::split(&path)
+                    .and_then(|(archive, _)| hyprforge_archive::Format::by_name(&archive))
+                    .map(|format| format.label().to_string());
                 if path == self.tabs[index].browser.current_dir() {
-                    self.tabs[index].browser.set_in_archive(in_archive);
+                    self.tabs[index].browser.set_archive(archive);
                 }
                 // An encrypted archive — very often a 7z, whose header
                 // can be encrypted so it will not even list. Asked here
@@ -4515,6 +4525,7 @@ mod tests {
             uid: 1000,
             owner: Some("alex".to_string()),
             origin: None,
+            packed: None,
         }
     }
 
@@ -5978,6 +5989,77 @@ mod archive_tests {
             Some(AfterUnlock::Extract(archive))
         );
         assert!(app.status.is_none(), "the prompt is the report");
+    }
+
+    // --- what mockup `1j` draws, end to end ---------------------------
+
+    /// The Packed column has to be fed by something. A zip states a
+    /// compressed size per entry; a tar cannot, because it is one
+    /// compressed stream — and that difference has to survive all the
+    /// way to the listing rather than being flattened to zero.
+    #[test]
+    fn a_zip_reports_a_packed_size_per_member_and_a_tar_reports_none() {
+        use hyprforge_files_core::backend::FsBackend;
+
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("payload");
+        std::fs::create_dir_all(&tree).unwrap();
+        // Compressible, so packed is visibly smaller than size.
+        std::fs::write(tree.join("big.txt"), "the quick brown fox ".repeat(500)).unwrap();
+
+        let sources = [Source {
+            path: tree.clone(),
+            as_member: "payload".to_string(),
+        }];
+
+        let zip = dir.path().join("sample.zip");
+        StdArchives.create(&zip, Format::Zip, &sources, &mut NoProgress).unwrap();
+        let tar = dir.path().join("sample.tar.gz");
+        StdArchives
+            .create(
+                &tar,
+                Format::Tar(hyprforge_archive::Compression::Gzip),
+                &sources,
+                &mut NoProgress,
+            )
+            .unwrap();
+
+        let backend = hyprforge_files_core::trash::RoutingBackend::default();
+
+        let from_zip = backend.read_dir(&zip.join("payload")).unwrap();
+        let member = from_zip.iter().find(|e| e.name == "big.txt").unwrap();
+        let packed = member.packed.expect("a zip states a compressed size per entry");
+        assert!(
+            packed < 10_000,
+            "the packed size should be the compressed one, not the original: {packed}"
+        );
+
+        let from_tar = backend.read_dir(&tar.join("payload")).unwrap();
+        let member = from_tar.iter().find(|e| e.name == "big.txt").unwrap();
+        assert_eq!(
+            member.packed, None,
+            "a tar is one stream; no member in it has a compressed size to report"
+        );
+    }
+
+    /// The format's own name, which nothing in a listing of members
+    /// says — the `zstd` that heads `1j`'s summary line.
+    #[test]
+    fn an_archive_is_labelled_by_what_compressed_it() {
+        use hyprforge_archive::{Compression, Format};
+
+        assert_eq!(
+            Format::by_name(Path::new("release-0.9.tar.zst")).map(|f| f.label()),
+            Some("zstd"),
+            "mockup 1j reads \u{201C}zstd\u{201D} for exactly this file"
+        );
+        assert_eq!(Format::by_name(Path::new("notes.zip")).map(|f| f.label()), Some("zip"));
+        assert_eq!(Format::by_name(Path::new("notes.7z")).map(|f| f.label()), Some("7z"));
+        assert_eq!(
+            Format::Tar(Compression::None).label(),
+            "tar",
+            "an uncompressed tar is named for itself"
+        );
     }
 
     // --- cut out of an archive --------------------------------------
