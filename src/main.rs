@@ -180,6 +180,8 @@ fn main() -> iced::Result {
         compressing: None,
         unlocking: None,
         keyring,
+        opened_members: Vec::new(),
+        writeback: None,
         scratch: Arc::new(Scratch::default()),
         opener: Opener::default(),
         jobs: Vec::new(),
@@ -400,6 +402,13 @@ enum Message {
     /// Members were unpacked so they could go on the clipboard as real
     /// files — see the `SetClipboard` arm in `handle_outcome`.
     ArchiveCopiesReady(Result<Vec<PathBuf>, String>),
+    /// Time to look at whether any file opened out of an archive has
+    /// been edited since.
+    CheckOpenedMembers,
+    /// Put the edited copy back into the archive it came from.
+    WriteBackConfirm,
+    /// Leave the archive as it is.
+    WriteBackDismiss,
     /// The password field changed.
     UnlockTyped(String),
     /// Try the typed password.
@@ -600,6 +609,15 @@ struct App {
     /// well as there because the prompt is the window's and the listing
     /// is the backend's.
     keyring: Arc<hyprforge_archive::Keyring>,
+    /// Members unpacked out of an archive and handed to another
+    /// application, watched for edits — see [`OpenedMember`].
+    opened_members: Vec<OpenedMember>,
+    /// An edit to one of those, waiting to be answered.
+    ///
+    /// One at a time: two notices stacked would be two questions about
+    /// two files with one Save button each, and the second would arrive
+    /// under the first.
+    writeback: Option<OpenedMember>,
     /// Where members opened out of an archive are unpacked to.
     ///
     /// One directory for the whole process, removed when it exits — see
@@ -812,6 +830,60 @@ impl JobKind {
                 _ => "updated",
             },
         }
+    }
+}
+
+/// How often a file opened out of an archive is checked for edits.
+///
+/// Two seconds, not two hundred milliseconds: this is waiting for a
+/// person to save in another application, and the cost of noticing a
+/// second late is nothing while the cost of asking the filesystem
+/// twenty times as often is paid on every tick forever.
+const WATCH_OPENED_EVERY: u64 = 2_000;
+
+/// A file unpacked out of an archive and opened in something else.
+///
+/// Tracked so an edit to the copy can be offered back to the archive.
+/// Offered, never applied: writing it back rewrites the whole archive
+/// (see `hyprforge_archive::write`), and doing that behind someone's
+/// back because a text editor saved a file is not a decision this app
+/// gets to make for them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenedMember {
+    /// The real file on disk, in the scratch directory.
+    copy: PathBuf,
+    archive: PathBuf,
+    /// The member's path inside the archive.
+    member: String,
+    /// What the copy looked like when it was written. Both, not just the
+    /// timestamp: an mtime has one-second resolution on some
+    /// filesystems, so a save that lands inside the same second would
+    /// otherwise look like no change at all — the same pairing
+    /// `ArchiveFsBackend`'s index cache uses, for the same reason.
+    stamp: (Option<std::time::SystemTime>, u64),
+}
+
+impl OpenedMember {
+    /// How the file looks now, or `None` if it has gone.
+    fn stamp_of(copy: &Path) -> Option<(Option<std::time::SystemTime>, u64)> {
+        let meta = std::fs::metadata(copy).ok()?;
+        Some((meta.modified().ok(), meta.len()))
+    }
+
+    /// Whether the copy has been written to since it was unpacked.
+    fn changed(&self) -> bool {
+        match Self::stamp_of(&self.copy) {
+            Some(now) => now != self.stamp,
+            // Gone. Not a change to offer: there is nothing to write
+            // back, and whatever removed it did not mean "put this in
+            // the archive".
+            None => false,
+        }
+    }
+
+    /// The member's final name, for the notice.
+    fn name(&self) -> &str {
+        self.member.rsplit('/').next().unwrap_or(&self.member)
     }
 }
 
@@ -1053,12 +1125,12 @@ impl App {
             // knows. So it is unpacked to a scratch directory first and
             // the copy there is what gets opened.
             //
-            // Read-only in effect, and deliberately not advertised as
-            // anything else: edits made in whatever opens it land on the
-            // copy, not in the archive. Writing them back would mean
-            // watching the file and rewriting the archive behind
-            // someone's back — a thing that should be asked for, not
-            // assumed, and it is not in this change.
+            // The copy is what gets edited, not the archive. That is
+            // watched: if whatever opened it saves, the window offers to
+            // put it back (see `OpenedMember` and `writeback_notice`).
+            // Offered and never applied — writing back rewrites the
+            // whole archive, and doing that because a text editor
+            // autosaved is not a decision this app gets to make.
             Outcome::Activated(path) if hyprforge_files_core::archive::split(&path).is_some() => {
                 self.open_from_archive(path)
             }
@@ -2244,7 +2316,22 @@ impl App {
                 self.chooser = None;
                 Task::none()
             }
-            Message::ArchiveMemberReady { result: Ok(path), .. } => {
+            Message::ArchiveMemberReady { archive, member, result: Ok(path) } => {
+                // Remembered now, with the copy's shape as it was
+                // written, so a later edit is recognisable as one. A
+                // second open of the same member replaces the first
+                // rather than watching it twice.
+                if let Some((_, inside)) = hyprforge_files_core::archive::split(&member) {
+                    self.opened_members.retain(|m| m.copy != path);
+                    if let Some(stamp) = OpenedMember::stamp_of(&path) {
+                        self.opened_members.push(OpenedMember {
+                            copy: path.clone(),
+                            archive,
+                            member: inside,
+                            stamp,
+                        });
+                    }
+                }
                 // Through the ordinary opening path from here, chooser
                 // and all: what is on disk now is a perfectly normal
                 // file, and which application opens it is the same
@@ -2266,6 +2353,42 @@ impl App {
             Message::ArchiveCopiesReady(Err(why)) => {
                 self.status = Some(why);
                 Task::none()
+            }
+            Message::CheckOpenedMembers => {
+                // A question already on screen is not replaced by
+                // another: the person is being asked about one file, and
+                // swapping it for a second under the same button would
+                // be a different file saved than the one they read.
+                if self.writeback.is_some() {
+                    return Task::none();
+                }
+                // Dropped as they vanish — a scratch copy that is gone
+                // has nothing to write back, and keeping it would mean
+                // checking a missing file forever.
+                self.opened_members.retain(|m| m.copy.exists());
+                if let Some(at) = self.opened_members.iter().position(|m| m.changed()) {
+                    // Taken out of the watch list: whatever the answer,
+                    // this edit has been asked about, and leaving it
+                    // there would ask again on the next tick.
+                    self.writeback = Some(self.opened_members.remove(at));
+                }
+                Task::none()
+            }
+            Message::WriteBackDismiss => {
+                self.writeback = None;
+                Task::none()
+            }
+            Message::WriteBackConfirm => {
+                let Some(edited) = self.writeback.take() else {
+                    return Task::none();
+                };
+                self.start_archive_job(archive_jobs::Work::Edit {
+                    archive: edited.archive,
+                    edits: vec![hyprforge_archive::Edit::Add {
+                        source: edited.copy,
+                        as_member: edited.member,
+                    }],
+                })
             }
             Message::UnlockTyped(typed) => {
                 if let Some(unlocking) = &mut self.unlocking {
@@ -2559,6 +2682,13 @@ impl App {
             content = content.push(undo_notice(text, scale));
         }
 
+        // Below the listing rather than over it: the person is probably
+        // still in the other application, and a modal that stole the
+        // window would interrupt the editing it is asking about.
+        if let Some(edited) = &self.writeback {
+            content = content.push(writeback_notice(edited, scale));
+        }
+
         if let Some(status) = &self.status {
             let bar = row![
                 scaled_text(status.clone(), BASE_TEXT_SIZE, scale).width(Length::Fill),
@@ -2634,8 +2764,21 @@ impl App {
             }
             key_press(&event).map(Message::KeyPressed)
         });
+        // Polled rather than watched with inotify, and only while
+        // something is actually open out of an archive. A watch would be
+        // a dependency and a file descriptor per file to learn something
+        // this cheap: two `stat`s a second over a handful of paths,
+        // costing nothing when the list is empty because the
+        // subscription does not exist then.
+        let edits = if self.opened_members.is_empty() {
+            Subscription::none()
+        } else {
+            iced::time::every(std::time::Duration::from_millis(WATCH_OPENED_EVERY))
+                .map(|_| Message::CheckOpenedMembers)
+        };
         Subscription::batch([
             keys,
+            edits,
             window::resize_events().map(|(_, size)| Message::WindowResized(size)),
             pointer::track(),
             iced::event::listen_with(field_escape),
@@ -2863,6 +3006,30 @@ fn chooser_dialog<'a>(chooser: &Chooser, scale: FontScale) -> Element<'a, Messag
         .into(),
         scale,
     )
+}
+
+/// "guide.txt was edited · Update archive" — the offer to put a scratch
+/// copy back where it came from.
+///
+/// A notice and not a dialog, deliberately. The edit happened in another
+/// application and that is probably still where the person is looking; a
+/// modal appearing over this window would interrupt the work it is
+/// asking about, and would have to be answered before the file manager
+/// could be used for anything else.
+fn writeback_notice<'a>(edited: &OpenedMember, scale: FontScale) -> Element<'a, Message> {
+    let text = format!(
+        "\u{201C}{}\u{201D} was edited. It is a copy — the archive still has the old one.",
+        edited.name()
+    );
+    let bar = row![
+        scaled_text(text, BASE_TEXT_SIZE, scale).width(Length::Fill),
+        secondary_button("Discard").on_press(Message::WriteBackDismiss),
+        primary_button("Update archive").on_press(Message::WriteBackConfirm),
+    ]
+    .spacing(spacing::SM)
+    .align_y(iced::Alignment::Center)
+    .padding(spacing::SM);
+    container(bar).width(Length::Fill).into()
 }
 
 /// The password prompt for an encrypted archive.
@@ -3878,6 +4045,8 @@ mod tests {
             compressing: None,
             unlocking: None,
             keyring: Arc::new(hyprforge_archive::Keyring::new()),
+            opened_members: Vec::new(),
+            writeback: None,
             scratch: Arc::new(Scratch::default()),
             // Never the real one: a test that opens a file would start
             // an application on the machine running the tests.
@@ -5655,6 +5824,166 @@ mod archive_tests {
             Some(AfterUnlock::Extract(archive))
         );
         assert!(app.status.is_none(), "the prompt is the report");
+    }
+
+    // --- write-back -----------------------------------------------
+
+    fn opened(dir: &Path, archive: &Path, member: &str, contents: &[u8]) -> OpenedMember {
+        let copy = dir.join("copy.txt");
+        std::fs::write(&copy, contents).unwrap();
+        OpenedMember {
+            stamp: OpenedMember::stamp_of(&copy).unwrap(),
+            copy,
+            archive: archive.to_path_buf(),
+            member: member.to_string(),
+        }
+    }
+
+    /// The copy is what was handed to another application; until it is
+    /// written to, there is nothing to offer.
+    #[test]
+    fn an_untouched_copy_is_not_an_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let tracked = opened(dir.path(), Path::new("/a.zip"), "notes.txt", b"before");
+        assert!(!tracked.changed());
+    }
+
+    /// Length *and* timestamp, because an mtime has one-second
+    /// resolution on some filesystems — a save inside the same second
+    /// that changed the length would otherwise read as no change.
+    #[test]
+    fn a_saved_copy_is_recognised_even_within_the_same_second() {
+        let dir = tempfile::tempdir().unwrap();
+        let tracked = opened(dir.path(), Path::new("/a.zip"), "notes.txt", b"before");
+        std::fs::write(&tracked.copy, b"after, and a different length").unwrap();
+        assert!(tracked.changed());
+    }
+
+    /// Deleting the scratch copy is not somebody asking for the archive
+    /// to be changed.
+    #[test]
+    fn a_copy_that_has_gone_is_not_an_edit_to_write_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let tracked = opened(dir.path(), Path::new("/a.zip"), "notes.txt", b"before");
+        std::fs::remove_file(&tracked.copy).unwrap();
+        assert!(!tracked.changed());
+    }
+
+    #[test]
+    fn an_edit_is_offered_once_and_not_asked_about_again_every_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_with(dir.path(), "sample.zip");
+        let mut app = app_for_test(&[dir.path().to_str().unwrap()]);
+        app.opened_members
+            .push(opened(dir.path(), &archive, "payload/readme.md", b"before"));
+        std::fs::write(dir.path().join("copy.txt"), b"after, longer").unwrap();
+
+        let _ = app.update(Message::CheckOpenedMembers);
+        assert!(app.writeback.is_some(), "the edit has to be offered");
+        assert!(
+            app.opened_members.is_empty(),
+            "and taken off the watch list, or the next tick asks again"
+        );
+    }
+
+    /// Nothing is written until it is asked for: the archive keeps the
+    /// old contents while the offer stands.
+    #[test]
+    fn an_edit_alone_changes_nothing_in_the_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_with(dir.path(), "sample.zip");
+        let mut app = app_for_test(&[dir.path().to_str().unwrap()]);
+        app.opened_members
+            .push(opened(dir.path(), &archive, "payload/readme.md", b"before"));
+        std::fs::write(dir.path().join("copy.txt"), b"edited in another app").unwrap();
+
+        let _ = app.update(Message::CheckOpenedMembers);
+        settle();
+
+        assert_eq!(
+            StdArchives.read_member(&archive, "payload/readme.md").unwrap(),
+            b"# hello",
+            "the archive must not change because a copy was saved"
+        );
+    }
+
+    #[test]
+    fn accepting_the_offer_puts_the_edited_copy_into_the_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_with(dir.path(), "sample.zip");
+        let mut app = app_for_test(&[dir.path().to_str().unwrap()]);
+        app.opened_members
+            .push(opened(dir.path(), &archive, "payload/readme.md", b"before"));
+        std::fs::write(dir.path().join("copy.txt"), b"edited in another app").unwrap();
+
+        let _ = app.update(Message::CheckOpenedMembers);
+        let _ = app.update(Message::WriteBackConfirm);
+        for _ in 0..60 {
+            if StdArchives
+                .read_member(&archive, "payload/readme.md")
+                .is_ok_and(|b| b == b"edited in another app")
+            {
+                break;
+            }
+            settle();
+        }
+
+        assert_eq!(
+            StdArchives.read_member(&archive, "payload/readme.md").unwrap(),
+            b"edited in another app"
+        );
+        assert!(
+            StdArchives.index(&archive).unwrap().get("payload/docs/guide.txt").is_some(),
+            "the rest of the archive survived the rewrite"
+        );
+    }
+
+    #[test]
+    fn discarding_the_offer_leaves_the_archive_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_with(dir.path(), "sample.zip");
+        let mut app = app_for_test(&[dir.path().to_str().unwrap()]);
+        app.opened_members
+            .push(opened(dir.path(), &archive, "payload/readme.md", b"before"));
+        std::fs::write(dir.path().join("copy.txt"), b"edited in another app").unwrap();
+
+        let _ = app.update(Message::CheckOpenedMembers);
+        let _ = app.update(Message::WriteBackDismiss);
+        settle();
+
+        assert!(app.writeback.is_none());
+        assert_eq!(
+            StdArchives.read_member(&archive, "payload/readme.md").unwrap(),
+            b"# hello"
+        );
+    }
+
+    /// Two edits at once would be two questions with one button each,
+    /// the second arriving under the first.
+    #[test]
+    fn a_second_edit_waits_until_the_first_has_been_answered() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_with(dir.path(), "sample.zip");
+        let mut app = app_for_test(&[dir.path().to_str().unwrap()]);
+
+        let first = opened(dir.path(), &archive, "payload/readme.md", b"before");
+        let second_dir = dir.path().join("second");
+        std::fs::create_dir(&second_dir).unwrap();
+        let second = opened(&second_dir, &archive, "payload/docs/guide.txt", b"before");
+        app.opened_members.push(first);
+        app.opened_members.push(second);
+        std::fs::write(dir.path().join("copy.txt"), b"edited one").unwrap();
+        std::fs::write(second_dir.join("copy.txt"), b"edited two").unwrap();
+
+        let _ = app.update(Message::CheckOpenedMembers);
+        let _ = app.update(Message::CheckOpenedMembers);
+
+        assert!(app.writeback.is_some());
+        assert_eq!(
+            app.opened_members.len(),
+            1,
+            "the second edit stays waiting rather than replacing the question on screen"
+        );
     }
 
     /// CLAUDE.md's rule, checked where it would actually break: the
