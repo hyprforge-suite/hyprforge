@@ -180,6 +180,29 @@ cancels per chunk; this is the popover and the queue window over it.
 Archives and network shares were already phases 6 and 7 of the original plan;
 the drawer is new and is the most cuttable thing here.
 
+*Archives are done, ahead of this order* — see `hyprforge-archive` and
+`hyprforge-files-core::archive`. Two deliberate departures from `1j`, and one
+thing still owed:
+
+- The mockup labels the pane **read-only**. It is not: members can be added,
+  renamed and deleted, and a file opened out of an archive is watched so an
+  edit can be offered back. Decided with the user; the rest of `1j` is
+  followed.
+- The mockup's buttons are **Extract here** and **Extract to…**. What shipped
+  is *Extract* (into a new folder named after the archive, so a tarbomb cannot
+  scatter two hundred files) and *Extract Here* (into the folder in view).
+  There is no destination picker: inside an archive "here" means the folder
+  the archive lives in, which is the only real folder on screen, and a picker
+  that almost always answers that is a dialog charging for something nobody
+  chose.
+- **Still owed from `1j`:** the `Packed` column (per-member compressed size,
+  which `hyprforge_archive::Member::compressed` already carries and nothing
+  displays) and the summary line — `zstd · 3 entries · 20.3 MB → 7.0 MB`.
+
+`1f` draws an extraction sitting in the transfers queue beside a copy, and
+that already works the way it has to: archive jobs report the same `JobEvent`
+as a paste, so when phase G builds the popover they appear in it for free.
+
 ## Deferred, and what that costs
 
 Named so nothing here is mistaken for an oversight:
