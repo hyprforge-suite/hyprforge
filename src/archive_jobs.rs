@@ -93,6 +93,26 @@ impl Work {
         }
     }
 
+    /// What taking this back would mean, if anything.
+    ///
+    /// Worked out before the job runs, because the destination is known
+    /// then and the summary does not carry it. `None` for an edit: see
+    /// `hyprforge_files_core::undo`'s module doc on why an archive
+    /// rewrite has no honest undo.
+    pub fn undoes(&self) -> Undoes {
+        match self {
+            // Only for a single archive extracted into a folder this
+            // job made. Extracting several at once, or into a folder
+            // that was already there, has no one thing to take back —
+            // and trashing a folder somebody chose, with whatever else
+            // was in it, is not an undo.
+            Work::Extract { archives, into: None } if archives.len() == 1 => Undoes::Extracted,
+            Work::Extract { .. } | Work::ExtractMembers { .. } => Undoes::Nothing,
+            Work::Compress { .. } => Undoes::Compressed,
+            Work::Edit { .. } => Undoes::Nothing,
+        }
+    }
+
     /// The archive this work is about, when there is exactly one — so
     /// the caller can look up a password for it.
     ///
@@ -118,6 +138,15 @@ impl Work {
             Work::Edit { .. } => "Updating",
         }
     }
+}
+
+/// What taking a piece of work back would mean — the kind only; the
+/// path comes from what the job reports it actually made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Undoes {
+    Nothing,
+    Extracted,
+    Compressed,
 }
 
 /// What the archive crate should do about something already at the

@@ -339,6 +339,18 @@ pub fn undo(done: hyprforge_files_core::undo::Undoable) -> (Vec<std::path::PathB
                 }
             }
         }
+        // Both go to the Trash rather than being deleted, the rule
+        // `Copied` above already follows: an undo that loses a file is
+        // worse than no undo, and an extracted folder may well have
+        // things in it by now that the extraction did not put there.
+        Undoable::Extracted(into) | Undoable::Compressed(into) => {
+            if exists(&into) {
+                match hyprforge_fileops::trash(&into) {
+                    Ok(_) => touched(&mut dirs, &into),
+                    Err(e) => errors.push(e.to_string()),
+                }
+            }
+        }
         Undoable::MadeFolder(path) => match std::fs::remove_dir(&path) {
             Ok(()) => touched(&mut dirs, &path),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
