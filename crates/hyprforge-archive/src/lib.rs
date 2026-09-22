@@ -50,6 +50,7 @@ pub mod model;
 pub mod read;
 pub mod stream;
 pub mod timestamp;
+pub mod unlock;
 pub mod write;
 
 pub use backend::{ArchiveBackend, Collision, Edit, ExtractReport, ExtractRequest, Progress, Source};
@@ -57,3 +58,9 @@ pub use error::{ArchiveError, Result};
 pub use format::{Compression, Format};
 pub use model::{Index, Member};
 pub use read::StdArchives;
+pub use unlock::{Keyring, Unlock};
+// Re-exported because it is part of this crate's surface: `Unlock::with`
+// takes one, so every caller that has a password to supply needs the
+// type, and making each of them depend on `hyprforge-secret` separately
+// would be asking them to spell out a dependency this crate already has.
+pub use hyprforge_secret::Secret;

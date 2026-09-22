@@ -30,7 +30,7 @@
 
 use crate::backend::FsBackend;
 use crate::types::{Entry, EntryKind, EntrySize, FilesError, ItemCount};
-use hyprforge_archive::{ArchiveError, Format, Index, Member, StdArchives};
+use hyprforge_archive::{ArchiveError, Format, Index, Keyring, Member, StdArchives};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -100,6 +100,14 @@ pub fn join(archive: &Path, member: &str) -> PathBuf {
 pub struct ArchiveFsBackend {
     archives: Box<dyn hyprforge_archive::ArchiveBackend>,
     cache: Mutex<VecDeque<Cached>>,
+    /// Passwords this process has been told, one per archive.
+    ///
+    /// Shared with whoever owns this backend, because the *prompt* is
+    /// the host's and the *listing* is this backend's, and a password
+    /// typed into the one has to reach the other. See
+    /// [`hyprforge_archive::Keyring`], which also says why it is never
+    /// written anywhere.
+    keyring: Arc<Keyring>,
 }
 
 struct Cached {
@@ -123,10 +131,23 @@ impl ArchiveFsBackend {
     /// With a specific archive backend — the seam this crate's tests use
     /// to browse a seeded archive rather than one on disk.
     pub fn with(archives: Box<dyn hyprforge_archive::ArchiveBackend>) -> Self {
+        ArchiveFsBackend::with_keyring(archives, Arc::new(Keyring::new()))
+    }
+
+    pub fn with_keyring(
+        archives: Box<dyn hyprforge_archive::ArchiveBackend>,
+        keyring: Arc<Keyring>,
+    ) -> Self {
         ArchiveFsBackend {
             archives,
             cache: Mutex::new(VecDeque::new()),
+            keyring,
         }
+    }
+
+    /// The passwords this backend consults, so a host can add one.
+    pub fn keyring(&self) -> &Arc<Keyring> {
+        &self.keyring
     }
 
     /// Whether this backend is the one for `path`.
@@ -154,7 +175,11 @@ impl ArchiveFsBackend {
             return Ok(hit.index.clone());
         }
 
-        let index = Arc::new(self.archives.index(archive).map_err(|e| to_files_error(archive, e))?);
+        let index = Arc::new(
+            self.archives
+                .index_with(archive, &self.keyring.unlock_for(archive))
+                .map_err(|e| to_files_error(archive, e))?,
+        );
 
         let mut cache = self.cache.lock().unwrap();
         // Any stale entry for this same archive goes, so a rewritten
@@ -245,6 +270,9 @@ fn to_files_error(path: &Path, error: ArchiveError) -> FilesError {
     let message = error.to_string();
     match error {
         ArchiveError::NotAnArchive { .. } => FilesError::NotAnArchive {
+            path: path.to_path_buf(),
+        },
+        ArchiveError::PasswordRequired { .. } => FilesError::PasswordRequired {
             path: path.to_path_buf(),
         },
         ArchiveError::MemberNotFound { .. } => FilesError::NotFound {

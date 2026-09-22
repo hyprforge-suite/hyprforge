@@ -81,6 +81,9 @@ pub enum DirErrorKind {
     NotFound,
     NotADirectory,
     Vanished,
+    /// The listing is inside an encrypted archive. Never rendered
+    /// either: the host opens a password prompt and reads again.
+    PasswordRequired,
     /// The path led through a file that looked like an archive and is
     /// not one. Never rendered: [`Browser::apply_dir_loaded`] turns it
     /// into an ordinary activation instead — see there.
@@ -96,6 +99,7 @@ impl From<&FilesError> for DirError {
             FilesError::NotADirectory { .. } => DirErrorKind::NotADirectory,
             FilesError::VanishedMidRead { .. } => DirErrorKind::Vanished,
             FilesError::NotAnArchive { .. } => DirErrorKind::NotAnArchive,
+            FilesError::PasswordRequired { .. } => DirErrorKind::PasswordRequired,
             FilesError::Elsewhere { .. } | FilesError::Io { .. } => DirErrorKind::Other,
         };
         DirError { message: e.to_string(), kind }

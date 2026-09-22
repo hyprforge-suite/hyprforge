@@ -98,7 +98,12 @@ fn main() -> iced::Result {
     // `hyprforge_files_core::trash`. Behind `Arc<dyn FsBackend>` because
     // each read runs on a background thread and because that is the type
     // that lets a test drive this whole window against `MockBackend`.
-    let backend: Arc<dyn FsBackend> = Arc::new(RoutingBackend::default());
+    let routing = RoutingBackend::default();
+    // Taken before the router is boxed away behind `dyn FsBackend`,
+    // which is the last moment the concrete type is nameable — see
+    // `RoutingBackend::keyring`.
+    let keyring = routing.keyring();
+    let backend: Arc<dyn FsBackend> = Arc::new(routing);
     let start_dir = resolve_start_dir(backend.as_ref(), std::env::args().nth(1));
 
     // A `files.toml` that exists and will not parse must be reported,
@@ -173,6 +178,8 @@ fn main() -> iced::Result {
         mime: hyprforge_mime::MimeDb::load(),
         chooser: None,
         compressing: None,
+        unlocking: None,
+        keyring,
         scratch: Arc::new(Scratch::default()),
         opener: Opener::default(),
         jobs: Vec::new(),
@@ -381,10 +388,23 @@ enum Message {
     PinnedLoaded(Vec<PinnedItem>),
     /// A member was unpacked out of an archive to a scratch directory,
     /// and the copy there is ready to open — or could not be made.
-    ArchiveMemberReady(Result<PathBuf, String>),
+    ///
+    /// Carries the archive it came from, because the failure worth
+    /// acting on (it needs a password) needs to know which archive to
+    /// ask about.
+    ArchiveMemberReady {
+        archive: PathBuf,
+        member: PathBuf,
+        result: Result<PathBuf, ArchiveFailure>,
+    },
     /// Members were unpacked so they could go on the clipboard as real
     /// files — see the `SetClipboard` arm in `handle_outcome`.
     ArchiveCopiesReady(Result<Vec<PathBuf>, String>),
+    /// The password field changed.
+    UnlockTyped(String),
+    /// Try the typed password.
+    UnlockConfirm,
+    UnlockCancel,
     /// The name in the Compress dialog changed.
     CompressNameChanged(String),
     /// A format button in the Compress dialog.
@@ -573,6 +593,13 @@ struct App {
     chooser: Option<Chooser>,
     /// An open "Compress\u{2026}" dialog.
     compressing: Option<Compressing>,
+    /// An open password prompt for an encrypted archive.
+    unlocking: Option<Unlocking>,
+    /// Passwords typed into that prompt, shared with the backend that
+    /// lists archives — see `hyprforge_archive::Keyring`. Held here as
+    /// well as there because the prompt is the window's and the listing
+    /// is the backend's.
+    keyring: Arc<hyprforge_archive::Keyring>,
     /// Where members opened out of an archive are unpacked to.
     ///
     /// One directory for the whole process, removed when it exits — see
@@ -788,6 +815,48 @@ impl JobKind {
     }
 }
 
+/// Why unpacking a member out of an archive did not produce a file.
+///
+/// Two cases and not a string, because the window *acts* on one of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ArchiveFailure {
+    NeedsPassword,
+    /// Already a sentence for the status bar.
+    Other(String),
+}
+
+/// A password being asked for, and what to do once it is given.
+///
+/// The `then` is the whole reason this is a struct rather than a field:
+/// an encrypted archive can be met while *listing* it, while opening one
+/// file out of it, or partway through extracting it, and the right thing
+/// to do after the password arrives is different in each case. Asking
+/// and then doing nothing — leaving someone to repeat whatever they were
+/// doing — is the failure this avoids.
+struct Unlocking {
+    archive: PathBuf,
+    /// What has been typed. A `Secret`, so no `Debug` anywhere in this
+    /// window can print it — CLAUDE.md's rule about a keystroke never
+    /// reaching a log, and the reason this is not a plain `String`.
+    typed: hyprforge_archive::Secret<String>,
+    then: AfterUnlock,
+    /// Whether a password has already been refused for this archive, so
+    /// the prompt can say "that wasn't it" rather than looking like it
+    /// ignored the first attempt.
+    retry: bool,
+}
+
+/// What the password was being asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AfterUnlock {
+    /// Read this listing again — the archive would not even list.
+    Listing { tab: u64, dir: PathBuf },
+    /// Open this member.
+    Open(PathBuf),
+    /// Run this archive job again.
+    Extract(PathBuf),
+}
+
 /// The process's unpacking area, made the first time something needs
 /// it.
 ///
@@ -822,7 +891,12 @@ impl Scratch {
 /// Under the member's own path inside a folder named for the archive, so
 /// two archives holding a `README.md` do not overwrite each other's, and
 /// so the name in whatever opens it is the name from the archive.
-fn extract_one(archive: &Path, member: &str, scratch: &Path) -> Result<PathBuf, String> {
+fn extract_one(
+    archive: &Path,
+    member: &str,
+    scratch: &Path,
+    unlock: &hyprforge_archive::Unlock,
+) -> Result<PathBuf, ArchiveFailure> {
     use hyprforge_archive::backend::{ArchiveBackend, Collision, ExtractRequest, NoProgress};
 
     let holder = archive
@@ -842,10 +916,23 @@ fn extract_one(archive: &Path, member: &str, scratch: &Path) -> Result<PathBuf, 
         collision: Collision::Overwrite,
     };
     let report = hyprforge_archive::StdArchives
-        .extract(archive, &request, &mut NoProgress)
-        .map_err(|e| e.to_string())?;
+        .extract_with(archive, &request, unlock, &mut NoProgress)
+        .map_err(|e| match e {
+            hyprforge_archive::ArchiveError::PasswordRequired { .. } => {
+                ArchiveFailure::NeedsPassword
+            }
+            other => ArchiveFailure::Other(other.to_string()),
+        })?;
+    // A member whose *contents* would not decrypt fails as a row rather
+    // than as a call — see `extract::Run::item` — so the password case
+    // has to be recognised here too, or opening one encrypted file out
+    // of an otherwise-readable zip would report "couldn't be read" and
+    // never ask.
     if let Some((_, why)) = report.failed.first() {
-        return Err(format!("{member} couldn't be read: {why}"));
+        if why.to_lowercase().contains("password") {
+            return Err(ArchiveFailure::NeedsPassword);
+        }
+        return Err(ArchiveFailure::Other(format!("{member} couldn't be read: {why}")));
     }
     Ok(dest.join(member))
 }
@@ -1143,6 +1230,14 @@ impl App {
             {
                 let scratch = self.scratch.clone();
                 let paths = clip.paths.clone();
+                // One password lookup for the whole selection: every
+                // path in a listing is inside the same archive.
+                let unlock = clip
+                    .paths
+                    .first()
+                    .and_then(|p| hyprforge_files_core::archive::split(p))
+                    .map(|(archive, _)| self.keyring.unlock_for(&archive))
+                    .unwrap_or_default();
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
@@ -1154,7 +1249,21 @@ impl App {
                                 else {
                                     continue;
                                 };
-                                copies.push(extract_one(&archive, &member, &dir)?);
+                                copies.push(
+                                    extract_one(&archive, &member, &dir, &unlock).map_err(
+                                        |failure| match failure {
+                                            // Copying several at once is
+                                            // not a place to open a
+                                            // prompt mid-loop, so this
+                                            // says what to do instead.
+                                            ArchiveFailure::NeedsPassword => format!(
+                                                "{} is encrypted — open it once to unlock it, then copy.",
+                                                archive.display()
+                                            ),
+                                            ArchiveFailure::Other(why) => why,
+                                        },
+                                    )?,
+                                );
                             }
                             Ok(copies)
                         })
@@ -1396,6 +1505,28 @@ impl App {
         Task::run(events, Message::Job)
     }
 
+    /// Asks for this archive's password, and remembers what to do once
+    /// it arrives.
+    ///
+    /// `retry` is set when a password for this archive has already been
+    /// refused, so the prompt says so — without it, a wrong password
+    /// reopens an identical-looking box and reads as the window having
+    /// ignored the first attempt.
+    fn ask_for_password(&mut self, archive: PathBuf, then: AfterUnlock) -> Task<Message> {
+        let retry = self.keyring.knows(&archive);
+        // Forgotten now rather than on the next attempt: whatever is in
+        // there did not work, and leaving it would have every later read
+        // of this archive silently retry the same wrong answer.
+        self.keyring.forget(&archive);
+        self.unlocking = Some(Unlocking {
+            archive,
+            typed: hyprforge_archive::Secret::new(String::new()),
+            then,
+            retry,
+        });
+        Task::none()
+    }
+
     /// Unpacks one member to a scratch directory and opens the copy.
     ///
     /// The scratch directory is the process's own and is cleaned up when
@@ -1408,16 +1539,25 @@ impl App {
             return Task::none();
         };
         let scratch = self.scratch.clone();
+        let unlock = self.keyring.unlock_for(&archive);
+        let opened = path.clone();
+        let from = archive.clone();
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
-                    let dir = scratch.dir()?;
-                    extract_one(&archive, &member, &dir)
+                    let dir = scratch.dir().map_err(ArchiveFailure::Other)?;
+                    extract_one(&archive, &member, &dir, &unlock)
                 })
                 .await
-                .unwrap_or_else(|e| Err(format!("Opening it was interrupted: {e}")))
+                .unwrap_or_else(|e| {
+                    Err(ArchiveFailure::Other(format!("Opening it was interrupted: {e}")))
+                })
             },
-            Message::ArchiveMemberReady,
+            move |result| Message::ArchiveMemberReady {
+                archive: from.clone(),
+                member: opened.clone(),
+                result,
+            },
         )
     }
 
@@ -1460,8 +1600,15 @@ impl App {
         self.next_job_id += 1;
         let dirs = work.touches();
         let doing = work.doing();
+        // Whatever password is already known for the archive this job is
+        // about. Looked up here rather than inside the job: the job runs
+        // on its own thread and the keyring is the window's.
+        let unlock = work
+            .archive()
+            .map(|archive| self.keyring.unlock_for(archive))
+            .unwrap_or_default();
         let (control, events) =
-            archive_jobs::start(id, work, self.config.behaviour.on_conflict);
+            archive_jobs::start(id, work, self.config.behaviour.on_conflict, unlock);
         self.jobs.push(RunningJob {
             id,
             control,
@@ -1497,6 +1644,13 @@ impl App {
                     return Task::none();
                 };
                 let finished = self.jobs.remove(at);
+                // Before the report: this is not a failure to describe,
+                // it is a question to ask, and a status line saying the
+                // extraction went wrong would sit there contradicting
+                // the prompt that follows it.
+                if let Some(archive) = summary.needs_password.clone() {
+                    return self.ask_for_password(archive.clone(), AfterUnlock::Extract(archive));
+                }
                 if let Some(message) = job_report(&finished.kind, &summary) {
                     self.status = Some(message);
                 }
@@ -1938,6 +2092,21 @@ impl App {
                 if path == self.tabs[index].browser.current_dir() {
                     self.tabs[index].browser.set_in_archive(in_archive);
                 }
+                // An encrypted archive — very often a 7z, whose header
+                // can be encrypted so it will not even list. Asked here
+                // rather than shown as an error, because an error with
+                // no way to answer it is a dead end.
+                if result.as_ref().err().map(|e| e.kind)
+                    == Some(hyprforge_files_core::DirErrorKind::PasswordRequired)
+                {
+                    if let Some((archive, _)) = hyprforge_files_core::archive::split(&path) {
+                        let tab = self.tabs[index].id;
+                        return self.ask_for_password(
+                            archive,
+                            AfterUnlock::Listing { tab, dir: path },
+                        );
+                    }
+                }
                 let outcome = self.tabs[index].browser.update(BrowserMessage::DirLoaded(path, result));
                 let task = self.handle_outcome(index, outcome);
                 #[cfg(debug_assertions)]
@@ -2075,7 +2244,7 @@ impl App {
                 self.chooser = None;
                 Task::none()
             }
-            Message::ArchiveMemberReady(Ok(path)) => {
+            Message::ArchiveMemberReady { result: Ok(path), .. } => {
                 // Through the ordinary opening path from here, chooser
                 // and all: what is on disk now is a perfectly normal
                 // file, and which application opens it is the same
@@ -2098,7 +2267,44 @@ impl App {
                 self.status = Some(why);
                 Task::none()
             }
-            Message::ArchiveMemberReady(Err(why)) => {
+            Message::UnlockTyped(typed) => {
+                if let Some(unlocking) = &mut self.unlocking {
+                    unlocking.typed = hyprforge_archive::Secret::new(typed);
+                }
+                Task::none()
+            }
+            Message::UnlockCancel => {
+                self.unlocking = None;
+                Task::none()
+            }
+            Message::UnlockConfirm => {
+                let Some(unlocking) = self.unlocking.take() else {
+                    return Task::none();
+                };
+                // Remembered before the retry, because the retry reads
+                // through the backend and the backend asks the keyring —
+                // there is no other way to hand it down.
+                self.keyring.remember(&unlocking.archive, unlocking.typed);
+                match unlocking.then {
+                    AfterUnlock::Listing { tab, dir } => match self.tab_index(tab) {
+                        Some(index) => self.spawn_read_dir(index, dir),
+                        None => Task::none(),
+                    },
+                    AfterUnlock::Open(path) => self.open_from_archive(path),
+                    AfterUnlock::Extract(archive) => {
+                        self.start_archive_job(archive_jobs::Work::Extract {
+                            archives: vec![archive],
+                            into: None,
+                        })
+                    }
+                }
+            }
+            Message::ArchiveMemberReady {
+                archive,
+                member,
+                result: Err(ArchiveFailure::NeedsPassword),
+            } => self.ask_for_password(archive, AfterUnlock::Open(member)),
+            Message::ArchiveMemberReady { result: Err(ArchiveFailure::Other(why)), .. } => {
                 self.status = Some(why);
                 Task::none()
             }
@@ -2379,6 +2585,12 @@ impl App {
         if let Some(pending) = &self.confirm {
             return iced::widget::stack![window, confirm_dialog(pending, scale)].into();
         }
+        // Above the others: a password prompt is the answer to
+        // something already in flight, so nothing else should be
+        // reachable until it is answered or dismissed.
+        if let Some(unlocking) = &self.unlocking {
+            return iced::widget::stack![window, unlock_dialog(unlocking, scale)].into();
+        }
         if let Some(compressing) = &self.compressing {
             return iced::widget::stack![window, compress_dialog(compressing, scale)].into();
         }
@@ -2646,6 +2858,62 @@ fn chooser_dialog<'a>(chooser: &Chooser, scale: FontScale) -> Element<'a, Messag
         row![
             iced::widget::Space::new().width(Length::Fill),
             secondary_button("Cancel").on_press(Message::CloseChooser),
+        ]
+        .spacing(spacing::SM)
+        .into(),
+        scale,
+    )
+}
+
+/// The password prompt for an encrypted archive.
+///
+/// `secure(true)` on the field, so the characters are never drawn — the
+/// screen is a display like any other, and a password shown in a file
+/// manager is a password shown to whoever is behind you.
+///
+/// There is no "remember this" tick, deliberately. The password is kept
+/// for as long as the window is open and is never written anywhere (see
+/// `hyprforge_archive::Keyring`), and a tick offering more than that
+/// would be offering something this suite has nowhere safe to put.
+fn unlock_dialog<'a>(unlocking: &Unlocking, scale: FontScale) -> Element<'a, Message> {
+    let name = display_name(&unlocking.archive);
+    let body = if unlocking.retry {
+        "That password didn't open it. Try again.".to_string()
+    } else {
+        "This archive is encrypted.".to_string()
+    };
+
+    let field = iced::widget::text_input("Password", unlocking.typed.expose())
+        .secure(true)
+        .on_input(Message::UnlockTyped)
+        .on_submit(Message::UnlockConfirm)
+        .size(scale.apply(BASE_TEXT_SIZE))
+        .width(Length::Fill);
+
+    let extra = column![
+        field,
+        hyprforge_ui::widgets::meta_text(
+            "Kept until this window closes, and never written to disk.",
+            BASE_TEXT_SIZE,
+            scale,
+        ),
+    ]
+    .spacing(spacing::SM);
+
+    let mut confirm = primary_button("Unlock");
+    // An empty password is not a guess worth spending an attempt on.
+    if !unlocking.typed.expose().is_empty() {
+        confirm = confirm.on_press(Message::UnlockConfirm);
+    }
+
+    dialog(
+        format!("Unlock \u{201C}{name}\u{201D}"),
+        body,
+        Some(extra.into()),
+        row![
+            iced::widget::Space::new().width(Length::Fill),
+            secondary_button("Cancel").on_press(Message::UnlockCancel),
+            confirm,
         ]
         .spacing(spacing::SM)
         .into(),
@@ -3608,6 +3876,8 @@ mod tests {
             mime: hyprforge_mime::MimeDb::default(),
             chooser: None,
             compressing: None,
+            unlocking: None,
+            keyring: Arc::new(hyprforge_archive::Keyring::new()),
             scratch: Arc::new(Scratch::default()),
             // Never the real one: a test that opens a file would start
             // an application on the machine running the tests.
@@ -5035,7 +5305,7 @@ mod archive_tests {
     use super::tests::app_for_test;
     use super::*;
     use hyprforge_archive::backend::{ArchiveBackend, NoProgress};
-    use hyprforge_archive::{Format, Source, StdArchives};
+    use hyprforge_archive::{Format, Source, StdArchives, Unlock};
 
     /// A real archive in a temporary directory. Real, because every
     /// claim in this module is about the window and the archive crate
@@ -5150,7 +5420,7 @@ mod archive_tests {
         let archive = archive_with(dir.path(), "sample.zip");
         let scratch = tempfile::tempdir().unwrap();
 
-        let landed = extract_one(&archive, "payload/docs/guide.txt", scratch.path()).unwrap();
+        let landed = extract_one(&archive, "payload/docs/guide.txt", scratch.path(), &Unlock::none()).unwrap();
         assert_eq!(std::fs::read(&landed).unwrap(), b"a guide");
         assert!(
             landed.ends_with("guide.txt"),
@@ -5229,7 +5499,7 @@ mod archive_tests {
         let archive = archive_with(dir.path(), "sample.zip");
         let scratch = tempfile::tempdir().unwrap();
 
-        let landed = extract_one(&archive, "payload/readme.md", scratch.path()).unwrap();
+        let landed = extract_one(&archive, "payload/readme.md", scratch.path(), &Unlock::none()).unwrap();
         assert!(landed.is_file(), "nothing was written for the clipboard to point at");
         assert!(
             hyprforge_files_core::archive::split(&landed).is_none(),
@@ -5237,6 +5507,163 @@ mod archive_tests {
             landed.display()
         );
         assert_eq!(std::fs::read(&landed).unwrap(), b"# hello");
+    }
+
+    /// Writes a zip whose one member is AES-encrypted.
+    fn encrypted_archive(dir: &Path, password: &str) -> PathBuf {
+        use std::io::Write;
+        let archive = dir.join("secret.zip");
+        let file = std::fs::File::create(&archive).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let locked = zip::write::SimpleFileOptions::default()
+            .with_aes_encryption(zip::AesMode::Aes256, password);
+        zip.start_file("secret.txt", locked).unwrap();
+        zip.write_all(b"the hidden thing").unwrap();
+        zip.finish().unwrap();
+        archive
+    }
+
+    /// The whole point of the prompt: a locked member must produce a
+    /// question, not a status line saying it could not be read.
+    #[test]
+    fn opening_a_locked_member_asks_for_a_password_rather_than_reporting_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = encrypted_archive(dir.path(), "hunter2");
+        let mut app = app_for_test(&[archive.to_str().unwrap()]);
+
+        let _task = app.update(Message::ArchiveMemberReady {
+            archive: archive.clone(),
+            member: archive.join("secret.txt"),
+            result: Err(ArchiveFailure::NeedsPassword),
+        });
+
+        let unlocking = app.unlocking.as_ref().expect("a prompt must open");
+        assert_eq!(unlocking.archive, archive);
+        assert_eq!(unlocking.then, AfterUnlock::Open(archive.join("secret.txt")));
+        assert!(!unlocking.retry, "the first attempt is not a retry");
+        assert!(app.status.is_none(), "a question is not a failure to report");
+    }
+
+    /// A password typed once has to reach the backend that lists the
+    /// archive, which is behind `Arc<dyn FsBackend>` and cannot be
+    /// named — the shared keyring is what carries it.
+    #[test]
+    fn a_password_typed_into_the_prompt_reaches_the_listing_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = encrypted_archive(dir.path(), "hunter2");
+        let mut app = app_for_test(&[archive.to_str().unwrap()]);
+
+        let _ = app.update(Message::ArchiveMemberReady {
+            archive: archive.clone(),
+            member: archive.join("secret.txt"),
+            result: Err(ArchiveFailure::NeedsPassword),
+        });
+        let _ = app.update(Message::UnlockTyped("hunter2".to_string()));
+        let _ = app.update(Message::UnlockConfirm);
+
+        assert!(app.unlocking.is_none(), "the prompt closes once answered");
+        assert_eq!(
+            app.keyring.unlock_for(&archive).expose(),
+            Some("hunter2"),
+            "the answer has to be where the backend will look for it"
+        );
+    }
+
+    /// A wrong password must not be retried forever behind the scenes,
+    /// and the second prompt has to say it is a second prompt.
+    #[test]
+    fn a_refused_password_is_forgotten_and_the_next_prompt_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = encrypted_archive(dir.path(), "hunter2");
+        let mut app = app_for_test(&[archive.to_str().unwrap()]);
+
+        app.keyring
+            .remember(&archive, hyprforge_archive::Secret::new("wrong".to_string()));
+        let _ = app.update(Message::ArchiveMemberReady {
+            archive: archive.clone(),
+            member: archive.join("secret.txt"),
+            result: Err(ArchiveFailure::NeedsPassword),
+        });
+
+        let unlocking = app.unlocking.as_ref().unwrap();
+        assert!(unlocking.retry, "the prompt has to say the last one did not work");
+        assert!(
+            !app.keyring.knows(&archive),
+            "a password that was refused must not stay on to be retried silently"
+        );
+    }
+
+    #[test]
+    fn cancelling_the_prompt_leaves_no_password_and_does_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = encrypted_archive(dir.path(), "hunter2");
+        let mut app = app_for_test(&[archive.to_str().unwrap()]);
+
+        let _ = app.update(Message::ArchiveMemberReady {
+            archive: archive.clone(),
+            member: archive.join("secret.txt"),
+            result: Err(ArchiveFailure::NeedsPassword),
+        });
+        let _ = app.update(Message::UnlockTyped("hunter2".to_string()));
+        let _ = app.update(Message::UnlockCancel);
+
+        assert!(app.unlocking.is_none());
+        assert!(
+            !app.keyring.knows(&archive),
+            "a password that was cancelled was never given"
+        );
+    }
+
+    /// An extraction that stops for a password is a question, and the
+    /// status bar must not first say the job went wrong.
+    #[test]
+    fn an_extraction_that_needs_a_password_asks_instead_of_reporting_it_as_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = encrypted_archive(dir.path(), "hunter2");
+        let mut app = app_for_test(&[dir.path().to_str().unwrap()]);
+
+        let (control, _events) = archive_jobs::start(
+            7,
+            archive_jobs::Work::Extract {
+                archives: vec![archive.clone()],
+                into: None,
+            },
+            hyprforge_files_core::config::OnConflict::Ask,
+            Unlock::none(),
+        );
+        app.jobs.push(RunningJob {
+            id: 7,
+            control,
+            kind: JobKind::Archive { doing: "Extracting" },
+            started: Instant::now(),
+            dirs: Vec::new(),
+            progress: None,
+            conflict: None,
+            apply_to_rest: false,
+        });
+
+        let _ = app.update(Message::Job(JobEvent::Finished {
+            job: 7,
+            summary: JobSummary {
+                needs_password: Some(archive.clone()),
+                ..JobSummary::default()
+            },
+        }));
+
+        assert_eq!(
+            app.unlocking.as_ref().map(|u| u.then.clone()),
+            Some(AfterUnlock::Extract(archive))
+        );
+        assert!(app.status.is_none(), "the prompt is the report");
+    }
+
+    /// CLAUDE.md's rule, checked where it would actually break: the
+    /// window holds a typed password, and a `Debug` of the thing holding
+    /// it must not print it.
+    #[test]
+    fn a_typed_password_is_never_renderable() {
+        let typed = hyprforge_archive::Secret::new("hunter2".to_string());
+        assert!(!format!("{typed:?}").contains("hunter2"));
     }
 
     #[test]

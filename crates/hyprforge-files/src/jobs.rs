@@ -58,6 +58,16 @@ pub struct JobSummary {
     /// wording `OpsError`'s `Display` produces.
     pub failed: Vec<String>,
     pub cancelled: bool,
+    /// The archive this job stopped on for want of a password.
+    ///
+    /// Carried as a field rather than left to be recognised in
+    /// `failed` by its wording: "did this need a password" is a
+    /// question the window acts on (it opens a prompt), and deciding it
+    /// by matching a sentence would break the moment that sentence was
+    /// reworded — which is exactly the sort of thing a message is
+    /// allowed to do. Always `None` for a paste; see
+    /// `crate::archive_jobs`.
+    pub needs_password: Option<std::path::PathBuf>,
 }
 
 impl JobSummary {

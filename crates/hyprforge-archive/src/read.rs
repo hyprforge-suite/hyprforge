@@ -29,6 +29,7 @@ use crate::extract::{self, PlanItem};
 use crate::format::{self, Compression, Format};
 use crate::model::{Index, Member};
 use crate::timestamp;
+use crate::unlock::Unlock;
 use std::collections::HashMap;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -161,18 +162,74 @@ fn is_symlink_mode(mode: u32) -> bool {
     mode & 0o170000 == 0o120000
 }
 
-fn zip_read_member(archive: &Path, member: &str) -> Result<Vec<u8>> {
+fn zip_read_member(archive: &Path, member: &str, unlock: &Unlock) -> Result<Vec<u8>> {
     let mut zip = zip_open(archive)?;
     let name = resolve_name(&mut zip, archive, member)?;
-    let mut entry = zip.by_name(&name).map_err(|e| zip_error(archive, e))?;
-    if entry.encrypted() {
-        return Err(ArchiveError::PasswordRequired {
-            path: archive.to_path_buf(),
-        });
-    }
-    let mut bytes = Vec::with_capacity(entry.size() as usize);
-    entry.read_to_end(&mut bytes).map_err(|e| ArchiveError::io(archive, e))?;
+    let mut bytes = Vec::new();
+    zip_entry(&mut zip, archive, &name, unlock, &mut bytes)?;
     Ok(bytes)
+}
+
+/// Reads one zip entry into `into`, decrypting if it is encrypted and a
+/// password was given.
+///
+/// A zip encrypts each entry, not the archive — so a zip can hold a
+/// mixture, and asking for a password to read the unencrypted half of
+/// one would be asking for nothing. Only an entry that says it is
+/// encrypted goes down the decrypting path.
+fn zip_entry<R: Read + std::io::Seek>(
+    zip: &mut zip::ZipArchive<R>,
+    archive: &Path,
+    name: &str,
+    unlock: &Unlock,
+    into: &mut Vec<u8>,
+) -> Result<()> {
+    // Asked of the *raw* entry, which reads the header without trying
+    // to decrypt anything — the question here is only "is this one
+    // encrypted", and answering it must not need the password it is
+    // being asked in order to request.
+    let encrypted = zip
+        .index_for_name(name)
+        .and_then(|at| zip.by_index_raw(at).ok().map(|entry| entry.encrypted()))
+        .unwrap_or(false);
+
+    let mut entry = if encrypted {
+        let Some(password) = unlock.expose() else {
+            return Err(ArchiveError::PasswordRequired {
+                path: archive.to_path_buf(),
+            });
+        };
+        zip.by_name_decrypt(name, password.as_bytes()).map_err(|e| {
+            // zip's own error for a bad password is an
+            // `InvalidPassword`-shaped `InvalidArchive`; either way the
+            // answer the caller needs is "ask again", not "this archive
+            // is damaged", which would send someone looking for a
+            // backup of a perfectly good file.
+            match e {
+                zip::result::ZipError::InvalidPassword => ArchiveError::PasswordRequired {
+                    path: archive.to_path_buf(),
+                },
+                other => zip_error(archive, other),
+            }
+        })?
+    } else {
+        zip.by_name(name).map_err(|e| zip_error(archive, e))?
+    };
+
+    entry.read_to_end(into).map_err(|e| {
+        // AES and ZipCrypto both authenticate on the way out, so a wrong
+        // password that got past the header check fails *here*, as a
+        // checksum or decryption error partway through the read. Same
+        // answer: ask again.
+        if encrypted {
+            ArchiveError::PasswordRequired {
+                path: archive.to_path_buf(),
+            }
+        } else {
+            ArchiveError::io(archive, e)
+        }
+    })?;
+    Ok(())
 }
 
 /// The name a zip actually stores for the member this crate calls
@@ -212,6 +269,7 @@ fn zip_extract(
     archive: &Path,
     plan: &extract::Plan,
     request: &ExtractRequest,
+    unlock: &Unlock,
     progress: &mut dyn Progress,
 ) -> Result<ExtractReport> {
     let mut zip = zip_open(archive)?;
@@ -221,17 +279,8 @@ fn zip_extract(
         // there is a failed row rather than a borrow tangle.
         let name = resolve_name(&mut zip, archive, &item.member);
         run.item(item, progress, || {
-            let mut entry = zip.by_name(&name?).map_err(|e| zip_error(archive, e))?;
-            if entry.encrypted() {
-                return Err(ArchiveError::PasswordRequired {
-                    path: archive.to_path_buf(),
-                });
-            }
-            // Read through to the caller rather than buffered here: see
-            // `extract::write_file` on why a member's size is not this
-            // crate's to assume.
             let mut bytes = Vec::new();
-            entry.read_to_end(&mut bytes).map_err(|e| ArchiveError::io(archive, e))?;
+            zip_entry(&mut zip, archive, &name?, unlock, &mut bytes)?;
             Ok(Box::new(std::io::Cursor::new(bytes)) as Box<dyn Read>)
         })?;
     }
@@ -392,9 +441,18 @@ fn tar_extract(
 
 // --- 7z -------------------------------------------------------------
 
-fn sevenz_open(archive: &Path) -> Result<sevenz_rust2::ArchiveReader<std::fs::File>> {
-    sevenz_rust2::ArchiveReader::open(archive, sevenz_rust2::Password::empty())
-        .map_err(|e| sevenz_error(archive, e))
+fn sevenz_open(
+    archive: &Path,
+    unlock: &Unlock,
+) -> Result<sevenz_rust2::ArchiveReader<std::fs::File>> {
+    // Unlike a zip, a 7z can encrypt its *header*, so the password is
+    // needed to list the archive at all — which is why `index` takes an
+    // `Unlock` and not only `read_member`.
+    let password = match unlock.expose() {
+        Some(password) => sevenz_rust2::Password::from(password),
+        None => sevenz_rust2::Password::empty(),
+    };
+    sevenz_rust2::ArchiveReader::open(archive, password).map_err(|e| sevenz_error(archive, e))
 }
 
 fn sevenz_error(archive: &Path, error: sevenz_rust2::Error) -> ArchiveError {
@@ -418,8 +476,8 @@ fn sevenz_error(archive: &Path, error: sevenz_rust2::Error) -> ArchiveError {
     }
 }
 
-fn sevenz_index(archive: &Path) -> Result<Index> {
-    let reader = sevenz_open(archive)?;
+fn sevenz_index(archive: &Path, unlock: &Unlock) -> Result<Index> {
+    let reader = sevenz_open(archive, unlock)?;
     let members = reader
         .archive()
         .files
@@ -445,8 +503,8 @@ fn sevenz_index(archive: &Path) -> Result<Index> {
     Ok(Index::build(members))
 }
 
-fn sevenz_read_member(archive: &Path, member: &str) -> Result<Vec<u8>> {
-    let mut reader = sevenz_open(archive)?;
+fn sevenz_read_member(archive: &Path, member: &str, unlock: &Unlock) -> Result<Vec<u8>> {
+    let mut reader = sevenz_open(archive, unlock)?;
     let name = sevenz_stored_name(&reader, archive, member)?;
     reader.read_file(&name).map_err(|e| sevenz_error(archive, e))
 }
@@ -521,36 +579,40 @@ fn compressed_read(archive: &Path, compression: Compression) -> Result<Vec<u8>> 
 // --- the backend ----------------------------------------------------
 
 impl ArchiveBackend for StdArchives {
-    fn index(&self, archive: &Path) -> Result<Index> {
+    fn index_with(&self, archive: &Path, unlock: &Unlock) -> Result<Index> {
         match StdArchives::format_of(archive)? {
+            // A zip's central directory is never encrypted, and a tar
+            // has no encryption at all — only 7z can need a password to
+            // say what is inside it.
             Format::Zip => zip_index(archive),
             Format::Tar(compression) => tar_index(archive, compression),
-            Format::SevenZ => sevenz_index(archive),
+            Format::SevenZ => sevenz_index(archive, unlock),
             Format::Compressed(compression) => compressed_index(archive, compression),
         }
     }
 
-    fn read_member(&self, archive: &Path, member: &str) -> Result<Vec<u8>> {
+    fn read_member_with(&self, archive: &Path, member: &str, unlock: &Unlock) -> Result<Vec<u8>> {
         match StdArchives::format_of(archive)? {
-            Format::Zip => zip_read_member(archive, member),
+            Format::Zip => zip_read_member(archive, member, unlock),
             Format::Tar(compression) => tar_read_member(archive, compression, member),
-            Format::SevenZ => sevenz_read_member(archive, member),
+            Format::SevenZ => sevenz_read_member(archive, member, unlock),
             Format::Compressed(compression) => compressed_read(archive, compression),
         }
     }
 
-    fn extract(
+    fn extract_with(
         &self,
         archive: &Path,
         request: &ExtractRequest,
+        unlock: &Unlock,
         progress: &mut dyn Progress,
     ) -> Result<ExtractReport> {
         let format = StdArchives::format_of(archive)?;
-        let index = self.index(archive)?;
+        let index = self.index_with(archive, unlock)?;
         let plan = extract::plan(&index, request, archive)?;
 
         match format {
-            Format::Zip => zip_extract(archive, &plan, request, progress),
+            Format::Zip => zip_extract(archive, &plan, request, unlock, progress),
             Format::Tar(compression) => tar_extract(archive, compression, &plan, request, progress),
             Format::SevenZ => {
                 // 7z members share compressed blocks, so pulling them one
@@ -558,7 +620,7 @@ impl ArchiveBackend for StdArchives {
                 // here and not for tar, because the reader keeps the file
                 // open and seeks — it is not re-reading the archive from
                 // byte zero each time, which is exactly what a tar would.
-                let mut reader = sevenz_open(archive)?;
+                let mut reader = sevenz_open(archive, unlock)?;
                 let mut run = extract::Run::new(&plan, request)?;
                 for item in &plan.items {
                     let name = sevenz_stored_name(&reader, archive, &item.member);
@@ -597,8 +659,14 @@ impl ArchiveBackend for StdArchives {
         crate::write::create(dest, format, sources, progress)
     }
 
-    fn edit(&self, archive: &Path, edits: &[Edit], progress: &mut dyn Progress) -> Result<()> {
-        crate::write::edit(archive, edits, progress)
+    fn edit_with(
+        &self,
+        archive: &Path,
+        edits: &[Edit],
+        unlock: &Unlock,
+        progress: &mut dyn Progress,
+    ) -> Result<()> {
+        crate::write::edit(archive, edits, unlock, progress)
     }
 }
 

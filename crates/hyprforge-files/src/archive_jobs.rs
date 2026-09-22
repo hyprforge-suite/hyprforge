@@ -21,7 +21,7 @@
 use hyprforge_archive::backend::{
     Advance, ArchiveBackend, Collision, ExtractRequest, Flow, Progress as ArchiveProgress, Source,
 };
-use hyprforge_archive::{ArchiveError, Format, StdArchives};
+use hyprforge_archive::{ArchiveError, Format, StdArchives, Unlock};
 use hyprforge_files_core::config::OnConflict;
 use hyprforge_fileops::Progress;
 use iced::futures::channel::mpsc;
@@ -90,6 +90,23 @@ impl Work {
                 dirs.extend(archive.parent().map(Path::to_path_buf));
                 dirs
             }
+        }
+    }
+
+    /// The archive this work is about, when there is exactly one — so
+    /// the caller can look up a password for it.
+    ///
+    /// `None` for a `Compress` (there is no archive yet) and for an
+    /// `Extract` over several at once, where there is no single answer
+    /// and each is unlocked as it is reached.
+    pub fn archive(&self) -> Option<&Path> {
+        match self {
+            Work::Extract { archives, .. } => match archives.as_slice() {
+                [only] => Some(only),
+                _ => None,
+            },
+            Work::ExtractMembers { archive, .. } | Work::Edit { archive, .. } => Some(archive),
+            Work::Compress { .. } => None,
         }
     }
 
@@ -164,6 +181,7 @@ pub fn start(
     job: JobId,
     work: Work,
     on_conflict: OnConflict,
+    unlock: Unlock,
 ) -> (JobControl, mpsc::UnboundedReceiver<JobEvent>) {
     let (events, receiver) = mpsc::unbounded();
     // An archive job never asks a question, so nothing is ever sent down
@@ -176,7 +194,7 @@ pub fn start(
     std::thread::Builder::new()
         .name(format!("files-archive-{job}"))
         .spawn(move || {
-            let summary = run(job, work, on_conflict, &cancel, &events);
+            let summary = run(job, work, on_conflict, &unlock, &cancel, &events);
             let _ = events.unbounded_send(JobEvent::Finished { job, summary });
         })
         .expect("spawning a thread only fails when the process is out of resources");
@@ -227,6 +245,7 @@ fn run(
     job: JobId,
     work: Work,
     on_conflict: OnConflict,
+    unlock: &Unlock,
     cancel: &AtomicBool,
     events: &mpsc::UnboundedSender<JobEvent>,
 ) -> JobSummary {
@@ -259,10 +278,19 @@ fn run(
                 // rule this suite follows everywhere a listing or a
                 // batch can go partly wrong. Each reports its own
                 // sentence.
-                match backend.extract(&archive, &request, &mut reporter) {
+                match backend.extract_with(&archive, &request, unlock, &mut reporter) {
                     Ok(report) => absorb(&mut summary, &archive, &dest, report),
                     Err(e) if e.cancelled() => {
                         summary.cancelled = true;
+                        break;
+                    }
+                    Err(ArchiveError::PasswordRequired { .. }) => {
+                        // Recorded, not reported as a failure: the
+                        // window turns this into a prompt, and calling
+                        // it a failure first would put a sentence in
+                        // the status bar that the prompt then
+                        // contradicts.
+                        summary.needs_password = Some(archive.clone());
                         break;
                     }
                     Err(e) => summary.failed.push(e.to_string()),
@@ -282,9 +310,12 @@ fn run(
                 strip_prefix,
                 collision,
             };
-            match backend.extract(&archive, &request, &mut reporter) {
+            match backend.extract_with(&archive, &request, unlock, &mut reporter) {
                 Ok(report) => absorb(&mut summary, &archive, &into, report),
                 Err(e) if e.cancelled() => summary.cancelled = true,
+                Err(ArchiveError::PasswordRequired { .. }) => {
+                    summary.needs_password = Some(archive.clone())
+                }
                 Err(e) => summary.failed.push(e.to_string()),
             }
         }
@@ -306,9 +337,12 @@ fn run(
         },
         Work::Edit { archive, edits } => {
             let count = edits.len();
-            match backend.edit(&archive, &edits, &mut reporter) {
+            match backend.edit_with(&archive, &edits, unlock, &mut reporter) {
                 Ok(()) => summary.done = count,
                 Err(e) if e.cancelled() => summary.cancelled = true,
+                Err(ArchiveError::PasswordRequired { .. }) => {
+                    summary.needs_password = Some(archive.clone())
+                }
                 Err(e) => summary.failed.push(e.to_string()),
             }
         }

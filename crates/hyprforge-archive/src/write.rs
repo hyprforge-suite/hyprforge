@@ -24,6 +24,7 @@ use crate::backend::{ArchiveBackend, Collision, Edit, ExtractRequest, Progress, 
 use crate::error::{ArchiveError, Result};
 use crate::format::{Compression, Format};
 use crate::model::{normalise, Member};
+use crate::unlock::Unlock;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -329,7 +330,12 @@ fn now_seconds() -> u64 {
 /// formats rewrites to change, and going through the filesystem keeps
 /// one code path for three formats and never holds an archive's
 /// contents in memory.
-pub fn edit(archive: &Path, edits: &[Edit], progress: &mut dyn Progress) -> Result<()> {
+pub fn edit(
+    archive: &Path,
+    edits: &[Edit],
+    unlock: &Unlock,
+    progress: &mut dyn Progress,
+) -> Result<()> {
     let format = crate::format::sniff(archive)
         .map_err(|e| ArchiveError::io(archive, e))?
         .ok_or_else(|| ArchiveError::NotAnArchive { path: archive.to_path_buf() })?;
@@ -344,7 +350,7 @@ pub fn edit(archive: &Path, edits: &[Edit], progress: &mut dyn Progress) -> Resu
     }
 
     let backend = crate::read::StdArchives;
-    let index = backend.index(archive)?;
+    let index = backend.index_with(archive, unlock)?;
 
     // Unpacked beside the archive rather than in `/tmp`: a home
     // directory and a temporary filesystem are usually different mounts,
@@ -362,7 +368,7 @@ pub fn edit(archive: &Path, edits: &[Edit], progress: &mut dyn Progress) -> Resu
         strip_prefix: None,
         collision: Collision::Overwrite,
     };
-    backend.extract(archive, &request, progress)?;
+    backend.extract_with(archive, &request, unlock, progress)?;
 
     // The second element is where the member's bytes are *now*: the
     // path it was unpacked under, which is the name it had in the

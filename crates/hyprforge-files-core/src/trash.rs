@@ -174,6 +174,18 @@ impl RoutingBackend {
         }
     }
 
+    /// The passwords the archive half consults.
+    ///
+    /// Reachable through the router because a host holds this as an
+    /// `Arc<dyn FsBackend>` and cannot name the archive backend
+    /// underneath it — and the password prompt is the host's, so it
+    /// needs somewhere to put the answer. Handed out as the `Arc` it
+    /// already is rather than as a borrow, so the host can keep it past
+    /// the call.
+    pub fn keyring(&self) -> std::sync::Arc<hyprforge_archive::Keyring> {
+        self.archive.keyring().clone()
+    }
+
     fn route(&self, path: &Path) -> &dyn FsBackend {
         // The trash first. Its own directory could in principle hold a
         // file called `Trash.zip`, but the *listing directory* itself is

@@ -13,6 +13,13 @@ description = "Reads and writes zip, tar and 7z archives: what is inside one, as
 # Not even `hyprforge-paths`: this crate is handed paths, it never goes
 # looking for one.
 [dependencies]
+# The one Hyprforge crate this depends on, and the exception worth
+# stating: an archive password must never be renderable, and
+# `hyprforge-secret` is this suite's single implementation of that rule
+# (written because it had been hand-rolled three times already). It has
+# no dependencies of its own, so taking it keeps this crate a leaf — see
+# `unlock.rs`.
+hyprforge-secret.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

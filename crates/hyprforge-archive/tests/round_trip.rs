@@ -12,7 +12,7 @@
 use hyprforge_archive::backend::{
     ArchiveBackend, Collision, Edit, ExtractRequest, NoProgress,
 };
-use hyprforge_archive::{Compression, Format, Source, StdArchives};
+use hyprforge_archive::{Compression, Format, Source, StdArchives, Unlock};
 use std::path::{Path, PathBuf};
 
 /// A small tree to pack: two files at different depths, and an empty
@@ -481,4 +481,166 @@ fn a_member_that_climbs_out_of_the_destination_writes_nothing_outside_it() {
         assert!(report.failed.is_empty(), "{:?}", report.failed);
         assert!(out.join("innocent.txt").exists(), "the safe member still extracts");
     }
+}
+
+// --- encrypted archives ---------------------------------------------
+
+/// Writes a zip whose one member is AES-encrypted, plus one that is not
+/// — a mixture, because a zip encrypts per entry rather than as a whole
+/// and the reader has to cope with both in one file.
+fn encrypted_zip(dir: &Path, password: &str) -> PathBuf {
+    use std::io::Write;
+    let archive = dir.join("secret.zip");
+    let file = std::fs::File::create(&archive).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+
+    let locked = zip::write::SimpleFileOptions::default()
+        .with_aes_encryption(zip::AesMode::Aes256, password);
+    zip.start_file("secret.txt", locked).unwrap();
+    zip.write_all(b"the hidden thing").unwrap();
+
+    let open = zip::write::SimpleFileOptions::default();
+    zip.start_file("public.txt", open).unwrap();
+    zip.write_all(b"nothing to hide").unwrap();
+
+    zip.finish().unwrap();
+    archive
+}
+
+/// A zip's central directory is not encrypted, so the *names* are
+/// readable without a password. Refusing to list one would hide
+/// information the format gives away anyway, and would leave someone
+/// unable to see what they are being asked a password for.
+#[test]
+fn an_encrypted_zip_still_lists_its_contents_without_a_password() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = encrypted_zip(dir.path(), "hunter2");
+
+    let index = StdArchives.index(&archive).unwrap();
+    let mut names: Vec<&str> = index.members().iter().map(|m| m.path.as_str()).collect();
+    names.sort();
+    assert_eq!(names, ["public.txt", "secret.txt"]);
+    assert!(
+        index.get("secret.txt").is_some_and(|m| m.encrypted),
+        "the listing has to say which rows are locked"
+    );
+    assert!(
+        index.get("public.txt").is_some_and(|m| !m.encrypted),
+        "and which are not — a zip encrypts per entry, not as a whole"
+    );
+}
+
+#[test]
+fn reading_an_encrypted_member_without_a_password_asks_for_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = encrypted_zip(dir.path(), "hunter2");
+
+    let err = StdArchives
+        .read_member(&archive, "secret.txt")
+        .expect_err("an encrypted member must not read as empty");
+    assert!(
+        matches!(err, hyprforge_archive::ArchiveError::PasswordRequired { .. }),
+        "the caller has to be able to tell this from a damaged archive: {err}"
+    );
+    assert!(err.to_string().contains("password"), "{err}");
+}
+
+#[test]
+fn the_unencrypted_half_of_a_mixed_zip_needs_no_password() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = encrypted_zip(dir.path(), "hunter2");
+
+    assert_eq!(
+        StdArchives.read_member(&archive, "public.txt").unwrap(),
+        b"nothing to hide",
+        "asking for a password to read an entry that has none would be asking for nothing"
+    );
+}
+
+#[test]
+fn the_right_password_reads_an_encrypted_member() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = encrypted_zip(dir.path(), "hunter2");
+
+    let unlock = Unlock::with(hyprforge_archive::Secret::new("hunter2".to_string()));
+    assert_eq!(
+        StdArchives.read_member_with(&archive, "secret.txt", &unlock).unwrap(),
+        b"the hidden thing"
+    );
+}
+
+/// A wrong password is "ask again", never "this archive is damaged" —
+/// which would send someone looking for a backup of a perfectly good
+/// file.
+#[test]
+fn a_wrong_password_asks_again_rather_than_calling_the_archive_damaged() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = encrypted_zip(dir.path(), "hunter2");
+
+    let unlock = Unlock::with(hyprforge_archive::Secret::new("wrong".to_string()));
+    let err = StdArchives
+        .read_member_with(&archive, "secret.txt", &unlock)
+        .expect_err("a wrong password must not return plausible bytes");
+    assert!(
+        matches!(err, hyprforge_archive::ArchiveError::PasswordRequired { .. }),
+        "{err}"
+    );
+    let message = err.to_string().to_lowercase();
+    assert!(!message.contains("damaged"), "{message}");
+}
+
+#[test]
+fn extracting_an_encrypted_zip_with_the_password_writes_every_member() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = encrypted_zip(dir.path(), "hunter2");
+    let out = dir.path().join("out");
+
+    let unlock = Unlock::with(hyprforge_archive::Secret::new("hunter2".to_string()));
+    let report = StdArchives
+        .extract_with(
+            &archive,
+            &ExtractRequest {
+                members: Vec::new(),
+                dest: out.clone(),
+                strip_prefix: None,
+                collision: Collision::Overwrite,
+            },
+            &unlock,
+            &mut NoProgress,
+        )
+        .unwrap();
+
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    assert_eq!(std::fs::read(out.join("secret.txt")).unwrap(), b"the hidden thing");
+    assert_eq!(std::fs::read(out.join("public.txt")).unwrap(), b"nothing to hide");
+}
+
+/// Without the password the encrypted member is a failed row and the
+/// rest still comes out — the same "one bad member does not sink the
+/// extraction" rule everything else here follows.
+#[test]
+fn extracting_without_the_password_still_writes_what_it_can() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = encrypted_zip(dir.path(), "hunter2");
+    let out = dir.path().join("out");
+
+    let report = StdArchives
+        .extract(
+            &archive,
+            &ExtractRequest {
+                members: Vec::new(),
+                dest: out.clone(),
+                strip_prefix: None,
+                collision: Collision::Overwrite,
+            },
+            &mut NoProgress,
+        )
+        .unwrap();
+
+    assert_eq!(report.failed.len(), 1, "{:?}", report.failed);
+    assert_eq!(report.failed[0].0, "secret.txt");
+    assert!(
+        out.join("public.txt").exists(),
+        "the member that needed no password still had to be written"
+    );
 }

@@ -229,6 +229,15 @@ pub enum FilesError {
     /// so rather than imply the path was always wrong.
     #[error("{path} was removed while it was being read.")]
     VanishedMidRead { path: PathBuf },
+    /// This location is inside an encrypted archive and no password for
+    /// it is known yet.
+    ///
+    /// Its own variant, like [`FilesError::NotAnArchive`] beside it and
+    /// for the same reason: the host *acts* on it by asking for a
+    /// password, rather than showing it. Rendered as a sentence only if
+    /// nothing handles it.
+    #[error("{path} is encrypted. A password is needed to open it.")]
+    PasswordRequired { path: PathBuf },
     /// A name this suite offered to open as an archive, whose contents
     /// turn out not to be one.
     ///

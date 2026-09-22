@@ -17,6 +17,7 @@
 use crate::error::Result;
 use crate::format::Format;
 use crate::model::Index;
+use crate::unlock::Unlock;
 use std::path::{Path, PathBuf};
 
 /// Whether a long operation should keep going.
@@ -148,19 +149,38 @@ pub trait ArchiveBackend: Send + Sync {
     /// on the way — so "list this one directory" is not a cheaper
     /// question than "list everything", and pretending otherwise would
     /// re-scan the archive at every step of a walk down into it.
-    fn index(&self, archive: &Path) -> Result<Index>;
+    fn index_with(&self, archive: &Path, unlock: &Unlock) -> Result<Index>;
 
     /// One member's contents.
-    fn read_member(&self, archive: &Path, member: &str) -> Result<Vec<u8>>;
+    fn read_member_with(&self, archive: &Path, member: &str, unlock: &Unlock) -> Result<Vec<u8>>;
 
-    fn extract(
+    fn extract_with(
         &self,
         archive: &Path,
         request: &ExtractRequest,
+        unlock: &Unlock,
         progress: &mut dyn Progress,
     ) -> Result<ExtractReport>;
 
+    /// Applies `edits` to an existing archive, in place.
+    ///
+    /// Takes an `unlock` because a rewrite reads the whole archive
+    /// first — editing an encrypted one needs the password just as
+    /// reading it does.
+    fn edit_with(
+        &self,
+        archive: &Path,
+        edits: &[Edit],
+        unlock: &Unlock,
+        progress: &mut dyn Progress,
+    ) -> Result<()>;
+
     /// Writes a brand new archive at `dest`.
+    ///
+    /// No `unlock`: writing an *encrypted* archive is a separate feature
+    /// with its own question to ask (which cipher, and is the header
+    /// encrypted too), and a password parameter that silently did
+    /// nothing would be worse than not having one.
     fn create(
         &self,
         dest: &Path,
@@ -169,8 +189,34 @@ pub trait ArchiveBackend: Send + Sync {
         progress: &mut dyn Progress,
     ) -> Result<()>;
 
-    /// Applies `edits` to an existing archive, in place.
-    fn edit(&self, archive: &Path, edits: &[Edit], progress: &mut dyn Progress) -> Result<()>;
+    // --- the same four, for the overwhelmingly common unencrypted case.
+    //
+    // Defaults rather than a second trait, and the short name is the one
+    // without a password because that is what nearly every call site
+    // means: a caller that has no password should not have to say so
+    // four times per function. An implementor overrides the `_with`
+    // forms and gets these for free.
+
+    fn index(&self, archive: &Path) -> Result<Index> {
+        self.index_with(archive, &Unlock::none())
+    }
+
+    fn read_member(&self, archive: &Path, member: &str) -> Result<Vec<u8>> {
+        self.read_member_with(archive, member, &Unlock::none())
+    }
+
+    fn extract(
+        &self,
+        archive: &Path,
+        request: &ExtractRequest,
+        progress: &mut dyn Progress,
+    ) -> Result<ExtractReport> {
+        self.extract_with(archive, request, &Unlock::none(), progress)
+    }
+
+    fn edit(&self, archive: &Path, edits: &[Edit], progress: &mut dyn Progress) -> Result<()> {
+        self.edit_with(archive, edits, &Unlock::none(), progress)
+    }
 }
 
 #[cfg(any(test, feature = "mock"))]
@@ -196,6 +242,9 @@ pub mod mock {
         archives: Mutex<HashMap<PathBuf, Seeded>>,
         /// Archives that fail to open at all.
         unreadable: Mutex<HashMap<PathBuf, String>>,
+        /// Archives that will not open without a password, and the one
+        /// that works.
+        needs_password: Mutex<HashMap<PathBuf, String>>,
         /// Members whose *contents* cannot be read although they list
         /// perfectly well — a damaged compressed stream for one file in
         /// an otherwise fine zip, which is the case that must not sink a
@@ -229,6 +278,14 @@ pub mod mock {
             self.unreadable.lock().unwrap().insert(archive.into(), why.into());
         }
 
+        /// After this, `archive` needs `password` to open at all.
+        pub fn make_encrypted(&self, archive: impl Into<PathBuf>, password: impl Into<String>) {
+            self.needs_password
+                .lock()
+                .unwrap()
+                .insert(archive.into(), password.into());
+        }
+
         /// After this, `member` lists but will not read.
         pub fn make_member_unreadable(&self, archive: impl Into<PathBuf>, member: impl Into<String>) {
             self.bad_members
@@ -257,6 +314,24 @@ pub mod mock {
                 })
         }
 
+        /// `Err` when this archive needs a password and `unlock` is not
+        /// it.
+        fn check_password(&self, archive: &Path, unlock: &Unlock) -> Result<()> {
+            let held = self.needs_password.lock().unwrap();
+            let Some(wanted) = held.get(archive) else {
+                return Ok(());
+            };
+            match unlock.expose() {
+                Some(given) if given == wanted => Ok(()),
+                // A wrong password and no password are the same answer
+                // to the caller: ask. Distinguishing them would mean
+                // telling whoever is guessing that they are close.
+                _ => Err(ArchiveError::PasswordRequired {
+                    path: archive.to_path_buf(),
+                }),
+            }
+        }
+
         fn member_is_bad(&self, archive: &Path, member: &str) -> bool {
             self.bad_members
                 .lock()
@@ -267,13 +342,19 @@ pub mod mock {
     }
 
     impl ArchiveBackend for MockArchives {
-        fn index(&self, archive: &Path) -> Result<Index> {
+        fn index_with(&self, archive: &Path, unlock: &Unlock) -> Result<Index> {
+            // A 7z can encrypt its header, so listing is the first thing
+            // a password can be needed for — modelled here so the
+            // caller's "prompt, then read again" path has something to
+            // fail against.
+            self.check_password(archive, unlock)?;
             Ok(Index::build(
                 self.members(archive)?.into_iter().map(|(m, _)| m).collect(),
             ))
         }
 
-        fn read_member(&self, archive: &Path, member: &str) -> Result<Vec<u8>> {
+        fn read_member_with(&self, archive: &Path, member: &str, unlock: &Unlock) -> Result<Vec<u8>> {
+            self.check_password(archive, unlock)?;
             if self.member_is_bad(archive, member) {
                 return Err(ArchiveError::Damaged {
                     path: archive.to_path_buf(),
@@ -292,10 +373,11 @@ pub mod mock {
                 })
         }
 
-        fn extract(
+        fn extract_with(
             &self,
             archive: &Path,
             request: &ExtractRequest,
+            unlock: &Unlock,
             progress: &mut dyn Progress,
         ) -> Result<ExtractReport> {
             // Through the same planner and writer the real backends use,
@@ -303,10 +385,10 @@ pub mod mock {
             // crate's own rules live in — which members a selected
             // directory brings, what `strip_prefix` does, and that
             // nothing lands outside the destination.
-            let index = self.index(archive)?;
+            let index = self.index_with(archive, unlock)?;
             let plan = crate::extract::plan(&index, request, archive)?;
             crate::extract::run(&plan, request, progress, |member| {
-                self.read_member(archive, member)
+                self.read_member_with(archive, member, unlock)
             })
         }
 
@@ -328,7 +410,14 @@ pub mod mock {
             Ok(())
         }
 
-        fn edit(&self, archive: &Path, edits: &[Edit], _progress: &mut dyn Progress) -> Result<()> {
+        fn edit_with(
+            &self,
+            archive: &Path,
+            edits: &[Edit],
+            unlock: &Unlock,
+            _progress: &mut dyn Progress,
+        ) -> Result<()> {
+            self.check_password(archive, unlock)?;
             let mut members = self.members(archive)?;
             for edit in edits {
                 crate::write::apply_to_list(&mut members, edit);
