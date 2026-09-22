@@ -4910,7 +4910,10 @@ mod archive_tests {
             "and removing it from the archive is what Delete means here"
         );
         assert!(action::enabled(Action::Rename, &ctx), "renaming is an edit the formats allow");
-        assert!(!action::enabled(Action::Cut, &ctx), "a move across a rewrite is not offered");
+        assert!(
+            action::enabled(Action::Cut, &ctx),
+            "cutting a member out is offered; the host removes it once a paste lands"
+        );
         assert!(!action::enabled(Action::Compress, &ctx), "an archive inside an archive is nobody's want");
         assert!(!action::enabled(Action::NewFolder, &ctx));
         assert!(!action::enabled(Action::Pin, &ctx), "a path through an archive is not a place to pin");

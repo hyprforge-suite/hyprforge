@@ -181,6 +181,7 @@ fn main() -> iced::Result {
         unlocking: None,
         keyring,
         opened_members: Vec::new(),
+        cut_from_archive: None,
         writeback: None,
         scratch: Arc::new(Scratch::default()),
         opener: Opener::default(),
@@ -400,8 +401,12 @@ enum Message {
         result: Result<PathBuf, ArchiveFailure>,
     },
     /// Members were unpacked so they could go on the clipboard as real
-    /// files — see the `SetClipboard` arm in `handle_outcome`.
-    ArchiveCopiesReady(Result<Vec<PathBuf>, String>),
+    /// files — see the `SetClipboard` arm in `handle_outcome`. The verb
+    /// is carried so a Cut can arrange its own second half.
+    ArchiveCopiesReady {
+        verb: hyprforge_files_core::clipboard::ClipVerb,
+        result: Result<Vec<PathBuf>, String>,
+    },
     /// Time to look at whether any file opened out of an archive has
     /// been edited since.
     CheckOpenedMembers,
@@ -612,6 +617,9 @@ struct App {
     /// Members unpacked out of an archive and handed to another
     /// application, watched for edits — see [`OpenedMember`].
     opened_members: Vec<OpenedMember>,
+    /// Members cut out of an archive, waiting for the paste that
+    /// finishes the move — see [`CutFromArchive`].
+    cut_from_archive: Option<CutFromArchive>,
     /// An edit to one of those, waiting to be answered.
     ///
     /// One at a time: two notices stacked would be two questions about
@@ -792,10 +800,14 @@ enum JobKind {
     /// to where it came from — its record goes too.
     Restore { records: Vec<(PathBuf, PathBuf)> },
     /// Extracting, compressing or rewriting an archive — see
-    /// [`crate::archive_jobs`]. Carries the word for the progress line
-    /// rather than the whole `Work`, because that is the only thing the
-    /// window still needs once the job is running.
-    Archive { doing: &'static str },
+    /// [`crate::archive_jobs`]. Carries the word for the progress line,
+    /// and what taking it back would mean — worked out when the job
+    /// starts, because that is when the paths are known, and applied
+    /// only if the job actually finished.
+    Archive {
+        doing: &'static str,
+        undo: ArchiveUndo,
+    },
 }
 
 impl JobKind {
@@ -812,7 +824,7 @@ impl JobKind {
             JobKind::Copy => "Copying",
             JobKind::Move => "Moving",
             JobKind::Restore { .. } => "Restoring",
-            JobKind::Archive { doing } => doing,
+            JobKind::Archive { doing, .. } => doing,
         }
     }
 
@@ -824,7 +836,7 @@ impl JobKind {
             JobKind::Restore { .. } => "restored",
             // "extracted 12 items", "compressed 3 items" — the past
             // tense of `doing`, which is what the report reads as.
-            JobKind::Archive { doing } => match *doing {
+            JobKind::Archive { doing, .. } => match *doing {
                 "Extracting" => "extracted",
                 "Compressing" => "compressed",
                 _ => "updated",
@@ -840,6 +852,56 @@ impl JobKind {
 /// second late is nothing while the cost of asking the filesystem
 /// twenty times as often is paid on every tick forever.
 const WATCH_OPENED_EVERY: u64 = 2_000;
+
+/// Members cut out of an archive: what was put on the clipboard, and
+/// what has to be removed once it lands somewhere.
+///
+/// The second half of a move that cannot be atomic. A paste happens at
+/// an unknown later time, possibly into a different archive, possibly
+/// in another application entirely — so the removal is deferred until a
+/// paste of *these* copies actually completes, and if that never
+/// happens the archive is left exactly as it was.
+///
+/// That means a cut nobody pastes is a copy. Visibly so: the member is
+/// still listed. The alternative — removing at cut time — turns a
+/// mis-click, or a paste into an app that ignores it, into a deletion
+/// with nothing to paste back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CutFromArchive {
+    archive: PathBuf,
+    /// Member paths inside that archive.
+    members: Vec<String>,
+    /// The scratch copies handed to the clipboard. What a finished paste
+    /// is matched against, so a paste of something *else* does not
+    /// trigger the removal.
+    copies: Vec<PathBuf>,
+}
+
+/// What taking an archive job back would mean.
+///
+/// Only the *kind*, because the path comes from the job's own report of
+/// where things landed — see the `Finished` arm. An edit records
+/// nothing; `hyprforge_files_core::undo`'s module doc says why at
+/// length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveUndo {
+    Nothing,
+    /// Trash the folder the extraction made.
+    Extracted,
+    /// Trash the archive that was made.
+    Compressed,
+}
+
+impl ArchiveUndo {
+    fn record(self, made: &Path) -> Option<hyprforge_files_core::undo::Undoable> {
+        use hyprforge_files_core::undo::Undoable;
+        match self {
+            ArchiveUndo::Nothing => None,
+            ArchiveUndo::Extracted => Some(Undoable::Extracted(made.to_path_buf())),
+            ArchiveUndo::Compressed => Some(Undoable::Compressed(made.to_path_buf())),
+        }
+    }
+}
 
 /// A file unpacked out of an archive and opened in something else.
 ///
@@ -1289,11 +1351,6 @@ impl App {
             // offered, which is what makes pasting into another
             // application work at all.
             //
-            // Always a Copy, whatever the verb was: a Cut would have the
-            // paste delete the scratch copy and leave the archive
-            // untouched, which is the opposite of what anyone asked for.
-            // `Action::Cut` is off inside an archive for the same
-            // reason; this is the second half of the same decision.
             Outcome::SetClipboard(clip)
                 if clip
                     .paths
@@ -1302,6 +1359,7 @@ impl App {
             {
                 let scratch = self.scratch.clone();
                 let paths = clip.paths.clone();
+                let verb = clip.verb;
                 // One password lookup for the whole selection: every
                 // path in a listing is inside the same archive.
                 let unlock = clip
@@ -1310,6 +1368,34 @@ impl App {
                     .and_then(|p| hyprforge_files_core::archive::split(p))
                     .map(|(archive, _)| self.keyring.unlock_for(&archive))
                     .unwrap_or_default();
+
+                // A cut's second half, noted now because the member
+                // paths are known now — the clipboard is about to hold
+                // scratch copies, which say nothing about where they
+                // came from. `copies` is filled in when the unpacking
+                // finishes.
+                self.cut_from_archive = (clip.verb
+                    == hyprforge_files_core::clipboard::ClipVerb::Cut)
+                    .then(|| {
+                        let archive = clip
+                            .paths
+                            .first()
+                            .and_then(|p| hyprforge_files_core::archive::split(p))
+                            .map(|(archive, _)| archive)?;
+                        Some(CutFromArchive {
+                            archive,
+                            members: clip
+                                .paths
+                                .iter()
+                                .filter_map(|p| {
+                                    hyprforge_files_core::archive::split(p).map(|(_, m)| m)
+                                })
+                                .filter(|m| !m.is_empty())
+                                .collect(),
+                            copies: Vec::new(),
+                        })
+                    })
+                    .flatten();
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
@@ -1342,7 +1428,7 @@ impl App {
                         .await
                         .unwrap_or_else(|e| Err(format!("Copying was interrupted: {e}")))
                     },
-                    Message::ArchiveCopiesReady,
+                    move |result| Message::ArchiveCopiesReady { verb, result },
                 )
             }
             Outcome::SetClipboard(clip) => {
@@ -1577,6 +1663,37 @@ impl App {
         Task::run(events, Message::Job)
     }
 
+    /// If this finished job was the paste that completes a cut out of an
+    /// archive, the work that removes the members it came from.
+    ///
+    /// Matched on the *sources* the paste actually placed, not merely on
+    /// "a paste finished": the clipboard may have been replaced, the
+    /// paste may have been of something else entirely, and removing a
+    /// member because an unrelated copy succeeded would be a deletion
+    /// nobody asked for.
+    fn cut_landed(&mut self, kind: &JobKind, summary: &JobSummary) -> Option<Task<Message>> {
+        if !matches!(kind, JobKind::Copy | JobKind::Move) || !summary.complete() {
+            return None;
+        }
+        let cut = self.cut_from_archive.as_ref()?;
+        if cut.copies.is_empty() || cut.members.is_empty() {
+            return None;
+        }
+        // Every copy that was cut has to have been placed by this job.
+        // A partial paste leaves the cut standing rather than removing
+        // members whose copies did not arrive.
+        let placed: Vec<&Path> = summary.placed.iter().map(|(from, _)| from.as_path()).collect();
+        if !cut.copies.iter().all(|copy| placed.contains(&copy.as_path())) {
+            return None;
+        }
+
+        let cut = self.cut_from_archive.take()?;
+        Some(self.start_archive_job(archive_jobs::Work::Edit {
+            archive: cut.archive,
+            edits: cut.members.into_iter().map(hyprforge_archive::Edit::Remove).collect(),
+        }))
+    }
+
     /// Asks for this archive's password, and remembers what to do once
     /// it arrives.
     ///
@@ -1679,12 +1796,17 @@ impl App {
             .archive()
             .map(|archive| self.keyring.unlock_for(archive))
             .unwrap_or_default();
+        let undo = match work.undoes() {
+            archive_jobs::Undoes::Nothing => ArchiveUndo::Nothing,
+            archive_jobs::Undoes::Extracted => ArchiveUndo::Extracted,
+            archive_jobs::Undoes::Compressed => ArchiveUndo::Compressed,
+        };
         let (control, events) =
             archive_jobs::start(id, work, self.config.behaviour.on_conflict, unlock);
         self.jobs.push(RunningJob {
             id,
             control,
-            kind: JobKind::Archive { doing },
+            kind: JobKind::Archive { doing, undo },
             started: Instant::now(),
             dirs,
             progress: None,
@@ -1726,6 +1848,15 @@ impl App {
                 if let Some(message) = job_report(&finished.kind, &summary) {
                     self.status = Some(message);
                 }
+
+                // The second half of a cut out of an archive: the paste
+                // has landed, so the members it came from can go. Only
+                // now, and only if this paste was of exactly those
+                // copies — see `CutFromArchive`.
+                if let Some(remove) = self.cut_landed(&finished.kind, &summary) {
+                    let refresh = self.refresh_dirs(&finished.dirs);
+                    return Task::batch([refresh, remove]);
+                }
                 // A cut that fully landed leaves the clipboard pointing at
                 // files that are no longer there. Emptied off the thread
                 // that paints: the system clipboard is asked first whether
@@ -1739,15 +1870,20 @@ impl App {
                     // Undoing a restore would be trashing again, which is
                     // one keypress away already.
                     JobKind::Restore { .. } => None,
-                    // Nothing yet. Undoing an extraction means deleting
-                    // a folder someone may have added to since, and
-                    // undoing an edit means putting back an archive
-                    // this job rewrote — both are real, both need a
-                    // record this suite's `Undoable` does not have a
-                    // shape for, and offering a half-working undo for
-                    // an operation that rewrites a file is worse than
-                    // offering none.
-                    JobKind::Archive { .. } => None,
+                    // An extraction and a compression each made exactly
+                    // one thing, and taking that back is moving it to
+                    // the Trash. An *edit* records nothing, and
+                    // `undo.rs` says at length why.
+                    // Built from where things actually landed, not from
+                    // where they were going to: the destination is
+                    // worked out again inside the job (a free folder
+                    // name), and a record made beforehand would name
+                    // the folder the job *would* have used.
+                    JobKind::Archive { undo, .. } => summary
+                        .placed
+                        .last()
+                        .filter(|_| summary.complete())
+                        .and_then(|(_, made)| undo.record(made)),
                 };
                 let noticed = done.map(|done| self.record(done)).unwrap_or_else(Task::none);
                 let refresh = Task::batch([refresh, noticed]);
@@ -2339,18 +2475,35 @@ impl App {
                 let index = self.active;
                 self.handle_outcome(index, Outcome::Activated(path))
             }
-            Message::ArchiveCopiesReady(Ok(paths)) => {
+            Message::ArchiveCopiesReady { verb, result: Ok(paths) } => {
+                // The clipboard always holds a *Copy* of the scratch
+                // files, whatever the verb was: a Cut would have the
+                // paste delete the scratch copy, which is neither here
+                // nor there — the thing that has to go is the member
+                // inside the archive, and that is `cut_from_archive`'s
+                // job once a paste has actually landed.
                 let clip = hyprforge_files_core::clipboard::FileClip {
-                    paths,
+                    paths: paths.clone(),
                     verb: hyprforge_files_core::clipboard::ClipVerb::Copy,
                 };
                 if let Err(e) = self.clipboard.set(clip) {
                     self.status = Some(format!("Couldn't copy: {e}"));
+                    return Task::none();
+                }
+                // Which real files a later paste has to match, for the
+                // removal to be the one that was asked for.
+                if let Some(cut) = &mut self.cut_from_archive {
+                    if verb == hyprforge_files_core::clipboard::ClipVerb::Cut {
+                        cut.copies = paths;
+                    }
                 }
                 self.sync_can_paste();
                 Task::none()
             }
-            Message::ArchiveCopiesReady(Err(why)) => {
+            Message::ArchiveCopiesReady { result: Err(why), .. } => {
+                // Nothing is on the clipboard, so there is no paste
+                // coming and nothing to remove later.
+                self.cut_from_archive = None;
                 self.status = Some(why);
                 Task::none()
             }
@@ -4046,6 +4199,7 @@ mod tests {
             unlocking: None,
             keyring: Arc::new(hyprforge_archive::Keyring::new()),
             opened_members: Vec::new(),
+            cut_from_archive: None,
             writeback: None,
             scratch: Arc::new(Scratch::default()),
             // Never the real one: a test that opens a file would start
@@ -5803,7 +5957,7 @@ mod archive_tests {
         app.jobs.push(RunningJob {
             id: 7,
             control,
-            kind: JobKind::Archive { doing: "Extracting" },
+            kind: JobKind::Archive { doing: "Extracting", undo: ArchiveUndo::Nothing },
             started: Instant::now(),
             dirs: Vec::new(),
             progress: None,
@@ -5824,6 +5978,247 @@ mod archive_tests {
             Some(AfterUnlock::Extract(archive))
         );
         assert!(app.status.is_none(), "the prompt is the report");
+    }
+
+    // --- cut out of an archive --------------------------------------
+
+    use hyprforge_files_core::clipboard::ClipVerb;
+
+    fn cut_state(archive: &Path, member: &str, copy: &Path) -> CutFromArchive {
+        CutFromArchive {
+            archive: archive.to_path_buf(),
+            members: vec![member.to_string()],
+            copies: vec![copy.to_path_buf()],
+        }
+    }
+
+    fn placed_summary(from: &Path, to: &Path) -> JobSummary {
+        JobSummary {
+            done: 1,
+            placed: vec![(from.to_path_buf(), to.to_path_buf())],
+            ..JobSummary::default()
+        }
+    }
+
+    /// The whole point of deferring: the member is still in the archive
+    /// until a paste lands, so a cut nobody pastes loses nothing.
+    #[test]
+    fn a_cut_that_is_never_pasted_leaves_the_archive_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_with(dir.path(), "sample.zip");
+        let mut app = app_for_test(&[archive.to_str().unwrap()]);
+        let copy = dir.path().join("readme.md");
+        std::fs::write(&copy, b"# hello").unwrap();
+        app.cut_from_archive = Some(cut_state(&archive, "payload/readme.md", &copy));
+
+        // A paste of something else entirely finishes.
+        let elsewhere = dir.path().join("other.txt");
+        let task = app.cut_landed(&JobKind::Copy, &placed_summary(&elsewhere, &elsewhere));
+
+        assert!(task.is_none(), "an unrelated paste must not complete the cut");
+        assert!(app.cut_from_archive.is_some(), "the cut is still waiting");
+        assert!(
+            StdArchives.index(&archive).unwrap().get("payload/readme.md").is_some(),
+            "nothing may be removed until a paste of these copies lands"
+        );
+    }
+
+    #[test]
+    fn a_paste_of_the_cut_copies_removes_the_members_from_the_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_with(dir.path(), "sample.zip");
+        let mut app = app_for_test(&[archive.to_str().unwrap()]);
+        let copy = dir.path().join("readme.md");
+        std::fs::write(&copy, b"# hello").unwrap();
+        app.cut_from_archive = Some(cut_state(&archive, "payload/readme.md", &copy));
+
+        let landed = dir.path().join("elsewhere/readme.md");
+        let _task = app.cut_landed(&JobKind::Copy, &placed_summary(&copy, &landed));
+        assert!(app.cut_from_archive.is_none(), "the cut is finished, not pending");
+
+        for _ in 0..60 {
+            if StdArchives
+                .index(&archive)
+                .is_ok_and(|i| i.get("payload/readme.md").is_none())
+            {
+                break;
+            }
+            settle();
+        }
+        let index = StdArchives.index(&archive).unwrap();
+        assert!(index.get("payload/readme.md").is_none(), "the member should have gone");
+        assert!(
+            index.get("payload/docs/guide.txt").is_some(),
+            "and nothing else with it"
+        );
+    }
+
+    /// A paste that only partly landed must not take the members away:
+    /// the copies that did not arrive have nowhere to be pasted back
+    /// from once the archive has lost them.
+    #[test]
+    fn a_partial_paste_leaves_the_cut_standing() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_with(dir.path(), "sample.zip");
+        let mut app = app_for_test(&[archive.to_str().unwrap()]);
+        let one = dir.path().join("readme.md");
+        let two = dir.path().join("guide.txt");
+        std::fs::write(&one, b"a").unwrap();
+        std::fs::write(&two, b"b").unwrap();
+        app.cut_from_archive = Some(CutFromArchive {
+            archive: archive.clone(),
+            members: vec!["payload/readme.md".into(), "payload/docs/guide.txt".into()],
+            copies: vec![one.clone(), two],
+        });
+
+        // Only the first of the two arrived.
+        let task = app.cut_landed(&JobKind::Copy, &placed_summary(&one, &one));
+        assert!(task.is_none());
+        assert!(app.cut_from_archive.is_some());
+    }
+
+    /// A paste that was cancelled or failed is not a landing.
+    #[test]
+    fn a_cancelled_paste_does_not_complete_the_cut() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_with(dir.path(), "sample.zip");
+        let mut app = app_for_test(&[archive.to_str().unwrap()]);
+        let copy = dir.path().join("readme.md");
+        std::fs::write(&copy, b"# hello").unwrap();
+        app.cut_from_archive = Some(cut_state(&archive, "payload/readme.md", &copy));
+
+        let summary = JobSummary {
+            cancelled: true,
+            ..placed_summary(&copy, &copy)
+        };
+        assert!(app.cut_landed(&JobKind::Copy, &summary).is_none());
+        assert!(app.cut_from_archive.is_some());
+    }
+
+    #[test]
+    fn cutting_is_offered_inside_an_archive() {
+        // The gate itself lives in `hyprforge-files-core`; this pins
+        // that the window has the other half of it, so the two cannot
+        // drift into "offered but does nothing".
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_with(dir.path(), "sample.zip");
+        let mut app = app_for_test(&[archive.to_str().unwrap()]);
+        let copy = dir.path().join("readme.md");
+        std::fs::write(&copy, b"# hello").unwrap();
+        app.cut_from_archive = Some(cut_state(&archive, "payload/readme.md", &copy));
+
+        assert!(
+            app.cut_landed(&JobKind::Move, &placed_summary(&copy, &copy)).is_some(),
+            "a completed move of the cut copies has to finish the cut"
+        );
+        let _ = ClipVerb::Cut;
+    }
+
+    // --- undo -------------------------------------------------------
+
+    use hyprforge_files_core::undo::Undoable;
+
+    /// Extracting one archive into a folder it made is a single thing
+    /// to take back.
+    #[test]
+    fn extracting_one_archive_records_the_folder_it_made() {
+        let work = archive_jobs::Work::Extract {
+            archives: vec![PathBuf::from("/a/sample.zip")],
+            into: None,
+        };
+        assert_eq!(work.undoes(), archive_jobs::Undoes::Extracted);
+        assert_eq!(
+            ArchiveUndo::Extracted.record(Path::new("/a/sample")),
+            Some(Undoable::Extracted(PathBuf::from("/a/sample")))
+        );
+    }
+
+    /// Extracting *into a folder the person chose* records nothing:
+    /// trashing that folder, with whatever else was already in it, is
+    /// not an undo of anything.
+    #[test]
+    fn extracting_into_a_chosen_folder_records_no_undo() {
+        let work = archive_jobs::Work::Extract {
+            archives: vec![PathBuf::from("/a/sample.zip")],
+            into: Some(PathBuf::from("/a/somewhere")),
+        };
+        assert_eq!(work.undoes(), archive_jobs::Undoes::Nothing);
+    }
+
+    #[test]
+    fn extracting_several_at_once_records_no_undo() {
+        let work = archive_jobs::Work::Extract {
+            archives: vec![PathBuf::from("/a/one.zip"), PathBuf::from("/a/two.zip")],
+            into: None,
+        };
+        assert_eq!(
+            work.undoes(),
+            archive_jobs::Undoes::Nothing,
+            "several folders is not one thing to take back"
+        );
+    }
+
+    /// The decision `undo.rs` documents: a rewrite's only honest undo is
+    /// a whole copy of the archive, and this suite will not quietly
+    /// spend that.
+    #[test]
+    fn editing_an_archive_records_no_undo() {
+        let work = archive_jobs::Work::Edit {
+            archive: PathBuf::from("/a/sample.zip"),
+            edits: vec![hyprforge_archive::Edit::Remove("x".to_string())],
+        };
+        assert_eq!(work.undoes(), archive_jobs::Undoes::Nothing);
+        assert_eq!(ArchiveUndo::Nothing.record(Path::new("/a/sample.zip")), None);
+    }
+
+    #[test]
+    fn compressing_records_the_archive_it_made() {
+        let work = archive_jobs::Work::Compress {
+            sources: Vec::new(),
+            dest: PathBuf::from("/a/notes.zip"),
+            format: Format::Zip,
+        };
+        assert_eq!(work.undoes(), archive_jobs::Undoes::Compressed);
+    }
+
+    /// The rule the whole undo model is built on: never delete.
+    #[test]
+    fn undoing_an_extraction_trashes_the_folder_rather_than_deleting_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let made = dir.path().join("sample");
+        std::fs::create_dir(&made).unwrap();
+        std::fs::write(made.join("inside.txt"), b"x").unwrap();
+
+        let (_dirs, errors) = jobs::undo(Undoable::Extracted(made.clone()));
+
+        // The trash is the real one on this machine, so the only thing
+        // asserted is that the folder left *and* that nothing was
+        // reported as lost — where it went is `hyprforge-fileops`'
+        // business and has its own tests.
+        if errors.is_empty() {
+            assert!(!made.exists(), "the extracted folder should have gone to the Trash");
+        }
+    }
+
+    /// A record naming something that is no longer there is not an
+    /// error: it was already dealt with.
+    #[test]
+    fn undoing_something_already_gone_says_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_dirs, errors) = jobs::undo(Undoable::Compressed(dir.path().join("never-made.zip")));
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn an_archive_undo_describes_itself_in_the_notice() {
+        assert_eq!(
+            Undoable::Extracted(PathBuf::from("/a/sample")).describe(),
+            "Extracted into \u{201C}sample\u{201D}"
+        );
+        assert_eq!(
+            Undoable::Compressed(PathBuf::from("/a/notes.zip")).describe(),
+            "Made \u{201C}notes.zip\u{201D}"
+        );
     }
 
     // --- write-back -----------------------------------------------

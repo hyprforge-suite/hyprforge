@@ -487,13 +487,14 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         Action::Copy | Action::CopyPath => ctx.selected > 0,
         // Moving something out of the Trash by hand would leave its
         // record behind; restoring is the way out, and it comes later.
-        // Cut is a move, and a move out of an archive is a copy and a
-        // deletion that have to either both happen or neither — across
-        // a rewrite of the whole file, with the paste arriving some
-        // unknown time later, possibly into another archive. Copy out
-        // and delete is the same result with the person deciding when
-        // the deletion happens.
-        Action::Cut => ctx.selected > 0 && !ctx.in_trash && !ctx.in_archive,
+        // Cut works inside an archive, and the honest caveat lives in
+        // the host: the member is removed only once a paste has
+        // actually landed, so a cut that is never pasted — or is pasted
+        // into another application — leaves the archive as it was. That
+        // is a cut degrading to a copy, visibly, which is the safe
+        // direction for a move whose two halves cannot be made atomic
+        // across a whole-file rewrite.
+        Action::Cut => ctx.selected > 0 && !ctx.in_trash,
         Action::Paste => ctx.can_paste && !ctx.in_trash,
         Action::Refresh => true,
         // One file at a time: "open these five in different

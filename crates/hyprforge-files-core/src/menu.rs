@@ -149,6 +149,7 @@ impl Default for MenuConfig {
                 A(Open),
                 A(ExtractTo),
                 Sep,
+                A(Cut),
                 A(Copy),
                 A(CopyPath),
                 A(Rename),
