@@ -59,6 +59,10 @@ tracing-subscriber.workspace = true
 tempfile = "3"
 
 [dev-dependencies]
+# Building an encrypted zip by hand, to prove the window opens a password
+# prompt rather than reporting a failure. This crate's own writer will
+# not produce one — encrypting an archive is not a thing it offers.
+zip = "8"
 # The `mock` feature turns on `hyprforge_files_core::backend::MockBackend`,
 # which this crate's tests drive the whole window against — the window
 # owns an `Arc<dyn FsBackend>`, so its update loop (stale generations,
