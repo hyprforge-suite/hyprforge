@@ -18,6 +18,11 @@ hyprforge-fileops.workspace = true
 # What a file is, and which applications can open it — see
 # `launch.rs` for why the launching itself is still the desktop's.
 hyprforge-mime.workspace = true
+# Zip, tar and 7z. The browsing of them is `hyprforge-files-core`'s
+# (through `FsBackend`); what this crate adds is the long, cancellable
+# work — extracting, compressing and rewriting — which needs the backend
+# directly rather than through a listing.
+hyprforge-archive.workspace = true
 # The Wayland clipboard, so copied files reach other applications and
 # theirs reach this one. The library only — this app never needs the
 # clipboard history daemon to be installed or running.
@@ -49,8 +54,11 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
-[dev-dependencies]
+# Not a dev-dependency: a file opened out of an archive is unpacked to a
+# scratch directory first — see `App::open_from_archive`.
 tempfile = "3"
+
+[dev-dependencies]
 # The `mock` feature turns on `hyprforge_files_core::backend::MockBackend`,
 # which this crate's tests drive the whole window against — the window
 # owns an `Arc<dyn FsBackend>`, so its update loop (stale generations,

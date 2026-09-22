@@ -32,6 +32,7 @@ members = [
     "crates/hyprforge-settings",
     "crates/hyprforge-mime",
     "crates/hyprforge-fileops",
+    "crates/hyprforge-archive",
     "crates/hyprforge-files-core",
     "crates/hyprforge-files",
 ]
@@ -85,6 +86,9 @@ hyprforge-emoji = { path = "crates/hyprforge-emoji", version = "0.1.0" }
 hyprforge-emojimenu = { path = "crates/hyprforge-emojimenu" }
 hyprforge-fileops = { path = "crates/hyprforge-fileops" }
 hyprforge-files-core = { path = "crates/hyprforge-files-core" }
+# Zip, tar and 7z, for the file manager's archive browsing. A leaf, like
+# hyprforge-mime beside it — nothing GUI and nothing Hyprland-shaped.
+hyprforge-archive = { path = "crates/hyprforge-archive" }
 hyprforge-mime = { path = "crates/hyprforge-mime" }
 hyprforge-files = { path = "crates/hyprforge-files" }
 

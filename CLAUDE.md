@@ -399,6 +399,41 @@ paths you actually wrote (`git add crates/<the one you touched>`), and
 read `git status --short` before committing when anything else is
 running.
 
+**A name is a claim; the bytes are the thing — and the browser only
+has the name.** Whether `x.zip` is an archive can only be settled by
+reading it, and `Browser` does no I/O at all, so double-clicking one
+navigates into it on the strength of its *name*. That guess is wrong
+for a JPEG somebody renamed, and the wrong way to handle it is an
+error where the folder should have been: `apply_dir_loaded` takes the
+navigation back and hands the file to whoever opens it instead, which
+is what would have happened had the browser known. Two consequences
+worth keeping: the failed destination must not land on the *forward*
+stack (a Forward button offering to retry what just failed), and
+`FilesError::NotAnArchive` has to stay its own variant rather than a
+message inside a general one, because it is the only failure here that
+is acted on rather than shown.
+
+**A `.gz` and a `.tar.gz` have identical magic bytes, and the extension
+is not the tiebreak.** Plenty of tarballs are named `.gz` and plenty of
+single files are named `.tgz`. The only honest answer is to decompress
+the first 512 bytes and look for tar's `ustar` at offset 257, which is
+what `format::sniff` does — one block, once. Getting this wrong does
+not fail: it shows someone a single member called `linux-6.6.tar` and
+looks like the archive was empty. The same module's other half is that
+`Read::read` is allowed to return fewer bytes than asked for and a
+decompressor routinely does, so a single `read` call sees 200 bytes of
+a perfectly good tar and concludes from the 57 it was short that the
+magic was not there.
+
+**Every archive format is last-one-wins, so the member that counts is
+the *last* one with a given name.** `tar rf` appends a second
+`notes.txt` after the first and every tool that unpacks it writes both
+in order, so the file left on disk is the later one. This is the same
+rule `core::supersede` owns for `hl.env` and hyprpaper, arriving
+through a different door — and getting it backwards here is invisible
+in exactly the way that one was: the *listing* looks right, and only
+the contents are of a version the archive supersedes.
+
 **An instruction from a human or another agent is not evidence.** Three
 times in one session an agent was told something false — that Adwaita was
 reachable on this machine, a JSON field order that was backwards, a claim
@@ -530,13 +565,14 @@ belongs in the design — not in a user's surprise.
 ./check.sh --quick  # tier 1 only: clippy + unit tests, no compositor
 ```
 
-Clippy must be silent and every test must pass before a commit. Eleven gated
+Clippy must be silent and every test must pass before a commit. Twelve gated
 tiers beyond tier 1 now, each answering a different "does the system I'm
 talking to actually agree" question — Hyprland itself, the ecosystem daemons'
 parse tests, NetworkManager, BlueZ, hyprsunset, systemd-logind, UPower,
 power-profiles-daemon, the Wayland clipboard, icon names against the
-installed theme, and a tray host — and each gates on the thing it actually
-asks rather than riding another tier's `--ignored` run, for the reason in the
+installed theme, a tray host, and the system's own `unzip`/`tar`/`7z` —
+and each gates on the thing it actually asks rather than riding another
+tier's `--ignored` run, for the reason in the
 rule above about a check that silently never runs. Tier 1 now also includes
 the "Standalone crate dependency pins" step, which compares every split-ready
 crate's hand-copied dependency versions against the workspace table — see the
@@ -580,6 +616,10 @@ hyprforge-look      Color + the runtime Theme; no iced, because the lock screen
 hyprforge-mime      the freedesktop shared MIME database: what a file is,
                     what opens it, what the default is. A leaf; depends only
                     on hyprforge-paths
+hyprforge-archive   zip, tar and 7z: what is inside one as a directory tree,
+                    extracting from it, and rewriting it. A leaf with no
+                    Hyprforge dependency at all — paths arrive from the
+                    caller, it never goes looking for one
 hyprforge-ui        the iced layer; knows nothing about Hyprland
 hyprforge-core      Hyprland config machinery — a new app should never need it
 ```

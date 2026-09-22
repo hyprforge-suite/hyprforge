@@ -81,6 +81,10 @@ pub enum DirErrorKind {
     NotFound,
     NotADirectory,
     Vanished,
+    /// The path led through a file that looked like an archive and is
+    /// not one. Never rendered: [`Browser::apply_dir_loaded`] turns it
+    /// into an ordinary activation instead — see there.
+    NotAnArchive,
     Other,
 }
 
@@ -91,7 +95,8 @@ impl From<&FilesError> for DirError {
             FilesError::NotFound { .. } => DirErrorKind::NotFound,
             FilesError::NotADirectory { .. } => DirErrorKind::NotADirectory,
             FilesError::VanishedMidRead { .. } => DirErrorKind::Vanished,
-            FilesError::Io { .. } => DirErrorKind::Other,
+            FilesError::NotAnArchive { .. } => DirErrorKind::NotAnArchive,
+            FilesError::Elsewhere { .. } | FilesError::Io { .. } => DirErrorKind::Other,
         };
         DirError { message: e.to_string(), kind }
     }
@@ -410,6 +415,30 @@ pub enum Outcome {
     /// where the pointer is — the window does, and fills it in, the same
     /// way it fills in modifier keys on a click.
     OpenContextMenuAtPointer(MenuSpot),
+    /// Unpack these archives. `to` is where they go; `None` means
+    /// "each into a new folder beside itself, named after it" — the
+    /// host picks the name, because it is the one that can see which
+    /// names are free.
+    ///
+    /// The unpacking itself is the host's for the same reason reading a
+    /// directory is: it is long, blocking work that wants a progress
+    /// bar and a cancel button, and `Browser` does no I/O.
+    Extract {
+        archives: Vec<PathBuf>,
+        to: Option<PathBuf>,
+    },
+    /// Unpack these members *out of* the archive this listing is inside.
+    /// The host asks where they should go.
+    ExtractMembers {
+        members: Vec<PathBuf>,
+        from: PathBuf,
+    },
+    /// Make an archive out of these. The host asks for a name and a
+    /// format.
+    Compress {
+        sources: Vec<PathBuf>,
+        into: PathBuf,
+    },
     /// A window-scope action — see [`crate::action::Scope`]. It reaches
     /// the host this way so a menu item for one travels the same road as
     /// every other action; a host without tabs ignores it.
@@ -578,6 +607,9 @@ pub struct Browser {
     menu: Option<OpenMenu>,
     /// Whether the clipboard holds files — see [`Self::set_can_paste`].
     can_paste: bool,
+    /// Whether this listing is inside an archive — see
+    /// [`Self::set_in_archive`].
+    in_archive: bool,
     /// The name being edited in place, if any.
     renaming: Option<Renaming>,
     /// See [`Message::AfterListing`].
@@ -624,6 +656,7 @@ impl Browser {
             config: Arc::new(Config::default()),
             menu: None,
             can_paste: false,
+            in_archive: false,
             renaming: None,
             after_listing: None,
             dotfiles: 0,
@@ -882,6 +915,22 @@ impl Browser {
             has_parent: self.current_dir.parent().is_some(),
             searching: !self.search_query.is_empty(),
             in_trash: self.in_trash(),
+            in_archive: self.in_archive,
+            // Every selected row is a file whose name this suite can
+            // open as an archive. `!is_dir` is the half that matters:
+            // a *folder* called `backup.zip` is a folder, and the name
+            // alone would call it an archive.
+            selection_is_archives: {
+                let selected = self.selected_shown();
+                !selected.is_empty()
+                    && selected.iter().all(|path| {
+                        rows.iter().any(|e| {
+                            e.path == *path
+                                && !e.is_dir
+                                && crate::archive::looks_browsable(&e.name)
+                        })
+                    })
+            },
             can_paste: self.can_paste,
             pin: {
                 let target = self.pin_target(target);
@@ -918,6 +967,21 @@ impl Browser {
 
     /// Tells the browser whether the clipboard holds files. The host owns
     /// the clipboard and calls this whenever it changes.
+    /// Tells the browser whether this listing is inside an archive.
+    ///
+    /// Set by the host after each read, for the reason
+    /// [`ActionContext::in_archive`] gives: deciding it needs one
+    /// `stat`, and `Browser` does no I/O. The host is reading the
+    /// directory anyway and already knows which backend answered.
+    pub fn set_in_archive(&mut self, in_archive: bool) {
+        self.in_archive = in_archive;
+    }
+
+    /// Whether this listing is inside an archive.
+    pub fn in_archive(&self) -> bool {
+        self.in_archive
+    }
+
     pub fn set_can_paste(&mut self, can_paste: bool) {
         self.can_paste = can_paste;
     }
@@ -1017,6 +1081,33 @@ impl Browser {
                 (Some(target), _) => Outcome::OpenInNewTab(target),
                 (None, Some(path)) => Outcome::OpenInNewTab(path.to_path_buf()),
                 (None, None) => Outcome::None,
+            },
+            Action::Extract => Outcome::Extract {
+                archives: self.selected_shown(),
+                // No destination: each archive gets a folder beside
+                // itself named after it, which the host works out —
+                // it is the one that knows what names are free.
+                to: None,
+            },
+            Action::ExtractTo => {
+                if self.in_archive {
+                    // Inside an archive the selection *is* the members,
+                    // and the archive they came out of is where this
+                    // listing is.
+                    Outcome::ExtractMembers {
+                        members: self.selected_shown(),
+                        from: self.current_dir.clone(),
+                    }
+                } else {
+                    Outcome::Extract {
+                        archives: self.selected_shown(),
+                        to: Some(self.current_dir.clone()),
+                    }
+                }
+            }
+            Action::Compress => Outcome::Compress {
+                sources: self.selected_shown(),
+                into: self.current_dir.clone(),
             },
             Action::Pin | Action::Unpin | Action::PinUp | Action::PinDown => {
                 let Some(target) = self.pin_target(target.as_deref()) else {
@@ -1180,10 +1271,21 @@ impl Browser {
                 } else {
                     self.selection.focus(path);
                 }
-                match (self.in_trash(), is_dir) {
-                    (true, _) => MenuKind::Trash,
-                    (false, true) => MenuKind::Folder,
-                    (false, false) => MenuKind::Entry,
+                // Inside an archive every row gets the same menu,
+                // folder or not: what can be done to a member does not
+                // depend on whether anything is under it.
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                match (self.in_trash(), self.in_archive, is_dir) {
+                    (true, _, _) => MenuKind::Trash,
+                    (_, true, _) => MenuKind::ArchiveMember,
+                    (_, false, true) => MenuKind::Folder,
+                    (_, false, false) if crate::archive::looks_browsable(&name) => {
+                        MenuKind::Archive
+                    }
+                    (_, false, false) => MenuKind::Entry,
                 }
             }
             None => {
@@ -1255,6 +1357,15 @@ impl Browser {
         // the result is actually for.
         if path != self.current_dir {
             return Outcome::None;
+        }
+        // The name said archive and the bytes disagree. Rather than
+        // leaving someone looking at an error where a folder should
+        // have been, the guess is taken back and the file is opened the
+        // ordinary way — which is what would have happened if
+        // `activate_path` had known, and it could not have.
+        if result.as_ref().err().map(|e| e.kind) == Some(DirErrorKind::NotAnArchive) {
+            let back = self.unwind_navigation();
+            return Outcome::Many(vec![back, Outcome::Activated(path)]);
         }
         match result {
             Ok(entries) => {
@@ -1438,11 +1549,35 @@ impl Browser {
 
     /// A folder navigates into itself; a file becomes
     /// [`Outcome::Activated`] for the host to interpret.
+    ///
+    /// An archive is a third case that resolves to the first: this suite
+    /// browses archives, so opening one means going into it, not handing
+    /// it to whatever else is installed. The decision is made on the
+    /// name, because the name is all a listing has and `Browser` does no
+    /// I/O — and a name can be wrong, which is why
+    /// [`Self::apply_dir_loaded`] has a way back out.
     fn activate_path(&mut self, is_dir: bool, path: PathBuf) -> Outcome {
         if is_dir {
-            self.go_to(path)
-        } else {
-            Outcome::Activated(path)
+            return self.go_to(path);
+        }
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if crate::archive::looks_browsable(&name) {
+            return self.go_to(path);
+        }
+        Outcome::Activated(path)
+    }
+
+    /// Takes back the navigation that just failed, without leaving it in
+    /// the forward history.
+    ///
+    /// Not [`Self::go_back`]: going back would put the failed
+    /// destination on the forward stack, so the Forward button would
+    /// offer to try it again — an offer to repeat something that did not
+    /// work. This one is "that never happened".
+    fn unwind_navigation(&mut self) -> Outcome {
+        match self.back_stack.pop() {
+            Some(previous) => self.arrive_at(previous),
+            None => Outcome::None,
         }
     }
 
@@ -3214,6 +3349,40 @@ fn grid_cell<'a>(
     with_row_menu(cell.into(), index)
 }
 
+/// Fixtures shared by this module's test modules.
+#[cfg(test)]
+mod tests_support {
+    use super::*;
+    use crate::types::EntryKind;
+    use std::time::SystemTime;
+
+    /// A listing of `(name, is_dir)` at `/dir`, already loaded.
+    pub fn loaded(rows: &[(&str, bool)]) -> Browser {
+        let (mut browser, _) =
+            Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
+        let entries: Vec<Entry> = rows
+            .iter()
+            .map(|(name, is_dir)| Entry {
+                name: name.to_string(),
+                path: PathBuf::from("/dir").join(name),
+                is_dir: *is_dir,
+                size: if *is_dir { EntrySize::UNCOUNTED } else { EntrySize::Bytes(10) },
+                modified: Some(SystemTime::UNIX_EPOCH),
+                is_symlink: false,
+                link_broken: false,
+                hidden: name.starts_with('.'),
+                kind: EntryKind::classify(*is_dir, name),
+                mode: 0o644,
+                uid: 1000,
+                owner: Some("alex".to_string()),
+                origin: None,
+            })
+            .collect();
+        browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(entries)));
+        browser
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4602,6 +4771,188 @@ mod tests {
             row.tint,
             sidebar::Tint::Accent,
             "the row's own colour is untouched — one field decides, and it is `missing`"
+        );
+    }
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::tests_support::*;
+    use super::*;
+
+    /// This suite browses archives, so opening one means going into it.
+    /// Handing it to the desktop would open whatever else is installed —
+    /// or, on a machine with nothing registered for `application/zip`,
+    /// nothing at all.
+    #[test]
+    fn activating_an_archive_navigates_into_it_rather_than_handing_it_over() {
+        let mut browser = loaded(&[("notes.txt", false), ("sample.zip", false)]);
+        let outcome = browser.update(Message::EntryActivated(1));
+
+        assert_eq!(outcome, Outcome::ReadDir(PathBuf::from("/dir/sample.zip")));
+        assert_eq!(browser.current_dir(), Path::new("/dir/sample.zip"));
+    }
+
+    #[test]
+    fn activating_an_ordinary_file_still_goes_to_the_host() {
+        let mut browser = loaded(&[("notes.txt", false), ("sample.zip", false)]);
+        assert_eq!(
+            browser.update(Message::EntryActivated(0)),
+            Outcome::Activated(PathBuf::from("/dir/notes.txt"))
+        );
+    }
+
+    /// A folder called `backup.zip` is a folder. It already navigates,
+    /// so the visible consequence is elsewhere: it must not be offered
+    /// the archive menu or counted as an archive by Extract.
+    #[test]
+    fn a_folder_named_like_an_archive_is_treated_as_the_folder_it_is() {
+        let mut browser = loaded(&[("backup.zip", true)]);
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+        assert!(
+            !browser.action_context().selection_is_archives,
+            "a directory is not an archive however it is named"
+        );
+    }
+
+    /// The guess is made from the name, because a name is all a listing
+    /// has. When it is wrong, the way out is the file opening normally —
+    /// not an error page where the folder would have been.
+    #[test]
+    fn a_file_that_only_looked_like_an_archive_opens_the_ordinary_way() {
+        let mut browser = loaded(&[("photo.zip", false)]);
+        browser.update(Message::EntryActivated(0));
+        assert_eq!(browser.current_dir(), Path::new("/dir/photo.zip"));
+
+        let outcome = browser.update(Message::DirLoaded(
+            PathBuf::from("/dir/photo.zip"),
+            Err(DirError {
+                message: "photo.zip isn't an archive.".to_string(),
+                kind: DirErrorKind::NotAnArchive,
+            }),
+        ));
+
+        assert!(
+            matches!(&outcome, Outcome::Many(parts) if parts.contains(&Outcome::Activated(PathBuf::from("/dir/photo.zip")))),
+            "the file has to reach the host to be opened: {outcome:?}"
+        );
+        assert_eq!(
+            browser.current_dir(),
+            Path::new("/dir"),
+            "and the browser must not be left standing in a place that does not exist"
+        );
+        assert!(
+            !matches!(browser.load_state, LoadState::Error(_)),
+            "an error that was handled is not an error to show"
+        );
+    }
+
+    /// Going *back* out of a failed navigation would leave the failure
+    /// on the forward stack — a Forward button offering to do again the
+    /// thing that just did not work.
+    #[test]
+    fn a_failed_archive_navigation_is_not_offered_again_by_forward() {
+        let mut browser = loaded(&[("photo.zip", false)]);
+        browser.update(Message::EntryActivated(0));
+        browser.update(Message::DirLoaded(
+            PathBuf::from("/dir/photo.zip"),
+            Err(DirError {
+                message: "photo.zip isn't an archive.".to_string(),
+                kind: DirErrorKind::NotAnArchive,
+            }),
+        ));
+
+        assert!(!browser.action_context().can_go_forward);
+    }
+
+    // --- what the menus and the actions offer ---------------------------
+
+    #[test]
+    fn an_archive_row_is_offered_extracting_and_an_ordinary_file_is_not() {
+        let mut browser = loaded(&[("notes.txt", false), ("sample.zip", false)]);
+
+        browser.update(Message::EntryClicked { index: 1, ctrl: false, shift: false });
+        assert!(action::enabled(Action::Extract, &browser.action_context()));
+
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+        assert!(!action::enabled(Action::Extract, &browser.action_context()));
+    }
+
+    /// All of them, or the action would quietly skip the rest of the
+    /// selection.
+    #[test]
+    fn extracting_a_mixed_selection_is_not_offered() {
+        let mut browser = loaded(&[("notes.txt", false), ("sample.zip", false)]);
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+        browser.update(Message::EntryClicked { index: 1, ctrl: true, shift: false });
+
+        assert_eq!(browser.action_context().selected, 2);
+        assert!(!action::enabled(Action::Extract, &browser.action_context()));
+    }
+
+    #[test]
+    fn inside_an_archive_deleting_is_offered_and_the_trash_is_not() {
+        let mut browser = loaded(&[("guide.txt", false)]);
+        browser.set_in_archive(true);
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+
+        let ctx = browser.action_context();
+        assert!(
+            !action::enabled(Action::Trash, &ctx),
+            "there is no trash inside a zip to file a member in"
+        );
+        assert!(
+            action::enabled(Action::DeletePermanently, &ctx),
+            "and removing it from the archive is what Delete means here"
+        );
+        assert!(action::enabled(Action::Rename, &ctx), "renaming is an edit the formats allow");
+        assert!(!action::enabled(Action::Cut, &ctx), "a move across a rewrite is not offered");
+        assert!(!action::enabled(Action::Compress, &ctx), "an archive inside an archive is nobody's want");
+        assert!(!action::enabled(Action::NewFolder, &ctx));
+        assert!(!action::enabled(Action::Pin, &ctx), "a path through an archive is not a place to pin");
+    }
+
+    #[test]
+    fn inside_an_archive_a_selection_can_be_extracted_out_of_it() {
+        let mut browser = loaded(&[("guide.txt", false)]);
+        browser.set_in_archive(true);
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+
+        assert!(action::enabled(Action::ExtractTo, &browser.action_context()));
+        assert_eq!(
+            browser.perform(Action::ExtractTo),
+            Outcome::ExtractMembers {
+                members: vec![PathBuf::from("/dir/guide.txt")],
+                from: PathBuf::from("/dir"),
+            }
+        );
+    }
+
+    #[test]
+    fn extracting_without_a_destination_leaves_the_naming_to_the_host() {
+        let mut browser = loaded(&[("sample.zip", false)]);
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+
+        assert_eq!(
+            browser.perform(Action::Extract),
+            Outcome::Extract {
+                archives: vec![PathBuf::from("/dir/sample.zip")],
+                to: None,
+            }
+        );
+    }
+
+    #[test]
+    fn compressing_names_the_folder_the_new_archive_goes_into() {
+        let mut browser = loaded(&[("notes.txt", false)]);
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+
+        assert_eq!(
+            browser.perform(Action::Compress),
+            Outcome::Compress {
+                sources: vec![PathBuf::from("/dir/notes.txt")],
+                into: PathBuf::from("/dir"),
+            }
         );
     }
 }

@@ -1,0 +1,484 @@
+//! Real archives, on a real disk, through the real backend.
+//!
+//! Everything in the crate's own unit tests runs against a seeded model
+//! or a mock. These build actual files and read them back, because the
+//! claims this crate makes about somebody else's format — that a tar's
+//! directories come back, that a zip's timestamps survive, that 7z can
+//! be written and reopened — are exactly the ones the type system cannot
+//! see.
+//!
+//! No daemon, no compositor, no network: they run in tier 1.
+
+use hyprforge_archive::backend::{
+    ArchiveBackend, Collision, Edit, ExtractRequest, NoProgress,
+};
+use hyprforge_archive::{Compression, Format, Source, StdArchives};
+use std::path::{Path, PathBuf};
+
+/// A small tree to pack: two files at different depths, and an empty
+/// directory — which is the one thing that disappears from an archive
+/// whose folders exist only by implication.
+fn sample_tree(root: &Path) -> PathBuf {
+    let tree = root.join("payload");
+    std::fs::create_dir_all(tree.join("docs/deep")).unwrap();
+    std::fs::create_dir_all(tree.join("empty")).unwrap();
+    std::fs::write(tree.join("readme.md"), b"# hello").unwrap();
+    std::fs::write(tree.join("docs/guide.txt"), b"a guide, of sorts").unwrap();
+    std::fs::write(tree.join("docs/deep/more.txt"), vec![b'x'; 10_000]).unwrap();
+    tree
+}
+
+fn sources(tree: &Path) -> Vec<Source> {
+    vec![Source {
+        path: tree.to_path_buf(),
+        as_member: "payload".to_string(),
+    }]
+}
+
+fn every_writable_format() -> Vec<(Format, &'static str)> {
+    vec![
+        (Format::Zip, "sample.zip"),
+        (Format::Tar(Compression::None), "sample.tar"),
+        (Format::Tar(Compression::Gzip), "sample.tar.gz"),
+        (Format::Tar(Compression::Bzip2), "sample.tar.bz2"),
+        (Format::Tar(Compression::Xz), "sample.tar.xz"),
+        (Format::Tar(Compression::Zstd), "sample.tar.zst"),
+        (Format::SevenZ, "sample.7z"),
+    ]
+}
+
+#[test]
+fn every_format_round_trips_a_tree_through_create_list_and_extract() {
+    for (format, name) in every_writable_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = sample_tree(dir.path());
+        let archive = dir.path().join(name);
+
+        StdArchives
+            .create(&archive, format, &sources(&tree), &mut NoProgress)
+            .unwrap_or_else(|e| panic!("{name} could not be created: {e}"));
+
+        // The listing agrees with what went in.
+        let index = StdArchives
+            .index(&archive)
+            .unwrap_or_else(|e| panic!("{name} could not be listed: {e}"));
+        assert!(
+            index.get("payload/docs/guide.txt").is_some(),
+            "{name} lost a nested file"
+        );
+        assert!(
+            index.get("payload/docs").is_some_and(|m| m.is_dir),
+            "{name} lost the directory above it"
+        );
+        assert_eq!(
+            index.get("payload/docs/deep/more.txt").map(|m| m.size),
+            Some(10_000),
+            "{name} reported the wrong size for a member"
+        );
+
+        // One member's bytes come back byte for byte.
+        let bytes = StdArchives
+            .read_member(&archive, "payload/docs/guide.txt")
+            .unwrap_or_else(|e| panic!("{name} could not read a member: {e}"));
+        assert_eq!(bytes, b"a guide, of sorts", "{name} changed a member's contents");
+
+        // And so does the whole thing, extracted.
+        let out = dir.path().join("out");
+        let report = StdArchives
+            .extract(
+                &archive,
+                &ExtractRequest {
+                    members: Vec::new(),
+                    dest: out.clone(),
+                    strip_prefix: None,
+                    collision: Collision::Overwrite,
+                },
+                &mut NoProgress,
+            )
+            .unwrap_or_else(|e| panic!("{name} could not be extracted: {e}"));
+
+        assert!(report.failed.is_empty(), "{name} failed members: {:?}", report.failed);
+        assert_eq!(report.files, 3, "{name} extracted {} files", report.files);
+        assert_eq!(
+            std::fs::read(out.join("payload/readme.md")).unwrap(),
+            b"# hello",
+            "{name} corrupted a file on the way out"
+        );
+        assert_eq!(
+            std::fs::read(out.join("payload/docs/deep/more.txt")).unwrap().len(),
+            10_000,
+            "{name} truncated the largest member"
+        );
+    }
+}
+
+/// An empty directory has no files under it to imply it, so it is the
+/// one thing a "directories are synthesised from paths" design loses if
+/// the writer does not record it deliberately.
+#[test]
+fn an_empty_directory_survives_every_format() {
+    for (format, name) in every_writable_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = sample_tree(dir.path());
+        let archive = dir.path().join(name);
+        StdArchives
+            .create(&archive, format, &sources(&tree), &mut NoProgress)
+            .unwrap();
+
+        let index = StdArchives.index(&archive).unwrap();
+        assert!(
+            index.get("payload/empty").is_some_and(|m| m.is_dir),
+            "{name} lost an empty directory"
+        );
+
+        let out = dir.path().join("out");
+        StdArchives
+            .extract(
+                &archive,
+                &ExtractRequest {
+                    members: Vec::new(),
+                    dest: out.clone(),
+                    strip_prefix: None,
+                    collision: Collision::Overwrite,
+                },
+                &mut NoProgress,
+            )
+            .unwrap();
+        assert!(
+            out.join("payload/empty").is_dir(),
+            "{name} did not put the empty directory back"
+        );
+    }
+}
+
+#[test]
+fn extracting_one_folders_contents_puts_them_at_the_destination_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let tree = sample_tree(dir.path());
+    let archive = dir.path().join("sample.zip");
+    StdArchives
+        .create(&archive, Format::Zip, &sources(&tree), &mut NoProgress)
+        .unwrap();
+
+    let out = dir.path().join("out");
+    StdArchives
+        .extract(
+            &archive,
+            &ExtractRequest {
+                members: vec!["payload/docs".to_string()],
+                dest: out.clone(),
+                strip_prefix: Some("payload/docs".to_string()),
+                collision: Collision::Overwrite,
+            },
+            &mut NoProgress,
+        )
+        .unwrap();
+
+    assert!(out.join("guide.txt").is_file(), "the folder's contents land at the top");
+    assert!(!out.join("payload").exists(), "and its path above it does not come along");
+    assert!(!out.join("readme.md").exists(), "nor anything outside the selection");
+}
+
+#[test]
+fn what_a_file_is_named_does_not_decide_what_it_is_read_as() {
+    let dir = tempfile::tempdir().unwrap();
+    let tree = sample_tree(dir.path());
+    // A real gzipped tar, called something else entirely.
+    let archive = dir.path().join("mystery.bin");
+    StdArchives
+        .create(
+            &archive,
+            Format::Tar(Compression::Gzip),
+            &sources(&tree),
+            &mut NoProgress,
+        )
+        .unwrap();
+
+    let index = StdArchives.index(&archive).unwrap();
+    assert!(
+        index.get("payload/readme.md").is_some(),
+        "a tarball must open under any name"
+    );
+}
+
+/// The `.gz` that is not a `.tar.gz` — see `format`'s module doc.
+#[test]
+fn a_single_compressed_file_browses_as_one_member_named_without_its_suffix() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("dump.sql.gz");
+    {
+        use std::io::Write;
+        let file = std::fs::File::create(&archive).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        encoder.write_all(b"SELECT 1;").unwrap();
+        encoder.finish().unwrap();
+    }
+
+    let index = StdArchives.index(&archive).unwrap();
+    let members: Vec<&str> = index.members().iter().map(|m| m.path.as_str()).collect();
+    assert_eq!(members, ["dump.sql"]);
+    assert!(
+        !index.members()[0].size_known,
+        "the decompressed size is not knowable without decompressing, and must not read as zero"
+    );
+    assert_eq!(StdArchives.read_member(&archive, "dump.sql").unwrap(), b"SELECT 1;");
+}
+
+#[test]
+fn a_file_that_is_not_an_archive_says_so_rather_than_claiming_to_be_damaged() {
+    let dir = tempfile::tempdir().unwrap();
+    let liar = dir.path().join("photo.zip");
+    std::fs::write(&liar, b"\xff\xd8\xff\xe0 this is a jpeg, honestly").unwrap();
+
+    let err = StdArchives.index(&liar).expect_err("not an archive");
+    let message = err.to_string().to_lowercase();
+    assert!(!message.contains("damaged"), "{message}");
+    assert!(message.contains("isn't an archive"), "{message}");
+}
+
+// --- editing --------------------------------------------------------
+
+/// The three formats that can be edited, and the reason the fourth
+/// cannot: `Format::Compressed` holds one stream with no room for a
+/// second member.
+fn every_editable_format() -> Vec<(Format, &'static str)> {
+    every_writable_format()
+}
+
+#[test]
+fn renaming_a_folder_inside_an_archive_moves_everything_under_it() {
+    for (format, name) in every_editable_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = sample_tree(dir.path());
+        let archive = dir.path().join(name);
+        StdArchives
+            .create(&archive, format, &sources(&tree), &mut NoProgress)
+            .unwrap();
+
+        StdArchives
+            .edit(
+                &archive,
+                &[Edit::Rename {
+                    from: "payload/docs".to_string(),
+                    to: "payload/manual".to_string(),
+                }],
+                &mut NoProgress,
+            )
+            .unwrap_or_else(|e| panic!("{name} could not be edited: {e}"));
+
+        let index = StdArchives.index(&archive).unwrap();
+        assert!(index.get("payload/docs").is_none(), "{name} kept the old name");
+        assert!(
+            index.get("payload/manual/deep/more.txt").is_some(),
+            "{name} lost a file under the renamed folder"
+        );
+        assert_eq!(
+            StdArchives.read_member(&archive, "payload/manual/guide.txt").unwrap(),
+            b"a guide, of sorts",
+            "{name} changed the contents of a renamed member"
+        );
+        // Untouched members are still untouched.
+        assert!(index.get("payload/readme.md").is_some(), "{name} lost an unrelated file");
+    }
+}
+
+#[test]
+fn removing_a_folder_removes_what_was_inside_it_in_the_file_as_well() {
+    for (format, name) in every_editable_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = sample_tree(dir.path());
+        let archive = dir.path().join(name);
+        StdArchives
+            .create(&archive, format, &sources(&tree), &mut NoProgress)
+            .unwrap();
+
+        StdArchives
+            .edit(&archive, &[Edit::Remove("payload/docs".to_string())], &mut NoProgress)
+            .unwrap();
+
+        let index = StdArchives.index(&archive).unwrap();
+        assert!(index.get("payload/docs").is_none(), "{name} left the folder standing");
+        assert!(
+            index.get("payload/docs/guide.txt").is_none(),
+            "{name} left a file inside a folder it deleted"
+        );
+        assert!(index.get("payload/readme.md").is_some(), "{name} deleted too much");
+    }
+}
+
+#[test]
+fn adding_a_file_to_an_archive_puts_it_where_it_was_asked_for() {
+    for (format, name) in every_editable_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = sample_tree(dir.path());
+        let archive = dir.path().join(name);
+        StdArchives
+            .create(&archive, format, &sources(&tree), &mut NoProgress)
+            .unwrap();
+
+        let extra = dir.path().join("notes.txt");
+        std::fs::write(&extra, b"added later").unwrap();
+        StdArchives
+            .edit(
+                &archive,
+                &[Edit::Add {
+                    source: extra,
+                    as_member: "payload/docs/notes.txt".to_string(),
+                }],
+                &mut NoProgress,
+            )
+            .unwrap();
+
+        assert_eq!(
+            StdArchives.read_member(&archive, "payload/docs/notes.txt").unwrap(),
+            b"added later",
+            "{name} did not add the file"
+        );
+        assert!(
+            StdArchives.index(&archive).unwrap().get("payload/readme.md").is_some(),
+            "{name} lost what was already there"
+        );
+    }
+}
+
+/// Both zip and tar permit the same name twice, and the last one wins
+/// when anything unpacks the archive — so an "add" that left the old
+/// member in place would produce a file that reads back correctly and
+/// is quietly twice the size, with a superseded copy inside it.
+#[test]
+fn adding_over_an_existing_member_replaces_it_rather_than_shadowing_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let tree = sample_tree(dir.path());
+    let archive = dir.path().join("sample.tar");
+    StdArchives
+        .create(&archive, Format::Tar(Compression::None), &sources(&tree), &mut NoProgress)
+        .unwrap();
+
+    let replacement = dir.path().join("replacement");
+    std::fs::write(&replacement, b"the new guide").unwrap();
+    StdArchives
+        .edit(
+            &archive,
+            &[Edit::Add {
+                source: replacement,
+                as_member: "payload/docs/guide.txt".to_string(),
+            }],
+            &mut NoProgress,
+        )
+        .unwrap();
+
+    let index = StdArchives.index(&archive).unwrap();
+    let copies = index
+        .members()
+        .iter()
+        .filter(|m| m.path == "payload/docs/guide.txt")
+        .count();
+    assert_eq!(copies, 1, "the superseded member is still in the file");
+    assert_eq!(
+        StdArchives.read_member(&archive, "payload/docs/guide.txt").unwrap(),
+        b"the new guide"
+    );
+}
+
+/// The property the temporary-file-then-rename dance exists for: an edit
+/// that fails must leave the original archive exactly as it was, not a
+/// truncated file where one used to be.
+#[test]
+fn an_edit_that_fails_leaves_the_original_archive_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let tree = sample_tree(dir.path());
+    let archive = dir.path().join("sample.zip");
+    StdArchives
+        .create(&archive, Format::Zip, &sources(&tree), &mut NoProgress)
+        .unwrap();
+    let before = std::fs::read(&archive).unwrap();
+
+    // A source that is not there is the simplest way to fail partway
+    // through the rewrite, after the archive has been read.
+    let err = StdArchives.edit(
+        &archive,
+        &[Edit::Add {
+            source: dir.path().join("does-not-exist"),
+            as_member: "payload/nope.txt".to_string(),
+        }],
+        &mut NoProgress,
+    );
+    assert!(err.is_err(), "adding a file that is not there should fail");
+
+    assert_eq!(
+        std::fs::read(&archive).unwrap(),
+        before,
+        "a failed edit rewrote the archive anyway"
+    );
+    // And nothing is left lying beside it.
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains("hyprforge-new"))
+        .collect();
+    assert!(leftovers.is_empty(), "left a temporary file behind: {leftovers:?}");
+}
+
+#[test]
+fn a_single_compressed_file_cannot_be_edited_and_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("dump.sql.gz");
+    {
+        use std::io::Write;
+        let file = std::fs::File::create(&archive).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        encoder.write_all(b"SELECT 1;").unwrap();
+        encoder.finish().unwrap();
+    }
+
+    let err = StdArchives
+        .edit(&archive, &[Edit::Remove("dump.sql".to_string())], &mut NoProgress)
+        .expect_err("a single stream has nothing to edit");
+    assert!(err.to_string().contains("single stream"), "{err}");
+}
+
+/// A crafted archive, not a seeded model: the unit tests pin
+/// `normalise` and `safe_join` in isolation, and this is the same claim
+/// made against a file a hostile tool actually wrote.
+#[test]
+fn a_member_that_climbs_out_of_the_destination_writes_nothing_outside_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("hostile.zip");
+    {
+        use std::io::Write;
+        let file = std::fs::File::create(&archive).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("../../escaped.txt", options).unwrap();
+        zip.write_all(b"should never be written").unwrap();
+        zip.start_file("innocent.txt", options).unwrap();
+        zip.write_all(b"fine").unwrap();
+        zip.finish().unwrap();
+    }
+
+    let out = dir.path().join("deep").join("out");
+    let report = StdArchives.extract(
+        &archive,
+        &ExtractRequest {
+            members: Vec::new(),
+            dest: out.clone(),
+            strip_prefix: None,
+            collision: Collision::Overwrite,
+        },
+        &mut NoProgress,
+    );
+
+    // Whether the escaping member is dropped from the listing or refused
+    // by the plan, the one thing that must be true is that nothing
+    // landed outside the destination.
+    assert!(
+        !dir.path().join("escaped.txt").exists(),
+        "an archive member wrote outside the folder it was extracted into"
+    );
+    assert!(!dir.path().join("deep/escaped.txt").exists());
+    if let Ok(report) = report {
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert!(out.join("innocent.txt").exists(), "the safe member still extracts");
+    }
+}

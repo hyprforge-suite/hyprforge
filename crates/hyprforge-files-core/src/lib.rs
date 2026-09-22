@@ -10,6 +10,7 @@
 //! without a window.
 
 pub mod action;
+pub mod archive;
 pub mod backend;
 pub mod browser;
 pub mod click;
@@ -35,6 +36,7 @@ pub mod xdg_user_dirs;
 pub use action::{Action, ActionContext, Scope};
 pub use backend::{FsBackend, StdBackend};
 pub use click::{Click, ClickTracker};
+pub use archive::ArchiveFsBackend;
 pub use trash::{RoutingBackend, TrashBackend};
 pub use browser::{Browser, DialogKind, DirError, DirErrorKind, LoadState, Message, Mode, Outcome, Selection};
 pub use format::{format_size, human_readable_size};

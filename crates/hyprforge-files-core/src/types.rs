@@ -229,6 +229,28 @@ pub enum FilesError {
     /// so rather than imply the path was always wrong.
     #[error("{path} was removed while it was being read.")]
     VanishedMidRead { path: PathBuf },
+    /// A name this suite offered to open as an archive, whose contents
+    /// turn out not to be one.
+    ///
+    /// Its own variant rather than a message inside `Elsewhere` because
+    /// the browser *acts* on it: navigating into an archive is decided
+    /// from the name (the only thing a listing has), so this is the
+    /// answer to "that guess was wrong", and the right response is to
+    /// hand the file to whatever opens it rather than to show an error
+    /// where the folder would have been. See
+    /// `browser::Browser::apply_dir_loaded`.
+    #[error("{path} isn't an archive — its contents don't match any format that can be opened.")]
+    NotAnArchive { path: PathBuf },
+    /// A place that lists through a backend of its own — the trash, or
+    /// an archive — reporting something no `std::fs` call could have
+    /// said. The message is already a sentence written for the person
+    /// reading it, so this variant adds nothing to it.
+    ///
+    /// The `path` is carried anyway, because every other variant has one
+    /// and a caller matching on the enum to decide *where* a failure
+    /// happened should not have to special-case this.
+    #[error("{message}")]
+    Elsewhere { path: PathBuf, message: String },
     #[error("{path} couldn't be read: {source}")]
     Io {
         path: PathBuf,

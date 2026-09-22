@@ -112,6 +112,16 @@ Hyprland-facing
                             content sniffing, which calls an STL a stream
                             of bytes and opens 3D models in a browser.
                             A leaf, like hyprforge-look.
+  hyprforge-archive/       zip, tar and 7z: what is inside one as a
+                            directory tree, extracting from it, making
+                            one, and rewriting it. Pure Rust, so a
+                            machine with no p7zip still opens a .7z.
+                            A leaf with no Hyprforge dependency at all
+                            — it is handed paths and never goes looking
+                            for one, which is what lets the file
+                            manager, the open/save dialog or a preview
+                            pane all ask the same questions without any
+                            of them pulling in a GUI toolkit.
   hyprforge-files-core/    the file browser's model, the FsBackend seam,
                             and the browsing view itself. The view lives
                             here rather than in the app because the

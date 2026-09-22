@@ -25,6 +25,9 @@ hyprforge-ui.workspace = true
 hyprforge-look.workspace = true
 hyprforge-paths.workspace = true
 hyprforge-fileops.workspace = true
+# Archives browse as directories — see `archive.rs`. A leaf dependency,
+# like `hyprforge-fileops` beside it: nothing GUI, nothing Hyprland.
+hyprforge-archive.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -39,4 +42,4 @@ tempfile = "3"
 
 [features]
 # The fake `FsBackend`, for the app's and the portal's own tests later.
-mock = []
+mock = ["hyprforge-archive/mock"]

@@ -1,0 +1,65 @@
+[package]
+name = "hyprforge-archive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reads and writes zip, tar and 7z archives: what is inside one, as a directory tree; extracting from it; and rewriting it."
+
+# A leaf. No iced, no Hyprland, no `hyprforge-core` — the file manager
+# browses archives, but so could the open/save dialog, a preview pane or
+# anything else, and none of them should have to pull a GUI toolkit in to
+# ask what is inside a tarball.
+#
+# Not even `hyprforge-paths`: this crate is handed paths, it never goes
+# looking for one.
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+
+# zip's own reader. Default features deliberately: they are what decides
+# which *compression methods inside a zip* can be read, and a zip this
+# cannot open is a worse failure than a slightly longer build — deflate64,
+# lzma, ppmd and bzip2 all occur in the wild, and `aes-crypto` is how an
+# encrypted zip gets read at all rather than reported as corrupt.
+zip = "8"
+tar = "0.4"
+
+# The four stream compressors a tar wears, and that also stand alone
+# (`dump.sql.gz` with no tar inside it — see `format::Format::Compressed`).
+#
+# Every one of these builds its codec from source rather than linking
+# whatever the machine happens to have: a package that installs and then
+# cannot open a `.tar.zst` because the host is missing a shared library
+# is exactly the "install only this package on a clean machine, does it
+# work?" failure CLAUDE.md names.
+flate2 = "1"
+bzip2 = "0.6"
+# `bindgen` is liblzma's default and needs libclang on the build machine;
+# `static` builds the C library from the vendored source instead, which
+# is the whole point of choosing it here.
+liblzma = { version = "0.4", default-features = false, features = ["static"] }
+zstd = "0.14"
+
+# 7z, in pure Rust — no p7zip on the machine, per the suite's rule about
+# owning its own tools. `compress` (on by default) is what makes writing
+# a 7z possible as well as reading one.
+sevenz-rust2 = "0.23"
+
+# Not a dev-dependency: editing an archive unpacks it to a scratch
+# directory beside itself (see `write::edit`), and the directory has to
+# be cleaned up even when the edit fails partway.
+tempfile = "3"
+
+[features]
+# The fake `ArchiveBackend`, so a caller's tests can drive a browser over
+# an archive without one existing on disk — the same arrangement
+# `hyprforge-files-core`'s `mock` feature makes for `FsBackend`, and for
+# the same reason.
+mock = []
+
+[dev-dependencies]
+# The round-trip tests build a hostile zip by hand — a member named
+# `../../escaped.txt`, which this crate's own writer will not produce
+# and which is exactly what the extraction guard exists to refuse.
+zip = "8"
+flate2 = "1"

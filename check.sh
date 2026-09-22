@@ -290,12 +290,14 @@ else
         # probe values and reloads to drop them, so two at once would undo
         # each other mid-assertion.
         #
-        # Two invocations rather than one --workspace run, because three
-        # crates hold live tests that answer to something other than the
-        # compositor: the ecosystem crate's parse tests need the daemons
-        # installed and *not* running, and the network and bluetooth
-        # crates' need NetworkManager and BlueZ respectively. Each gets
-        # its own step below. Running them here as well would report a
+        # Two invocations rather than one --workspace run, because
+        # several crates hold live tests that answer to something other
+        # than the compositor: the ecosystem crate's parse tests need the
+        # daemons installed and *not* running, the network and bluetooth
+        # crates' need NetworkManager and BlueZ respectively, and the
+        # archive crate's need `unzip`, `tar` and `7z` — which have
+        # nothing to do with a compositor at all. Each gets its own step
+        # below. Running them here as well would report a
         # daemon rejecting a generated file, or disagreeing about an
         # interface that has nothing to do with Hyprland, under the
         # heading "the code disagrees with the running system", which is
@@ -305,7 +307,7 @@ else
         # are named. That also survives a test being renamed, which
         # `--skip` on the test names would not.
         output=$(
-            cargo test --workspace --exclude hyprforge-ecosystem --exclude hyprforge-network --exclude hyprforge-bluetooth --exclude hyprforge-tray --exclude hyprforge-power --exclude hyprforge-clipboard -- --ignored --test-threads=1 2>&1
+            cargo test --workspace --exclude hyprforge-ecosystem --exclude hyprforge-network --exclude hyprforge-bluetooth --exclude hyprforge-tray --exclude hyprforge-power --exclude hyprforge-clipboard --exclude hyprforge-archive -- --ignored --test-threads=1 2>&1
             cargo test -p hyprforge-ecosystem --lib --test live_ecosystem -- --ignored --test-threads=1 2>&1
         )
         if grep -q "test result: FAILED" <<<"$output"; then
@@ -349,6 +351,38 @@ else
             while IFS= read -r reason; do
                 [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
             done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^.]*\).*/\1/p' <<<"$output" | sort -u)
+        fi
+    fi
+
+    # Answers to `unzip`, `tar` and `7z`, so it gets its own gate for the
+    # same reason every other step here does. Folded into the tier 2 run
+    # these would have needed a compositor to ask a question about three
+    # command-line tools.
+    #
+    # What they add over the round-trip tests in tier 1: those prove this
+    # crate can read what it wrote, which a writer emitting something
+    # only its own reader accepts would also pass. These hand the file to
+    # an implementation nobody here wrote, and read back what one of them
+    # produced.
+    #
+    # Not gated on any one tool being present — each test says for itself
+    # which it needs and prints HYPRFORGE-SKIP when it is missing, so a
+    # machine with `tar` and no `7z` still gets the half it can run, and
+    # the summary says which half that was.
+    step "Live tests against the system's archive tools"
+    if ! command -v tar >/dev/null && ! command -v unzip >/dev/null && ! command -v 7z >/dev/null; then
+        skip "archive tool tests" "none of tar, unzip or 7z is installed"
+    else
+        output=$(cargo test -p hyprforge-archive --test live_system_tools \
+            -- --ignored --test-threads=1 --nocapture 2>&1)
+        if grep -q "test result: FAILED" <<<"$output"; then
+            bad "archive tool tests failed — something else on this machine disagrees with what this suite writes"
+            grep -E '^test .* FAILED' <<<"$output" | head -20
+        else
+            ok "$(count_tests <<<"$output") archive tool tests passed"
+            while IFS= read -r reason; do
+                [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
+            done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^(]*\).*/\1/p' <<<"$output" | sort -u)
         fi
     fi
 
