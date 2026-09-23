@@ -638,7 +638,13 @@ fn extracting_without_the_password_still_writes_what_it_can() {
         .unwrap();
 
     assert_eq!(report.failed.len(), 1, "{:?}", report.failed);
-    assert_eq!(report.failed[0].0, "secret.txt");
+    assert_eq!(report.failed[0].member, "secret.txt");
+    // The *reason*, so the caller can open a prompt instead of showing
+    // an error — see `MemberFailure`.
+    assert_eq!(
+        report.failed[0].reason,
+        hyprforge_archive::backend::FailureReason::NeedsPassword
+    );
     assert!(
         out.join("public.txt").exists(),
         "the member that needed no password still had to be written"
@@ -702,4 +708,37 @@ fn two_rewrites_at_once_leave_a_whole_archive_and_an_honest_answer() {
         .filter(|n| n.contains("hyprforge-new"))
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+/// The guard on the coupling that was there before `MemberFailure` had
+/// a `reason`: a caller decided "does this need a password" by searching
+/// the message for the word. Rewording the sentence would have turned a
+/// password prompt into a dead end, silently. Nothing should have to
+/// read the prose to act.
+#[test]
+fn a_callers_decision_never_depends_on_the_wording_of_a_failure() {
+    use hyprforge_archive::backend::FailureReason;
+
+    let dir = tempfile::tempdir().unwrap();
+    let archive = encrypted_zip(dir.path(), "hunter2");
+    let out = dir.path().join("out");
+
+    let report = StdArchives
+        .extract(
+            &archive,
+            &ExtractRequest {
+                members: Vec::new(),
+                dest: out,
+                strip_prefix: None,
+                collision: Collision::Overwrite,
+            },
+            &mut NoProgress,
+        )
+        .unwrap();
+
+    let locked = report.failed.iter().find(|f| f.member == "secret.txt").unwrap();
+    assert_eq!(locked.reason, FailureReason::NeedsPassword);
+    // The message is for showing, and is free to change. The test says
+    // so rather than pinning it.
+    assert!(!locked.message.is_empty());
 }

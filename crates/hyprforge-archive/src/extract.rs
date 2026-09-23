@@ -23,7 +23,9 @@
 //! question, and a future change to either has no business quietly
 //! disabling the other.
 
-use crate::backend::{Advance, Collision, ExtractReport, ExtractRequest, Flow, Progress};
+use crate::backend::{
+    Advance, Collision, ExtractReport, ExtractRequest, Flow, MemberFailure, Progress,
+};
 use crate::error::{ArchiveError, Result};
 use crate::model::{normalise, Index};
 use std::io::{Read, Write};
@@ -238,7 +240,10 @@ impl<'a> Run<'a> {
         if item.is_dir {
             match std::fs::create_dir_all(&item.dest) {
                 Ok(()) => self.report.dirs += 1,
-                Err(e) => self.report.failed.push((item.member.clone(), e.to_string())),
+                Err(e) => self
+                    .report
+                    .failed
+                    .push(MemberFailure::plain(item.member.clone(), e.to_string())),
             }
             return Ok(());
         }
@@ -255,7 +260,9 @@ impl<'a> Run<'a> {
         // exactly the case where it is not.
         if let Some(parent) = dest.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
-                self.report.failed.push((item.member.clone(), e.to_string()));
+                self.report
+                    .failed
+                    .push(MemberFailure::plain(item.member.clone(), e.to_string()));
                 return Ok(());
             }
         }
@@ -263,7 +270,7 @@ impl<'a> Run<'a> {
         if let Some(target) = &item.link_target {
             match write_link(target, &dest) {
                 Ok(()) => self.report.files += 1,
-                Err(why) => self.report.failed.push((item.member.clone(), why)),
+                Err(why) => self.report.failed.push(MemberFailure::plain(item.member.clone(), why)),
             }
             return Ok(());
         }
@@ -278,7 +285,10 @@ impl<'a> Run<'a> {
                 self.report.bytes += written;
             }
             Err(e) if e.cancelled() => return Err(e),
-            Err(e) => self.report.failed.push((item.member.clone(), e.to_string())),
+            // Through `MemberFailure::new`, which reads the *kind* off
+            // the error rather than leaving a caller to search the
+            // sentence for it — see `MemberFailure`.
+            Err(e) => self.report.failed.push(MemberFailure::new(item.member.clone(), &e)),
         }
         Ok(())
     }
@@ -541,7 +551,7 @@ mod tests {
 
         assert_eq!(report.files, 2);
         assert_eq!(report.failed.len(), 1);
-        assert_eq!(report.failed[0].0, "bad.txt");
+        assert_eq!(report.failed[0].member, "bad.txt");
         assert!(out.join("good.txt").exists() && out.join("also-good.txt").exists());
     }
 
@@ -580,7 +590,7 @@ mod tests {
         let report = run(&plan, &req, &mut NoProgress, |_| Ok(b"x".to_vec())).unwrap();
 
         assert_eq!(report.failed.len(), 1);
-        assert_eq!(report.failed[0].0, "escape");
+        assert_eq!(report.failed[0].member, "escape");
         assert!(!out.join("escape").exists());
         assert!(out.join("safe").exists(), "a link that stays inside is written");
     }

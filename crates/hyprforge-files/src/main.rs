@@ -1072,11 +1072,19 @@ fn extract_one(
     // has to be recognised here too, or opening one encrypted file out
     // of an otherwise-readable zip would report "couldn't be read" and
     // never ask.
-    if let Some((_, why)) = report.failed.first() {
-        if why.to_lowercase().contains("password") {
+    //
+    // Off the reason, not the wording. This read the message for the
+    // word "password" until `MemberFailure` grew a `reason`, which
+    // would have stopped working silently the first time that sentence
+    // was improved.
+    if let Some(failure) = report.failed.first() {
+        if failure.reason == hyprforge_archive::backend::FailureReason::NeedsPassword {
             return Err(ArchiveFailure::NeedsPassword);
         }
-        return Err(ArchiveFailure::Other(format!("{member} couldn't be read: {why}")));
+        return Err(ArchiveFailure::Other(format!(
+            "{member} couldn't be read: {}",
+            failure.message
+        )));
     }
     Ok(dest.join(member))
 }
@@ -1902,6 +1910,22 @@ impl App {
             archive: cut.archive,
             edits: cut.members.into_iter().map(hyprforge_archive::Edit::Remove).collect(),
         }))
+    }
+
+    /// Puts a member back on the watch list with its *current* contents
+    /// as the baseline, so the next save reads as a new edit.
+    ///
+    /// Re-stamped rather than restored as it was: the file on disk has
+    /// moved on, and putting back the old stamp would make the edit
+    /// that was just answered look unanswered on the very next tick.
+    fn watch_again(&mut self, mut edited: OpenedMember) {
+        let Some(stamp) = OpenedMember::stamp_of(&edited.copy) else {
+            // Gone since. Nothing to watch, and nothing to write back.
+            return;
+        };
+        edited.stamp = stamp;
+        self.opened_members.retain(|m| m.copy != edited.copy);
+        self.opened_members.push(edited);
     }
 
     /// Asks for this archive's password, and remembers what to do once
@@ -2855,20 +2879,34 @@ impl App {
                 Task::none()
             }
             Message::WriteBackDismiss => {
-                self.writeback = None;
+                // Watched again from where it is now. "Discard" answers
+                // *this* edit, not every edit that will ever be made to
+                // the file: someone who says no, carries on editing and
+                // saves again is making a new decision and should get to
+                // make it. Dropping the file from the watch list — which
+                // is what `CheckOpenedMembers` did when it took the
+                // offer — would have silently stopped asking forever.
+                if let Some(edited) = self.writeback.take() {
+                    self.watch_again(edited);
+                }
                 Task::none()
             }
             Message::WriteBackConfirm => {
                 let Some(edited) = self.writeback.take() else {
                     return Task::none();
                 };
-                self.start_archive_job(archive_jobs::Work::Edit {
-                    archive: edited.archive,
+                let work = archive_jobs::Work::Edit {
+                    archive: edited.archive.clone(),
                     edits: vec![hyprforge_archive::Edit::Add {
-                        source: edited.copy,
-                        as_member: edited.member,
+                        source: edited.copy.clone(),
+                        as_member: edited.member.clone(),
                     }],
-                })
+                };
+                // Re-watched for the same reason, from the contents just
+                // written: the archive and the copy now agree, and the
+                // next save is a fresh edit worth offering.
+                self.watch_again(edited);
+                self.start_archive_job(work)
             }
             Message::UnlockTyped(typed) => {
                 if let Some(unlocking) = &mut self.unlocking {
@@ -7326,6 +7364,50 @@ mod archive_tests {
             StdArchives.read_member(&archive, "payload/readme.md").unwrap(),
             b"# hello"
         );
+    }
+
+    /// "Discard" answers this edit, not every future one. Dropping the
+    /// file from the watch list would silently stop asking forever.
+    #[test]
+    fn discarding_an_edit_keeps_watching_for_the_next_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_with(dir.path(), "sample.zip");
+        let mut app = app_for_test(&[dir.path().to_str().unwrap()]);
+        app.opened_members
+            .push(opened(dir.path(), &archive, "payload/readme.md", b"before"));
+        let copy = dir.path().join("copy.txt");
+
+        std::fs::write(&copy, b"first edit").unwrap();
+        let _ = app.update(Message::CheckOpenedMembers);
+        assert!(app.writeback.is_some());
+        let _ = app.update(Message::WriteBackDismiss);
+
+        assert_eq!(app.opened_members.len(), 1, "still watched after a discard");
+        // And the *current* contents are the new baseline, or the edit
+        // just answered would come straight back on the next tick.
+        let _ = app.update(Message::CheckOpenedMembers);
+        assert!(app.writeback.is_none(), "an answered edit must not be asked again");
+
+        std::fs::write(&copy, b"a second, longer edit").unwrap();
+        let _ = app.update(Message::CheckOpenedMembers);
+        assert!(app.writeback.is_some(), "a later save is a new decision to offer");
+    }
+
+    #[test]
+    fn writing_back_keeps_watching_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_with(dir.path(), "sample.zip");
+        let mut app = app_for_test(&[dir.path().to_str().unwrap()]);
+        app.opened_members
+            .push(opened(dir.path(), &archive, "payload/readme.md", b"before"));
+        std::fs::write(dir.path().join("copy.txt"), b"edited once").unwrap();
+
+        let _ = app.update(Message::CheckOpenedMembers);
+        let _ = app.update(Message::WriteBackConfirm);
+
+        assert_eq!(app.opened_members.len(), 1, "a written-back file is still open elsewhere");
+        let _ = app.update(Message::CheckOpenedMembers);
+        assert!(app.writeback.is_none(), "the archive and the copy now agree");
     }
 
     /// Two edits at once would be two questions with one button each,

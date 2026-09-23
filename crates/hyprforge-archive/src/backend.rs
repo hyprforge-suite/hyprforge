@@ -112,7 +112,61 @@ pub struct ExtractReport {
     /// broken compressed stream must not turn "here are the other four
     /// hundred files" into "nothing was extracted". The caller reports
     /// what is in here; it is never empty silently.
-    pub failed: Vec<(String, String)>,
+    pub failed: Vec<MemberFailure>,
+}
+
+/// One member that could not be written, and why.
+///
+/// The `reason` is the point. This was a `(String, String)` of member
+/// and message, and the one caller that had to *act* on a failure —
+/// opening an encrypted file, which needs a password prompt rather than
+/// an error — could only do it by searching the message for the word
+/// "password". That is a coupling to wording, and wording is exactly
+/// the thing anyone is free to improve; the first reworded sentence
+/// would have turned the prompt into a dead end with nothing failing to
+/// say so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberFailure {
+    pub member: String,
+    pub reason: FailureReason,
+    /// Already a sentence, for showing.
+    pub message: String,
+}
+
+/// What kind of failure, for a caller that does something different
+/// about one of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureReason {
+    /// This member is encrypted and the password was wrong or absent.
+    /// The caller asks; it is not an error to report.
+    NeedsPassword,
+    /// Anything else — already described by `message`.
+    Other,
+}
+
+impl MemberFailure {
+    pub fn new(member: impl Into<String>, error: &crate::error::ArchiveError) -> MemberFailure {
+        MemberFailure {
+            member: member.into(),
+            reason: match error {
+                crate::error::ArchiveError::PasswordRequired { .. } => {
+                    FailureReason::NeedsPassword
+                }
+                _ => FailureReason::Other,
+            },
+            message: error.to_string(),
+        }
+    }
+
+    /// For a failure that is not an [`crate::error::ArchiveError`] — a
+    /// directory that would not be created, a symlink refused.
+    pub fn plain(member: impl Into<String>, message: impl Into<String>) -> MemberFailure {
+        MemberFailure {
+            member: member.into(),
+            reason: FailureReason::Other,
+            message: message.into(),
+        }
+    }
 }
 
 /// One thing going *into* a new archive.
