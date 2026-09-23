@@ -434,6 +434,19 @@ through a different door — and getting it backwards here is invisible
 in exactly the way that one was: the *listing* looks right, and only
 the contents are of a version the archive supersedes.
 
+**A path is not a file, and anything that opens one twice is reading two
+files.** Every archive entry point sniffed the format with one open and
+read with another, and extraction listed before it unpacked — so a rewrite
+renaming a new archive over the name between them left an edit repacking
+members it had never unpacked. Three failures in two hundred under load,
+none in three hundred idle, which is why it surfaced as a flaky test in
+`check.sh` and nowhere else. `hyprforge_archive::pin` opens once and reopens
+through `/proc/self/fd/<n>`, which names the held file rather than whoever
+has the name now. The trap on the way out: a pinned path has no *name*, and
+a `.gz`'s one member is named after its file — extraction briefly wrote
+`dump.sql` to disk as `9`. Whatever is derived from a name has to be given
+the real one separately; only the bytes come from the pin.
+
 **A library can be fetched; a binary cannot — so a package's binaries
 must all live in one crate directory.** `git subtree split --prefix=`
 takes one directory, so that directory *is* the published repository.

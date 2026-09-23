@@ -28,6 +28,7 @@ use crate::error::{ArchiveError, Result};
 use crate::extract::{self, PlanItem};
 use crate::format::{self, Compression, Format};
 use crate::model::{Index, Member};
+use crate::pin::Pinned;
 use crate::timestamp;
 use crate::unlock::Unlock;
 use std::collections::HashMap;
@@ -552,8 +553,10 @@ fn compressed_member_name(archive: &Path, compression: Compression) -> String {
     }
 }
 
-fn compressed_index(archive: &Path, compression: Compression) -> Result<Index> {
-    let mut member = Member::file(compressed_member_name(archive, compression), 0);
+/// `named` supplies the member's name and `archive` everything else —
+/// see `StdArchives::index_pinned` for why they differ.
+fn compressed_index(archive: &Path, named: &Path, compression: Compression) -> Result<Index> {
+    let mut member = Member::file(compressed_member_name(named, compression), 0);
     // The size is the *decompressed* length, and the only way to learn
     // it is to decompress the whole stream — which listing a file must
     // not do. Unknown is the honest answer, and `size_known` is what
@@ -578,8 +581,16 @@ fn compressed_read(archive: &Path, compression: Compression) -> Result<Vec<u8>> 
 
 // --- the backend ----------------------------------------------------
 
-impl ArchiveBackend for StdArchives {
-    fn index_with(&self, archive: &Path, unlock: &Unlock) -> Result<Index> {
+impl StdArchives {
+    /// [`ArchiveBackend::index_with`], reading an already-pinned
+    /// `archive` and naming things after `named`.
+    ///
+    /// `named` is never opened. It exists for the one listing whose
+    /// contents are named after the file rather than stored in it: a
+    /// single compressed file's member is its own name with the suffix
+    /// stripped, and through a pin that name is a descriptor number —
+    /// `dump.sql.gz` would list, and then extract, as a file called `9`.
+    fn index_pinned(archive: &Path, named: &Path, unlock: &Unlock) -> Result<Index> {
         match StdArchives::format_of(archive)? {
             // A zip's central directory is never encrypted, and a tar
             // has no encryption at all — only 7z can need a password to
@@ -587,28 +598,25 @@ impl ArchiveBackend for StdArchives {
             Format::Zip => zip_index(archive),
             Format::Tar(compression) => tar_index(archive, compression),
             Format::SevenZ => sevenz_index(archive, unlock),
-            Format::Compressed(compression) => compressed_index(archive, compression),
+            Format::Compressed(compression) => compressed_index(archive, named, compression),
         }
     }
 
-    fn read_member_with(&self, archive: &Path, member: &str, unlock: &Unlock) -> Result<Vec<u8>> {
-        match StdArchives::format_of(archive)? {
-            Format::Zip => zip_read_member(archive, member, unlock),
-            Format::Tar(compression) => tar_read_member(archive, compression, member),
-            Format::SevenZ => sevenz_read_member(archive, member, unlock),
-            Format::Compressed(compression) => compressed_read(archive, compression),
-        }
-    }
-
-    fn extract_with(
+    /// [`ArchiveBackend::extract_with`], against an already-pinned path.
+    ///
+    /// Lists through `index_pinned` rather than `index_with`: the plan
+    /// names the files it writes after the listing, so the listing has
+    /// to be named after the real archive — see `index_pinned`.
+    fn extract_pinned(
         &self,
         archive: &Path,
+        named: &Path,
         request: &ExtractRequest,
         unlock: &Unlock,
         progress: &mut dyn Progress,
     ) -> Result<ExtractReport> {
         let format = StdArchives::format_of(archive)?;
-        let index = self.index_with(archive, unlock)?;
+        let index = StdArchives::index_pinned(archive, named, unlock)?;
         let plan = extract::plan(&index, request, archive)?;
 
         match format {
@@ -647,6 +655,42 @@ impl ArchiveBackend for StdArchives {
                 Ok(run.finish())
             }
         }
+    }
+}
+
+
+impl ArchiveBackend for StdArchives {
+    // Each entry point runs inside a `Pinned`, with `archive` rebound to
+    // the pinned path, so every open below it — the sniff, the listing,
+    // each member — reads one version of the file. See `crate::pin` for
+    // the race this closes. Rebinding the name rather than introducing a
+    // second one is deliberate: nothing inside can reach the unpinned
+    // path by accident. The one thing that needs the real name is
+    // naming, which is why `index_pinned` takes it separately.
+
+    fn index_with(&self, archive: &Path, unlock: &Unlock) -> Result<Index> {
+        let named = archive;
+        Pinned::open(archive)?.read(|archive| StdArchives::index_pinned(archive, named, unlock))
+    }
+
+    fn read_member_with(&self, archive: &Path, member: &str, unlock: &Unlock) -> Result<Vec<u8>> {
+        Pinned::open(archive)?.read(|archive| match StdArchives::format_of(archive)? {
+            Format::Zip => zip_read_member(archive, member, unlock),
+            Format::Tar(compression) => tar_read_member(archive, compression, member),
+            Format::SevenZ => sevenz_read_member(archive, member, unlock),
+            Format::Compressed(compression) => compressed_read(archive, compression),
+        })
+    }
+
+    fn extract_with(
+        &self,
+        archive: &Path,
+        request: &ExtractRequest,
+        unlock: &Unlock,
+        progress: &mut dyn Progress,
+    ) -> Result<ExtractReport> {
+        let named = archive;
+        Pinned::open(archive)?.extract(|archive| self.extract_pinned(archive, named, request, unlock, progress))
     }
 
     fn create(
@@ -747,4 +791,68 @@ pub(crate) fn rewrite_in_place(
         .persist(archive)
         .map_err(|e| ArchiveError::io(archive, e.error))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::{Collision, NoProgress};
+
+    /// A zip at `dest` holding one file per `(name, contents)`.
+    fn zip_of(dest: &Path, files: &[(&str, &str)]) {
+        let staging = tempfile::tempdir().unwrap();
+        let sources: Vec<Source> = files
+            .iter()
+            .map(|(name, contents)| {
+                let path = staging.path().join(name);
+                std::fs::write(&path, contents).unwrap();
+                Source {
+                    path,
+                    as_member: name.to_string(),
+                }
+            })
+            .collect();
+        StdArchives.create(dest, Format::Zip, &sources, &mut NoProgress).unwrap();
+    }
+
+    /// The extraction half of the race `crate::pin` closes, put exactly
+    /// where it has to land: another writer renames a different archive
+    /// over this one after the extraction has pinned it and before it
+    /// has read anything. What comes out is the archive as it was —
+    /// all of it, and none of the newcomer — rather than a listing of
+    /// one archive unpacked from another, which is what reading by
+    /// name produced: members the plan expected and the file no longer
+    /// held, each a failure row, beside a destination half-written.
+    #[test]
+    fn an_archive_replaced_mid_extraction_is_extracted_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("sample.zip");
+        zip_of(&archive, &[("a.txt", "a"), ("b.txt", "b")]);
+        let pin = Pinned::open(&archive).unwrap();
+
+        let newcomer = dir.path().join("newcomer.zip");
+        zip_of(&newcomer, &[("z.txt", "z")]);
+        std::fs::rename(&newcomer, &archive).unwrap();
+
+        let out = dir.path().join("out");
+        let request = ExtractRequest {
+            members: Vec::new(),
+            dest: out.clone(),
+            strip_prefix: None,
+            collision: Collision::Overwrite,
+        };
+        let report = pin
+            .extract(|source| {
+                StdArchives.extract_pinned(source, &archive, &request, &Unlock::none(), &mut NoProgress)
+            })
+            .unwrap();
+
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        let mut written: Vec<String> = std::fs::read_dir(&out)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        written.sort();
+        assert_eq!(written, ["a.txt", "b.txt"]);
+    }
 }

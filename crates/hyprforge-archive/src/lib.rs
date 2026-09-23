@@ -47,6 +47,7 @@ pub mod error;
 pub mod extract;
 pub mod format;
 pub mod model;
+mod pin;
 pub mod read;
 pub mod stream;
 pub mod timestamp;

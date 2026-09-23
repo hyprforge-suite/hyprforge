@@ -224,6 +224,47 @@ fn a_single_compressed_file_browses_as_one_member_named_without_its_suffix() {
     assert_eq!(StdArchives.read_member(&archive, "dump.sql").unwrap(), b"SELECT 1;");
 }
 
+/// Extraction writes the member under the name the listing gave it,
+/// and that name comes from the *file's* name — the one thing a
+/// compressed stream does not store. Reading through a pinned
+/// descriptor briefly named it after the descriptor instead, which
+/// would have written `dump.sql` to disk as a file called `9`; the
+/// listing test above did not notice, because only extraction turns
+/// the name into a path.
+#[test]
+fn a_single_compressed_file_extracts_under_its_own_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("dump.sql.gz");
+    {
+        use std::io::Write;
+        let file = std::fs::File::create(&archive).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        encoder.write_all(b"SELECT 1;").unwrap();
+        encoder.finish().unwrap();
+    }
+    let out = dir.path().join("out");
+
+    StdArchives
+        .extract(
+            &archive,
+            &ExtractRequest {
+                members: Vec::new(),
+                dest: out.clone(),
+                strip_prefix: None,
+                collision: Collision::Overwrite,
+            },
+            &mut NoProgress,
+        )
+        .unwrap();
+
+    let written: Vec<String> = std::fs::read_dir(&out)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(written, ["dump.sql"]);
+    assert_eq!(std::fs::read(out.join("dump.sql")).unwrap(), b"SELECT 1;");
+}
+
 #[test]
 fn a_file_that_is_not_an_archive_says_so_rather_than_claiming_to_be_damaged() {
     let dir = tempfile::tempdir().unwrap();
