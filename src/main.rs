@@ -181,6 +181,7 @@ fn main() -> iced::Result {
         unlocking: None,
         keyring,
         opened_members: Vec::new(),
+        queued: std::collections::VecDeque::new(),
         failures: Vec::new(),
         cut_from_archive: None,
         writeback: None,
@@ -622,6 +623,8 @@ struct App {
     /// Members unpacked out of an archive and handed to another
     /// application, watched for edits — see [`OpenedMember`].
     opened_members: Vec<OpenedMember>,
+    /// Work asked for but not started — see [`Queued`].
+    queued: std::collections::VecDeque<Queued>,
     /// What went wrong in jobs that have finished — see [`Failures`].
     failures: Vec<Failures>,
     /// Members cut out of an archive, waiting for the paste that
@@ -1147,6 +1150,9 @@ struct RunningJob {
     /// Every folder whose listing the job changes — where things landed,
     /// and, for a move, where they came from — refreshed when it ends.
     dirs: Vec<PathBuf>,
+    /// The archive this job rewrites, if any — what
+    /// [`App::may_start`] serialises on.
+    archive: Option<PathBuf>,
     progress: Option<Progress>,
     /// How fast it is going, for the rate and the estimate — see
     /// [`Rate`].
@@ -1154,6 +1160,53 @@ struct RunningJob {
     /// The conflict the job is paused on, if any.
     conflict: Option<Collision>,
     apply_to_rest: bool,
+}
+
+/// Work that has been asked for and has not started yet.
+///
+/// The queue exists for a correctness reason before a cosmetic one.
+/// Every archive edit reads the whole archive and writes a whole new
+/// one, so two of them running at once on the same file means the later
+/// rename wins and the earlier edit is silently lost — rename a member
+/// and quickly delete another, and one of the two changes is gone with
+/// both jobs reporting success. Measured, not theorised: see
+/// `hyprforge_archive`'s `two_rewrites_at_once_leave_a_whole_archive`,
+/// which pins what the library can promise on its own and says that
+/// serialising is the caller's job. This is the caller.
+///
+/// The throughput argument is real too and secondary: two heavy copies
+/// to one disk finish no sooner than one after the other, and the
+/// progress of both is less legible than the progress of one.
+struct Queued {
+    id: JobId,
+    kind: JobKind,
+    /// Folders to re-read when it finishes.
+    dirs: Vec<PathBuf>,
+    what: QueuedWork,
+}
+
+/// The two shapes of work, each with what its own starter needs.
+enum QueuedWork {
+    Paste {
+        steps: Vec<hyprforge_files_core::clipboard::PasteStep>,
+    },
+    Archive {
+        work: archive_jobs::Work,
+        unlock: hyprforge_archive::Unlock,
+    },
+}
+
+impl Queued {
+    /// The archive this work rewrites, if it rewrites one.
+    ///
+    /// The whole basis of the conflict rule: two jobs naming the same
+    /// archive must not run together, whatever else is going on.
+    fn archive(&self) -> Option<&Path> {
+        match &self.what {
+            QueuedWork::Paste { .. } => None,
+            QueuedWork::Archive { work, .. } => work.archive(),
+        }
+    }
 }
 
 /// What went wrong in one finished job, kept until it is read.
@@ -1769,19 +1822,12 @@ impl App {
         }
         let id = self.next_job_id;
         self.next_job_id += 1;
-        let (control, events) = jobs::start(id, plan.steps, self.config.behaviour.on_conflict);
-        self.jobs.push(RunningJob {
+        self.enqueue(Queued {
             id,
-            control,
             kind: JobKind::of(clip.verb),
-            started: Instant::now(),
             dirs,
-            progress: None,
-            rate: Rate::default(),
-            conflict: None,
-            apply_to_rest: false,
-        });
-        Task::run(events, Message::Job)
+            what: QueuedWork::Paste { steps: plan.steps },
+        })
     }
 
     /// Starts putting trashed items back, once their records are found.
@@ -1819,19 +1865,12 @@ impl App {
         }
         let id = self.next_job_id;
         self.next_job_id += 1;
-        let (control, events) = jobs::start(id, steps, self.config.behaviour.on_conflict);
-        self.jobs.push(RunningJob {
+        self.enqueue(Queued {
             id,
-            control,
             kind: JobKind::Restore { records },
-            started: Instant::now(),
             dirs,
-            progress: None,
-            rate: Rate::default(),
-            conflict: None,
-            apply_to_rest: false,
-        });
-        Task::run(events, Message::Job)
+            what: QueuedWork::Paste { steps },
+        })
     }
 
     /// If this finished job was the paste that completes a cut out of an
@@ -1949,6 +1988,86 @@ impl App {
         })
     }
 
+    /// How many jobs run at once.
+    ///
+    /// Two, not one: a small rename should not sit behind a long
+    /// extraction when the two have nothing to do with each other. And
+    /// not more, because every job here is disk-bound and a third
+    /// concurrent one finishes no sooner — it only makes the other two
+    /// slower and the panel harder to read. Jobs that would *conflict*
+    /// are serialised regardless of this number; see
+    /// [`App::may_start`].
+    const AT_ONCE: usize = 2;
+
+    /// Takes work on, and starts whatever can start.
+    fn enqueue(&mut self, queued: Queued) -> Task<Message> {
+        self.queued.push_back(queued);
+        self.pump()
+    }
+
+    /// Whether `queued` can start right now.
+    ///
+    /// Two rules. Nothing may run alongside another job that rewrites
+    /// the same archive — that is the correctness one, and it holds
+    /// even when there is room. And no more than [`Self::AT_ONCE`] at a
+    /// time, which is only about throughput and legibility.
+    fn may_start(&self, queued: &Queued) -> bool {
+        if let Some(archive) = queued.archive() {
+            if self.jobs.iter().any(|running| running.archive.as_deref() == Some(archive)) {
+                return false;
+            }
+        }
+        self.jobs.len() < Self::AT_ONCE
+    }
+
+    /// Starts every queued job that is allowed to start, oldest first.
+    ///
+    /// Oldest first and *skipping* rather than stopping at the first
+    /// blocked one: a second edit of one archive must not hold up an
+    /// unrelated copy behind it. Asked again whenever a job finishes.
+    fn pump(&mut self) -> Task<Message> {
+        let mut started = Vec::new();
+        let mut index = 0;
+        while index < self.queued.len() {
+            if !self.may_start(&self.queued[index]) {
+                index += 1;
+                continue;
+            }
+            let queued = self.queued.remove(index).expect("index is in range");
+            started.push(self.begin(queued));
+        }
+        Task::batch(started)
+    }
+
+    /// Actually starts one job.
+    fn begin(&mut self, queued: Queued) -> Task<Message> {
+        let Queued { id, kind, dirs, what } = queued;
+        let archive = match &what {
+            QueuedWork::Archive { work, .. } => work.archive().map(Path::to_path_buf),
+            QueuedWork::Paste { .. } => None,
+        };
+        let on_conflict = self.config.behaviour.on_conflict;
+        let (control, events) = match what {
+            QueuedWork::Paste { steps } => jobs::start(id, steps, on_conflict),
+            QueuedWork::Archive { work, unlock } => {
+                archive_jobs::start(id, work, on_conflict, unlock)
+            }
+        };
+        self.jobs.push(RunningJob {
+            id,
+            control,
+            kind,
+            started: Instant::now(),
+            dirs,
+            archive,
+            progress: None,
+            rate: Rate::default(),
+            conflict: None,
+            apply_to_rest: false,
+        });
+        Task::run(events, Message::Job)
+    }
+
     /// Starts an archive job — extracting, compressing or rewriting.
     ///
     /// The same shape as a paste: a `RunningJob` so the progress bar and
@@ -1972,22 +2091,12 @@ impl App {
             archive_jobs::Undoes::Extracted => ArchiveUndo::Extracted,
             archive_jobs::Undoes::Compressed => ArchiveUndo::Compressed,
         };
-        let (control, events) =
-            archive_jobs::start(id, work, self.config.behaviour.on_conflict, unlock);
-        self.jobs.push(RunningJob {
+        self.enqueue(Queued {
             id,
-            control,
             kind: JobKind::Archive { doing, undo },
-            started: Instant::now(),
             dirs,
-            progress: None,
-            rate: Rate::default(),
-            // An archive job never pauses to ask — see
-            // `archive_jobs`'s module doc on why.
-            conflict: None,
-            apply_to_rest: false,
-        });
-        Task::run(events, Message::Job)
+            what: QueuedWork::Archive { work, unlock },
+        })
     }
 
     /// Updates the window for something a job reported.
@@ -2033,14 +2142,22 @@ impl App {
                 // now, and only if this paste was of exactly those
                 // copies — see `CutFromArchive`.
                 if let Some(remove) = self.cut_landed(&finished.kind, &summary) {
-                    let refresh = self.refresh_dirs(&finished.dirs);
+                    // A slot has just come free, and an edit that was
+                // waiting on *this* archive can now go. Before the
+                // refresh, so the two land in one batch.
+                let next = self.pump();
+                let refresh = Task::batch([self.refresh_dirs(&finished.dirs), next]);
                     return Task::batch([refresh, remove]);
                 }
                 // A cut that fully landed leaves the clipboard pointing at
                 // files that are no longer there. Emptied off the thread
                 // that paints: the system clipboard is asked first whether
                 // it still holds them.
-                let refresh = self.refresh_dirs(&finished.dirs);
+                // A slot has just come free, and an edit that was
+                // waiting on *this* archive can now go. Before the
+                // refresh, so the two land in one batch.
+                let next = self.pump();
+                let refresh = Task::batch([self.refresh_dirs(&finished.dirs), next]);
                 let done = match &finished.kind {
                     JobKind::Copy => Some(hyprforge_files_core::undo::Undoable::Copied(
                         summary.placed.iter().map(|(_, now)| now.clone()).collect(),
@@ -2571,6 +2688,10 @@ impl App {
                     running.conflict = None;
                     running.control.cancel();
                 }
+                // It may not have started. Dropping it from the queue
+                // is the whole of cancelling it — there is no thread to
+                // stop and nothing has been written.
+                self.queued.retain(|q| q.id != id);
                 Task::none()
             }
             Message::TrashDone(tab_id, dir, trashed, errors) => {
@@ -2703,6 +2824,10 @@ impl App {
                 for job in &self.jobs {
                     job.control.cancel();
                 }
+                // Including what has not begun — otherwise "cancel all"
+                // stops two jobs and then starts the next one from the
+                // queue, which is the opposite of what the button says.
+                self.queued.clear();
                 Task::none()
             }
             Message::DismissFailures => {
@@ -3034,8 +3159,8 @@ impl App {
             .iter()
             .filter(|j| j.conflict.is_none() && j.started.elapsed() >= after)
             .collect();
-        if !showing.is_empty() {
-            content = content.push(transfers_panel(&showing, scale));
+        if !showing.is_empty() || !self.queued.is_empty() {
+            content = content.push(transfers_panel(&showing, &self.queued, scale));
         }
 
         if !self.failures.is_empty() {
@@ -3202,16 +3327,25 @@ fn undo_notice<'a>(text: &str, scale: FontScale) -> Element<'a, Message> {
 /// fine when a second paste was rare, and wrong now that extracting,
 /// compressing and rewriting an archive are jobs too: starting two and
 /// seeing one is the app quietly under-reporting its own work.
-fn transfers_panel<'a>(jobs: &[&RunningJob], scale: FontScale) -> Element<'a, Message> {
+fn transfers_panel<'a>(
+    jobs: &[&RunningJob],
+    queued: &std::collections::VecDeque<Queued>,
+    scale: FontScale,
+) -> Element<'a, Message> {
     let mut panel = column![].spacing(spacing::XS);
 
     // Only worth a heading when there is more than one thing under it;
-    // a single transfer says what it is on its own row.
-    if jobs.len() > 1 {
+    // a single transfer with nothing behind it says what it is on its
+    // own row.
+    if jobs.len() > 1 || !queued.is_empty() {
+        let mut counts = vec![format!("{} active", jobs.len())];
+        if !queued.is_empty() {
+            counts.push(format!("{} queued", queued.len()));
+        }
         panel = panel.push(
             row![
                 hyprforge_ui::widgets::meta_text(
-                    format!("Transfers \u{00B7} {} active", jobs.len()),
+                    format!("Transfers \u{00B7} {}", counts.join(" \u{00B7} ")),
                     BASE_TEXT_SIZE,
                     scale,
                 )
@@ -3227,7 +3361,36 @@ fn transfers_panel<'a>(jobs: &[&RunningJob], scale: FontScale) -> Element<'a, Me
     for job in jobs {
         panel = panel.push(job_progress_bar(job, scale));
     }
+
+    // Waiting work, in the order it will run. No Start button, unlike
+    // mockup `1f`: a job is queued either because the machine is busy,
+    // where starting it early gains nothing, or because it would
+    // rewrite an archive another job is already rewriting — where
+    // starting it early is the data loss the queue exists to prevent.
+    // A button that is sometimes safe is worse than no button.
+    for waiting in queued {
+        panel = panel.push(queued_row(waiting, scale));
+    }
+
     container(panel).width(Length::Fill).padding([spacing::XS as u16, 0]).into()
+}
+
+/// One waiting job: what it will do, and a way to call it off.
+fn queued_row<'a>(queued: &Queued, scale: FontScale) -> Element<'a, Message> {
+    let what = match queued.archive().and_then(|a| a.file_name()) {
+        Some(name) => format!("{} {} \u{00B7} queued", queued.kind.doing(), name.to_string_lossy()),
+        None => format!("{} \u{00B7} queued", queued.kind.doing()),
+    };
+    container(
+        row![
+            hyprforge_ui::widgets::meta_text(what, BASE_TEXT_SIZE, scale).width(Length::Fill),
+            secondary_button("Cancel").on_press(Message::CancelJob(queued.id)),
+        ]
+        .spacing(spacing::SM)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding([spacing::XS as u16, spacing::MD as u16])
+    .into()
 }
 
 /// What went wrong, and did not get to say so before now.
@@ -3937,6 +4100,7 @@ impl DebugShow {
             kind: JobKind::Copy,
             started: Instant::now(),
             dirs: Vec::new(),
+            archive: None,
             progress: None,
             rate: Rate::default(),
             conflict: Some(Collision {
@@ -4523,6 +4687,7 @@ mod tests {
             unlocking: None,
             keyring: Arc::new(hyprforge_archive::Keyring::new()),
             opened_members: Vec::new(),
+            queued: std::collections::VecDeque::new(),
             failures: Vec::new(),
             cut_from_archive: None,
             writeback: None,
@@ -5476,6 +5641,7 @@ mod tests {
             kind: JobKind::Move,
             started: Instant::now(),
             dirs: vec![],
+            archive: None,
             progress: None,
             rate: Rate::default(),
             conflict: None,
@@ -5502,6 +5668,7 @@ mod tests {
             kind: JobKind::Copy,
             started: Instant::now(),
             dirs: vec![],
+            archive: None,
             progress: None,
             rate: Rate::default(),
             conflict: Some(Collision { source: "/a/x".into(), dest: "/dir/x".into() }),
@@ -5561,6 +5728,7 @@ mod tests {
             kind: JobKind::Copy,
             started: Instant::now(),
             dirs: vec![],
+            archive: None,
             progress: None,
             rate: Rate::default(),
             conflict: None,
@@ -5812,6 +5980,7 @@ mod tests {
             kind,
             started: Instant::now(),
             dirs: vec![],
+            archive: None,
             progress: None,
             rate: Rate::default(),
             conflict: None,
@@ -5999,6 +6168,161 @@ mod tests {
         );
     }
 
+    // --- the queue ---------------------------------------------------
+
+    fn queued_paste(id: JobId) -> Queued {
+        Queued {
+            id,
+            kind: JobKind::Copy,
+            dirs: vec![],
+            what: QueuedWork::Paste { steps: vec![] },
+        }
+    }
+
+    fn queued_edit(id: JobId, archive: &Path) -> Queued {
+        Queued {
+            id,
+            kind: JobKind::Archive { doing: "Updating", undo: ArchiveUndo::Nothing },
+            dirs: vec![],
+            what: QueuedWork::Archive {
+                work: archive_jobs::Work::Edit {
+                    archive: archive.to_path_buf(),
+                    edits: vec![],
+                },
+                unlock: hyprforge_archive::Unlock::none(),
+            },
+        }
+    }
+
+    #[test]
+    fn two_jobs_run_at_once_and_a_third_waits() {
+        let mut app = app_for_test(&["/dir"]);
+        app.jobs.push(running(1, JobKind::Copy));
+        app.jobs.push(running(2, JobKind::Copy));
+
+        assert!(
+            !app.may_start(&queued_paste(3)),
+            "a third would make the panel less legible and finish no sooner"
+        );
+        app.jobs.pop();
+        assert!(app.may_start(&queued_paste(3)), "and goes as soon as there is room");
+    }
+
+    /// The correctness rule, and the reason this queue exists. Two
+    /// rewrites of one archive each read the whole file and write a
+    /// whole new one, so the later rename wins and the earlier edit is
+    /// lost.
+    #[test]
+    fn two_edits_of_one_archive_never_run_together_even_when_there_is_room() {
+        let archive = PathBuf::from("/home/a/sample.zip");
+        let mut app = app_for_test(&["/dir"]);
+
+        let mut editing = running(1, JobKind::Archive {
+            doing: "Updating",
+            undo: ArchiveUndo::Nothing,
+        });
+        editing.archive = Some(archive.clone());
+        app.jobs.push(editing);
+
+        assert_eq!(app.jobs.len(), 1, "there is room for another job");
+        assert!(
+            !app.may_start(&queued_edit(2, &archive)),
+            "but not for another rewrite of the same archive"
+        );
+        assert!(
+            app.may_start(&queued_edit(2, Path::new("/home/a/other.zip"))),
+            "a different archive is not in the way"
+        );
+        assert!(app.may_start(&queued_paste(3)), "nor is an unrelated copy");
+    }
+
+    /// A blocked job must not hold up the queue behind it: a second edit
+    /// of one archive and an unrelated copy are not the same wait.
+    #[test]
+    fn a_blocked_job_does_not_hold_up_an_unrelated_one_behind_it() {
+        let archive = PathBuf::from("/home/a/sample.zip");
+        let mut app = app_for_test(&["/dir"]);
+        let mut editing = running(1, JobKind::Archive {
+            doing: "Updating",
+            undo: ArchiveUndo::Nothing,
+        });
+        editing.archive = Some(archive.clone());
+        app.jobs.push(editing);
+
+        app.queued.push_back(queued_edit(2, &archive));
+        app.queued.push_back(queued_paste(3));
+        let _ = app.pump();
+
+        let waiting: Vec<JobId> = app.queued.iter().map(|q| q.id).collect();
+        assert_eq!(waiting, [2], "the copy went; the conflicting edit stayed");
+        assert!(app.jobs.iter().any(|j| j.id == 3));
+    }
+
+    #[test]
+    fn cancelling_something_that_has_not_started_takes_it_out_of_the_queue() {
+        let mut app = app_for_test(&["/dir"]);
+        app.jobs.push(running(1, JobKind::Copy));
+        app.jobs.push(running(2, JobKind::Copy));
+        app.queued.push_back(queued_paste(3));
+
+        let _ = app.update(Message::CancelJob(3));
+        assert!(app.queued.is_empty(), "there is no thread to stop; dropping it is the cancel");
+    }
+
+    /// Otherwise "cancel all" stops what is running and immediately
+    /// starts the next thing from the queue.
+    #[test]
+    fn cancel_all_empties_the_queue_as_well() {
+        let mut app = app_for_test(&["/dir"]);
+        app.jobs.push(running(1, JobKind::Copy));
+        app.queued.push_back(queued_paste(2));
+        app.queued.push_back(queued_paste(3));
+
+        let _ = app.update(Message::CancelAllJobs);
+        assert!(app.queued.is_empty());
+    }
+
+    /// End to end, against a real archive: the thing that was silently
+    /// broken before the queue. Two edits of one archive, one after the
+    /// other, and *both* changes survive.
+    #[test]
+    fn both_edits_of_one_archive_survive_when_they_are_queued() {
+        use hyprforge_archive::backend::{ArchiveBackend, NoProgress};
+        use hyprforge_archive::{Format, Source, StdArchives};
+
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("payload");
+        std::fs::create_dir_all(&tree).unwrap();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(tree.join(name), name).unwrap();
+        }
+        let archive = dir.path().join("sample.zip");
+        StdArchives
+            .create(
+                &archive,
+                Format::Zip,
+                &[Source { path: tree, as_member: "payload".into() }],
+                &mut NoProgress,
+            )
+            .unwrap();
+
+        // Two removals, run in sequence the way the queue orders them.
+        for member in ["payload/a.txt", "payload/b.txt"] {
+            StdArchives
+                .edit(
+                    &archive,
+                    &[hyprforge_archive::Edit::Remove(member.to_string())],
+                    &mut NoProgress,
+                )
+                .unwrap();
+        }
+
+        let index = StdArchives.index(&archive).unwrap();
+        assert!(index.get("payload/a.txt").is_none(), "the first edit was lost");
+        assert!(index.get("payload/b.txt").is_none(), "the second edit was lost");
+        assert!(index.get("payload/c.txt").is_some(), "and nothing else went with them");
+    }
+
     // --- undo -------------------------------------------------------------------
 
     /// A rename is remembered and offered straight away, and Ctrl+Z takes
@@ -6080,6 +6404,7 @@ mod tests {
             kind: JobKind::Move,
             started: Instant::now(),
             dirs: vec![],
+            archive: None,
             progress: None,
             rate: Rate::default(),
             conflict: None,
@@ -6537,6 +6862,7 @@ mod archive_tests {
             kind: JobKind::Archive { doing: "Extracting", undo: ArchiveUndo::Nothing },
             started: Instant::now(),
             dirs: Vec::new(),
+            archive: None,
             progress: None,
             rate: Rate::default(),
             conflict: None,
