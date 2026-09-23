@@ -202,6 +202,17 @@ are two sources, and the second gets fetched over the network. The URL
 can change; it has to change everywhere at once, and `split.sh` now
 refuses to split while more than one spelling exists.
 
+Three more followed — displayd, emojimenu and files — and the one thing
+they taught is that a split can succeed with nothing to check it. All
+three were split, pushed and published before their CI workflows were
+committed, so for a day they were live repositories with no automated
+checking at all: the extreme form of a check that silently never runs,
+arriving through the one door `split.sh` had not guarded. It refuses now
+unless `.github/workflows/ci.yml` and `rust-toolchain.toml` are
+committed in the crate. Their first runs also needed the `SUITE_READ`
+secret on each new repository, which cannot be copied from another one —
+GitHub never reads a secret back.
+
 **Judged, and the answers are: cheap, yes, and not yet.**
 
 *Cheap* — the clipboard is still an ordinary workspace member. One
@@ -322,6 +333,9 @@ is a decision rather than the drift `sync.sh` exists to catch.
 - [x] `tray` prepared and verified standalone; not yet pushed
 - [x] `settings` prepared and verified standalone; not yet pushed
 - [x] All five pushed: clipboard, lock, greet, tray, settings, all green CI
+- [x] displayd, emojimenu and files split and pushed; CI committed after
+      the fact and green on 2026-09-23, and `split.sh` now refuses a
+      crate whose CI is not committed
 - [x] Day-2 drift detection (`./sync.sh`), monorepo included
 
 ## Staying in sync after the push

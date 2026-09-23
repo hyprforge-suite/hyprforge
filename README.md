@@ -172,9 +172,9 @@ Apps
                             conversation model
 ```
 
-Five of these directories — clipboard, lock, greet, tray, settings — are also
-their own repositories, published separately from this one. See "Six
-repositories, one workspace" below for what that means and where a change to
+Eight of these directories — clipboard, lock, greet, tray, settings,
+displayd, emojimenu and files — are also their own repositories, published
+separately from this one. See "Nine repositories, one workspace" below for what that means and where a change to
 one of them should actually be made.
 
 ### Why the look is one crate
@@ -197,11 +197,11 @@ greeter runs as its own user and a home directory is `drwx------`: it cannot
 traverse into `$HOME` at all, so continuity across the login boundary has to be
 an export rather than a shared path.
 
-## Six repositories, one workspace
+## Nine repositories, one workspace
 
 There is no GitHub organisation for this suite — the name `hyprforge` was
-already taken — so this repository is the only place that says the other five
-exist. Five components have been split out of `crates/` into their own
+already taken — so this repository is the only place that says the other eight
+exist. Eight components have been split out of `crates/` into their own
 repositories with `git subtree`, pushed, and have green CI. They are private
 today; the intent is to make them public once they've had more use.
 
@@ -212,8 +212,11 @@ today; the intent is to make them public once they've had more use.
 | [hyprforge-greet](https://github.com/adamrpostjr/hyprforge-greet) | A greetd greeter for Hyprland, sharing its look and authentication conversation with the lock screen. |
 | [hyprforge-tray](https://github.com/adamrpostjr/hyprforge-tray) | A StatusNotifierItem tray library, plus `hyprforge-trayd`, the daemon that puts Wi-Fi, Bluetooth, keep-awake and night-light icons in whatever bar is running, and draws its own right-click menu through `hyprforge-traymenu` rather than `com.canonical.dbusmenu`. |
 | [hyprforge-settings](https://github.com/adamrpostjr/hyprforge-settings) | The Settings app: an iced GUI over Hyprland's config, appearance, displays, network, Bluetooth, shortcuts and more. |
+| [hyprforge-displayd](https://github.com/adamrpostjr/hyprforge-displayd) | A monitor-arrangement daemon: it watches `wlr-output-management`, recognises a set of displays it has seen before and applies the layout saved for it, plus `hyprforge-displayctl` to drive it from a script. |
+| [hyprforge-emojimenu](https://github.com/adamrpostjr/hyprforge-emojimenu) | An emoji picker: a layer-shell popup at the pointer with type-to-filter search over the full Unicode set, skin tones, and a remembered default tone. |
+| [hyprforge-files](https://github.com/adamrpostjr/hyprforge-files) | A file manager: tabs, a sidebar, list and grid views, the freedesktop trash, copy and paste with other applications, and zip/tar/7z archives browsed and edited in place. |
 
-Four of the five are meant to be installed on their own: clone
+Seven of the eight are meant to be installed on their own: clone
 `hyprforge-clipboard` and you get a clipboard daemon and nothing else — no
 Settings app, no tray, no Hyprland config machinery. `hyprforge-settings` is
 the exception and its own README says so: it depends on fifteen other

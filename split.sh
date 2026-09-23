@@ -93,6 +93,24 @@ for f in LICENSE README.md; do
     fi
 done
 
+# The repository has to be able to check itself. `check.sh` does not
+# come along in a split, so a component published without its own
+# workflow starts life with no automated checking at all — and nothing
+# says so, because the one place that would have noticed is here.
+# displayd, emojimenu and files went out exactly like that: split and
+# pushed, their CI written afterwards and published a day late.
+# Committed, not merely present — a split only carries what is in
+# history, and the dirty-tree check above already makes those the same.
+printf '\n%s==> Checking the repository will check itself%s\n' "$BOLD" "$OFF"
+for f in .github/workflows/ci.yml rust-toolchain.toml; do
+    git ls-files --error-unmatch "$PREFIX/$f" >/dev/null 2>&1 \
+        || die "$PREFIX/$f is not committed.
+     A split repository has no check.sh; its own CI is all it has. Copy
+     another component's (hyprforge-tray's is the reference), adjust the
+     comments and native packages to this crate, and commit it first."
+    ok "$f is committed"
+done
+
 # Every manifest that names the suite's git URL must name the SAME one.
 #
 # This cost a confusing afternoon. A standalone crate that depends on
