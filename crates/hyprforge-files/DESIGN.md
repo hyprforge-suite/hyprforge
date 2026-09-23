@@ -186,15 +186,25 @@ Not built, and each for a reason rather than for lack of time:
   midway through rewriting an archive is not a state worth being able to sit
   in — the rewrite holds a temporary file beside the original until it
   finishes.
-- **A queue.** Every job starts at once today. Serialising them is a change to
-  *when work happens*, not to how it is displayed, and it wants deciding on
-  its own rather than arriving inside a panel.
+- ~~**A queue.**~~ Built, and it turned out to be a correctness fix rather
+  than a scheduling preference — see below.
 - **Completed/Failed tabs, retry policy, "Retry as root".** The failures panel
   covers what the Failed tab is for. A retry policy needs a queue; "as root"
   needs privilege escalation this suite does not do.
 - **"Queue survives window close · resumes on reconnect".** Jobs are threads
   in this process, and the remote transfers that line is really about need
   phase I's mounts.
+- **A Start button on a queued row.** `1f` has one. A job here is queued
+  either because the machine is busy, where starting it early gains nothing,
+  or because it would rewrite an archive another job is already rewriting —
+  where starting it early is the data loss the queue exists to prevent. A
+  button that is only sometimes safe is worse than no button.
+
+The queue serialises on *conflict* first and a count second. Two jobs that
+rewrite the same archive never run together, whatever else is going on,
+because each reads the whole archive and writes a whole new one: the later
+rename wins and the earlier edit is silently lost. Everything else runs two at
+a time, and a blocked job does not hold up an unrelated one behind it.
 
 **H — the command palette.** `1l`'s idea, inside `1b`.
 

@@ -644,3 +644,62 @@ fn extracting_without_the_password_still_writes_what_it_can() {
         "the member that needed no password still had to be written"
     );
 }
+
+/// Two rewrites of one archive at the same time.
+///
+/// What a library can promise on its own is that the file left behind is
+/// a complete archive one writer wrote, and that neither leaves its
+/// half-written bytes there or removes the other's temporary out from
+/// under it. It cannot promise both edits survive — each reads the whole
+/// archive and writes a whole new one, so the later rename wins.
+/// Serialising that belongs to whoever is scheduling the work.
+///
+/// This existed as a much worse bug before the temporary file was made
+/// unique: with a fixed `.<name>.hyprforge-new`, the edit that returned
+/// `Ok` had its change lost and the edit that returned `Err` had its
+/// change applied.
+#[test]
+fn two_rewrites_at_once_leave_a_whole_archive_and_an_honest_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let tree = sample_tree(dir.path());
+    let archive = dir.path().join("sample.zip");
+    StdArchives
+        .create(&archive, Format::Zip, &sources(&tree), &mut NoProgress)
+        .unwrap();
+
+    let (one, two) = (archive.clone(), archive.clone());
+    let first = std::thread::spawn(move || {
+        StdArchives.edit(&one, &[Edit::Remove("payload/readme.md".into())], &mut NoProgress)
+    });
+    let second = std::thread::spawn(move || {
+        StdArchives.edit(&two, &[Edit::Remove("payload/docs/guide.txt".into())], &mut NoProgress)
+    });
+    let (first, second) = (first.join().unwrap(), second.join().unwrap());
+
+    // Neither may report a failure it did not have, nor a success it did
+    // not have — which is exactly what the shared temporary produced.
+    assert!(first.is_ok() && second.is_ok(), "{first:?} {second:?}");
+
+    // Whatever is there reads as a complete archive, and is one of the
+    // two outcomes rather than a mixture of both writers' bytes.
+    let index = StdArchives.index(&archive).expect("still a readable archive");
+    let removed_readme = index.get("payload/readme.md").is_none();
+    let removed_guide = index.get("payload/docs/guide.txt").is_none();
+    assert!(
+        removed_readme ^ removed_guide,
+        "exactly one rewrite should have won: readme gone {removed_readme}, guide gone {removed_guide}"
+    );
+    assert!(
+        index.get("payload/docs/deep/more.txt").is_some(),
+        "and the members neither edit touched are still there"
+    );
+
+    // Nothing left lying beside it.
+    let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains("hyprforge-new"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}

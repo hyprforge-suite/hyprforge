@@ -32,7 +32,7 @@ use crate::timestamp;
 use crate::unlock::Unlock;
 use std::collections::HashMap;
 use std::io::{BufReader, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Archives on the real filesystem.
 pub struct StdArchives;
@@ -715,18 +715,36 @@ pub(crate) fn rewrite_in_place(
 ) -> Result<()> {
     let parent = archive.parent().unwrap_or(Path::new("."));
     let name = archive.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let temporary: PathBuf = parent.join(format!(".{name}.hyprforge-new"));
 
-    let result = write(&temporary);
-    if result.is_err() {
-        // Nothing half-written is left lying next to someone's archive,
-        // including after a cancel.
-        let _ = std::fs::remove_file(&temporary);
-        return result;
-    }
+    // A *unique* temporary, not `.<name>.hyprforge-new`. A fixed name is
+    // shared by any two rewrites of the same archive happening at once,
+    // and they then corrupt each other in a way that reports itself
+    // backwards: measured with two concurrent edits of one zip, the edit
+    // that returned `Ok` had its change lost and the edit that returned
+    // `Err` had its change applied, because the second writer truncated
+    // the file the first was about to rename into place.
+    //
+    // This does not make concurrent edits *correct*. Each reads the whole
+    // archive and writes a whole new one, so the later rename still wins
+    // and the earlier edit is still lost; serialising that is the
+    // caller's job. What it guarantees is the part a library owes on its
+    // own — whatever ends up at `archive` is a complete archive that one
+    // writer wrote, and no rewrite can leave another's half-written bytes
+    // there.
+    let holder = tempfile::Builder::new()
+        .prefix(&format!(".{name}."))
+        .suffix(".hyprforge-new")
+        .tempfile_in(parent)
+        .map_err(|e| ArchiveError::io(archive, e))?;
+    let temporary = holder.path().to_path_buf();
 
-    std::fs::rename(&temporary, archive).map_err(|e| {
-        let _ = std::fs::remove_file(&temporary);
-        ArchiveError::io(archive, e)
-    })
+    // Dropping `holder` removes the file, so a failure or a cancel leaves
+    // nothing lying beside someone's archive — including on a panic,
+    // which the hand-rolled remove-on-error could not promise.
+    write(&temporary)?;
+
+    holder
+        .persist(archive)
+        .map_err(|e| ArchiveError::io(archive, e.error))?;
+    Ok(())
 }
