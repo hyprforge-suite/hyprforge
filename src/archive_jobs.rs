@@ -19,7 +19,8 @@
 //! everywhere still gets the safest of the three rather than a surprise.
 
 use hyprforge_archive::backend::{
-    Advance, ArchiveBackend, Collision, ExtractRequest, Flow, Progress as ArchiveProgress, Source,
+    Advance, ArchiveBackend, Collision, ExtractRequest, FailureReason, Flow,
+    Progress as ArchiveProgress, Source,
 };
 use hyprforge_archive::{ArchiveError, Format, StdArchives, Unlock};
 use hyprforge_files_core::config::OnConflict;
@@ -395,11 +396,20 @@ fn absorb(
 ) {
     summary.done += report.files;
     summary.skipped += report.skipped.len();
-    for (member, why) in report.failed {
+    for failure in report.failed {
+        // A member that needed a password is not a failure to report —
+        // it is a question, and the window asks it. Recording it as a
+        // failure as well would put a sentence in the status bar
+        // underneath the prompt that contradicts it.
+        if failure.reason == FailureReason::NeedsPassword {
+            summary.needs_password.get_or_insert_with(|| archive.to_path_buf());
+            continue;
+        }
         summary.failed.push(format!(
-            "{} couldn't be extracted from {}: {why}",
-            member,
-            archive.display()
+            "{} couldn't be extracted from {}: {}",
+            failure.member,
+            archive.display(),
+            failure.message
         ));
     }
     // The destination, not each file: an undo of an extraction takes
