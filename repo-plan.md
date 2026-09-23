@@ -242,6 +242,10 @@ the crate being extracted needs a self-contained manifest. `lock` and
 
 ## What must stay true
 
+- **One installable package is one crate directory is one repository.**
+  This is the rule the rest of this document assumes and did not say, and
+  it went wrong twice before anyone wrote it down — see "The shape a
+  package has to have" below for what the two failures looked like.
 - **Leaf crates stay runtime-free.** `hyprforge-look` depends on no async
   runtime and no D-Bus, which is exactly why `notif` can share it while
   keeping smol where the rest of the suite uses tokio. A leaf crate that
@@ -253,6 +257,54 @@ the crate being extracted needs a self-contained manifest. `lock` and
 - **One place to fix a shared thing.** If a change to the theme starts
   needing five pull requests, the split has gone too far and should be
   walked back.
+
+## The shape a package has to have
+
+`git subtree split --prefix=` takes exactly one directory. That single
+fact decides the whole layout, and ignoring it is what produced two
+repositories that were not the component they claimed to be.
+
+**One installable package is one crate directory is one repository.** A
+package that installs several *binaries* ships them as several `[[bin]]`
+targets in that one crate — `hyprforge-displayd` already does it, with
+`src/bin/displayd.rs` and `src/bin/displayctl.rs` beside one `lib.rs`.
+
+The reason is narrow and easy to miss, which is why it has to be written
+down rather than remembered:
+
+> A library a component needs can live anywhere, because Cargo fetches
+> it. **A binary cannot.** There is no dependency edge that makes a
+> second executable appear in somebody's `$PATH`.
+
+That is the whole difference between the two failures and the three
+non-failures. `hyprforge-settings`'s repository does not contain
+`windowrules`, `input`, `session`, `shortcuts` or `system` either — and
+nobody noticed, because those are libraries its manifest pulls from this
+repository by URL. `hyprforge-traymenu` is a *binary*, so when
+`hyprforge-tray` was split without it, the published repository built a
+daemon whose right-click spawns a program that is not in it. Same for
+`hyprforge-clipboard` and `hyprforge-clipmenu`: a clipboard daemon with
+no way to see the history.
+
+Neither errored. The daemon logs a warning and carries on, exactly as
+CLAUDE.md's "a sibling binary that is not installed is a logged warning"
+says it should — which is why this was invisible for as long as it was.
+Degrading well hid it.
+
+So: before splitting anything, the question is not "is this crate
+ready", it is **"does this crate directory contain every binary its
+package installs"**. `check.sh`'s "Every package is a repository" step
+asks it now, discovered from the PKGBUILD rather than from a list
+someone has to remember to update.
+
+### notif is a deliberate exception
+
+`notif/` is a nested workspace with its own repository, its own PKGBUILD
+and its own CI, published before the merge. `sync.sh` does not check it
+and is not going to: the plan is to archive that repository and let the
+nested workspace here be the only copy. Until that happens its published
+repository is stale on purpose, and this paragraph is the record that it
+is a decision rather than the drift `sync.sh` exists to catch.
 
 ## Status
 

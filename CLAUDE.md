@@ -434,6 +434,24 @@ through a different door — and getting it backwards here is invisible
 in exactly the way that one was: the *listing* looks right, and only
 the contents are of a version the archive supersedes.
 
+**A library can be fetched; a binary cannot — so a package's binaries
+must all live in one crate directory.** `git subtree split --prefix=`
+takes one directory, so that directory *is* the published repository.
+`hyprforge-tray` was split without `hyprforge-traymenu` and
+`hyprforge-clipboard` without `hyprforge-clipmenu`, publishing a tray
+daemon whose right-click spawns a program the repository does not
+contain, and a clipboard daemon with no way to see the history. What
+made it invisible is that it degrades well: the daemon logs a warning
+and carries on, exactly as the rule about an absent sibling says it
+should. What made it *confusing* is that `hyprforge-settings` has five
+crates outside its repository and is fine — because those are libraries
+its manifest pulls by URL, and Cargo fetches them. Nothing fetches a
+second executable into someone's `$PATH`. A package that installs two
+binaries ships two `[[bin]]` targets from one crate, the way
+`hyprforge-displayd` already ships `displayd` and `displayctl`.
+`check.sh`'s "Every package is a repository" step now asks this of every
+`pkgname` in the PKGBUILD, because it was rediscovered twice.
+
 **An instruction from a human or another agent is not evidence.** Three
 times in one session an agent was told something false — that Adwaita was
 reachable on this machine, a JSON field order that was backwards, a claim

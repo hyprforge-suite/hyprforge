@@ -239,6 +239,118 @@ PYEOF
     fi
 fi
 
+# The rule this exists for is in repo-plan.md under "The shape a package
+# has to have", and in CLAUDE.md: one installable package is one crate
+# directory is one repository, because a library can be fetched and a
+# binary cannot.
+#
+# It was rediscovered twice. `hyprforge-tray` shipped without
+# `hyprforge-traymenu` and `hyprforge-clipboard` without
+# `hyprforge-clipmenu`, and neither errored — the daemon logs a warning
+# about the absent sibling and carries on, which is correct behaviour
+# that happened to hide a published repository being incomplete. A rule
+# nothing checks is a rule that gets rediscovered, so this asks.
+#
+# Discovered from the PKGBUILD, not from a list here: the next package
+# somebody adds is covered without anyone remembering to add it, the same
+# way the dependency-pin step above discovers its own crates by shape.
+step "Every package is a repository"
+if ! command -v python3 >/dev/null; then
+    skip "package/repository check" "python3 not available to parse the PKGBUILD"
+else
+    output=$(python3 - <<'PYEOF'
+import re
+import sys
+import tomllib
+from pathlib import Path
+
+PKGBUILD = Path("packaging/arch/PKGBUILD")
+if not PKGBUILD.is_file():
+    print("SKIP no packaging/arch/PKGBUILD to read")
+    sys.exit(0)
+
+text = PKGBUILD.read_text()
+
+# The split packages, and the binaries each one installs. A `package_x`
+# function body is read for `install -Dm755 .../<name>` and friends; what
+# matters is which `hyprforge-*` executables end up in the package.
+names = re.search(r"pkgname=\((.*?)\)", text, re.S)
+packages = names.group(1).split() if names else []
+
+problems = []
+checked = 0
+for package in packages:
+    # The umbrella package installs nothing of its own.
+    if package == "hyprforge":
+        continue
+    body = re.search(
+        rf"^package_{re.escape(package)}\(\)\s*\{{(.*?)^\}}",
+        text,
+        re.S | re.M,
+    )
+    if not body:
+        problems.append(f"{package}: no package_{package}() in the PKGBUILD")
+        continue
+
+    # Binaries, as the PKGBUILD's own `_bin` helper installs them, plus
+    # any spelled out as a path. Both forms, because matching only the
+    # one that happens to be used today is how this check silently stops
+    # checking: the first version matched `usr/bin/...` and reported
+    # "0 packages" in green.
+    binaries = sorted(
+        set(re.findall(r"^\s*_bin\s+(hyprforge-[a-z0-9-]+)", body.group(1), re.M))
+        | set(re.findall(r"usr/bin/(hyprforge-[a-z0-9-]+)", body.group(1)))
+    )
+    if not binaries:
+        problems.append(f"{package}: installs no hyprforge binary this check can see")
+        continue
+
+    checked += 1
+
+    # Which crate directory declares each binary. One directory for the
+    # whole package is the rule; several means the split cannot produce
+    # a repository that is the package.
+    owners = {}
+    for manifest in sorted(Path("crates").glob("*/Cargo.toml")):
+        data = tomllib.loads(manifest.read_text())
+        declared = {b.get("name") for b in data.get("bin", [])}
+        if not declared:
+            # A crate with no [[bin]] but a src/main.rs builds one named
+            # after the package.
+            if (manifest.parent / "src" / "main.rs").is_file():
+                declared = {data.get("package", {}).get("name")}
+        for binary in binaries:
+            if binary in declared:
+                owners.setdefault(binary, manifest.parent.name)
+
+    missing = [b for b in binaries if b not in owners]
+    if missing:
+        problems.append(f"{package}: no crate declares {', '.join(missing)}")
+        continue
+
+    directories = sorted(set(owners.values()))
+    if len(directories) > 1:
+        problems.append(
+            f"{package}: installs {', '.join(binaries)} from {len(directories)} crate "
+            f"directories ({', '.join(directories)}) — a subtree split takes one "
+            f"prefix, so this package cannot become one repository"
+        )
+
+print(f"CHECKED {checked}")
+for problem in problems:
+    print(f"PROBLEM {problem}")
+PYEOF
+    )
+    if grep -q "^SKIP" <<<"$output"; then
+        skip "package/repository check" "$(sed -n 's/^SKIP //p' <<<"$output")"
+    elif grep -q "^PROBLEM" <<<"$output"; then
+        bad "$(grep -c '^PROBLEM' <<<"$output") package(s) cannot become a repository as they stand"
+        sed -n 's/^PROBLEM /    • /p' <<<"$output"
+    else
+        ok "$(sed -n 's/^CHECKED //p' <<<"$output") package(s) each build from one crate directory"
+    fi
+fi
+
 step "Unit and integration tests"
 output=$(cargo test --workspace 2>&1)
 if grep -q "test result: FAILED" <<<"$output"; then
