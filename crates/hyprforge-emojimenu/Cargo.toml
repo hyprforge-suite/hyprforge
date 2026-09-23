@@ -1,16 +1,22 @@
 [package]
 name = "hyprforge-emojimenu"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "An emoji picker for Hyprland: a layer-shell popup at the pointer with type-to-filter search over the full Unicode set, skin tones, and a remembered default tone."
+repository = "https://github.com/adamrpostjr/hyprforge"
+documentation = "https://docs.rs/hyprforge-emojimenu"
+readme = "README.md"
+keywords = ["hyprland", "wayland", "emoji", "picker", "linux"]
+categories = ["os::linux-apis", "gui"]
 
 [[bin]]
 name = "hyprforge-emojimenu"
 path = "src/main.rs"
 
 [dependencies]
-hyprforge-emoji.workspace = true
-hyprforge-clipboard.workspace = true
+hyprforge-emoji = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-clipboard = { git = "https://github.com/adamrpostjr/hyprforge" }
 # The layer-shell surface, its event loop, pointer/keyboard handling,
 # placement and the single-instance lock — see the `hyprforge-clipmenu`
 # binary's own
@@ -18,22 +24,22 @@ hyprforge-clipboard.workspace = true
 # ~1800 lines of Wayland/iced plumbing. This crate is also where the one
 # genuine gap this picker needed closed lives: long-press detection (see
 # `hyprforge_popup::PopupApp::long_press_duration`/`pointer_long_press`).
-hyprforge-popup.workspace = true
-hyprforge-appearance.workspace = true
-hyprforge-look.workspace = true
-hyprforge-paths.workspace = true
-hyprforge-process.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-toml.workspace = true
+hyprforge-popup = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-appearance = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-look = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-paths = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-process = { git = "https://github.com/adamrpostjr/hyprforge" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1.1"
 # Same reasoning as `hyprforge-clipboard`'s manifest for every one of
 # these iced-related lines — this crate paints through
 # `iced_tiny_skia::Renderer` the same way, with no windowing backend of
 # its own beyond the Wayland layer-shell surface `hyprforge-popup` sets
 # up.
-iced_tiny_skia = { workspace = true, default-features = false, features = ["wayland"] }
-iced_runtime.workspace = true
-iced_widget.workspace = true
+iced_tiny_skia = { version = "0.14", default-features = false, features = ["wayland"] }
+iced_runtime = "0.14"
+iced_widget = "0.14"
 # `iced_widget` depends on `iced_renderer` unconditionally (not behind
 # any of its own feature flags — see its Cargo.toml), and `iced_renderer`
 # refuses to *link* in release mode unless one of its own "wgpu" or
@@ -45,7 +51,7 @@ iced_widget.workspace = true
 # happens through `iced_tiny_skia::Renderer` alone, exactly as
 # `hyprforge-clipmenu` and the lock screen both do.
 iced_renderer = { version = "0.14", default-features = false, features = ["tiny-skia"] }
-anyhow.workspace = true
+anyhow = "1"
 
 [dev-dependencies]
 tempfile = "3"

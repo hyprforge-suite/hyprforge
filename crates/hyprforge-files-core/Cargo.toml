@@ -39,6 +39,15 @@ chrono.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+# This crate's *own* tests browse a seeded archive, so this crate is
+# what has to ask for the mock. It used to arrive by feature
+# unification — `hyprforge-files` dev-depends on this crate with
+# `features = ["mock"]`, and that happened to switch the archive mock on
+# for this crate's tests too. That is a dependency on somebody else's
+# manifest to make your own tests compile, and it broke the moment
+# `hyprforge-files` named this crate as a git dependency in preparation
+# for standing alone.
+hyprforge-archive = { workspace = true, features = ["mock"] }
 
 [features]
 # The fake `FsBackend`, for the app's and the portal's own tests later.
