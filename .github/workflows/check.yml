@@ -23,6 +23,19 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Debug info is the largest thing in a Rust `target/` — routinely
+  # several times the size of the code it describes — and a hosted
+  # runner has about fourteen gigabytes free. This workspace is forty
+  # crates and got heavier when `hyprforge-archive` arrived with zip,
+  # zstd, bzip2, liblzma (which builds its C from source) and 7z, and
+  # the run after that one went red not on a test but on
+  # `rust-cache`'s *save* step: "No space left on device".
+  #
+  # Nothing here needs line numbers in a backtrace. A failing test names
+  # itself, and anyone chasing it further runs `check.sh` locally, where
+  # the profile is untouched.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
   tier1:
@@ -30,6 +43,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # The runner image ships Android, .NET, GHC and a stack of
+      # preinstalled toolchains this build never touches, and they are
+      # the difference between fitting and not. Removed before anything
+      # is compiled rather than after the failure, because the step that
+      # runs out of room is `rust-cache`'s post-run save — which reports
+      # as the whole job failing after every test has already passed,
+      # and reads as a code failure when it is a disk one.
+      - name: Free disk space on the runner
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/share/boost /usr/local/lib/node_modules \
+            "$AGENT_TOOLSDIRECTORY"
+          df -h /
 
       # The native dependencies behind the -sys crates in Cargo.lock:
       #   pam-sys2  -> libpam0g-dev   (hyprforge-lock authenticates)
