@@ -27,6 +27,7 @@
 //! hides.
 
 use std::fmt;
+use zeroize::Zeroize;
 
 /// A value that must never reach a log, a panic message, or a debug
 /// dump — only its length may be rendered.
@@ -36,9 +37,33 @@ use std::fmt;
 /// sanctioned way back out, and `Debug` is implemented once, here,
 /// instead of by hand at every call site that holds one.
 #[derive(Clone, PartialEq, Eq, Default)]
-pub struct Secret<T>(T);
+pub struct Secret<T: Zeroize>(T);
 
-impl<T> Secret<T> {
+/// Erased when it goes out of scope.
+///
+/// This is the half `Debug` cannot do. Hiding the value from a log stops
+/// it being *written down*; it does nothing about the copy sitting in
+/// the process's heap until that page is reused, which a core dump or a
+/// swapped-out page can still carry.
+///
+/// It matters more here than it looks, because of how the value is
+/// accumulated. A typed password is not appended to in place — the host
+/// hands the whole string over on every keystroke and the old `Secret`
+/// is dropped — so entering eight characters allocates eight strings,
+/// each holding a prefix of the password, and before this each of them
+/// was freed with its contents intact. Zeroing on drop clears every one
+/// of them at the moment it stops being used.
+///
+/// What it still does not cover, and the README says so: PAM and greetd
+/// keep copies of their own once the answer is handed over, and nothing
+/// on this side can reach those.
+impl<T: Zeroize> Drop for Secret<T> {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl<T: Zeroize> Secret<T> {
     /// Wraps a value so it can only leave through [`Secret::expose`] or
     /// [`Secret::into_inner`]. Always safe: wrapping does not expose
     /// anything, which is why `Secret<T>: From<T>` also exists as a
@@ -59,8 +84,16 @@ impl<T> Secret<T> {
     /// (`std::mem::take` and hand it to something that owns it next).
     /// Still not a way to see the value — the caller has to `expose()`
     /// it separately, same as anyone else.
-    pub fn into_inner(self) -> T {
-        self.0
+    /// Requires `Default` because this type erases itself on drop, and
+    /// Rust will not let a field move out of something with a `Drop`
+    /// impl — so the value is swapped for a default one, which is then
+    /// what gets erased. The caller owns the real value afterwards and
+    /// owns the job of clearing it, exactly as they would have anyway.
+    pub fn into_inner(mut self) -> T
+    where
+        T: Default,
+    {
+        std::mem::take(&mut self.0)
     }
 }
 
@@ -122,13 +155,13 @@ impl<T: SecretLen + ?Sized> SecretLen for &T {
 /// Deliberately one-directional: there is no `From<Secret<T>> for T`,
 /// because taking a value back *out* is the operation that has to stay
 /// greppable, and that is what [`Secret::expose`] is for.
-impl<T> From<T> for Secret<T> {
+impl<T: Zeroize> From<T> for Secret<T> {
     fn from(value: T) -> Self {
         Secret::new(value)
     }
 }
 
-impl<T: SecretLen> fmt::Debug for Secret<T> {
+impl<T: SecretLen + Zeroize> fmt::Debug for Secret<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", chars(self.0.secret_char_count()))
     }
@@ -217,5 +250,95 @@ mod tests {
     fn a_redacted_count_renders_a_count_and_a_unit_never_a_value() {
         assert_eq!(format!("{:?}", chars(28)), "<28 chars>");
         assert_eq!(format!("{:?}", bytes(2048)), "<2048 bytes>");
+    }
+}
+
+#[cfg(test)]
+mod erasing {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Counts how many times it was erased, so the *wiring* can be
+    /// tested without reading freed memory.
+    ///
+    /// Reading the heap after a free to prove the bytes are gone is
+    /// undefined behaviour, and a test built on it reports whatever the
+    /// allocator happened to do — which is the sort of measurement
+    /// CLAUDE.md's "check the instrument" rule is about. What this crate
+    /// can actually get wrong is the wiring: forgetting the `Drop`,
+    /// bounding it so it silently does not apply, or moving the value
+    /// out before it runs. That is what these check. Whether the write
+    /// survives the optimiser is `zeroize`'s own guarantee and its own
+    /// test suite, which is the reason for depending on it rather than
+    /// writing the loop here.
+    /// `Option`, so the empty husk `into_inner` leaves behind counts
+    /// against nothing and erasing it cannot be mistaken for erasing
+    /// the value that was taken out. That is also what `Default` gives
+    /// for free, which is why it is derived.
+    #[derive(Clone, Default)]
+    struct Counted(Option<&'static AtomicUsize>);
+
+    impl Zeroize for Counted {
+        fn zeroize(&mut self) {
+            if let Some(counter) = self.0 {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    static DROPPED: AtomicUsize = AtomicUsize::new(0);
+    static TAKEN: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn a_secret_erases_itself_when_it_goes_out_of_scope() {
+        DROPPED.store(0, Ordering::SeqCst);
+        {
+            let _held = Secret::new(Counted(Some(&DROPPED)));
+            assert_eq!(DROPPED.load(Ordering::SeqCst), 0, "not while it is still in use");
+        }
+        assert_eq!(DROPPED.load(Ordering::SeqCst), 1);
+    }
+
+    /// The case that makes this worth having. A typed password is
+    /// replaced wholesale on every keystroke rather than appended to, so
+    /// each intermediate has to be erased as it is displaced — eight
+    /// characters, eight strings, each holding a prefix.
+    #[test]
+    fn every_displaced_value_is_erased_not_only_the_last() {
+        DROPPED.store(0, Ordering::SeqCst);
+        let mut entered = Secret::new(Counted(Some(&DROPPED)));
+        for _ in 0..8 {
+            entered = Secret::new(Counted(Some(&DROPPED)));
+        }
+        assert_eq!(DROPPED.load(Ordering::SeqCst), 8, "one per displaced value");
+        drop(entered);
+        assert_eq!(DROPPED.load(Ordering::SeqCst), 9);
+    }
+
+    /// `into_inner` hands the value to the caller, so what is erased is
+    /// the default left behind — not the value, which the caller now
+    /// owns and is responsible for.
+    #[test]
+    fn taking_the_value_out_does_not_erase_the_value_that_was_taken() {
+        TAKEN.store(0, Ordering::SeqCst);
+        let held = Secret::new(Counted(Some(&TAKEN)));
+        let out = held.into_inner();
+        // Nothing was counted: what the wrapper erased was the empty
+        // husk left in its place, and the real value went to the
+        // caller untouched.
+        assert_eq!(TAKEN.load(Ordering::SeqCst), 0, "the value that was taken must not be erased");
+        // The real value came out, and nothing erased it on the way —
+        // it is the caller's now, and clearing it is theirs too.
+        assert!(out.0.is_some(), "and it is the real one");
+    }
+
+    /// A real password, through the type the auth stack actually uses —
+    /// so a change that made `String` stop satisfying the bound would
+    /// fail here rather than somewhere far away.
+    #[test]
+    fn a_string_password_is_what_this_is_for() {
+        let password = Secret::new("hunter2".to_string());
+        assert_eq!(password.expose(), "hunter2");
+        assert!(!format!("{password:?}").contains("hunter2"));
     }
 }

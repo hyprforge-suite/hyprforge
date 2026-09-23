@@ -999,9 +999,16 @@ established lock screen has:
 
 - **No input-method support.** A password typed through an IME cannot be
   entered. swaylock is the same; it still means some users cannot log in.
-- **The password is not zeroized.** `entered` is a plain `String`, cloned
-  into the backend, and PAM holds its own copy. A core dump or swap could
-  contain it.
+- **The password is erased on this side, and PAM keeps its own copy.**
+  `Secret<T>` zeroes its value when it goes out of scope, which matters
+  more than it looks: a typed password is not appended to in place — the
+  host hands the whole string over on every keystroke and the old one is
+  dropped — so eight characters allocate eight strings, each holding a
+  prefix, and every one of them is now cleared as it is displaced. The
+  clone `submit` makes for the backend is wrapped too. What remains is
+  outside this code: PAM and greetd copy the answer once it is handed
+  over, and a core dump or a swapped page taken while they hold it can
+  still contain it.
 - **No attempt limiting of its own**, on purpose: rate limiting belongs in
   `/etc/pam.d`, where an administrator can see and change it, rather than
   hidden in a settings app.
