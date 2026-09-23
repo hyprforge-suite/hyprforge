@@ -14,7 +14,8 @@ hyprforge-look.workspace = true
 # an async runtime, or D-Bus.
 hyprforge-process.workspace = true
 serde_json.workspace = true
-# Same reasoning `hyprforge-clipmenu`'s manifest gives for each of these:
+# Same reasoning `hyprforge-clipboard`'s manifest gives for each of these
+# (where the `hyprforge-clipmenu` binary's dependencies now live):
 # a layer-shell popup with no windowing backend of its own, painting
 # straight into the buffer the compositor hands over.
 iced_tiny_skia = { workspace = true, default-features = false, features = ["wayland"] }
