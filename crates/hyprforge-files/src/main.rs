@@ -60,7 +60,7 @@ use hyprforge_files_core::{
 };
 use hyprforge_ui::theme::{app_theme, spacing, FontScale, BASE_TEXT_SIZE};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use hyprforge_ui::widgets::{primary_button, scaled_text, secondary_button};
 use iced::keyboard::{self, key, Key};
 use iced::widget::{button, column, container, row};
@@ -181,6 +181,7 @@ fn main() -> iced::Result {
         unlocking: None,
         keyring,
         opened_members: Vec::new(),
+        failures: Vec::new(),
         cut_from_archive: None,
         writeback: None,
         scratch: Arc::new(Scratch::default()),
@@ -407,6 +408,10 @@ enum Message {
         verb: hyprforge_files_core::clipboard::ClipVerb,
         result: Result<Vec<PathBuf>, String>,
     },
+    /// Stop every job that is running.
+    CancelAllJobs,
+    /// Clear the list of what went wrong.
+    DismissFailures,
     /// Time to look at whether any file opened out of an archive has
     /// been edited since.
     CheckOpenedMembers,
@@ -617,6 +622,8 @@ struct App {
     /// Members unpacked out of an archive and handed to another
     /// application, watched for edits — see [`OpenedMember`].
     opened_members: Vec<OpenedMember>,
+    /// What went wrong in jobs that have finished — see [`Failures`].
+    failures: Vec<Failures>,
     /// Members cut out of an archive, waiting for the paste that
     /// finishes the move — see [`CutFromArchive`].
     cut_from_archive: Option<CutFromArchive>,
@@ -1141,9 +1148,171 @@ struct RunningJob {
     /// and, for a move, where they came from — refreshed when it ends.
     dirs: Vec<PathBuf>,
     progress: Option<Progress>,
+    /// How fast it is going, for the rate and the estimate — see
+    /// [`Rate`].
+    rate: Rate,
     /// The conflict the job is paused on, if any.
     conflict: Option<Collision>,
     apply_to_rest: bool,
+}
+
+/// What went wrong in one finished job, kept until it is read.
+///
+/// Mockup `1f` gives failures a tab of their own, and the reason is
+/// visible in what this replaces: they were joined into one sentence in
+/// the status bar, which the *next* job's report then overwrote. A
+/// paste of four hundred files that could not write three of them said
+/// so for as long as it took to start anything else, and the three
+/// names were gone.
+///
+/// Kept until dismissed, therefore — a failure is the one outcome that
+/// has to outlast the thing that produced it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Failures {
+    /// "copied", "extracted" — what was being attempted.
+    doing: &'static str,
+    items: Vec<String>,
+}
+
+impl Failures {
+    /// How many are listed before the rest become a count.
+    ///
+    /// A permission-denied sweep over a mounted share can fail on every
+    /// one of ten thousand files, and a panel that grows to ten
+    /// thousand rows is not a report — it is the listing again, in the
+    /// wrong place, pushing the browser off screen.
+    const SHOWN: usize = 8;
+
+    fn headline(&self) -> String {
+        format!(
+            "{} couldn't be {}",
+            plural(self.items.len(), "item", "items"),
+            self.doing
+        )
+    }
+}
+
+impl RunningJob {
+    /// How far along, from 0 to 1 — or `None` when there is no honest
+    /// fraction to draw.
+    ///
+    /// Bytes where the job knows them, entries otherwise: copying one
+    /// large file reports no entry progress until it finishes, and a
+    /// bar that sits at zero for a minute and jumps to full reads as a
+    /// hung job.
+    fn fraction(&self) -> Option<f32> {
+        let progress = self.progress.as_ref()?;
+        if let Some(total) = progress.bytes_total.filter(|t| *t > 0) {
+            return Some((progress.bytes_done as f64 / total as f64).clamp(0.0, 1.0) as f32);
+        }
+        let total = progress.entries_total.filter(|t| *t > 0)?;
+        Some((progress.entries_done as f64 / total as f64).clamp(0.0, 1.0) as f32)
+    }
+}
+
+/// How fast a job is moving bytes, over a short window.
+///
+/// The instantaneous rate between two progress reports is useless to
+/// show: a report arrives every 100ms, one large file makes a single
+/// enormous jump and a thousand small ones make a thousand tiny ones,
+/// so the number swings through orders of magnitude and nobody can read
+/// it.
+///
+/// An exponential moving average was tried first and is not enough. It
+/// weights the newest sample by a fixed fraction, so a jump of nine
+/// hundred megabytes in one tick still moved the estimate to 223x the
+/// steady rate — `a_rate_settles_rather_than_tracking_every_jump`
+/// caught it. What that average cannot do is *bound* one sample's
+/// influence, because the sample's own size is unbounded.
+///
+/// A sliding window can. The rate is what actually moved across the
+/// last few seconds divided by those seconds, so a single tick can
+/// contribute at most its true share, and a spike leaves the number
+/// again when it leaves the window. It is also the honest reading:
+/// if a gigabyte really did move in the last second, a gigabyte per
+/// second is what happened.
+#[derive(Debug, Clone, Default)]
+struct Rate {
+    /// `(when, bytes_done)`, oldest first, spanning at most [`WINDOW`].
+    samples: std::collections::VecDeque<(Instant, u64)>,
+}
+
+impl Rate {
+    /// How much history the rate is averaged over. Long enough that a
+    /// single large file is a fraction of it, short enough that the
+    /// number still follows a job that genuinely slows down.
+    const WINDOW: Duration = Duration::from_secs(3);
+
+    fn sample(&mut self, at: Instant, bytes_done: u64) {
+        self.samples.push_back((at, bytes_done));
+        while let Some((when, _)) = self.samples.front() {
+            if at.duration_since(*when) > Self::WINDOW && self.samples.len() > 2 {
+                self.samples.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Bytes per second across the window, or `None` before there are
+    /// two reports to compare — a rate needs an interval, and inventing
+    /// one from the first sample would measure against the moment the
+    /// job started being watched.
+    fn per_second_value(&self) -> Option<f64> {
+        let (first, oldest) = self.samples.front().copied()?;
+        let (last, newest) = self.samples.back().copied()?;
+        let seconds = last.duration_since(first).as_secs_f64();
+        if seconds <= 0.0 {
+            return None;
+        }
+        // A job that went *backwards* across the window is one item
+        // finishing and the next starting; `saturating_sub` reads that
+        // as no progress rather than wrapping into an astronomical
+        // number.
+        Some(newest.saturating_sub(oldest) as f64 / seconds)
+    }
+
+    /// "18.2 MB/s", or `None` before there is anything to say.
+    fn per_second(&self) -> Option<String> {
+        let rate = self.per_second_value()?;
+        (rate >= 1.0)
+            .then(|| format!("{}/s", hyprforge_files_core::human_readable_size(rate as u64)))
+    }
+
+    /// "4s left", from what is left and how fast it is going.
+    ///
+    /// `None` when the total is unknown (the tree is still being
+    /// walked), or when the rate is too small to divide by — an
+    /// estimate of four hours that turns into four seconds a moment
+    /// later is worse than no estimate.
+    fn remaining(&self, progress: &Progress) -> Option<String> {
+        let total = progress.bytes_total?;
+        let rate = self.per_second_value()?;
+        if rate < 1.0 {
+            return None;
+        }
+        let left = total.saturating_sub(progress.bytes_done) as f64 / rate;
+        if !left.is_finite() || left > 60.0 * 60.0 * 24.0 {
+            return None;
+        }
+        Some(format!("{} left", short_duration(left)))
+    }
+}
+
+/// "4s", "2m 10s", "1h 5m" — the shapes mockup `1f` uses.
+fn short_duration(seconds: f64) -> String {
+    let seconds = seconds.round() as u64;
+    match seconds {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => match (s / 60, s % 60) {
+            (m, 0) => format!("{m}m"),
+            (m, rest) => format!("{m}m {rest}s"),
+        },
+        s => match (s / 3600, (s % 3600) / 60) {
+            (h, 0) => format!("{h}h"),
+            (h, m) => format!("{h}h {m}m"),
+        },
+    }
 }
 
 impl App {
@@ -1608,6 +1777,7 @@ impl App {
             started: Instant::now(),
             dirs,
             progress: None,
+            rate: Rate::default(),
             conflict: None,
             apply_to_rest: false,
         });
@@ -1657,6 +1827,7 @@ impl App {
             started: Instant::now(),
             dirs,
             progress: None,
+            rate: Rate::default(),
             conflict: None,
             apply_to_rest: false,
         });
@@ -1810,6 +1981,7 @@ impl App {
             started: Instant::now(),
             dirs,
             progress: None,
+            rate: Rate::default(),
             // An archive job never pauses to ask — see
             // `archive_jobs`'s module doc on why.
             conflict: None,
@@ -1823,6 +1995,7 @@ impl App {
         match event {
             JobEvent::Progress { job, progress } => {
                 if let Some(running) = self.jobs.iter_mut().find(|j| j.id == job) {
+                    running.rate.sample(Instant::now(), progress.bytes_done);
                     running.progress = Some(progress);
                 }
                 Task::none()
@@ -1847,6 +2020,12 @@ impl App {
                 }
                 if let Some(message) = job_report(&finished.kind, &summary) {
                     self.status = Some(message);
+                }
+                if !summary.failed.is_empty() {
+                    self.failures.push(Failures {
+                        doing: finished.kind.done(),
+                        items: summary.failed.clone(),
+                    });
                 }
 
                 // The second half of a cut out of an archive: the paste
@@ -2517,6 +2696,19 @@ impl App {
                 self.status = Some(why);
                 Task::none()
             }
+            Message::CancelAllJobs => {
+                // Every one, including any paused on a conflict — a
+                // "cancel all" that left a job sitting behind a dialog
+                // would be a button that did not do what it said.
+                for job in &self.jobs {
+                    job.control.cancel();
+                }
+                Task::none()
+            }
+            Message::DismissFailures => {
+                self.failures.clear();
+                Task::none()
+            }
             Message::CheckOpenedMembers => {
                 // A question already on screen is not replaced by
                 // another: the person is being asked about one file, and
@@ -2837,8 +3029,17 @@ impl App {
         // small files finishes before the bar could be read, and a bar
         // that flashes up and vanishes reads as something going wrong.
         let after = std::time::Duration::from_millis(self.config.behaviour.progress_after_ms);
-        if let Some(job) = self.jobs.iter().find(|j| j.conflict.is_none() && j.started.elapsed() >= after) {
-            content = content.push(job_progress_bar(job, scale));
+        let showing: Vec<&RunningJob> = self
+            .jobs
+            .iter()
+            .filter(|j| j.conflict.is_none() && j.started.elapsed() >= after)
+            .collect();
+        if !showing.is_empty() {
+            content = content.push(transfers_panel(&showing, scale));
+        }
+
+        if !self.failures.is_empty() {
+            content = content.push(failures_panel(&self.failures, scale));
         }
 
         if let Some((_, text)) = &self.notice {
@@ -2961,9 +3162,9 @@ fn job_report(kind: &JobKind, summary: &JobSummary) -> Option<String> {
     if summary.skipped > 0 {
         parts.push(format!("{} skipped.", plural(summary.skipped, "item", "items")));
     }
-    if !summary.failed.is_empty() {
-        parts.push(format!("Some items weren't {doing}: {}", summary.failed.join("; ")));
-    }
+    // Failures are deliberately *not* here any more: they go to the
+    // transfers panel, where they stay until they are read. See
+    // `Failures`.
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
@@ -2993,6 +3194,94 @@ fn undo_notice<'a>(text: &str, scale: FontScale) -> Element<'a, Message> {
 
 /// One line under the listing while a paste runs: what it is doing, how
 /// far it has got, and a way to stop it.
+/// The transfers panel: every job that has been running long enough to
+/// be worth showing, and what each is doing.
+///
+/// Every one, which is the change mockup `1f` is really about. The
+/// window has always kept a `Vec` of jobs and always drawn the first —
+/// fine when a second paste was rare, and wrong now that extracting,
+/// compressing and rewriting an archive are jobs too: starting two and
+/// seeing one is the app quietly under-reporting its own work.
+fn transfers_panel<'a>(jobs: &[&RunningJob], scale: FontScale) -> Element<'a, Message> {
+    let mut panel = column![].spacing(spacing::XS);
+
+    // Only worth a heading when there is more than one thing under it;
+    // a single transfer says what it is on its own row.
+    if jobs.len() > 1 {
+        panel = panel.push(
+            row![
+                hyprforge_ui::widgets::meta_text(
+                    format!("Transfers \u{00B7} {} active", jobs.len()),
+                    BASE_TEXT_SIZE,
+                    scale,
+                )
+                .width(Length::Fill),
+                secondary_button("Cancel all").on_press(Message::CancelAllJobs),
+            ]
+            .spacing(spacing::SM)
+            .align_y(iced::Alignment::Center)
+            .padding([0, spacing::MD as u16]),
+        );
+    }
+
+    for job in jobs {
+        panel = panel.push(job_progress_bar(job, scale));
+    }
+    container(panel).width(Length::Fill).padding([spacing::XS as u16, 0]).into()
+}
+
+/// What went wrong, and did not get to say so before now.
+fn failures_panel<'a>(failures: &[Failures], scale: FontScale) -> Element<'a, Message> {
+    let total: usize = failures.iter().map(|f| f.items.len()).sum();
+    let mut panel = column![row![
+        scaled_text(
+            match failures {
+                [only] => only.headline(),
+                _ => format!("{} couldn't be finished", plural(total, "item", "items")),
+            },
+            BASE_TEXT_SIZE,
+            scale,
+        )
+        .width(Length::Fill),
+        secondary_button("Dismiss").on_press(Message::DismissFailures),
+    ]
+    .spacing(spacing::SM)
+    .align_y(iced::Alignment::Center)]
+    .spacing(spacing::XS);
+
+    // Each reason once. A permission failure over a whole tree produces
+    // the same sentence per file, and forty identical lines say no more
+    // than one does — what is worth showing is how many there were,
+    // which the headline already carries.
+    let mut seen: Vec<&str> = Vec::new();
+    for reason in failures.iter().flat_map(|f| f.items.iter()) {
+        if !seen.contains(&reason.as_str()) {
+            seen.push(reason);
+        }
+    }
+    for reason in seen.iter().take(Failures::SHOWN) {
+        panel = panel.push(hyprforge_ui::widgets::meta_text(
+            (*reason).to_string(),
+            BASE_TEXT_SIZE,
+            scale,
+        ));
+    }
+    if seen.len() > Failures::SHOWN {
+        panel = panel.push(hyprforge_ui::widgets::meta_text(
+            format!("and {} more", seen.len() - Failures::SHOWN),
+            BASE_TEXT_SIZE,
+            scale,
+        ));
+    }
+
+    container(panel)
+        .width(Length::Fill)
+        .padding([spacing::XS as u16, spacing::MD as u16])
+        .into()
+}
+
+/// One job's row: what it is doing, how far along, how fast, and how
+/// much longer.
 fn job_progress_bar<'a>(job: &RunningJob, scale: FontScale) -> Element<'a, Message> {
     let doing = job.kind.doing();
     let detail = match &job.progress {
@@ -3011,14 +3300,38 @@ fn job_progress_bar<'a>(job: &RunningJob, scale: FontScale) -> Element<'a, Messa
         }
         _ => "counting\u{2026}".to_string(),
     };
-    row![
-        scaled_text(format!("{doing} \u{00B7} {detail}"), BASE_TEXT_SIZE, scale).width(Length::Fill),
+
+    // Rate and estimate, when there is anything honest to say — see
+    // `Rate`. Appended rather than given their own column so a job that
+    // cannot report them simply has a shorter line, instead of two
+    // empty cells.
+    let mut line = format!("{doing} \u{00B7} {detail}");
+    if let Some(rate) = job.rate.per_second() {
+        line.push_str(&format!(" \u{00B7} {rate}"));
+    }
+    if let Some(left) = job.progress.as_ref().and_then(|p| job.rate.remaining(p)) {
+        line.push_str(&format!(" \u{00B7} {left}"));
+    }
+
+    let mut rows = column![row![
+        scaled_text(line, BASE_TEXT_SIZE, scale).width(Length::Fill),
         secondary_button("Cancel").on_press(Message::CancelJob(job.id)),
     ]
     .spacing(spacing::SM)
-    .align_y(iced::Alignment::Center)
-    .padding([spacing::XS as u16, spacing::MD as u16])
-    .into()
+    .align_y(iced::Alignment::Center)]
+    .spacing(spacing::XS);
+
+    // A bar only where there is a fraction to draw. An indeterminate
+    // bar that fills at a fixed rate is a lie about progress, and while
+    // the tree is still being walked there is genuinely no fraction —
+    // the "counting…" above is the honest report of that.
+    if let Some(fraction) = job.fraction() {
+        rows = rows.push(
+            iced::widget::progress_bar(0.0..=1.0, fraction).girth(scale.apply(4.0)),
+        );
+    }
+
+    container(rows).padding([spacing::XS as u16, spacing::MD as u16]).into()
 }
 
 /// The question a paused paste is asking.
@@ -3625,6 +3938,7 @@ impl DebugShow {
             started: Instant::now(),
             dirs: Vec::new(),
             progress: None,
+            rate: Rate::default(),
             conflict: Some(Collision {
                 source: PathBuf::from("/tmp/quarterly report.pdf"),
                 dest: app.home_dir.join("Documents").join("quarterly report.pdf"),
@@ -4209,6 +4523,7 @@ mod tests {
             unlocking: None,
             keyring: Arc::new(hyprforge_archive::Keyring::new()),
             opened_members: Vec::new(),
+            failures: Vec::new(),
             cut_from_archive: None,
             writeback: None,
             scratch: Arc::new(Scratch::default()),
@@ -5162,6 +5477,7 @@ mod tests {
             started: Instant::now(),
             dirs: vec![],
             progress: None,
+            rate: Rate::default(),
             conflict: None,
             apply_to_rest: false,
         });
@@ -5170,7 +5486,10 @@ mod tests {
             summary: JobSummary { done: 1, failed: vec!["disk full".into()], ..JobSummary::default() },
         }));
         assert!(app.clipboard.get().is_some());
-        assert!(app.status.as_deref().unwrap().contains("disk full"));
+        // The failure is kept where failures are kept now — see
+        // `Failures` — rather than in a status line the next job
+        // overwrites.
+        assert!(app.failures.iter().any(|f| f.items.iter().any(|i| i.contains("disk full"))));
     }
 
     #[test]
@@ -5184,6 +5503,7 @@ mod tests {
             started: Instant::now(),
             dirs: vec![],
             progress: None,
+            rate: Rate::default(),
             conflict: Some(Collision { source: "/a/x".into(), dest: "/dir/x".into() }),
             apply_to_rest: false,
         });
@@ -5218,7 +5538,52 @@ mod tests {
         let text = job_report(&JobKind::Move, &summary).unwrap();
         assert!(text.contains("Stopped after 1 item moved"), "{text}");
         assert!(text.contains("2 items skipped"), "{text}");
-        assert!(text.contains("permission denied"), "{text}");
+        // Not here any more, deliberately. A failure joined into the
+        // status line is overwritten by the next job's report, and the
+        // names go with it — so failures live in the transfers panel
+        // until they are dismissed. See `Failures`.
+        assert!(
+            !text.contains("permission denied"),
+            "a failure in the status line is a failure with a lifespan: {text}"
+        );
+    }
+
+    /// The other half of the decision above: the failure has to reach
+    /// somewhere that keeps it.
+    #[test]
+    fn a_failure_outlives_the_job_that_produced_it() {
+        let mut app = app_for_test(&["/dir"]);
+        let (control, _events) =
+            jobs::start(4, vec![], hyprforge_files_core::config::OnConflict::Ask);
+        app.jobs.push(RunningJob {
+            id: 4,
+            control,
+            kind: JobKind::Copy,
+            started: Instant::now(),
+            dirs: vec![],
+            progress: None,
+            rate: Rate::default(),
+            conflict: None,
+            apply_to_rest: false,
+        });
+        let _ = app.update(Message::Job(JobEvent::Finished {
+            job: 4,
+            summary: JobSummary {
+                failed: vec!["x.txt: permission denied".into()],
+                ..JobSummary::default()
+            },
+        }));
+
+        assert_eq!(app.failures.len(), 1);
+        assert_eq!(app.failures[0].items, ["x.txt: permission denied"]);
+        assert_eq!(app.failures[0].doing, "copied");
+
+        // And a later job's report does not erase it.
+        app.status = Some("something else entirely".to_string());
+        assert_eq!(app.failures.len(), 1, "a status line is not where a failure lives");
+
+        let _ = app.update(Message::DismissFailures);
+        assert!(app.failures.is_empty(), "and it goes when it has been read");
     }
 
     /// F2, type, Enter — and the file is renamed on disk, then selected
@@ -5426,12 +5791,212 @@ mod tests {
 
     #[test]
     fn a_restore_report_says_restored() {
+        // Through the cancelled wording, which is where the past tense
+        // now appears — failures moved to the transfers panel.
         let text = job_report(
             &JobKind::Restore { records: vec![] },
-            &JobSummary { skipped: 1, failed: vec!["busy".into()], ..JobSummary::default() },
+            &JobSummary { done: 2, cancelled: true, ..JobSummary::default() },
         )
         .unwrap();
-        assert!(text.contains("weren't restored"), "{text}");
+        assert!(text.contains("restored"), "{text}");
+    }
+
+    // --- transfers ---------------------------------------------------
+
+    fn running(id: JobId, kind: JobKind) -> RunningJob {
+        let (control, _events) =
+            jobs::start(id, vec![], hyprforge_files_core::config::OnConflict::Ask);
+        RunningJob {
+            id,
+            control,
+            kind,
+            started: Instant::now(),
+            dirs: vec![],
+            progress: None,
+            rate: Rate::default(),
+            conflict: None,
+            apply_to_rest: false,
+        }
+    }
+
+    fn progress(done: u64, total: Option<u64>) -> Progress {
+        Progress {
+            bytes_done: done,
+            bytes_total: total,
+            entries_done: 0,
+            entries_total: None,
+            current: PathBuf::new(),
+        }
+    }
+
+    /// The gap this whole panel exists to close: the window has always
+    /// kept a `Vec` of jobs and always drawn the first one.
+    #[test]
+    fn every_running_job_is_shown_not_just_the_first() {
+        let mut app = app_for_test(&["/dir"]);
+        app.jobs.push(running(1, JobKind::Copy));
+        app.jobs.push(running(2, JobKind::Archive {
+            doing: "Extracting",
+            undo: ArchiveUndo::Nothing,
+        }));
+
+        // What the view filters on, asserted directly: `view` needs a
+        // renderer, and this is the decision inside it.
+        let after = Duration::from_millis(app.config.behaviour.progress_after_ms);
+        let showing = app
+            .jobs
+            .iter()
+            .filter(|j| j.conflict.is_none() && j.started.elapsed() >= after)
+            .count();
+        assert_eq!(app.jobs.len(), 2);
+        assert_eq!(showing, 0, "neither has run long enough to be worth showing yet");
+
+        for job in &mut app.jobs {
+            job.started = Instant::now() - Duration::from_secs(5);
+        }
+        let showing = app
+            .jobs
+            .iter()
+            .filter(|j| j.conflict.is_none() && j.started.elapsed() >= after)
+            .count();
+        assert_eq!(showing, 2, "both, once both are worth showing");
+    }
+
+    #[test]
+    fn cancel_all_stops_every_job_including_one_paused_on_a_conflict() {
+        let mut app = app_for_test(&["/dir"]);
+        app.jobs.push(running(1, JobKind::Copy));
+        let mut paused = running(2, JobKind::Move);
+        paused.conflict = Some(Collision {
+            source: PathBuf::from("/a"),
+            dest: PathBuf::from("/b"),
+        });
+        app.jobs.push(paused);
+
+        // Nothing to observe but that it does not panic and reaches
+        // every job — the threads are empty. A "cancel all" that
+        // skipped the paused one would leave it sitting behind a dialog
+        // nobody can answer any more.
+        let _ = app.update(Message::CancelAllJobs);
+    }
+
+    /// A rate needs an interval. Quoting one from the first report
+    /// would measure against the moment the job started being watched.
+    #[test]
+    fn no_rate_is_claimed_from_a_single_report() {
+        let mut rate = Rate::default();
+        rate.sample(Instant::now(), 1_000_000);
+        assert_eq!(rate.per_second(), None);
+    }
+
+    /// The property an exponential moving average could not give: one
+    /// enormous sample contributes its true share of the window and no
+    /// more, and the number comes back once that sample ages out.
+    #[test]
+    fn one_huge_sample_cannot_dominate_the_rate_for_long() {
+        let mut rate = Rate::default();
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+
+        // A steady 10 MB/s for a second.
+        for tick in 0..=10u64 {
+            rate.sample(at(100 * tick), 1_000_000 * tick);
+        }
+        let steady = rate.per_second_value().unwrap();
+        assert!((steady - 10_000_000.0).abs() < 1.0, "{steady}");
+
+        // Then 900 MB lands in one tick. Across the 1.1s window so far
+        // that really is most of a gigabyte per second, and saying so
+        // is honest — what matters is that it is the *window's*
+        // average and not the tick's own 9 GB/s.
+        rate.sample(at(1_100), 910_000_000);
+        let spiked = rate.per_second_value().unwrap();
+        assert!(spiked < 1_000_000_000.0, "{spiked}");
+
+        // And once the spike has aged out of the window, the number is
+        // about what is happening now rather than what happened then.
+        for tick in 12..=50u64 {
+            rate.sample(at(100 * tick), 910_000_000 + 1_000_000 * (tick - 11));
+        }
+        let after = rate.per_second_value().unwrap();
+        assert!(
+            (after - 10_000_000.0).abs() < 2_000_000.0,
+            "the spike should have left the window: {after}"
+        );
+    }
+
+    /// A job that goes backwards is the next item starting, not
+    /// negative progress — and an unsigned subtraction would wrap.
+    #[test]
+    fn progress_going_backwards_does_not_produce_an_astronomical_rate() {
+        let mut rate = Rate::default();
+        let start = Instant::now();
+        rate.sample(start, 5_000_000);
+        rate.sample(start + Duration::from_millis(100), 0);
+        assert_eq!(rate.per_second_value(), Some(0.0));
+    }
+
+    #[test]
+    fn no_estimate_is_offered_without_a_total_to_measure_against() {
+        let mut rate = Rate::default();
+        let start = Instant::now();
+        rate.sample(start, 0);
+        rate.sample(start + Duration::from_millis(100), 1_000_000);
+
+        assert_eq!(rate.remaining(&progress(1_000_000, None)), None, "still counting");
+        assert!(rate.remaining(&progress(1_000_000, Some(5_000_000))).is_some());
+    }
+
+    /// An estimate of four hours that becomes four seconds a moment
+    /// later is worse than none.
+    #[test]
+    fn an_absurd_estimate_is_not_shown() {
+        let mut rate = Rate::default();
+        let start = Instant::now();
+        rate.sample(start, 0);
+        // One byte in a tenth of a second, against a terabyte to go.
+        rate.sample(start + Duration::from_millis(100), 1);
+        assert_eq!(rate.remaining(&progress(1, Some(1_000_000_000_000))), None);
+    }
+
+    #[test]
+    fn a_duration_reads_the_way_the_mockup_writes_it() {
+        assert_eq!(short_duration(4.0), "4s");
+        assert_eq!(short_duration(130.0), "2m 10s");
+        assert_eq!(short_duration(120.0), "2m");
+        assert_eq!(short_duration(3_900.0), "1h 5m");
+    }
+
+    /// Bytes where they are known, entries otherwise: one large file
+    /// reports no entry progress until it lands, and a bar stuck at
+    /// zero reads as a hung job.
+    #[test]
+    fn the_bar_falls_back_to_entries_when_there_are_no_byte_totals() {
+        let mut job = running(1, JobKind::Copy);
+        assert_eq!(job.fraction(), None, "nothing to draw before the first report");
+
+        job.progress = Some(Progress {
+            bytes_done: 0,
+            bytes_total: None,
+            entries_done: 3,
+            entries_total: Some(4),
+            current: PathBuf::new(),
+        });
+        assert_eq!(job.fraction(), Some(0.75));
+
+        job.progress = Some(progress(500, Some(1_000)));
+        assert_eq!(job.fraction(), Some(0.5), "bytes win when the job knows them");
+    }
+
+    #[test]
+    fn a_job_still_counting_draws_no_bar_at_all() {
+        let mut job = running(1, JobKind::Copy);
+        job.progress = Some(progress(0, None));
+        assert_eq!(
+            job.fraction(),
+            None,
+            "an indeterminate bar that fills anyway is a lie about progress"
+        );
     }
 
     // --- undo -------------------------------------------------------------------
@@ -5516,6 +6081,7 @@ mod tests {
             started: Instant::now(),
             dirs: vec![],
             progress: None,
+            rate: Rate::default(),
             conflict: None,
             apply_to_rest: false,
         });
@@ -5972,6 +6538,7 @@ mod archive_tests {
             started: Instant::now(),
             dirs: Vec::new(),
             progress: None,
+            rate: Rate::default(),
             conflict: None,
             apply_to_rest: false,
         });

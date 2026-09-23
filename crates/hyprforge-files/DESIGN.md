@@ -174,6 +174,28 @@ directory.
 **G — Transfers (`1f`).** `hyprforge-fileops::ops` already reports progress and
 cancels per chunk; this is the popover and the queue window over it.
 
+*Partly built.* The panel shows every running job — the window had always kept
+a `Vec` and drawn the first, which only started to matter once extracting,
+compressing and rewriting an archive became jobs too. Each row has a bar, a
+rate and an estimate, and failures now live in a panel that keeps them rather
+than a status line the next job overwrites.
+
+Not built, and each for a reason rather than for lack of time:
+
+- **Pause.** `JobControl` can cancel but not pause, and pausing a job that is
+  midway through rewriting an archive is not a state worth being able to sit
+  in — the rewrite holds a temporary file beside the original until it
+  finishes.
+- **A queue.** Every job starts at once today. Serialising them is a change to
+  *when work happens*, not to how it is displayed, and it wants deciding on
+  its own rather than arriving inside a panel.
+- **Completed/Failed tabs, retry policy, "Retry as root".** The failures panel
+  covers what the Failed tab is for. A retry policy needs a queue; "as root"
+  needs privilege escalation this suite does not do.
+- **"Queue survives window close · resumes on reconnect".** Jobs are threads
+  in this process, and the remote transfers that line is really about need
+  phase I's mounts.
+
 **H — the command palette.** `1l`'s idea, inside `1b`.
 
 **I — Devices, mounts, archives (`1j`)** and the terminal drawer (`1i`).
