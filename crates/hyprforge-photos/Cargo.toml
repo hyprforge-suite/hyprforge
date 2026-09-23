@@ -1,0 +1,52 @@
+[package]
+name = "hyprforge-photos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Measuring, orienting and decoding within a budget. The whole reason
+# the viewer never hands iced a path handle — see that crate's doc.
+hyprforge-image.workspace = true
+# Directly as well as through `hyprforge-image`: the info panel names the
+# format a file is (`image::ImageFormat`), and a crate that uses a type
+# must say so rather than relying on a dependency's dependency happening
+# to be in the tree.
+image.workspace = true
+# The listing, so "the next picture" means the next one the file manager
+# was showing. Not `hyprforge-files-core`: a viewer has no use for a
+# browser widget, and this is the leaf under both.
+hyprforge-listing.workspace = true
+# The suite's keyboard grammar. This app answers its one open question
+# differently from the file manager — see `keys.rs` and `BareKeys`.
+hyprforge-keys.workspace = true
+hyprforge-ui.workspace = true
+hyprforge-look.workspace = true
+hyprforge-appearance.workspace = true
+hyprforge-paths.workspace = true
+# `tokio` on top of the workspace base, the same addition
+# `hyprforge-files` and `hyprforge-settings` make and for the same
+# reason: it selects iced's tokio executor, so the futures a `Task` runs
+# are polled inside a tokio runtime. Without it `Task::perform` runs on a
+# `futures` thread pool with no ambient runtime and the free function
+# `tokio::task::spawn_blocking()` panics with "there is no reactor
+# running" — which a viewer would hit on the first picture it opened,
+# since every decode goes off the UI thread.
+#
+# Declared here rather than inherited: that unification only happens when
+# something builds both, so `cargo build -p hyprforge-photos` alone would
+# not get it.
+iced = { workspace = true, features = ["tokio", "image"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+serde.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+# `MockBackend`, so the folder model — what the next picture is, what
+# happens at the ends, what a folder of mixed stills and clips does — is
+# exercised without a disk.
+hyprforge-listing = { workspace = true, features = ["mock"] }

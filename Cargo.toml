@@ -35,6 +35,7 @@ members = [
     "crates/hyprforge-fileops",
     "crates/hyprforge-listing",
     "crates/hyprforge-image",
+    "crates/hyprforge-photos",
     "crates/hyprforge-files-core",
     "crates/hyprforge-files",
 ]
@@ -99,6 +100,7 @@ hyprforge-listing = { path = "crates/hyprforge-listing", version = "0.1.0" }
 # under the image viewer, and under the file manager's preview pane when
 # that grows one.
 hyprforge-image = { path = "crates/hyprforge-image", version = "0.1.0" }
+hyprforge-photos = { path = "crates/hyprforge-photos" }
 hyprforge-files-core = { path = "crates/hyprforge-files-core" }
 hyprforge-mime = { path = "crates/hyprforge-mime" }
 hyprforge-files = { path = "crates/hyprforge-files" }
