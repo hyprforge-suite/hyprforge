@@ -12,7 +12,8 @@ path = "src/main.rs"
 hyprforge-emoji.workspace = true
 hyprforge-clipboard.workspace = true
 # The layer-shell surface, its event loop, pointer/keyboard handling,
-# placement and the single-instance lock — see `hyprforge-clipmenu`'s own
+# placement and the single-instance lock — see the `hyprforge-clipmenu`
+# binary's own
 # manifest comment for why a picker depends on this instead of copying
 # ~1800 lines of Wayland/iced plumbing. This crate is also where the one
 # genuine gap this picker needed closed lives: long-press detection (see
@@ -25,7 +26,7 @@ hyprforge-process.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
-# Same reasoning as `hyprforge-clipmenu`'s manifest for every one of
+# Same reasoning as `hyprforge-clipboard`'s manifest for every one of
 # these iced-related lines — this crate paints through
 # `iced_tiny_skia::Renderer` the same way, with no windowing backend of
 # its own beyond the Wayland layer-shell surface `hyprforge-popup` sets
@@ -37,7 +38,7 @@ iced_widget.workspace = true
 # any of its own feature flags — see its Cargo.toml), and `iced_renderer`
 # refuses to *link* in release mode unless one of its own "wgpu" or
 # "tiny-skia" features is on, which nothing else in this crate's own
-# dependency graph turns on the way `hyprforge-clipmenu`'s manifest
+# dependency graph turns on the way `hyprforge-clipboard`'s manifest
 # explains happens for `hyprforge-lock` "by accident" via a different
 # sibling crate. So it is requested directly here too, even though
 # nothing in this crate calls into `iced_renderer` itself — painting
