@@ -657,8 +657,23 @@ fn extracting_without_the_password_still_writes_what_it_can() {
 /// a complete archive one writer wrote, and that neither leaves its
 /// half-written bytes there or removes the other's temporary out from
 /// under it. It cannot promise both edits survive — each reads the whole
-/// archive and writes a whole new one, so the later rename wins.
-/// Serialising that belongs to whoever is scheduling the work.
+/// archive and writes a whole new one, so when they overlap the later
+/// rename wins. Serialising that belongs to whoever is scheduling the
+/// work.
+///
+/// "When they overlap" is not guaranteed either: two threads spawned
+/// together can still run one after the other, and then the second
+/// reads what the first wrote and both edits survive. That is a correct
+/// outcome, so the assertion allows it. This test used to demand that
+/// exactly one edit won, which only held while the scheduler happened to
+/// interleave them.
+///
+/// Under load it also found a real race: an edit listed the archive and
+/// then unpacked it by opening the path twice, and a rename between the
+/// two left it repacking a member that was never unpacked — `NotFound`,
+/// three runs in two hundred. `write::edit` reads a snapshot now, and
+/// `an_archive_replaced_mid_edit_is_edited_as_it_was_when_the_edit_began`
+/// in `src/write.rs` puts the rename in that window deterministically.
 ///
 /// This existed as a much worse bug before the temporary file was made
 /// unique: with a fixed `.<name>.hyprforge-new`, the edit that returned
@@ -686,14 +701,16 @@ fn two_rewrites_at_once_leave_a_whole_archive_and_an_honest_answer() {
     // not have — which is exactly what the shared temporary produced.
     assert!(first.is_ok() && second.is_ok(), "{first:?} {second:?}");
 
-    // Whatever is there reads as a complete archive, and is one of the
-    // two outcomes rather than a mixture of both writers' bytes.
+    // Whatever is there reads as a complete archive written by one of the
+    // two: either edit alone (they overlapped and the later rename won)
+    // or both (they ran one after the other). Never neither — that would
+    // mean a rewrite reported `Ok` and left no trace.
     let index = StdArchives.index(&archive).expect("still a readable archive");
     let removed_readme = index.get("payload/readme.md").is_none();
     let removed_guide = index.get("payload/docs/guide.txt").is_none();
     assert!(
-        removed_readme ^ removed_guide,
-        "exactly one rewrite should have won: readme gone {removed_readme}, guide gone {removed_guide}"
+        removed_readme || removed_guide,
+        "both edits reported success and neither took effect"
     );
     assert!(
         index.get("payload/docs/deep/more.txt").is_some(),

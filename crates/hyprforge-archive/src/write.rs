@@ -336,9 +336,67 @@ pub fn edit(
     unlock: &Unlock,
     progress: &mut dyn Progress,
 ) -> Result<()> {
-    let format = crate::format::sniff(archive)
-        .map_err(|e| ArchiveError::io(archive, e))?
-        .ok_or_else(|| ArchiveError::NotAnArchive { path: archive.to_path_buf() })?;
+    // Unpacked beside the archive rather than in `/tmp`: a home
+    // directory and a temporary filesystem are usually different mounts,
+    // and one of them is usually much smaller and in memory. Unpacking a
+    // four-gigabyte archive into a tmpfs to change one name in it is how
+    // a machine runs out of memory doing what looked like a rename.
+    let scratch = tempfile::Builder::new()
+        .prefix(".hyprforge-edit-")
+        .tempdir_in(archive.parent().unwrap_or(Path::new(".")))
+        .map_err(|e| ArchiveError::io(archive, e))?;
+
+    let source = snapshot(archive, scratch.path())?;
+    edit_from(&source, archive, scratch.path(), edits, unlock, progress)
+        .map_err(|e| e.renaming(&source, archive))
+}
+
+/// Pins the bytes an edit reads to one version of `archive`.
+///
+/// An edit reads the archive several times — sniffing its format,
+/// listing it, then unpacking it, and the unpacking lists it again —
+/// and every one of those opens it by *path*. A path is not a file:
+/// another rewrite of the same archive can rename a new one over it
+/// between any two of those opens. Measured with two concurrent edits
+/// of one zip under load: the listing came from the old archive and
+/// the unpacked files from the new one, so the edit went to repack a
+/// member that had never been unpacked and failed with `NotFound` —
+/// about three runs in two hundred, and never on an idle machine.
+///
+/// A hard link beside the scratch directory pins the inode instead.
+/// Every rewrite here — and nearly every tool's — replaces an archive
+/// by renaming over it, which moves the name and leaves the inode the
+/// link holds exactly as it was. It costs nothing, and it is always
+/// possible in principle because `scratch` is on the archive's own
+/// filesystem. It is refused in practice by filesystems without hard
+/// links, and by `fs.protected_hardlinks` for an archive this user can
+/// read but does not own; a copy pins the bytes just as well there,
+/// at the price of the archive's size in disk space, which the
+/// unpacking beside it was about to spend anyway.
+fn snapshot(archive: &Path, scratch: &Path) -> Result<PathBuf> {
+    let pinned = scratch.join("source");
+    if std::fs::hard_link(archive, &pinned).is_err() {
+        std::fs::copy(archive, &pinned).map_err(|e| ArchiveError::io(archive, e))?;
+    }
+    Ok(pinned)
+}
+
+/// [`edit`], reading from `source` and replacing `archive`.
+///
+/// Apart so the test can put another writer into exactly the window a
+/// race would need — after the snapshot, before anything reads it —
+/// rather than hoping a scheduler lands one there.
+fn edit_from(
+    source: &Path,
+    archive: &Path,
+    scratch: &Path,
+    edits: &[Edit],
+    unlock: &Unlock,
+    progress: &mut dyn Progress,
+) -> Result<()> {
+    let format = crate::format::sniff(source)
+        .map_err(|e| ArchiveError::io(source, e))?
+        .ok_or_else(|| ArchiveError::NotAnArchive { path: source.to_path_buf() })?;
     if !format.writable() {
         return Err(ArchiveError::Unsupported {
             path: archive.to_path_buf(),
@@ -350,25 +408,19 @@ pub fn edit(
     }
 
     let backend = crate::read::StdArchives;
-    let index = backend.index_with(archive, unlock)?;
+    let index = backend.index_with(source, unlock)?;
 
-    // Unpacked beside the archive rather than in `/tmp`: a home
-    // directory and a temporary filesystem are usually different mounts,
-    // and one of them is usually much smaller and in memory. Unpacking a
-    // four-gigabyte archive into a tmpfs to change one name in it is how
-    // a machine runs out of memory doing what looked like a rename.
-    let scratch = tempfile::Builder::new()
-        .prefix(".hyprforge-edit-")
-        .tempdir_in(archive.parent().unwrap_or(Path::new(".")))
-        .map_err(|e| ArchiveError::io(archive, e))?;
-
+    // Members go in a directory of their own, not beside `source`: an
+    // archive with a member called `source` would otherwise unpack it
+    // over the snapshot being read.
+    let unpacked = scratch.join("members");
     let request = ExtractRequest {
         members: Vec::new(),
-        dest: scratch.path().to_path_buf(),
+        dest: unpacked.clone(),
         strip_prefix: None,
         collision: Collision::Overwrite,
     };
-    backend.extract_with(archive, &request, unlock, progress)?;
+    backend.extract_with(source, &request, unlock, progress)?;
 
     // The second element is where the member's bytes are *now*: the
     // path it was unpacked under, which is the name it had in the
@@ -409,7 +461,7 @@ pub fn edit(
         .map(|(member, unpacked_as)| Item {
             member: member.path,
             is_dir: member.is_dir,
-            source: (!member.is_dir).then(|| scratch.path().join(unpacked_as)),
+            source: (!member.is_dir).then(|| unpacked.join(unpacked_as)),
         })
         .collect();
     // Added members come off the real filesystem and may be whole
@@ -510,5 +562,134 @@ mod tests {
         let mut members = listing();
         apply_to_list(&mut members, &Edit::Remove("../../etc".to_string()));
         assert_eq!(paths(&members).len(), 4);
+    }
+
+    // --- the snapshot an edit reads --------------------------------
+
+    use crate::backend::NoProgress;
+    use crate::read::StdArchives;
+
+    /// A zip at `dest` holding one file per `(name, contents)`.
+    fn zip_of(dest: &Path, files: &[(&str, &str)]) {
+        let staging = tempfile::tempdir().unwrap();
+        let sources: Vec<Source> = files
+            .iter()
+            .map(|(name, contents)| {
+                let path = staging.path().join(name);
+                std::fs::write(&path, contents).unwrap();
+                Source {
+                    path,
+                    as_member: name.to_string(),
+                }
+            })
+            .collect();
+        create(dest, Format::Zip, &sources, &mut NoProgress).unwrap();
+    }
+
+    fn members_of(archive: &Path) -> Vec<String> {
+        let index = StdArchives.index(archive).unwrap();
+        let mut names: Vec<String> = index.members().iter().map(|m| m.path.clone()).collect();
+        names.sort();
+        names
+    }
+
+    /// The race, put exactly where it has to land instead of waited for.
+    ///
+    /// Another writer renames a different archive over this one after
+    /// the edit has taken its snapshot and before it has read anything.
+    /// The edit must neither fail nor pick up any of the newcomer: it
+    /// edits the archive as it was when it began, and — the later rename
+    /// winning, as `rewrite_in_place` documents — replaces the newcomer.
+    ///
+    /// Reading `archive` rather than the snapshot anywhere in `edit_from`
+    /// fails this, where the concurrent test in `tests/round_trip.rs`
+    /// catches it only a few runs in two hundred, and only under load.
+    #[test]
+    fn an_archive_replaced_mid_edit_is_edited_as_it_was_when_the_edit_began() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("sample.zip");
+        zip_of(&archive, &[("a.txt", "a"), ("b.txt", "b"), ("c.txt", "c")]);
+
+        let scratch = tempfile::tempdir_in(dir.path()).unwrap();
+        let source = snapshot(&archive, scratch.path()).unwrap();
+
+        let newcomer = dir.path().join("newcomer.zip");
+        zip_of(&newcomer, &[("z.txt", "z")]);
+        std::fs::rename(&newcomer, &archive).unwrap();
+
+        edit_from(
+            &source,
+            &archive,
+            scratch.path(),
+            &[Edit::Remove("b.txt".into())],
+            &Unlock::none(),
+            &mut NoProgress,
+        )
+        .expect("an archive replaced under an edit is not the edit's failure");
+
+        assert_eq!(members_of(&archive), ["a.txt", "c.txt"]);
+    }
+
+    /// The snapshot is unpacked into a directory of its own, so an
+    /// archive that happens to hold a member with the snapshot's own
+    /// name cannot unpack it over the thing being read. Worse than a
+    /// failed edit: extraction writes with `File::create`, which
+    /// truncates in place, and the snapshot is a hard link — so the
+    /// member's bytes would land in the *original archive's* inode, and
+    /// an edit cancelled after that point would leave the person's
+    /// archive destroyed rather than untouched.
+    #[test]
+    fn a_member_named_like_the_snapshot_is_carried_through_an_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("sample.zip");
+        // `zz.txt` after `source`, so something is still to be read from
+        // the snapshot once `source` has been unpacked.
+        zip_of(
+            &archive,
+            &[("drop.txt", "x"), ("source", "a member, not the snapshot"), ("zz.txt", "z")],
+        );
+
+        edit(&archive, &[Edit::Remove("drop.txt".into())], &Unlock::none(), &mut NoProgress)
+            .unwrap();
+
+        assert_eq!(members_of(&archive), ["source", "zz.txt"]);
+        assert_eq!(
+            StdArchives.read_member(&archive, "source").unwrap(),
+            b"a member, not the snapshot"
+        );
+    }
+
+    /// Every read happens against the snapshot, so every read error
+    /// would name it — a hidden `.hyprforge-edit-…/source` the person
+    /// never chose and cannot find.
+    #[test]
+    fn a_failed_edit_names_the_archive_and_not_its_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("photo.zip");
+        std::fs::write(&archive, b"\xff\xd8\xff\xe0 not a zip at all").unwrap();
+
+        let error = edit(&archive, &[Edit::Remove("x".into())], &Unlock::none(), &mut NoProgress)
+            .unwrap_err();
+
+        match error {
+            ArchiveError::NotAnArchive { path } => assert_eq!(path, archive),
+            other => panic!("expected NotAnArchive, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_snapshot_and_the_scratch_directory_are_gone_once_an_edit_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("sample.zip");
+        zip_of(&archive, &[("a.txt", "a"), ("b.txt", "b")]);
+
+        edit(&archive, &[Edit::Remove("a.txt".into())], &Unlock::none(), &mut NoProgress)
+            .unwrap();
+
+        let left: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, ["sample.zip"]);
     }
 }

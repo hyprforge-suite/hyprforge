@@ -3,7 +3,7 @@
 //! reason: these messages reach a status bar verbatim, and "check the
 //! logs" is not a thing a file manager may say.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ArchiveError {
@@ -73,6 +73,32 @@ impl ArchiveError {
     /// the floor without matching the whole enum.
     pub fn cancelled(&self) -> bool {
         matches!(self, ArchiveError::Cancelled)
+    }
+
+    /// The same error, naming `to` wherever it named `from`.
+    ///
+    /// For [`crate::write::edit`], which reads a private snapshot of the
+    /// archive rather than the archive itself. The snapshot's name is a
+    /// hidden temporary nobody has heard of, and these messages reach a
+    /// status bar verbatim — "`.hyprforge-edit-TdVwtJ/source` is a damaged
+    /// zip archive" names a file the person cannot find, about a problem
+    /// with the one they can.
+    pub(crate) fn renaming(mut self, from: &Path, to: &Path) -> ArchiveError {
+        match &mut self {
+            ArchiveError::NotAnArchive { path }
+            | ArchiveError::Damaged { path, .. }
+            | ArchiveError::Unsupported { path, .. }
+            | ArchiveError::PasswordRequired { path }
+            | ArchiveError::Io { path, .. }
+            | ArchiveError::MemberNotFound { archive: path, .. }
+            | ArchiveError::UnsafeMemberPath { archive: path, .. } => {
+                if path == from {
+                    *path = to.to_path_buf();
+                }
+            }
+            ArchiveError::Cancelled => {}
+        }
+        self
     }
 }
 
