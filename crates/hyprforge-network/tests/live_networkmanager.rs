@@ -135,3 +135,35 @@ async fn saved_networks_are_read_without_needing_their_secrets() {
         Err(e) => panic!("listing saved networks failed: {e}"),
     }
 }
+
+/// `Device.Wired`'s `Carrier` and `Speed`, `Device`'s `Interface`,
+/// `State` and `ActiveConnection`, and the active connection's `Id` —
+/// every property the wired status reads, against the real service.
+///
+/// Read-only like everything here: it lists, and connects or
+/// disconnects nothing.
+#[tokio::test]
+#[ignore]
+async fn every_wired_property_this_crate_reads_exists_and_has_the_type_it_expects() {
+    use hyprforge_network::WiredState;
+    let Some(backend) = backend().await else { return };
+    match backend.wired().await {
+        Ok(wired) if wired.is_empty() => {
+            eprintln!("{SKIP_MARKER} no Ethernet interface NetworkManager manages on this machine");
+        }
+        Ok(wired) => {
+            for port in &wired {
+                println!("{port:?}");
+                assert!(!port.interface.is_empty(), "every device has an interface name");
+                if port.state != WiredState::Connected {
+                    assert_eq!(port.speed_mbps, None, "a speed is only reported with a link");
+                }
+                if matches!(port.state, WiredState::CableUnplugged | WiredState::Disconnected) {
+                    assert_eq!(port.connection, None, "no connection is named on a port with none active");
+                }
+            }
+        }
+        Err(NetworkError::Unavailable) => eprintln!("{SKIP_MARKER} NetworkManager is not running"),
+        Err(e) => panic!("NetworkManager answered, but not in the shape this crate expects: {e}"),
+    }
+}
