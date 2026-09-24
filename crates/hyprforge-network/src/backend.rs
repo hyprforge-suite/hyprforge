@@ -189,6 +189,9 @@ pub mod mock {
         /// When set, `connect` reports a rejected passphrase.
         pub reject_psk: Mutex<bool>,
         pub wired: Mutex<Vec<WiredStatus>>,
+        /// Set for a machine with no Wi-Fi adapter: the Wi-Fi calls
+        /// answer [`NetworkError::NoWifiDevice`], as NetworkManager does.
+        pub no_wifi: Mutex<bool>,
     }
 
     impl MockBackend {
@@ -235,6 +238,9 @@ pub mod mock {
 
         async fn access_points(&self) -> Result<Vec<AccessPoint>, NetworkError> {
             self.guard()?;
+            if *self.no_wifi.lock().unwrap() {
+                return Err(NetworkError::NoWifiDevice);
+            }
             Ok(self.points.lock().unwrap().clone())
         }
 
@@ -266,6 +272,9 @@ pub mod mock {
 
         async fn request_scan(&self) -> Result<(), NetworkError> {
             self.guard()?;
+            if *self.no_wifi.lock().unwrap() {
+                return Err(NetworkError::NoWifiDevice);
+            }
             *self.scans.lock().unwrap() += 1;
             Ok(())
         }
