@@ -60,7 +60,7 @@ with zero GTK/Qt dependency anywhere in the stack.
 
 | Component | Crate(s) | Replaces | Daemon? | Status |
 |---|---|---|---|---|
-| **Settings app** (shell) | `hyprforge-settings` | GNOME/KDE Settings | no (hosts modules that may talk to daemons) | twelve working screens (Monitors, Window Rules, Shortcuts, Input, Network, Bluetooth, Power, Tray, Appearance, Desktop, Session, System), ~23.2k lines |
+| **Settings app** (shell) | `hyprforge-settings` | GNOME/KDE Settings | no (hosts modules that may talk to daemons) | thirteen working screens (Monitors, Window Rules, Shortcuts, Input, Network, Bluetooth, Power, Tray, Appearance, Desktop, Default Applications, Session, System), ~24.3k lines |
 | — Displays module | `hyprforge-displayd` (daemon) | manual `wlr-randr`/GUI fiddling | **yes**, systemd user service, D-Bus API | in progress |
 | — Window Rules module | `hyprforge-windowrules` (lib) | hand-written Lua rules | no | in progress |
 | — Shortcuts module | `hyprforge-shortcuts` (lib) | hand-edited keybinds | no | in progress; TOML storage, Lua codegen, live conflict detection against `hyprctl binds` |
@@ -213,9 +213,9 @@ sign something belongs in `hyprforge-look` instead.
 
 The Settings modules above marked *in progress* are functional; their look
 and feel is deliberately unfinished, functionality first. The Settings app
-itself is twelve working screens (Monitors, Window Rules, Shortcuts, Input,
-Network, Bluetooth, Power, Tray, Appearance, Desktop, Session, System) at
-roughly 23.2k lines.
+itself is thirteen working screens (Monitors, Window Rules, Shortcuts,
+Input, Network, Bluetooth, Power, Tray, Appearance, Desktop, Default
+Applications, Session, System) at roughly 24.3k lines (as of 2026-09-23).
 
 `hyprforge-lock` locks, draws, authenticates against PAM and unlocks, and
 now has the look: it shares `hyprforge-look`'s runtime `Theme` with the rest
@@ -272,7 +272,7 @@ it, in both the places that needed it — the left click
 trayd test exists to keep in step with each other.
 
 The tray itself gained a Settings screen of its own at the same time
-(`--screen tray`): the four icons' visibility, previously reachable only
+(`--screen tray`): each icon's visibility, previously reachable only
 as a "Show in tray" checkbox on whichever screen owned that icon, and
 `menu_y_offset`, previously reachable only by hand-editing `tray.toml`.
 That gave one file three writers inside one process, so every writer now

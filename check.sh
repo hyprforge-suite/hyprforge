@@ -351,6 +351,142 @@ PYEOF
     fi
 fi
 
+step "Docs name things that exist"
+# The half of keeping docs current that a machine can do. The other half
+# — "four icons" when there are five — is judgement, and lives in the
+# `keep-docs-current` skill; this step catches what needs none.
+#
+# Both checks here were written after the drift they catch shipped: a
+# published README listing `src/dbusmenu.rs` long after the file was
+# deleted, and a README saying five components were split when there
+# were eight.
+if ! command -v python3 >/dev/null; then
+    skip "docs check" "python3 not available"
+else
+    output=$(python3 - <<'PYEOF'
+import re
+import subprocess
+import tomllib
+from pathlib import Path
+
+problems = []
+
+# --- every source path a doc names is one that exists ----------------
+#
+# A crate's own docs resolve `src/`, `tests/` and the like against that
+# crate, strictly: it is what someone reading the published repository
+# will look for. `crates/` and `packaging/` in those same docs may point
+# back at the monorepo ("this repository is a split of `crates/x`"), so
+# they also resolve from the root. The root docs name a crate in prose and then
+# give a path inside it, so a path there passes if any crate has it —
+# which still catches a file deleted outright, the case that actually
+# happened.
+docs = subprocess.run(
+    ["git", "ls-files", "*.md"], capture_output=True, text=True, check=True
+).stdout.split()
+docs = [Path(d) for d in docs if not d.startswith("notif/")]
+crates = sorted(p for p in Path("crates").iterdir() if p.is_dir())
+path_in_backticks = re.compile(
+    r"`((?:crates/|src/|tests/|testing/|config/|packaging/)[A-Za-z0-9_./-]+)`"
+)
+named = 0
+for doc in docs:
+    text = doc.read_text()
+    in_crate = doc.parts[0] == "crates" and len(doc.parts) > 2
+    for match in path_in_backticks.finditer(text):
+        path = match.group(1).rstrip("/.")
+        named += 1
+        if in_crate and not path.startswith(("crates/", "packaging/")):
+            candidates = [doc.parent / path]
+        elif in_crate:
+            # A crate can have a `packaging/` of its own (the unit files
+            # the split repository ships) as well as meaning the root's.
+            candidates = [doc.parent / path, Path(path)]
+        else:
+            candidates = [Path(path)] + [crate / path for crate in crates]
+        if not any(c.exists() for c in candidates):
+            line = text[: match.start()].count("\n") + 1
+            problems.append(f"{doc}:{line} names `{path}`, which does not exist")
+
+# --- the README's repository table is the set of standalone crates --
+#
+# "Standalone" by shape, the way the dependency-pin step finds them: a
+# manifest with no workspace inheritance left. A crate prepared for a
+# split is then held to this without anybody adding it to a list.
+def inherits(obj):
+    if isinstance(obj, dict):
+        return obj.get("workspace") is True or any(inherits(v) for v in obj.values())
+    if isinstance(obj, list):
+        return any(inherits(v) for v in obj)
+    return False
+
+standalone = sorted(
+    m.parent.name
+    for m in Path("crates").glob("*/Cargo.toml")
+    if not inherits(tomllib.loads(m.read_text()))
+)
+readme = Path("README.md").read_text()
+listed = sorted(
+    set(re.findall(r"^\| \[(hyprforge-[a-z0-9-]+)\]\(https://github\.com/", readme, re.M))
+)
+for crate in sorted(set(standalone) - set(listed)):
+    problems.append(f"README.md's repository table is missing {crate}, which is standalone")
+for crate in sorted(set(listed) - set(standalone)):
+    problems.append(f"README.md's repository table lists {crate}, which is not standalone")
+
+# The counts in prose, spelled out: "## Nine repositories" is the
+# components plus this one, "Eight of these directories" the components.
+WORDS = "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty".split()
+def spelled(n):
+    return WORDS[n] if n < len(WORDS) else str(n)
+
+heading = re.search(r"^## (\w+) repositories, one workspace", readme, re.M | re.I)
+if not heading:
+    problems.append("README.md has no '## <N> repositories, one workspace' heading to check")
+elif heading.group(1).lower() != spelled(len(standalone) + 1):
+    problems.append(
+        f"README.md says '{heading.group(1)} repositories'; there are "
+        f"{spelled(len(standalone) + 1)} ({len(standalone)} components and this one)"
+    )
+directories = re.search(r"^(\w+) of these directories", readme, re.M)
+if directories and directories.group(1).lower() != spelled(len(standalone)):
+    problems.append(
+        f"README.md says '{directories.group(1)} of these directories' are repositories; "
+        f"there are {spelled(len(standalone))}"
+    )
+
+# CLAUDE.md's "Fourteen gated tiers": the indented `step` lines below
+# are the gated tiers — `--quick` skips the block they sit in — less the
+# one that only announces the skip. It said twelve while there were
+# fourteen, and named neither of the two it was missing.
+tiers = [
+    t
+    for t in re.findall(r'^[ \t]+step "([^"]+)"', Path("check.sh").read_text(), re.M)
+    if not t.startswith("Skipping")
+]
+claimed = re.search(r"(\w+)\s+gated\s+tiers", Path("CLAUDE.md").read_text(), re.I)
+if not claimed:
+    problems.append("CLAUDE.md no longer says how many gated tiers there are")
+elif claimed.group(1).lower() != spelled(len(tiers)):
+    problems.append(
+        f"CLAUDE.md says '{claimed.group(1)} gated tiers'; check.sh has "
+        f"{spelled(len(tiers))}: {', '.join(tiers)}"
+    )
+
+print(f"CHECKED {named} {len(standalone)} {len(tiers)}")
+for problem in problems:
+    print(f"PROBLEM {problem}")
+PYEOF
+    )
+    if grep -q "^PROBLEM" <<<"$output"; then
+        bad "$(grep -c '^PROBLEM' <<<"$output") doc claim(s) no longer true"
+        sed -n 's/^PROBLEM /    • /p' <<<"$output"
+    else
+        read -r named repos tiers < <(sed -n 's/^CHECKED //p' <<<"$output")
+        ok "$named source path(s) named in docs all exist; README lists all $repos standalone repositories; CLAUDE.md counts all $tiers gated tiers"
+    fi
+fi
+
 step "Unit and integration tests"
 output=$(cargo test --workspace 2>&1)
 if grep -q "test result: FAILED" <<<"$output"; then

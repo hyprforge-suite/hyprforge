@@ -596,18 +596,24 @@ belongs in the design — not in a user's surprise.
 ./check.sh --quick  # tier 1 only: clippy + unit tests, no compositor
 ```
 
-Clippy must be silent and every test must pass before a commit. Twelve gated
-tiers beyond tier 1 now, each answering a different "does the system I'm
-talking to actually agree" question — Hyprland itself, the ecosystem daemons'
-parse tests, NetworkManager, BlueZ, hyprsunset, systemd-logind, UPower,
-power-profiles-daemon, the Wayland clipboard, icon names against the
-installed theme, a tray host, and the system's own `unzip`/`tar`/`7z` —
-and each gates on the thing it actually asks rather than riding another
-tier's `--ignored` run, for the reason in the
+Clippy must be silent and every test must pass before a commit. Fourteen
+gated tiers beyond tier 1 now, each answering a different "does the system
+I'm talking to actually agree" question — Hyprland itself, the ecosystem
+daemons' parse tests, the system's own `unzip`/`tar`/`7z`, NetworkManager,
+BlueZ, hyprsunset, systemd-logind, trash entries written by another
+implementation, UPower, power-profiles-daemon, the Wayland clipboard, icon
+names against the installed theme, the installed shared MIME database, and
+a tray host — and each gates on the thing it actually asks rather than
+riding another tier's `--ignored` run, for the reason in the
 rule above about a check that silently never runs. Tier 1 now also includes
 the "Standalone crate dependency pins" step, which compares every split-ready
 crate's hand-copied dependency versions against the workspace table — see the
-rule above about drift with no symptom.
+rule above about drift with no symptom — and "Docs name things that exist",
+which fails on a doc naming a source file that is gone or a repository count
+that no longer matches, and checks this paragraph's own tier count. The
+judgement half of keeping docs true is the `keep-docs-current` skill in
+`.claude/skills/`; run it before committing anything that changes what a doc
+counts, names or calls unfinished.
 
 `check.sh` does **not** cover the lock screen's live behaviour. Its unit tests
 run in tier 1, but proving it locks, draws and unlocks needs the nested
