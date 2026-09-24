@@ -28,6 +28,7 @@ pkgname=(
   hyprforge-clipboard
   hyprforge-emojimenu
   hyprforge-files
+  hyprforge-photos
   hyprforge
 )
 pkgver=0.1.0
@@ -100,6 +101,23 @@ package_hyprforge-files() {
   _bin hyprforge-files
   install -Dm644 crates/hyprforge-files/packaging/hyprforge-files.desktop \
     "$pkgdir/usr/share/applications/hyprforge-files.desktop"
+}
+
+package_hyprforge-photos() {
+  pkgdesc="Image viewer for Hyprland"
+  depends=(wayland libxkbcommon)
+  optdepends=(
+    # Each of these is an action that degrades to a sentence without its
+    # program, never a viewer that fails to start — see the plan's
+    # "every sibling may be absent".
+    'glib2: "Open With…" hands a picture to another program through gio'
+    'hyprpaper: "Set as Wallpaper" shows it now, not only at next login'
+    'hyprforge-files: "Show in Files"'
+  )
+  cd "$startdir/../.."
+  _bin hyprforge-photos
+  install -Dm644 crates/hyprforge-photos/packaging/hyprforge-photos.desktop \
+    "$pkgdir/usr/share/applications/hyprforge-photos.desktop"
 }
 
 package_hyprforge-lock() {
@@ -192,6 +210,7 @@ package_hyprforge() {
     hyprforge-clipboard
     hyprforge-emojimenu
     hyprforge-files
+    hyprforge-photos
   )
   # The greeter is deliberately not here. Installing it is not the
   # dangerous step — enabling greetd is, because that decides which VT

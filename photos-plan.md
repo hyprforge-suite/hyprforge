@@ -1,5 +1,14 @@
 # Building the image viewer
 
+**Status, 2026-09-23.** Phases 0 to 3 are built: packaging, the window,
+the viewer grammar and the actions that touch files. The three open
+questions at the end were answered by the owner — PNG, JPEG, WebP and GIF;
+Set as Wallpaper in scope; the keyboard grammar merged as
+`hyprforge-keys`. Phase 4, the file manager's preview pane on
+`hyprforge-image`, is next. Two gaps are named rather than hidden: an
+animated GIF plays its first frame only, and zooming past the size that
+was decoded upsamples rather than re-decoding a sharper crop.
+
 `hyprforge-photos`, the "Photo Viewer" row the inventory in
 `hyprforge-vision.md` has carried as *not started*. This is the plan for
 it, written the way `repo-plan.md` is: the decisions, what each one costs,

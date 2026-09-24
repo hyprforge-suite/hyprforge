@@ -60,7 +60,7 @@ with zero GTK/Qt dependency anywhere in the stack.
 
 | Component | Crate(s) | Replaces | Daemon? | Status |
 |---|---|---|---|---|
-| **Settings app** (shell) | `hyprforge-settings` | GNOME/KDE Settings | no (hosts modules that may talk to daemons) | thirteen working screens (Monitors, Window Rules, Shortcuts, Input, Network, Bluetooth, Power, Tray, Appearance, Desktop, Default Applications, Session, System), ~24.3k lines |
+| **Settings app** (shell) | `hyprforge-settings` | GNOME/KDE Settings | no (hosts modules that may talk to daemons) | thirteen working screens (Monitors, Window Rules, Shortcuts, Input, Network, Bluetooth, Power, Tray, Appearance, Desktop, Default Applications, Session, System), ~24.3k lines. Planned: a Keyboard screen for the suite's own app bindings (Files' `files-config.toml`, the viewer's `photos-config.toml`), editing the same `hyprforge-keys` grammar both apps already read — asked for once the shared grammar landed |
 | — Displays module | `hyprforge-displayd` (daemon) | manual `wlr-randr`/GUI fiddling | **yes**, systemd user service, D-Bus API | in progress |
 | — Window Rules module | `hyprforge-windowrules` (lib) | hand-written Lua rules | no | in progress |
 | — Shortcuts module | `hyprforge-shortcuts` (lib) | hand-edited keybinds | no | in progress; TOML storage, Lua codegen, live conflict detection against `hyprctl binds` |
@@ -88,7 +88,7 @@ with zero GTK/Qt dependency anywhere in the stack.
 | *(shared foundation)* | `hyprforge-paths` (xdg + atomic writes), `hyprforge-look` (colour type + runtime Theme), `hyprforge-ui` (iced widgets and palette), `hyprforge-popup` (layer-shell popup shell: surface, pointer/keyboard, flip-then-clamp placement, singleton lock, scrollbar, fractional-scale rendering, and the `Dismissal` choice that decides whether a click elsewhere closes the popup or is swallowed by it) | — | no | in place; every future app builds on these. `hyprforge-popup` was extracted from `hyprforge-clipmenu` once a second and third popup (`hyprforge-emojimenu`, `hyprforge-traymenu`) needed the same Wayland/iced plumbing rather than copying it; it is listed here rather than as its own inventory component because, like `hyprforge-look`/`hyprforge-ui`, nothing user-facing depends on it alone — it only ever appears through a popup that builds on it |
 | **Greeter / display manager** | `hyprforge-greet`, on `hyprforge-authui` | greetd greeters (gtkgreet/tuigreet) | runs under greetd | ~885 lines; has an installer (`./hyprforge --install --greeter`) and its own `INSTALL.md` |
 | **File Manager** | `hyprforge-files-core` (the model, the `FsBackend` seam, and the browsing view both hosts render), `hyprforge-fileops` (trash, copy, move), `hyprforge-files` (the app), `hyprforge-files-portal` (xdg-desktop-portal FileChooser backend) *(planned)* | Nautilus/Dolphin/Thunar | portal backend runs as a D-Bus service | in progress; the model, sorting/filtering, remembered prefs, the freedesktop trash spec (including the cross-filesystem `$topdir/.Trash-$uid` case, which is reachable on an ordinary btrfs laptop because subvolumes report different device numbers), copy/move/rename with per-chunk cancellation, and the browsing view — sidebar, path bar, list and grid, search, multi-select, history. The open/save dialog renders that *same* view rather than a reduced copy of it, which is enforced structurally: `view()` takes a private `ViewModel` with no `mode` field, so it cannot branch on which host it is in. Archives are built (`hyprforge-archive`): zip, tar over gzip/bzip2/xz/zstd, and 7z, all pure Rust so a machine with no p7zip still opens a `.7z`. An archive is a *place* — `~/Downloads/x.tar.xz/bin` is a path this browser navigates to, routed by the same `RoutingBackend` that gives the Trash its own listing — and it is read *and* written: extract, compress, and add/rename/delete in place, each rewrite going to a temporary file beside the original and renamed over it so an interrupted edit never leaves a truncated archive. Encrypted archives ask for a password, kept in memory for the life of the process and never written anywhere. A file opened out of an archive is a scratch copy, watched, with the window offering to put an edit back rather than doing it silently. Mockup `1j` called the archive view read-only; that was reconsidered in favour of editing. Deferred: the portal backend itself, preview and Quick Look, network shares, and the `Packed` column and summary line `1j` also draws |
-| **Photo Viewer** | `hyprforge-photos` | eog/gwenview | no | not started |
+| **Photo Viewer** | `hyprforge-photos`, on `hyprforge-image` (bounded decode, EXIF orientation) and `hyprforge-listing` (the folder order Files shows) | eog/gwenview | no | built; PNG, JPEG, WebP and GIF (first frame), decoded to fit the window rather than at full size, EXIF orientation applied once. Pages through the folder in Files' own order; zoom about the pointer, drag to pan, rotate, fullscreen, an info panel and a filmstrip. Trash with undo, Copy, Open With (never itself), Show in Files, and Set as Wallpaper through the same settings the Desktop screen edits. Key bindings come from `photos-config.toml` on the shared `hyprforge-keys` grammar. Not yet: animated GIFs play only their first frame, and zooming past the decoded size upsamples rather than re-decoding a sharper crop |
 | **Video Viewer** | `hyprforge-videos` | — (likely thin mpv wrapper; revisit build-vs-wrap) | no | not started |
 | **Process Manager** | `hyprforge-procman` | Windows Task Manager / GNOME System Monitor (Mission Center already covers this well — revisit whether to build vs. skip before starting) | no (reads /proc, polls) | not started |
 | **Service Manager** | `hyprforge-servicemgr` | `systemctl` CLI | talks to systemd D-Bus API directly | not started |
@@ -109,15 +109,14 @@ locked spec.
 
 ## Workspace structure
 
-Single Cargo workspace at the repo root, 32 crates under `crates/` plus the
+Single Cargo workspace at the repo root, 36 crates under `crates/` plus the
 `notif/` nested workspace (see "Notifications" above for why that one is
 kept separate). The original intent was for every component above to get
 its own crate(s) under `crates/`, even before it's built — stub/empty
 crates as placeholders so the workspace shape reflects the intended full
 suite. That convention was not followed in practice: `Cargo.toml`'s
 `members` lists only crates that actually have code in them, and planned
-components with no crate yet (Audio, Users/time, Photo Viewer, Video
-Viewer, Process Manager, Service Manager, Disk Utility, Notepad,
+components with no crate yet (Audio, Users/time, Video Viewer, Process Manager, Service Manager, Disk Utility, Notepad,
 Calculator, Calendar) simply have none. Power is no longer an
 exception to that: `hyprforge-power` now covers keep-awake, battery and
 power profiles, matching the module this table lists. Treat the table

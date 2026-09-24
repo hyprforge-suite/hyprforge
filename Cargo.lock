@@ -2098,10 +2098,15 @@ name = "hyprforge-photos"
 version = "0.1.0"
 dependencies = [
  "hyprforge-appearance",
+ "hyprforge-clipboard",
+ "hyprforge-core",
+ "hyprforge-ecosystem",
+ "hyprforge-fileops",
  "hyprforge-image",
  "hyprforge-keys",
  "hyprforge-listing",
  "hyprforge-look",
+ "hyprforge-mime",
  "hyprforge-paths",
  "hyprforge-ui",
  "iced",

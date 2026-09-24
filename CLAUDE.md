@@ -672,6 +672,10 @@ hyprforge-archive   zip, tar and 7z: what is inside one as a directory tree,
                     extracting from it, and rewriting it. A leaf with no
                     Hyprforge dependency at all — paths arrive from the
                     caller, it never goes looking for one
+hyprforge-keys      the keyboard grammar every app binds keys through; no iced
+hyprforge-listing   a directory listing and its order, under both Files and
+                    the image viewer so they agree which picture is next
+hyprforge-image     bounded, orientation-correct decoding; no iced, no Wayland
 hyprforge-ui        the iced layer; knows nothing about Hyprland
 hyprforge-core      Hyprland config machinery — a new app should never need it
 ```

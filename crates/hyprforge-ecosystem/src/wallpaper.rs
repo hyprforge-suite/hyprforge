@@ -59,6 +59,27 @@ impl std::fmt::Display for FitMode {
     }
 }
 
+/// Where Hyprforge keeps the wallpaper settings.
+///
+/// One definition, because two programs write them — the Desktop screen
+/// in Settings and the image viewer's Set as Wallpaper — and a second
+/// spelling of the path is how one of them ends up editing a file the
+/// other never reads.
+pub fn settings_path() -> std::path::PathBuf {
+    hyprforge_core::paths::hyprforge_config_dir().join("wallpaper.toml")
+}
+
+/// The generated hyprpaper config the settings are rendered into.
+pub fn generated_path() -> std::path::PathBuf {
+    hyprforge_core::paths::hypr_hyprforge_dir().join("wallpaper.conf")
+}
+
+/// hyprpaper's own config, which gains one `source =` line pointing at
+/// [`generated_path`] and is otherwise the user's.
+pub fn hyprpaper_conf_path() -> std::path::PathBuf {
+    hyprforge_core::paths::hypr_config_dir().join("hyprpaper.conf")
+}
+
 /// One `wallpaper { … }` block.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -116,6 +137,28 @@ pub struct Settings {
 }
 
 impl Settings {
+    /// Shows `image` on every monitor — what "set as wallpaper" means from
+    /// the image viewer.
+    ///
+    /// Every existing entry keeps its monitor and fit mode and takes the
+    /// new picture, and a fallback is added if there is none, so a
+    /// monitor without a block of its own shows it too. The directory-only
+    /// options are cleared: they describe cycling through a folder, and an
+    /// entry that now names one picture has nothing to cycle. Nothing is
+    /// removed — a per-monitor block the user wrote is kept, pointing at
+    /// the new picture, rather than deleted to make "everywhere" simpler.
+    pub fn set_everywhere(&mut self, image: &str) {
+        for entry in &mut self.entries {
+            entry.path = image.to_string();
+            entry.timeout = None;
+            entry.random_order = false;
+            entry.recursive = false;
+        }
+        if !self.entries.iter().any(Entry::is_fallback) {
+            self.entries.push(Entry { path: image.to_string(), ..Entry::default() });
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
             && self.splash.is_none()
@@ -663,5 +706,43 @@ mod auth_screen_wallpaper {
     #[test]
     fn nothing_configured_means_nothing_to_show() {
         assert_eq!(for_auth_screen(&Settings::default()), None);
+    }
+
+    #[test]
+    fn setting_a_wallpaper_with_nothing_configured_adds_the_fallback() {
+        let mut settings = Settings::default();
+        settings.set_everywhere("/pics/a.jpg");
+        assert_eq!(settings.entries.len(), 1);
+        assert!(settings.entries[0].is_fallback());
+        assert_eq!(settings.entries[0].path, "/pics/a.jpg");
+    }
+
+    /// A block the user wrote for one monitor keeps its monitor and fit,
+    /// and shows the new picture — "everywhere" is not permission to
+    /// delete it.
+    #[test]
+    fn setting_a_wallpaper_keeps_every_monitor_block_and_points_it_at_the_picture() {
+        let mut settings = Settings {
+            entries: vec![Entry {
+                monitor: "DP-1".to_string(),
+                path: "/walls".to_string(),
+                fit_mode: FitMode::Contain,
+                timeout: Some(60),
+                random_order: true,
+                recursive: true,
+            }],
+            ..Settings::default()
+        };
+        settings.set_everywhere("/pics/a.jpg");
+
+        let dp1 = &settings.entries[0];
+        assert_eq!((dp1.monitor.as_str(), dp1.path.as_str()), ("DP-1", "/pics/a.jpg"));
+        assert_eq!(dp1.fit_mode, FitMode::Contain);
+        assert_eq!((dp1.timeout, dp1.random_order, dp1.recursive), (None, false, false));
+        assert!(
+            settings.entries.iter().any(|e| e.is_fallback() && e.path == "/pics/a.jpg"),
+            "a monitor with no block of its own must get the picture too"
+        );
+        assert!(settings.invalid().is_empty(), "{:?}", settings.invalid());
     }
 }

@@ -49,6 +49,24 @@ Shared by every app in the suite
                             Unicode's emoji-test.txt) and a pure search
                             function. No dependencies at all; a picker UI
                             is built on this, not the other way round.
+  hyprforge-keys/          the suite's keyboard grammar: one parser for
+                            "Ctrl+Shift+N", one merge policy for a user's
+                            bindings over the defaults, generic over each
+                            app's own action type. No iced — the toolkit
+                            adapter is hyprforge-ui::keys — so the file
+                            manager and the image viewer read a key the
+                            same way because it is the same code.
+  hyprforge-listing/       what a directory listing is, how it is read,
+                            and what order it is in, with the FsBackend
+                            seam and its mock. The leaf under both the file
+                            manager and the image viewer, so the two cannot
+                            disagree about which picture comes next.
+  hyprforge-image/         measuring, orienting and decoding a picture
+                            within a budget: the header is read before
+                            anything is allocated, the EXIF orientation is
+                            applied once, and a 36-megapixel photograph is
+                            decoded to fit the window rather than at full
+                            size. No iced, no Wayland, no Hyprland.
 
 Hyprland-facing
   hyprforge-core/          the config machinery: hlconfig (the generic
@@ -61,7 +79,7 @@ Hyprland-facing
   hyprforge-shortcuts/     TOML shortcut storage, Lua codegen, live conflict
                             detection against hyprctl binds
   hyprforge-input/         the input option catalog (51 options)
-  hyprforge-appearance/    the appearance catalog (88 options), the animation
+  hyprforge-appearance/    the appearance catalog (155 options), the animation
                             model, the gsettings bridge, theme/font discovery,
                             and `look::resolve()` — which turns all of that
                             into the shared Theme
@@ -75,8 +93,8 @@ Hyprland-facing
                             NetworkManager. The first module whose backend
                             trait came before its D-Bus client, so the
                             screen is testable without an adapter.
-  hyprforge-bluetooth/     adapters and devices over BlueZ, on the same
-                            backend-trait-first shape. Pairing not yet.
+  hyprforge-bluetooth/     adapters, devices and pairing over BlueZ, on the
+                            same backend-trait-first shape.
   hyprforge-power/         keeping the machine awake, battery state and the
                             active power profile, over systemd-logind,
                             UPower and power-profiles-daemon — three
@@ -88,10 +106,10 @@ Hyprland-facing
                             copied and what may be kept. Sensitivity is
                             checked before an offer's bytes are ever read,
                             so a password manager's clipboard contents are
-                            never hashed, stored or logged.
-  hyprforge-clipmenu/      the clipboard history popup, launched per
-                            invocation by a keybind rather than run as a
-                            daemon — a short-lived process cannot leak a
+                            never hashed, stored or logged. Also ships
+                            hyprforge-clipmenu, the history popup, launched
+                            per invocation by a keybind rather than run as
+                            a daemon — a short-lived process cannot leak a
                             stuck layer surface holding exclusive keyboard
                             focus. A PopupApp consumer of hyprforge-popup.
   hyprforge-fileops/       trash, copy, move and rename. The freedesktop
@@ -122,8 +140,9 @@ Hyprland-facing
                             manager, the open/save dialog or a preview
                             pane all ask the same questions without any
                             of them pulling in a GUI toolkit.
-  hyprforge-files-core/    the file browser's model, the FsBackend seam,
-                            and the browsing view itself. The view lives
+  hyprforge-files-core/    the file browser's model and the browsing view
+                            itself (the FsBackend seam it re-exports lives
+                            in hyprforge-listing now). The view lives
                             here rather than in the app because the
                             portal's open/save dialog has to render the
                             same one — enforced by the type, not by
@@ -131,8 +150,9 @@ Hyprland-facing
                             with no mode field, so it cannot branch on
                             which host it is in.
   hyprforge-tray/          the StatusNotifierItem protocol, and
-                            hyprforge-trayd, which puts a Wi-Fi, a
-                            Bluetooth, a keep-awake and a night-light icon
+                            hyprforge-trayd, which puts network (Wi-Fi and
+                            Ethernet), Bluetooth, keep-awake, night-light,
+                            battery/power-profile and display-layout icons
                             in whatever bar is running. A tray icon is a
                             D-Bus object, not a widget — which is why it
                             needs no GTK or Qt. The right-click menu is
@@ -148,10 +168,11 @@ Hyprland-facing
                             Hyprforge installed sees an icon with no menu
                             at all, its right-click falling back to the
                             icon's primary action.
-  hyprforge-traymenu/      the tray's own right-click menu, themed like
-                            every other Hyprforge popup and anchored below
-                            the icon that was clicked — a PopupApp
-                            consumer, the same shape as hyprforge-clipmenu.
+                            hyprforge-traymenu, a second binary in the same
+                            crate, is the tray's own right-click menu,
+                            themed like every other Hyprforge popup and
+                            anchored below the icon that was clicked — a
+                            PopupApp consumer, like hyprforge-clipmenu.
   hyprforge-emojimenu/     an emoji picker popup that appears where the
                             mouse is, filtered by what's typed, built the
                             same way as hyprforge-clipmenu — a PopupApp
@@ -164,6 +185,11 @@ Apps
                             shared browsing view, plus what a dialog
                             deliberately does not have — launching what
                             you double-click, and file operations.
+  hyprforge-photos/        the image viewer: one picture at a time, paged
+                            through its folder in the order Files shows
+                            it, with zoom, pan, rotation, an info panel and
+                            a filmstrip; trash with undo, copy, Open With,
+                            Show in Files and Set as Wallpaper.
   hyprforge-settings/      the iced GUI, hosting the settings modules
   hyprforge-authui/        the authentication conversation model, shared by
                             the lock screen and the greeter

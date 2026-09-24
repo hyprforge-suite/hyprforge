@@ -49,6 +49,14 @@ pub enum Action {
     /// Hand this file to whatever the desktop opens it with — how a clip
     /// gets played, since nothing here decodes video.
     OpenExternally,
+    /// Open the file manager on this picture's folder. A logged warning,
+    /// not a failure, when the file manager is not installed.
+    ShowInFiles,
+    /// Put the picture on the clipboard, for pasting into another app.
+    Copy,
+    /// Make this picture the wallpaper, through the same settings the
+    /// Desktop screen in Settings edits — so the two never disagree.
+    SetWallpaper,
     /// Send to the trash, reversibly.
     Trash,
     /// Leave fullscreen, or close.
@@ -72,6 +80,9 @@ impl Action {
             Action::ToggleInfo,
             Action::ToggleFilmstrip,
             Action::OpenExternally,
+            Action::ShowInFiles,
+            Action::Copy,
+            Action::SetWallpaper,
             Action::Trash,
             Action::Close,
         ]
@@ -95,6 +106,9 @@ impl Action {
             Action::ToggleInfo => "info",
             Action::ToggleFilmstrip => "filmstrip",
             Action::OpenExternally => "open-externally",
+            Action::ShowInFiles => "show-in-files",
+            Action::Copy => "copy",
+            Action::SetWallpaper => "set-wallpaper",
             Action::Trash => "trash",
             Action::Close => "close",
         }
@@ -117,6 +131,9 @@ impl Action {
             Action::ToggleInfo => "Information",
             Action::ToggleFilmstrip => "Filmstrip",
             Action::OpenExternally => "Open With…",
+            Action::ShowInFiles => "Show in Files",
+            Action::Copy => "Copy",
+            Action::SetWallpaper => "Set as Wallpaper",
             Action::Trash => "Move to Trash",
             Action::Close => "Close",
         }
@@ -147,6 +164,9 @@ impl Action {
             Action::ToggleInfo => &["I"],
             Action::ToggleFilmstrip => &["F9"],
             Action::OpenExternally => &["Enter"],
+            Action::ShowInFiles => &["Ctrl+O"],
+            Action::Copy => &["Ctrl+C"],
+            Action::SetWallpaper => &["W"],
             Action::Trash => &["Delete"],
             // Escape leaves fullscreen first and closes otherwise — the
             // app decides which, not the keymap.
