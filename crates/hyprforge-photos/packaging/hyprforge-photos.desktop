@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=Hyprforge Photos
+GenericName=Image Viewer
+Comment=View pictures, one folder at a time
+# No absolute path, for the reason hyprforge-files.desktop gives.
+Exec=hyprforge-photos %U
+Icon=image-viewer
+Terminal=false
+Categories=Graphics;Viewer;
+Keywords=image;picture;photo;viewer;
+StartupNotify=true
+# Exactly the four formats the workspace root's `image` features decode —
+# PNG, JPEG, WebP and GIF. A type claimed here and not decodable is a
+# viewer that opens with an error for a file it offered to open; add a
+# type here only in the same change that switches its decoder on.
+MimeType=image/png;image/jpeg;image/webp;image/gif;

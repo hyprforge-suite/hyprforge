@@ -48,8 +48,16 @@ const EVERY_ICON: &[&str] = &[
     "network-wireless-signal-weak-symbolic",
     "network-wireless-signal-none-symbolic",
     "network-wireless-disconnected-symbolic",
-    // Bluetooth
+    // Wired: connected, connecting, cable in but idle, unplugged.
+    "network-wired-activated-symbolic",
+    "network-wired-symbolic",
+    "network-wired-disconnected-symbolic",
+    "network-wired-unavailable-symbolic",
+    // Bluetooth. `network-bluetooth-symbolic` (on, nothing connected)
+    // was missing from this list while the daemon emitted it, so the
+    // one Bluetooth state people see most was never checked here.
     "network-bluetooth-activated-symbolic",
+    "network-bluetooth-symbolic",
     "network-bluetooth-inactive-symbolic",
     // Keep awake
     "changes-prevent-symbolic",
@@ -57,9 +65,40 @@ const EVERY_ICON: &[&str] = &[
     // Night light
     "redshift-status-on-symbolic",
     "redshift-status-off-symbolic",
+    // Power: the battery at every step Breeze draws, charged, and the
+    // three profiles for a machine with no battery.
+    "battery-000-symbolic",
+    "battery-000-charging-symbolic",
+    "battery-010-symbolic",
+    "battery-010-charging-symbolic",
+    "battery-020-symbolic",
+    "battery-020-charging-symbolic",
+    "battery-030-symbolic",
+    "battery-030-charging-symbolic",
+    "battery-040-symbolic",
+    "battery-040-charging-symbolic",
+    "battery-050-symbolic",
+    "battery-050-charging-symbolic",
+    "battery-060-symbolic",
+    "battery-060-charging-symbolic",
+    "battery-070-symbolic",
+    "battery-070-charging-symbolic",
+    "battery-080-symbolic",
+    "battery-080-charging-symbolic",
+    "battery-090-symbolic",
+    "battery-090-charging-symbolic",
+    "battery-100-symbolic",
+    "battery-100-charging-symbolic",
+    "battery-full-charged-symbolic",
+    "battery-profile-powersave-symbolic",
+    "battery-profile-balanced-symbolic",
+    "battery-profile-performance-symbolic",
+    // Displays: normal, and a layout waiting to be kept.
+    "monitor-symbolic",
+    "preferences-desktop-display-randr-symbolic",
     // Shared fallbacks. These two are the one deliberate exception to
     // "every name is symbolic" (see `SHARED_FALLBACK_ICONS` below): they
-    // are the identical error state on all four items, not one item's
+    // are the identical error state on every item, not one item's
     // own look, and neither Breeze nor hicolor ships a `-symbolic`
     // variant of either that this machine's configured theme can reach.
     "dialog-warning",

@@ -239,6 +239,299 @@ PYEOF
     fi
 fi
 
+# The rule this exists for is in repo-plan.md under "The shape a package
+# has to have", and in CLAUDE.md: one installable package is one crate
+# directory is one repository, because a library can be fetched and a
+# binary cannot.
+#
+# It was rediscovered twice. `hyprforge-tray` shipped without
+# `hyprforge-traymenu` and `hyprforge-clipboard` without
+# `hyprforge-clipmenu`, and neither errored — the daemon logs a warning
+# about the absent sibling and carries on, which is correct behaviour
+# that happened to hide a published repository being incomplete. A rule
+# nothing checks is a rule that gets rediscovered, so this asks.
+#
+# Discovered from the PKGBUILD, not from a list here: the next package
+# somebody adds is covered without anyone remembering to add it, the same
+# way the dependency-pin step above discovers its own crates by shape.
+step "Siblings build from this checkout"
+# A standalone manifest names its Hyprforge siblings by git URL, and the
+# root `[patch]` table is what points each one back at `crates/`. A name
+# missing from that table does not fail to build — cargo fetches the
+# sibling from GitHub at whatever commit the lockfile holds and builds
+# against that. Seven were missing at once after the files, displayd and
+# emojimenu split: Files built its archive, file-operation and
+# browser crates from a days-old GitHub snapshot, the tray and clipboard
+# their popup shell, and every local fix to those crates — and every test
+# of the apps using them — silently ran against the old copy.
+if ! command -v python3 >/dev/null; then
+    skip "sibling patch check" "python3 not available to parse Cargo.toml"
+else
+    output=$(python3 - <<'PYEOF'
+import tomllib
+from pathlib import Path
+
+URL = "https://github.com/adamrpostjr/hyprforge"
+root = tomllib.loads(Path("Cargo.toml").read_text())
+patched = set(root.get("patch", {}).get(URL, {}))
+
+named = {}
+for manifest in sorted(Path("crates").glob("*/Cargo.toml")):
+    data = tomllib.loads(manifest.read_text())
+    tables = [data.get("dependencies", {}), data.get("dev-dependencies", {}), data.get("build-dependencies", {})]
+    for target in data.get("target", {}).values():
+        tables += [target.get(k, {}) for k in ("dependencies", "dev-dependencies", "build-dependencies")]
+    for table in tables:
+        for name, spec in table.items():
+            if isinstance(spec, dict) and spec.get("git") == URL:
+                named.setdefault(name, set()).add(manifest.parent.name)
+
+print(f"CHECKED {len(named)}")
+for name in sorted(set(named) - patched):
+    print(f"PROBLEM {name} is named by git in {', '.join(sorted(named[name]))} but not redirected by [patch] — it builds from GitHub, not from crates/")
+PYEOF
+    )
+    if grep -q "^PROBLEM" <<<"$output"; then
+        bad "$(grep -c '^PROBLEM' <<<"$output") sibling(s) build from GitHub instead of this checkout"
+        sed -n 's/^PROBLEM /    • /p' <<<"$output"
+    else
+        ok "all $(sed -n 's/^CHECKED //p' <<<"$output") git-named siblings build from crates/"
+    fi
+fi
+
+step "Every package is a repository"
+if ! command -v python3 >/dev/null; then
+    skip "package/repository check" "python3 not available to parse the PKGBUILD"
+else
+    output=$(python3 - <<'PYEOF'
+import re
+import sys
+import tomllib
+from pathlib import Path
+
+PKGBUILD = Path("packaging/arch/PKGBUILD")
+if not PKGBUILD.is_file():
+    print("SKIP no packaging/arch/PKGBUILD to read")
+    sys.exit(0)
+
+text = PKGBUILD.read_text()
+
+# The split packages, and the binaries each one installs. A `package_x`
+# function body is read for `install -Dm755 .../<name>` and friends; what
+# matters is which `hyprforge-*` executables end up in the package.
+names = re.search(r"pkgname=\((.*?)\)", text, re.S)
+packages = names.group(1).split() if names else []
+
+problems = []
+checked = 0
+for package in packages:
+    # The umbrella package installs nothing of its own.
+    if package == "hyprforge":
+        continue
+    body = re.search(
+        rf"^package_{re.escape(package)}\(\)\s*\{{(.*?)^\}}",
+        text,
+        re.S | re.M,
+    )
+    if not body:
+        problems.append(f"{package}: no package_{package}() in the PKGBUILD")
+        continue
+
+    # Binaries, as the PKGBUILD's own `_bin` helper installs them, plus
+    # any spelled out as a path. Both forms, because matching only the
+    # one that happens to be used today is how this check silently stops
+    # checking: the first version matched `usr/bin/...` and reported
+    # "0 packages" in green.
+    binaries = sorted(
+        set(re.findall(r"^\s*_bin\s+(hyprforge-[a-z0-9-]+)", body.group(1), re.M))
+        | set(re.findall(r"usr/bin/(hyprforge-[a-z0-9-]+)", body.group(1)))
+    )
+    if not binaries:
+        problems.append(f"{package}: installs no hyprforge binary this check can see")
+        continue
+
+    checked += 1
+
+    # Which crate directory declares each binary. One directory for the
+    # whole package is the rule; several means the split cannot produce
+    # a repository that is the package.
+    owners = {}
+    for manifest in sorted(Path("crates").glob("*/Cargo.toml")):
+        data = tomllib.loads(manifest.read_text())
+        declared = {b.get("name") for b in data.get("bin", [])}
+        if not declared:
+            # A crate with no [[bin]] but a src/main.rs builds one named
+            # after the package.
+            if (manifest.parent / "src" / "main.rs").is_file():
+                declared = {data.get("package", {}).get("name")}
+        for binary in binaries:
+            if binary in declared:
+                owners.setdefault(binary, manifest.parent.name)
+
+    missing = [b for b in binaries if b not in owners]
+    if missing:
+        problems.append(f"{package}: no crate declares {', '.join(missing)}")
+        continue
+
+    directories = sorted(set(owners.values()))
+    if len(directories) > 1:
+        problems.append(
+            f"{package}: installs {', '.join(binaries)} from {len(directories)} crate "
+            f"directories ({', '.join(directories)}) — a subtree split takes one "
+            f"prefix, so this package cannot become one repository"
+        )
+
+print(f"CHECKED {checked}")
+for problem in problems:
+    print(f"PROBLEM {problem}")
+PYEOF
+    )
+    if grep -q "^SKIP" <<<"$output"; then
+        skip "package/repository check" "$(sed -n 's/^SKIP //p' <<<"$output")"
+    elif grep -q "^PROBLEM" <<<"$output"; then
+        bad "$(grep -c '^PROBLEM' <<<"$output") package(s) cannot become a repository as they stand"
+        sed -n 's/^PROBLEM /    • /p' <<<"$output"
+    else
+        ok "$(sed -n 's/^CHECKED //p' <<<"$output") package(s) each build from one crate directory"
+    fi
+fi
+
+step "Docs name things that exist"
+# The half of keeping docs current that a machine can do. The other half
+# — "four icons" when there are five — is judgement, and lives in the
+# `keep-docs-current` skill; this step catches what needs none.
+#
+# Both checks here were written after the drift they catch shipped: a
+# published README listing `src/dbusmenu.rs` long after the file was
+# deleted, and a README saying five components were split when there
+# were eight.
+if ! command -v python3 >/dev/null; then
+    skip "docs check" "python3 not available"
+else
+    output=$(python3 - <<'PYEOF'
+import re
+import subprocess
+import tomllib
+from pathlib import Path
+
+problems = []
+
+# --- every source path a doc names is one that exists ----------------
+#
+# A crate's own docs resolve `src/`, `tests/` and the like against that
+# crate, strictly: it is what someone reading the published repository
+# will look for. `crates/` and `packaging/` in those same docs may point
+# back at the monorepo ("this repository is a split of `crates/x`"), so
+# they also resolve from the root. The root docs name a crate in prose and then
+# give a path inside it, so a path there passes if any crate has it —
+# which still catches a file deleted outright, the case that actually
+# happened.
+docs = subprocess.run(
+    ["git", "ls-files", "*.md"], capture_output=True, text=True, check=True
+).stdout.split()
+docs = [Path(d) for d in docs if not d.startswith("notif/")]
+crates = sorted(p for p in Path("crates").iterdir() if p.is_dir())
+path_in_backticks = re.compile(
+    r"`((?:crates/|src/|tests/|testing/|config/|packaging/)[A-Za-z0-9_./-]+)`"
+)
+named = 0
+for doc in docs:
+    text = doc.read_text()
+    in_crate = doc.parts[0] == "crates" and len(doc.parts) > 2
+    for match in path_in_backticks.finditer(text):
+        path = match.group(1).rstrip("/.")
+        named += 1
+        if in_crate and not path.startswith(("crates/", "packaging/")):
+            candidates = [doc.parent / path]
+        elif in_crate:
+            # A crate can have a `packaging/` of its own (the unit files
+            # the split repository ships) as well as meaning the root's.
+            candidates = [doc.parent / path, Path(path)]
+        else:
+            candidates = [Path(path)] + [crate / path for crate in crates]
+        if not any(c.exists() for c in candidates):
+            line = text[: match.start()].count("\n") + 1
+            problems.append(f"{doc}:{line} names `{path}`, which does not exist")
+
+# --- the README's repository table is the set of standalone crates --
+#
+# "Standalone" by shape, the way the dependency-pin step finds them: a
+# manifest with no workspace inheritance left. A crate prepared for a
+# split is then held to this without anybody adding it to a list.
+def inherits(obj):
+    if isinstance(obj, dict):
+        return obj.get("workspace") is True or any(inherits(v) for v in obj.values())
+    if isinstance(obj, list):
+        return any(inherits(v) for v in obj)
+    return False
+
+standalone = sorted(
+    m.parent.name
+    for m in Path("crates").glob("*/Cargo.toml")
+    if not inherits(tomllib.loads(m.read_text()))
+)
+readme = Path("README.md").read_text()
+listed = sorted(
+    set(re.findall(r"^\| \[(hyprforge-[a-z0-9-]+)\]\(https://github\.com/", readme, re.M))
+)
+for crate in sorted(set(standalone) - set(listed)):
+    problems.append(f"README.md's repository table is missing {crate}, which is standalone")
+for crate in sorted(set(listed) - set(standalone)):
+    problems.append(f"README.md's repository table lists {crate}, which is not standalone")
+
+# The counts in prose, spelled out: "## Nine repositories" is the
+# components plus this one, "Eight of these directories" the components.
+WORDS = "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty".split()
+def spelled(n):
+    return WORDS[n] if n < len(WORDS) else str(n)
+
+heading = re.search(r"^## (\w+) repositories, one workspace", readme, re.M | re.I)
+if not heading:
+    problems.append("README.md has no '## <N> repositories, one workspace' heading to check")
+elif heading.group(1).lower() != spelled(len(standalone) + 1):
+    problems.append(
+        f"README.md says '{heading.group(1)} repositories'; there are "
+        f"{spelled(len(standalone) + 1)} ({len(standalone)} components and this one)"
+    )
+directories = re.search(r"^(\w+) of these directories", readme, re.M)
+if directories and directories.group(1).lower() != spelled(len(standalone)):
+    problems.append(
+        f"README.md says '{directories.group(1)} of these directories' are repositories; "
+        f"there are {spelled(len(standalone))}"
+    )
+
+# CLAUDE.md's "Fourteen gated tiers": the indented `step` lines below
+# are the gated tiers — `--quick` skips the block they sit in — less the
+# one that only announces the skip. It said twelve while there were
+# fourteen, and named neither of the two it was missing.
+tiers = [
+    t
+    for t in re.findall(r'^[ \t]+step "([^"]+)"', Path("check.sh").read_text(), re.M)
+    if not t.startswith("Skipping")
+]
+claimed = re.search(r"(\w+)\s+gated\s+tiers", Path("CLAUDE.md").read_text(), re.I)
+if not claimed:
+    problems.append("CLAUDE.md no longer says how many gated tiers there are")
+elif claimed.group(1).lower() != spelled(len(tiers)):
+    problems.append(
+        f"CLAUDE.md says '{claimed.group(1)} gated tiers'; check.sh has "
+        f"{spelled(len(tiers))}: {', '.join(tiers)}"
+    )
+
+print(f"CHECKED {named} {len(standalone)} {len(tiers)}")
+for problem in problems:
+    print(f"PROBLEM {problem}")
+PYEOF
+    )
+    if grep -q "^PROBLEM" <<<"$output"; then
+        bad "$(grep -c '^PROBLEM' <<<"$output") doc claim(s) no longer true"
+        sed -n 's/^PROBLEM /    • /p' <<<"$output"
+    else
+        read -r named repos tiers < <(sed -n 's/^CHECKED //p' <<<"$output")
+        ok "$named source path(s) named in docs all exist; README lists all $repos standalone repositories; CLAUDE.md counts all $tiers gated tiers"
+    fi
+fi
+
 step "Unit and integration tests"
 output=$(cargo test --workspace 2>&1)
 if grep -q "test result: FAILED" <<<"$output"; then
@@ -290,12 +583,14 @@ else
         # probe values and reloads to drop them, so two at once would undo
         # each other mid-assertion.
         #
-        # Two invocations rather than one --workspace run, because three
-        # crates hold live tests that answer to something other than the
-        # compositor: the ecosystem crate's parse tests need the daemons
-        # installed and *not* running, and the network and bluetooth
-        # crates' need NetworkManager and BlueZ respectively. Each gets
-        # its own step below. Running them here as well would report a
+        # Two invocations rather than one --workspace run, because
+        # several crates hold live tests that answer to something other
+        # than the compositor: the ecosystem crate's parse tests need the
+        # daemons installed and *not* running, the network and bluetooth
+        # crates' need NetworkManager and BlueZ respectively, and the
+        # archive crate's need `unzip`, `tar` and `7z` — which have
+        # nothing to do with a compositor at all. Each gets its own step
+        # below. Running them here as well would report a
         # daemon rejecting a generated file, or disagreeing about an
         # interface that has nothing to do with Hyprland, under the
         # heading "the code disagrees with the running system", which is
@@ -305,7 +600,7 @@ else
         # are named. That also survives a test being renamed, which
         # `--skip` on the test names would not.
         output=$(
-            cargo test --workspace --exclude hyprforge-ecosystem --exclude hyprforge-network --exclude hyprforge-bluetooth --exclude hyprforge-tray --exclude hyprforge-power --exclude hyprforge-clipboard -- --ignored --test-threads=1 2>&1
+            cargo test --workspace --exclude hyprforge-ecosystem --exclude hyprforge-network --exclude hyprforge-bluetooth --exclude hyprforge-tray --exclude hyprforge-power --exclude hyprforge-clipboard --exclude hyprforge-archive -- --ignored --test-threads=1 2>&1
             cargo test -p hyprforge-ecosystem --lib --test live_ecosystem -- --ignored --test-threads=1 2>&1
         )
         if grep -q "test result: FAILED" <<<"$output"; then
@@ -349,6 +644,38 @@ else
             while IFS= read -r reason; do
                 [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
             done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^.]*\).*/\1/p' <<<"$output" | sort -u)
+        fi
+    fi
+
+    # Answers to `unzip`, `tar` and `7z`, so it gets its own gate for the
+    # same reason every other step here does. Folded into the tier 2 run
+    # these would have needed a compositor to ask a question about three
+    # command-line tools.
+    #
+    # What they add over the round-trip tests in tier 1: those prove this
+    # crate can read what it wrote, which a writer emitting something
+    # only its own reader accepts would also pass. These hand the file to
+    # an implementation nobody here wrote, and read back what one of them
+    # produced.
+    #
+    # Not gated on any one tool being present — each test says for itself
+    # which it needs and prints HYPRFORGE-SKIP when it is missing, so a
+    # machine with `tar` and no `7z` still gets the half it can run, and
+    # the summary says which half that was.
+    step "Live tests against the system's archive tools"
+    if ! command -v tar >/dev/null && ! command -v unzip >/dev/null && ! command -v 7z >/dev/null; then
+        skip "archive tool tests" "none of tar, unzip or 7z is installed"
+    else
+        output=$(cargo test -p hyprforge-archive --test live_system_tools \
+            -- --ignored --test-threads=1 --nocapture 2>&1)
+        if grep -q "test result: FAILED" <<<"$output"; then
+            bad "archive tool tests failed — something else on this machine disagrees with what this suite writes"
+            grep -E '^test .* FAILED' <<<"$output" | head -20
+        else
+            ok "$(count_tests <<<"$output") archive tool tests passed"
+            while IFS= read -r reason; do
+                [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
+            done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^(]*\).*/\1/p' <<<"$output" | sort -u)
         fi
     fi
 

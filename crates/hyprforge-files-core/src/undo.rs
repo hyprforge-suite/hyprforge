@@ -14,9 +14,23 @@
 //! - **Copied** — move the copies to the Trash. Never delete them: an
 //!   undo that loses a file is worse than no undo.
 //! - **Made a folder** — remove it, only if it is still empty.
+//! - **Extracted an archive** — move the folder it made to the Trash.
+//! - **Made an archive** — move it to the Trash.
 //!
 //! A permanent delete is not here, because there is nothing to take back
 //! from — which is what its confirmation dialog says.
+//!
+//! Neither is *editing* an archive, and that one is a decision rather
+//! than an omission. Every format here rewrites the whole file to change
+//! one member, so the only honest undo is a copy of the archive as it
+//! was — which for a large one is a multi-gigabyte hidden file sitting
+//! beside it for the length of an undo window, on the same filesystem
+//! (it cannot go in `/tmp`, which is very often memory), with nothing
+//! able to promise it gets cleaned up if the process dies. An undo that
+//! quietly costs the size of your archive is not a good trade for
+//! renaming something inside it, and one that sometimes has the old copy
+//! and sometimes does not — by size, say — is worse than one that never
+//! claims to.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -33,6 +47,15 @@ pub enum Undoable {
     /// Copies made, where they are.
     Copied(Vec<PathBuf>),
     MadeFolder(PathBuf),
+    /// An archive was unpacked into this folder.
+    ///
+    /// The folder, not the files in it: an extraction makes hundreds of
+    /// paths and listing them all would make the record larger than the
+    /// listing it came from. It is also why undoing this only works on
+    /// a folder the extraction itself made — see the window's own check.
+    Extracted(PathBuf),
+    /// An archive was made here.
+    Compressed(PathBuf),
 }
 
 impl Undoable {
@@ -44,6 +67,12 @@ impl Undoable {
             Undoable::Moved(items) => format!("Moved {}", count(items.len())),
             Undoable::Copied(items) => format!("Copied {}", count(items.len())),
             Undoable::MadeFolder(path) => format!("Made \u{201C}{}\u{201D}", name(path)),
+            Undoable::Extracted(into) => {
+                format!("Extracted into \u{201C}{}\u{201D}", name(into))
+            }
+            Undoable::Compressed(archive) => {
+                format!("Made \u{201C}{}\u{201D}", name(archive))
+            }
         }
     }
 
@@ -54,7 +83,10 @@ impl Undoable {
             Undoable::Trashed(items) => items.is_empty(),
             Undoable::Moved(items) => items.is_empty(),
             Undoable::Copied(items) => items.is_empty(),
-            Undoable::Renamed { .. } | Undoable::MadeFolder(_) => false,
+            Undoable::Renamed { .. }
+            | Undoable::MadeFolder(_)
+            | Undoable::Extracted(_)
+            | Undoable::Compressed(_) => false,
         }
     }
 }

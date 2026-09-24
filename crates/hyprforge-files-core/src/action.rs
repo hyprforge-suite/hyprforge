@@ -72,6 +72,30 @@ pub enum Action {
     /// Open a file with an application the user picks, and optionally
     /// make that the default for its kind.
     OpenWith,
+    /// Unpack the selected archives, each into a new folder beside it
+    /// named after it.
+    ///
+    /// Into a folder and never loose into the current one, which is what
+    /// "Extract Here" means in most file managers and what makes a
+    /// *tarbomb* — an archive whose members sit at its top level rather
+    /// than under one directory — scatter two hundred files across
+    /// someone's Downloads folder with no way to tell afterwards which
+    /// ones came out of it. A folder costs one extra click to go into
+    /// and cannot do that.
+    Extract,
+    /// Unpack a selection into a folder already in view: the archives
+    /// selected here go into *this* folder, and members selected inside
+    /// an archive go into the folder that archive lives in.
+    ///
+    /// Inside an archive "here" cannot mean the listing, because the
+    /// listing is not a folder anything can be written to — so it means
+    /// the nearest real one, which is also the only other folder the
+    /// person can see. The alternative was a destination picker, and a
+    /// picker that almost always answers "the folder it came from" is a
+    /// dialog charging for something nobody chose.
+    ExtractTo,
+    /// Make a new archive out of the selection.
+    Compress,
     /// Add a folder to the sidebar's Pinned section.
     Pin,
     /// Take a folder out of it.
@@ -131,6 +155,9 @@ impl Action {
             Action::CopyPath,
             Action::Refresh,
             Action::OpenWith,
+            Action::Extract,
+            Action::ExtractTo,
+            Action::Compress,
             Action::Pin,
             Action::Unpin,
             Action::PinUp,
@@ -175,6 +202,9 @@ impl Action {
             Action::CopyPath => "copy-path",
             Action::Refresh => "refresh",
             Action::OpenWith => "open-with",
+            Action::Extract => "extract",
+            Action::ExtractTo => "extract-to",
+            Action::Compress => "compress",
             Action::Pin => "pin",
             Action::Unpin => "unpin",
             Action::PinUp => "pin-up",
@@ -238,6 +268,9 @@ impl Action {
             Action::CopyPath => "Copy Path",
             Action::Refresh => "Refresh",
             Action::OpenWith => "Open With\u{2026}",
+            Action::Extract => "Extract",
+            Action::ExtractTo => "Extract Here",
+            Action::Compress => "Compress\u{2026}",
             Action::Pin => "Pin to Sidebar",
             Action::Unpin => "Unpin",
             Action::PinUp => "Move Up",
@@ -318,6 +351,14 @@ impl Action {
             // No default key: it opens a chooser, which is a thing you
             // go looking for rather than reach for.
             Action::OpenWith => &[],
+            // All three are reached from a menu. Extracting is not
+            // something anyone does often enough to hold a key for, and
+            // Compress opens a dialog — a thing you go looking for,
+            // which is the same reasoning `OpenWith` above is left
+            // unbound for.
+            Action::Extract => &[],
+            Action::ExtractTo => &[],
+            Action::Compress => &[],
             // Ctrl+D is "bookmark this" in Nautilus and in every browser.
             Action::Pin => &["Ctrl+D"],
             Action::Unpin => &[],
@@ -372,6 +413,29 @@ pub struct ActionContext {
     /// the trash would file it a second time under a new record, so the
     /// Trash action is off here.
     pub in_trash: bool,
+    /// Whether the listing is *inside* an archive — see
+    /// [`crate::archive`].
+    ///
+    /// A second place, like the Trash, where some of these actions have
+    /// no meaning and others mean something slightly different. The ones
+    /// that survive do so because this suite edits archives rather than
+    /// only reading them: Rename is `Edit::Rename`, Delete is
+    /// `Edit::Remove`, Paste is `Edit::Add`. The ones that do not are
+    /// off, and each is commented where it is decided rather than here.
+    ///
+    /// Told to the browser by its host rather than worked out here: the
+    /// only honest way to know is to ask the filesystem whether the
+    /// archive-looking component of this path is a real file (a folder
+    /// someone named `backup.zip` is a folder), and `Browser` does no
+    /// I/O at all — the same reason `can_paste` below arrives the same
+    /// way.
+    pub in_archive: bool,
+    /// Whether every selected entry is an archive this suite can open.
+    ///
+    /// Worked out here rather than told, unlike `in_archive`, because
+    /// the listing already holds what it takes: an entry's name, and
+    /// whether it is a directory. No I/O, so no reason to ask anyone.
+    pub selection_is_archives: bool,
     /// Whether the clipboard holds files to paste. The host knows; the
     /// browser is told.
     pub can_paste: bool,
@@ -413,13 +477,23 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         | Action::SelectAll => ctx.shown > 0,
         Action::ClearSearch => ctx.searching,
         Action::ToggleHidden | Action::ContextMenu => true,
-        Action::Trash => ctx.selected > 0 && !ctx.in_trash,
+        // Not inside an archive: there is no trash in a zip, and a
+        // member removed from one is gone. `DeletePermanently` is the
+        // action that means that, and it is the one offered there.
+        Action::Trash => ctx.selected > 0 && !ctx.in_trash && !ctx.in_archive,
         Action::DeletePermanently => ctx.selected > 0,
         Action::Restore => ctx.in_trash && ctx.selected > 0,
         Action::EmptyTrash => ctx.in_trash && ctx.shown > 0,
         Action::Copy | Action::CopyPath => ctx.selected > 0,
         // Moving something out of the Trash by hand would leave its
         // record behind; restoring is the way out, and it comes later.
+        // Cut works inside an archive, and the honest caveat lives in
+        // the host: the member is removed only once a paste has
+        // actually landed, so a cut that is never pasted — or is pasted
+        // into another application — leaves the archive as it was. That
+        // is a cut degrading to a copy, visibly, which is the safe
+        // direction for a move whose two halves cannot be made atomic
+        // across a whole-file rewrite.
         Action::Cut => ctx.selected > 0 && !ctx.in_trash,
         Action::Paste => ctx.can_paste && !ctx.in_trash,
         Action::Refresh => true,
@@ -427,12 +501,36 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         // applications" is not a question the chooser can ask, and a
         // folder is opened by going into it.
         Action::OpenWith => ctx.selected == 1 && ctx.focused_is_dir == Some(false) && !ctx.in_trash,
-        Action::Pin => ctx.pin.exists && ctx.pin.pinned_at.is_none() && !ctx.in_trash,
+        // A path through an archive is not somewhere a sidebar can
+        // usefully point: the archive it goes through can be rewritten
+        // or deleted, and a pin to a folder inside one would break
+        // silently and look like the pin was at fault.
+        Action::Pin => {
+            ctx.pin.exists && ctx.pin.pinned_at.is_none() && !ctx.in_trash && !ctx.in_archive
+        }
         Action::Unpin => ctx.pin.pinned_at.is_some(),
         Action::PinUp => ctx.pin.pinned_at.is_some_and(|at| at > 0),
         Action::PinDown => ctx.pin.pinned_at.is_some_and(|at| at + 1 < ctx.pin.pins),
         Action::Rename => ctx.selected == 1 && !ctx.in_trash,
-        Action::NewFolder => !ctx.in_trash,
+        // A folder with nothing in it is the one thing an archive
+        // cannot hold by implication, so "New Folder" inside one would
+        // have to write a directory member and rewrite the whole
+        // archive to do it — for a folder that is empty until something
+        // is put in it, which is a paste, which already works.
+        Action::NewFolder => !ctx.in_trash && !ctx.in_archive,
+        // Extracting is about archives sitting in this folder; the
+        // selection has to be archives, and all of them, or the action
+        // would silently skip the rest.
+        Action::Extract => ctx.selected > 0 && ctx.selection_is_archives && !ctx.in_trash,
+        // Two ways to reach it: archives selected here, or members
+        // selected inside one.
+        Action::ExtractTo => {
+            ctx.selected > 0 && !ctx.in_trash && (ctx.selection_is_archives || ctx.in_archive)
+        }
+        // Compressing something that is already inside an archive would
+        // mean unpacking it to make a second archive inside the first,
+        // which is a thing nobody has ever wanted.
+        Action::Compress => ctx.selected > 0 && !ctx.in_trash && !ctx.in_archive,
         Action::Undo
         | Action::NewTab
         | Action::CloseTab

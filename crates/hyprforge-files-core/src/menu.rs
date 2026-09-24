@@ -21,6 +21,17 @@ pub enum MenuKind {
     Entry,
     /// A folder.
     Folder,
+    /// An archive file sitting in an ordinary folder. Its own kind
+    /// rather than extra rows on [`MenuKind::Entry`], because "Extract"
+    /// greyed out on every text file in the system is noise on the menu
+    /// that opens most often — and because which rows an archive
+    /// deserves is exactly the sort of thing `files-config.toml` exists
+    /// to let someone change.
+    Archive,
+    /// A row *inside* an archive, folder or file alike. The two want the
+    /// same menu: what can be done to a member does not depend on
+    /// whether it has things under it.
+    ArchiveMember,
     /// The empty space around the rows — the current folder itself.
     Empty,
     /// Anything inside the Trash, where the everyday actions mostly do
@@ -38,6 +49,8 @@ impl MenuKind {
         match self {
             MenuKind::Entry => "entry",
             MenuKind::Folder => "folder",
+            MenuKind::Archive => "archive",
+            MenuKind::ArchiveMember => "archive-member",
             MenuKind::Empty => "empty",
             MenuKind::Trash => "trash",
             MenuKind::Place => "place",
@@ -45,10 +58,12 @@ impl MenuKind {
         }
     }
 
-    pub fn all() -> [MenuKind; 6] {
+    pub fn all() -> [MenuKind; 8] {
         [
             MenuKind::Entry,
             MenuKind::Folder,
+            MenuKind::Archive,
+            MenuKind::ArchiveMember,
             MenuKind::Empty,
             MenuKind::Trash,
             MenuKind::Place,
@@ -81,6 +96,8 @@ impl MenuEntry {
 pub struct MenuConfig {
     pub entry: Vec<MenuEntry>,
     pub folder: Vec<MenuEntry>,
+    pub archive: Vec<MenuEntry>,
+    pub archive_member: Vec<MenuEntry>,
     pub empty: Vec<MenuEntry>,
     pub trash: Vec<MenuEntry>,
     pub place: Vec<MenuEntry>,
@@ -105,10 +122,43 @@ impl Default for MenuConfig {
                 A(Copy),
                 A(CopyPath),
                 A(Rename),
+                A(Compress),
                 Sep,
                 A(SelectAll),
                 Sep,
                 A(Trash),
+            ],
+            archive: vec![
+                // Open goes *into* it — see `Browser::activate_path`.
+                A(Open),
+                A(Extract),
+                A(ExtractTo),
+                Sep,
+                A(OpenWith),
+                Sep,
+                A(Cut),
+                A(Copy),
+                A(CopyPath),
+                A(Rename),
+                Sep,
+                A(SelectAll),
+                Sep,
+                A(Trash),
+            ],
+            archive_member: vec![
+                A(Open),
+                A(ExtractTo),
+                Sep,
+                A(Cut),
+                A(Copy),
+                A(CopyPath),
+                A(Rename),
+                Sep,
+                A(SelectAll),
+                Sep,
+                // Not Trash: a member removed from an archive is gone,
+                // and there is no trash inside a zip to file it in.
+                A(DeletePermanently),
             ],
             folder: vec![
                 A(Open),
@@ -119,6 +169,7 @@ impl Default for MenuConfig {
                 A(Copy),
                 A(CopyPath),
                 A(Rename),
+                A(Compress),
                 Sep,
                 A(SelectAll),
                 Sep,
@@ -161,6 +212,8 @@ impl MenuConfig {
         match kind {
             MenuKind::Entry => &self.entry,
             MenuKind::Folder => &self.folder,
+            MenuKind::Archive => &self.archive,
+            MenuKind::ArchiveMember => &self.archive_member,
             MenuKind::Empty => &self.empty,
             MenuKind::Trash => &self.trash,
             MenuKind::Place => &self.place,
@@ -172,6 +225,8 @@ impl MenuConfig {
         match kind {
             MenuKind::Entry => self.entry = entries,
             MenuKind::Folder => self.folder = entries,
+            MenuKind::Archive => self.archive = entries,
+            MenuKind::ArchiveMember => self.archive_member = entries,
             MenuKind::Empty => self.empty = entries,
             MenuKind::Trash => self.trash = entries,
             MenuKind::Place => self.place = entries,

@@ -301,9 +301,15 @@ impl<B: Backend> Conversation<B> {
         let State::Asking { entered, .. } = &self.state else {
             return;
         };
-        let answer = entered.expose().clone();
+        // Wrapped, not a bare `String`. The clone is a second copy of
+        // the password living until the end of this function, and a
+        // bare one is freed with its contents intact — which would put
+        // back exactly what `Secret`'s erase-on-drop takes away. What
+        // the backend then does with it is the backend's (and PAM's);
+        // this is the last copy this crate owns.
+        let answer = Secret::new(entered.expose().clone());
         self.state = State::Working;
-        self.backend.answer(&answer);
+        self.backend.answer(answer.expose());
         self.pump();
     }
 

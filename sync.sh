@@ -50,8 +50,8 @@
 #
 # Every other script here (`split.sh`, `check.sh`) either changes nothing
 # outward-facing or only reports. This is the first one that *can* push,
-# and pushing here means to five separate GitHub repositories other
-# people might have cloned. So `./sync.sh` alone only ever reads: local
+# and pushing here means to a separate GitHub repository per component,
+# each one something other people might have cloned. So `./sync.sh` alone only ever reads: local
 # object database writes from `git subtree split` and `git fetch`, never
 # a ref update anywhere that matters, never a push. `--push` is the one
 # way to make it act, same as `split.sh` leaves the actual `git push` to

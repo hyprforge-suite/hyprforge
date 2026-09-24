@@ -9,9 +9,16 @@ documentation = "https://docs.rs/hyprforge-secret"
 keywords = ["secret", "redact", "debug", "password", "hyprland"]
 categories = ["development-tools::debugging", "rust-patterns"]
 
-# Deliberately no dependencies at all, like hyprforge-paths and
-# hyprforge-process. "Never render this" is a rule about a value, not
-# about Hyprland or any particular app, and a wrapper for it should be
-# usable by anything on this desktop that ever reads a password or a
-# passphrase.
+# One dependency, and the doc above used to say none. `zeroize` earns the
+# exception: erasing a value so the compiler cannot decide the write is
+# dead is not a thing to hand-roll. The naive version — a loop writing
+# zeroes over bytes nothing reads again — is exactly what an optimiser is
+# entitled to delete, and it would then do nothing while looking like it
+# worked, which is the failure mode this project names most often.
+#
+# It costs nothing of what "no dependencies" was protecting: `zeroize` is
+# `no_std`, has no dependencies of its own, and pulls in no runtime — so
+# this crate is still usable by anything on this desktop that reads a
+# password or a passphrase.
 [dependencies]
+zeroize = "1"

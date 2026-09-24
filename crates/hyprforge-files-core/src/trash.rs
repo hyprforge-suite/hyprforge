@@ -144,12 +144,22 @@ impl FsBackend for TrashBackend {
 /// rather than another branch inside somebody's read function.
 pub struct RoutingBackend {
     trash: TrashBackend,
+    /// Paths that go *through* an archive file — see
+    /// [`crate::archive`]. The second place this router's whole shape
+    /// paid for itself: browsing inside a zip is a listing that comes
+    /// from somewhere other than `read_dir`, and it needed no change
+    /// anywhere above here.
+    archive: crate::archive::ArchiveFsBackend,
     std: StdBackend,
 }
 
 impl Default for RoutingBackend {
     fn default() -> Self {
-        RoutingBackend { trash: TrashBackend::default(), std: StdBackend }
+        RoutingBackend {
+            trash: TrashBackend::default(),
+            archive: crate::archive::ArchiveFsBackend::default(),
+            std: StdBackend,
+        }
     }
 }
 
@@ -157,12 +167,35 @@ impl RoutingBackend {
     /// With the trash rooted somewhere specific — the seam tests use to
     /// point this at a throwaway directory rather than the real trash.
     pub fn with_trash(trash: TrashBackend) -> Self {
-        RoutingBackend { trash, std: StdBackend }
+        RoutingBackend {
+            trash,
+            archive: crate::archive::ArchiveFsBackend::default(),
+            std: StdBackend,
+        }
+    }
+
+    /// The passwords the archive half consults.
+    ///
+    /// Reachable through the router because a host holds this as an
+    /// `Arc<dyn FsBackend>` and cannot name the archive backend
+    /// underneath it — and the password prompt is the host's, so it
+    /// needs somewhere to put the answer. Handed out as the `Arc` it
+    /// already is rather than as a borrow, so the host can keep it past
+    /// the call.
+    pub fn keyring(&self) -> std::sync::Arc<hyprforge_archive::Keyring> {
+        self.archive.keyring().clone()
     }
 
     fn route(&self, path: &Path) -> &dyn FsBackend {
+        // The trash first. Its own directory could in principle hold a
+        // file called `Trash.zip`, but the *listing directory* itself is
+        // one exact path and an archive claim needs an archive component
+        // in the path, so the two cannot both match — the order is for
+        // the reader, not to break a tie.
         if self.trash.claims(path) {
             &self.trash
+        } else if self.archive.claims(path) {
+            &self.archive
         } else {
             &self.std
         }

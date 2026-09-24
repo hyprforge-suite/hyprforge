@@ -70,7 +70,7 @@ pub struct OpenMenu(Mutex<Option<(u32, Child)>>);
 
 /// The slot [`show`] uses. Process-wide because what it models is: there
 /// is one `hyprforge-traymenu` lock per session, so there is one open
-/// menu per daemon, whichever of the four items was clicked. It is a
+/// menu per daemon, whichever item was clicked. It is a
 /// parameter of [`show_with_binary`] rather than reached for directly,
 /// so tests get their own slot instead of racing each other through
 /// this one.
@@ -388,7 +388,16 @@ mod tests {
         // Wait for the first menu to actually be open before replacing
         // it — polled rather than slept, since what matters is the slot
         // being occupied, not any particular length of time.
-        for _ in 0..200 {
+        //
+        // The bound is deliberately far longer than this can take. It
+        // exists so a menu that never opens fails rather than hangs the
+        // suite; it is not a claim about how quickly one does. The same
+        // helper in `hyprforge-greet` gave up after a second — fifty
+        // times its real figure — and still went red on a loaded CI
+        // runner, which is a test reporting someone else's scheduling
+        // as a bug here.
+        let giving_up_at = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < giving_up_at {
             if open.0.lock().await.is_some() {
                 break;
             }

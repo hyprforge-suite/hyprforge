@@ -112,6 +112,16 @@ Hyprland-facing
                             content sniffing, which calls an STL a stream
                             of bytes and opens 3D models in a browser.
                             A leaf, like hyprforge-look.
+  hyprforge-archive/       zip, tar and 7z: what is inside one as a
+                            directory tree, extracting from it, making
+                            one, and rewriting it. Pure Rust, so a
+                            machine with no p7zip still opens a .7z.
+                            A leaf with no Hyprforge dependency at all
+                            — it is handed paths and never goes looking
+                            for one, which is what lets the file
+                            manager, the open/save dialog or a preview
+                            pane all ask the same questions without any
+                            of them pulling in a GUI toolkit.
   hyprforge-files-core/    the file browser's model, the FsBackend seam,
                             and the browsing view itself. The view lives
                             here rather than in the app because the
@@ -162,9 +172,9 @@ Apps
                             conversation model
 ```
 
-Five of these directories — clipboard, lock, greet, tray, settings — are also
-their own repositories, published separately from this one. See "Six
-repositories, one workspace" below for what that means and where a change to
+Eight of these directories — clipboard, lock, greet, tray, settings,
+displayd, emojimenu and files — are also their own repositories, published
+separately from this one. See "Nine repositories, one workspace" below for what that means and where a change to
 one of them should actually be made.
 
 ### Why the look is one crate
@@ -187,11 +197,11 @@ greeter runs as its own user and a home directory is `drwx------`: it cannot
 traverse into `$HOME` at all, so continuity across the login boundary has to be
 an export rather than a shared path.
 
-## Six repositories, one workspace
+## Nine repositories, one workspace
 
 There is no GitHub organisation for this suite — the name `hyprforge` was
-already taken — so this repository is the only place that says the other five
-exist. Five components have been split out of `crates/` into their own
+already taken — so this repository is the only place that says the other eight
+exist. Eight components have been split out of `crates/` into their own
 repositories with `git subtree`, pushed, and have green CI. They are private
 today; the intent is to make them public once they've had more use.
 
@@ -200,10 +210,13 @@ today; the intent is to make them public once they've had more use.
 | [hyprforge-clipboard](https://github.com/adamrpostjr/hyprforge-clipboard) | A Wayland clipboard history library over `wlr-data-control`/`ext-data-control`, plus `hyprforge-clipd`, the daemon that watches the compositor's clipboard and writes its history. |
 | [hyprforge-lock](https://github.com/adamrpostjr/hyprforge-lock) | An `ext-session-lock-v1` lock screen for Hyprland, authenticating against PAM and sharing its look with the greeter. |
 | [hyprforge-greet](https://github.com/adamrpostjr/hyprforge-greet) | A greetd greeter for Hyprland, sharing its look and authentication conversation with the lock screen. |
-| [hyprforge-tray](https://github.com/adamrpostjr/hyprforge-tray) | A StatusNotifierItem tray library, plus `hyprforge-trayd`, the daemon that puts Wi-Fi, Bluetooth, keep-awake and night-light icons in whatever bar is running, and draws its own right-click menu through `hyprforge-traymenu` rather than `com.canonical.dbusmenu`. |
+| [hyprforge-tray](https://github.com/adamrpostjr/hyprforge-tray) | A StatusNotifierItem tray library, plus `hyprforge-trayd`, the daemon that puts network (Wi-Fi and Ethernet), Bluetooth, keep-awake, night-light, battery/power-profile and display-layout icons in whatever bar is running, and draws its own right-click menu through `hyprforge-traymenu` rather than `com.canonical.dbusmenu`. |
 | [hyprforge-settings](https://github.com/adamrpostjr/hyprforge-settings) | The Settings app: an iced GUI over Hyprland's config, appearance, displays, network, Bluetooth, shortcuts and more. |
+| [hyprforge-displayd](https://github.com/adamrpostjr/hyprforge-displayd) | A monitor-arrangement daemon: it watches `wlr-output-management`, recognises a set of displays it has seen before and applies the layout saved for it, plus `hyprforge-displayctl` to drive it from a script. |
+| [hyprforge-emojimenu](https://github.com/adamrpostjr/hyprforge-emojimenu) | An emoji picker: a layer-shell popup at the pointer with type-to-filter search over the full Unicode set, skin tones, and a remembered default tone. |
+| [hyprforge-files](https://github.com/adamrpostjr/hyprforge-files) | A file manager: tabs, a sidebar, list and grid views, the freedesktop trash, copy and paste with other applications, and zip/tar/7z archives browsed and edited in place. |
 
-Four of the five are meant to be installed on their own: clone
+Seven of the eight are meant to be installed on their own: clone
 `hyprforge-clipboard` and you get a clipboard daemon and nothing else — no
 Settings app, no tray, no Hyprland config machinery. `hyprforge-settings` is
 the exception and its own README says so: it depends on fifteen other
@@ -989,9 +1002,16 @@ established lock screen has:
 
 - **No input-method support.** A password typed through an IME cannot be
   entered. swaylock is the same; it still means some users cannot log in.
-- **The password is not zeroized.** `entered` is a plain `String`, cloned
-  into the backend, and PAM holds its own copy. A core dump or swap could
-  contain it.
+- **The password is erased on this side, and PAM keeps its own copy.**
+  `Secret<T>` zeroes its value when it goes out of scope, which matters
+  more than it looks: a typed password is not appended to in place — the
+  host hands the whole string over on every keystroke and the old one is
+  dropped — so eight characters allocate eight strings, each holding a
+  prefix, and every one of them is now cleared as it is displaced. The
+  clone `submit` makes for the backend is wrapped too. What remains is
+  outside this code: PAM and greetd copy the answer once it is handed
+  over, and a core dump or a swapped page taken while they hold it can
+  still contain it.
 - **No attempt limiting of its own**, on purpose: rate limiting belongs in
   `/etc/pam.d`, where an administrator can see and change it, rather than
   hidden in a settings app.

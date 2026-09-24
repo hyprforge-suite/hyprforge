@@ -133,6 +133,50 @@ pub fn with_default(text: &str, mime: &str, app: &str) -> String {
     finish(lines)
 }
 
+/// `text` with `mime`'s default removed, or `None` when it had none.
+///
+/// The counterpart to [`with_default`], and under the same rule: one
+/// line goes and every other byte is copied through. `None` rather than
+/// an unchanged copy, so a caller can decline to rewrite a file it has
+/// nothing to say about — a save that only rewrites the line endings of
+/// somebody's hand-kept file is still a save they did not ask for.
+///
+/// Removing the line rather than setting it to nothing. `type=` with an
+/// empty value is a line every other reader on the desktop has to have
+/// an opinion about, and the specification gives it none.
+///
+/// *Every* line for the type in that section, not the first. A repeated
+/// key accumulates here (see [`parse_section`]), so leaving one behind
+/// would mean a cleared default that is still set — the failure being
+/// cleared in the first place.
+///
+/// Only `[Default Applications]`. An association a person added is a
+/// different statement and is not theirs to lose because a default was
+/// cleared.
+pub fn without_default(text: &str, mime: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.iter().position(|line| line.trim() == DEFAULTS_SECTION)?;
+    let end = lines[start + 1..]
+        .iter()
+        .position(|line| line.trim_start().starts_with('['))
+        .map(|offset| start + 1 + offset)
+        .unwrap_or(lines.len());
+
+    let mut kept: Vec<String> = Vec::with_capacity(lines.len());
+    let mut removed = false;
+    for (index, line) in lines.iter().enumerate() {
+        let in_section = index > start && index < end;
+        let is_ours = in_section
+            && !line.trim_start().starts_with('#')
+            && line.split_once('=').is_some_and(|(key, _)| key.trim() == mime);
+        match is_ours {
+            true => removed = true,
+            false => kept.push(line.to_string()),
+        }
+    }
+    removed.then(|| finish(kept))
+}
+
 /// A text file ends with a newline.
 fn finish(lines: Vec<String>) -> String {
     let mut text = lines.join("\n");
@@ -172,6 +216,40 @@ model/3mf=fstl.desktop;
             !added.contains_key("text/html"),
             "a default is not an association; the sections stay apart"
         );
+    }
+
+    #[test]
+    fn clearing_removes_the_line_and_leaves_the_rest_alone() {
+        let out = without_default(REAL, "model/stl").expect("that type had a default");
+        assert!(!out.contains("model/stl"), "the line is gone");
+        assert!(out.contains("# my associations"), "and the comment above it is not");
+        assert!(out.contains("text/html=google-chrome.desktop"), "nor its neighbours");
+        assert!(out.contains("model/3mf=fstl.desktop;"), "nor the association in the next section");
+    }
+
+    /// Nothing to remove is not a reason to rewrite somebody's file:
+    /// `None` rather than an unchanged copy, so a caller can decline
+    /// the write entirely.
+    #[test]
+    fn clearing_a_type_that_was_never_set_writes_nothing() {
+        assert_eq!(without_default(REAL, "image/png"), None);
+        assert_eq!(without_default("", "image/png"), None, "nor when there is no section at all");
+        assert_eq!(
+            without_default(REAL, "model/3mf"),
+            None,
+            "an added association is not a default, and clearing must not take it"
+        );
+    }
+
+    /// A key written twice accumulates on the way in, so leaving one
+    /// occurrence behind would be a cleared default that is still set.
+    #[test]
+    fn clearing_takes_every_occurrence_of_the_type() {
+        let text = "[Default Applications]\nimage/png=a.desktop\nimage/gif=c.desktop\nimage/png=b.desktop\n";
+        let out = without_default(text, "image/png").expect("it was set");
+        assert!(!out.contains("image/png"), "both lines go: {out}");
+        assert!(out.contains("image/gif=c.desktop"));
+        assert!(!parse(&out).contains_key("image/png"));
     }
 
     #[test]

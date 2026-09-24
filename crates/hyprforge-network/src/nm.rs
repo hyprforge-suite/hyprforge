@@ -17,7 +17,7 @@
 //! is exactly the class `hyprforge_process::output` exists for, one
 //! transport further out.
 
-use crate::backend::{NetworkBackend, SavedNetwork, Status};
+use crate::backend::{no_such_wired_interface, NetworkBackend, SavedNetwork, Status, WiredState, WiredStatus};
 use crate::secret::Psk;
 use crate::types::{AccessPoint, NetworkError, RadioState, Security, Ssid};
 use std::collections::HashMap;
@@ -38,6 +38,35 @@ pub const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// `NM_DEVICE_TYPE_WIFI`.
 const DEVICE_TYPE_WIFI: u32 = 2;
+
+/// `NM_DEVICE_TYPE_ETHERNET`. Not a bridge (13), a veth (20) or anything
+/// else with a cable-shaped name: container plumbing reports those, and
+/// listing Docker's bridges as "wired" would put interfaces nobody
+/// plugged in at the top of the menu.
+const DEVICE_TYPE_ETHERNET: u32 = 1;
+
+/// `NM_DEVICE_STATE_*`, the ones [`wired_state`] tells apart.
+const DEVICE_STATE_UNKNOWN: u32 = 0;
+const DEVICE_STATE_UNMANAGED: u32 = 10;
+const DEVICE_STATE_PREPARE: u32 = 40;
+const DEVICE_STATE_ACTIVATED: u32 = 100;
+
+/// A wired device's state, from NetworkManager's device state and its
+/// carrier — or `None` for a device NetworkManager does not manage, which
+/// is not this crate's to show or to switch.
+///
+/// Carrier is asked separately rather than read off the state because
+/// NetworkManager folds "no cable" into `UNAVAILABLE` together with other
+/// reasons a device can't be used; the carrier says which it is.
+pub(crate) fn wired_state(device_state: u32, carrier: bool) -> Option<WiredState> {
+    match device_state {
+        DEVICE_STATE_UNKNOWN | DEVICE_STATE_UNMANAGED => None,
+        DEVICE_STATE_ACTIVATED => Some(WiredState::Connected),
+        DEVICE_STATE_PREPARE..DEVICE_STATE_ACTIVATED => Some(WiredState::Connecting),
+        _ if !carrier => Some(WiredState::CableUnplugged),
+        _ => Some(WiredState::Disconnected),
+    }
+}
 
 /// `NM_ACTIVE_CONNECTION_STATE_*`.
 const ACTIVE_STATE_ACTIVATED: u32 = 2;
@@ -86,7 +115,26 @@ trait NetworkManagerDbus {
 trait DeviceDbus {
     #[zbus(property)]
     fn device_type(&self) -> zbus::Result<u32>;
+    #[zbus(property)]
+    fn interface(&self) -> zbus::Result<String>;
+    #[zbus(property)]
+    fn state(&self) -> zbus::Result<u32>;
+    /// `/` while nothing is active on the device.
+    #[zbus(property)]
+    fn active_connection(&self) -> zbus::Result<OwnedObjectPath>;
     fn disconnect(&self) -> zbus::Result<()>;
+}
+
+#[zbus::proxy(
+    interface = "org.freedesktop.NetworkManager.Device.Wired",
+    default_service = "org.freedesktop.NetworkManager"
+)]
+trait WiredDbus {
+    #[zbus(property)]
+    fn carrier(&self) -> zbus::Result<bool>;
+    /// Mb/s, `0` when there is no link to have a speed.
+    #[zbus(property)]
+    fn speed(&self) -> zbus::Result<u32>;
 }
 
 #[zbus::proxy(
@@ -150,6 +198,9 @@ trait SettingsConnectionDbus {
 trait ActiveConnectionDbus {
     #[zbus(property)]
     fn state(&self) -> zbus::Result<u32>;
+    /// The connection's name, as NetworkManager lists it.
+    #[zbus(property)]
+    fn id(&self) -> zbus::Result<String>;
 }
 
 /// Bounds a call and turns a D-Bus failure into something a screen can
@@ -282,6 +333,82 @@ impl NetworkManagerBackend {
             }
         }
         Err(NetworkError::NoWifiDevice)
+    }
+
+    async fn device(&self, path: OwnedObjectPath) -> Result<DeviceDbusProxy<'_>, NetworkError> {
+        bounded(
+            TIMEOUT,
+            DeviceDbusProxy::builder(&self.connection)
+                .path(path)
+                .map_err(classify)?
+                .build(),
+        )
+        .await
+    }
+
+    /// One Ethernet device's status, or `None` when it is not an
+    /// Ethernet device NetworkManager manages.
+    async fn read_wired(&self, path: OwnedObjectPath) -> Result<Option<WiredStatus>, NetworkError> {
+        let device = self.device(path.clone()).await?;
+        if bounded(TIMEOUT, device.device_type()).await? != DEVICE_TYPE_ETHERNET {
+            return Ok(None);
+        }
+        let wired = bounded(
+            TIMEOUT,
+            WiredDbusProxy::builder(&self.connection)
+                .path(path)
+                .map_err(classify)?
+                .build(),
+        )
+        .await?;
+        let carrier = bounded(TIMEOUT, wired.carrier()).await?;
+        let Some(state) = wired_state(bounded(TIMEOUT, device.state()).await?, carrier) else {
+            return Ok(None);
+        };
+
+        let connection = match state {
+            WiredState::Connected | WiredState::Connecting => {
+                let active = bounded(TIMEOUT, device.active_connection()).await?;
+                if active.as_str() == "/" {
+                    None
+                } else {
+                    let active = bounded(
+                        TIMEOUT,
+                        ActiveConnectionDbusProxy::builder(&self.connection)
+                            .path(active)
+                            .map_err(classify)?
+                            .build(),
+                    )
+                    .await?;
+                    Some(bounded(TIMEOUT, active.id()).await?)
+                }
+            }
+            WiredState::CableUnplugged | WiredState::Disconnected => None,
+        };
+        let speed_mbps = match state {
+            WiredState::Connected => Some(bounded(TIMEOUT, wired.speed()).await?).filter(|s| *s > 0),
+            _ => None,
+        };
+
+        Ok(Some(WiredStatus {
+            interface: bounded(TIMEOUT, device.interface()).await?,
+            state,
+            connection,
+            speed_mbps,
+        }))
+    }
+
+    /// The object path of the Ethernet device called `interface`.
+    async fn wired_device(&self, interface: &str) -> Result<OwnedObjectPath, NetworkError> {
+        for path in bounded(TIMEOUT, self.root().await?.get_devices()).await? {
+            let device = self.device(path.clone()).await?;
+            if bounded(TIMEOUT, device.device_type()).await? == DEVICE_TYPE_ETHERNET
+                && bounded(TIMEOUT, device.interface()).await? == interface
+            {
+                return Ok(path);
+            }
+        }
+        Err(no_such_wired_interface(interface))
     }
 
     async fn wireless(&self) -> Result<WirelessDbusProxy<'_>, NetworkError> {
@@ -432,6 +559,41 @@ impl NetworkBackend for NetworkManagerBackend {
         };
 
         Ok(Status { radio, connected_to })
+    }
+
+    async fn wired(&self) -> Result<Vec<WiredStatus>, NetworkError> {
+        let mut wired = Vec::new();
+        for path in bounded(TIMEOUT, self.root().await?.get_devices()).await? {
+            match self.read_wired(path).await {
+                Ok(Some(status)) => wired.push(status),
+                Ok(None) => {}
+                // A USB adapter unplugged between the list and the read:
+                // the same churn `access_points` tolerates.
+                Err(NetworkError::Refused(_)) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(wired)
+    }
+
+    async fn wired_connect(&self, interface: &str) -> Result<(), NetworkError> {
+        let device = self.wired_device(interface).await?;
+        // `/` for the connection lets NetworkManager pick the best saved
+        // one for this device — its documented meaning, and the choice it
+        // makes by itself when a cable goes in.
+        let any = ObjectPath::try_from("/").expect("/ is a valid object path");
+        let root = self.root().await?;
+        let active = bounded(
+            ACTIVATION_TIMEOUT,
+            root.activate_connection(&any, &device.as_ref(), &any),
+        )
+        .await?;
+        self.await_activation(active, false).await
+    }
+
+    async fn wired_disconnect(&self, interface: &str) -> Result<(), NetworkError> {
+        let path = self.wired_device(interface).await?;
+        bounded(TIMEOUT, self.device(path).await?.disconnect()).await
     }
 
     async fn access_points(&self) -> Result<Vec<AccessPoint>, NetworkError> {
@@ -696,6 +858,32 @@ mod tests {
         assert_eq!(sent, raw);
         // The human-facing label is separate and may be lossy.
         assert!(text(&settings["connection"], "id").is_some());
+    }
+
+    /// The mapping everything wired rests on. `UNAVAILABLE` (20) is the
+    /// state an unplugged cable puts a device in — and not the only
+    /// reason a device can be unavailable, which is why the carrier
+    /// decides between "unplugged" and "not connected".
+    #[test]
+    fn a_wired_devices_state_and_carrier_map_to_the_four_states_people_act_on() {
+        assert_eq!(wired_state(100, true), Some(WiredState::Connected));
+        for connecting in [40, 50, 60, 70, 80, 90] {
+            assert_eq!(wired_state(connecting, true), Some(WiredState::Connecting), "{connecting}");
+        }
+        assert_eq!(wired_state(20, false), Some(WiredState::CableUnplugged));
+        assert_eq!(wired_state(30, false), Some(WiredState::CableUnplugged));
+        assert_eq!(wired_state(30, true), Some(WiredState::Disconnected));
+        assert_eq!(wired_state(120, true), Some(WiredState::Disconnected), "failed");
+        assert_eq!(wired_state(110, true), Some(WiredState::Disconnected), "deactivating");
+    }
+
+    /// Unmanaged is NetworkManager saying "not mine" — a device someone
+    /// configured by hand. Showing it with a connect button would offer
+    /// to take it over.
+    #[test]
+    fn a_device_networkmanager_does_not_manage_is_not_listed() {
+        assert_eq!(wired_state(10, true), None);
+        assert_eq!(wired_state(0, true), None);
     }
 
     /// Timeouts exist, and the join one is not the read one: capping an

@@ -25,7 +25,7 @@
 
 use crate::density;
 use crate::filter::{is_hidden, matches_query};
-use crate::format::{format_kind, format_modified_at, format_origin, format_owner, format_permissions, format_size};
+use crate::format::{format_kind, format_modified_at, format_origin, format_owner, format_packed, format_permissions, format_size};
 use crate::glyph;
 use crate::icon::{self, entry_icon};
 use crate::action::{self, Action, ActionContext, Scope};
@@ -81,6 +81,13 @@ pub enum DirErrorKind {
     NotFound,
     NotADirectory,
     Vanished,
+    /// The listing is inside an encrypted archive. Never rendered
+    /// either: the host opens a password prompt and reads again.
+    PasswordRequired,
+    /// The path led through a file that looked like an archive and is
+    /// not one. Never rendered: [`Browser::apply_dir_loaded`] turns it
+    /// into an ordinary activation instead — see there.
+    NotAnArchive,
     Other,
 }
 
@@ -91,7 +98,9 @@ impl From<&FilesError> for DirError {
             FilesError::NotFound { .. } => DirErrorKind::NotFound,
             FilesError::NotADirectory { .. } => DirErrorKind::NotADirectory,
             FilesError::VanishedMidRead { .. } => DirErrorKind::Vanished,
-            FilesError::Io { .. } => DirErrorKind::Other,
+            FilesError::NotAnArchive { .. } => DirErrorKind::NotAnArchive,
+            FilesError::PasswordRequired { .. } => DirErrorKind::PasswordRequired,
+            FilesError::Elsewhere { .. } | FilesError::Io { .. } => DirErrorKind::Other,
         };
         DirError { message: e.to_string(), kind }
     }
@@ -410,6 +419,30 @@ pub enum Outcome {
     /// where the pointer is — the window does, and fills it in, the same
     /// way it fills in modifier keys on a click.
     OpenContextMenuAtPointer(MenuSpot),
+    /// Unpack these archives. `to` is where they go; `None` means
+    /// "each into a new folder beside itself, named after it" — the
+    /// host picks the name, because it is the one that can see which
+    /// names are free.
+    ///
+    /// The unpacking itself is the host's for the same reason reading a
+    /// directory is: it is long, blocking work that wants a progress
+    /// bar and a cancel button, and `Browser` does no I/O.
+    Extract {
+        archives: Vec<PathBuf>,
+        to: Option<PathBuf>,
+    },
+    /// Unpack these members *out of* the archive this listing is inside.
+    /// The host asks where they should go.
+    ExtractMembers {
+        members: Vec<PathBuf>,
+        from: PathBuf,
+    },
+    /// Make an archive out of these. The host asks for a name and a
+    /// format.
+    Compress {
+        sources: Vec<PathBuf>,
+        into: PathBuf,
+    },
     /// A window-scope action — see [`crate::action::Scope`]. It reaches
     /// the host this way so a menu item for one travels the same road as
     /// every other action; a host without tabs ignores it.
@@ -490,6 +523,9 @@ struct ViewModel<'a> {
     current_dir: &'a Path,
     /// Whether this listing is the Trash — which changes its columns.
     in_trash: bool,
+    /// The archive this listing is inside, named by its format — which
+    /// adds the Packed column and heads the summary line.
+    archive: Option<&'a str>,
     /// The name being edited, if any.
     renaming: Option<&'a Renaming>,
     column_picker_open: bool,
@@ -578,6 +614,10 @@ pub struct Browser {
     menu: Option<OpenMenu>,
     /// Whether the clipboard holds files — see [`Self::set_can_paste`].
     can_paste: bool,
+    /// The archive this listing is inside, named by its format ("zip",
+    /// "zstd") — see [`Self::set_archive`]. `None` when this is an
+    /// ordinary directory.
+    archive: Option<String>,
     /// The name being edited in place, if any.
     renaming: Option<Renaming>,
     /// See [`Message::AfterListing`].
@@ -624,6 +664,7 @@ impl Browser {
             config: Arc::new(Config::default()),
             menu: None,
             can_paste: false,
+            archive: None,
             renaming: None,
             after_listing: None,
             dotfiles: 0,
@@ -882,6 +923,22 @@ impl Browser {
             has_parent: self.current_dir.parent().is_some(),
             searching: !self.search_query.is_empty(),
             in_trash: self.in_trash(),
+            in_archive: self.in_archive(),
+            // Every selected row is a file whose name this suite can
+            // open as an archive. `!is_dir` is the half that matters:
+            // a *folder* called `backup.zip` is a folder, and the name
+            // alone would call it an archive.
+            selection_is_archives: {
+                let selected = self.selected_shown();
+                !selected.is_empty()
+                    && selected.iter().all(|path| {
+                        rows.iter().any(|e| {
+                            e.path == *path
+                                && !e.is_dir
+                                && crate::archive::looks_browsable(&e.name)
+                        })
+                    })
+            },
             can_paste: self.can_paste,
             pin: {
                 let target = self.pin_target(target);
@@ -918,6 +975,26 @@ impl Browser {
 
     /// Tells the browser whether the clipboard holds files. The host owns
     /// the clipboard and calls this whenever it changes.
+    /// Tells the browser which archive this listing is inside, if any,
+    /// named by its format — `Some("zstd")`, `None` for a plain folder.
+    ///
+    /// Set by the host after each read, for the reason
+    /// [`ActionContext::in_archive`] gives: deciding it needs one
+    /// `stat`, and `Browser` does no I/O. The host is reading the
+    /// directory anyway and already knows which backend answered.
+    ///
+    /// The *name* and not just a flag, because the summary line owes it
+    /// — mockup `1j` reads "zstd · 3 entries · 20.3 MB → 7.0 MB", and
+    /// nothing in a listing of members says what compressed them.
+    pub fn set_archive(&mut self, format: Option<String>) {
+        self.archive = format;
+    }
+
+    /// Whether this listing is inside an archive.
+    pub fn in_archive(&self) -> bool {
+        self.archive.is_some()
+    }
+
     pub fn set_can_paste(&mut self, can_paste: bool) {
         self.can_paste = can_paste;
     }
@@ -1017,6 +1094,33 @@ impl Browser {
                 (Some(target), _) => Outcome::OpenInNewTab(target),
                 (None, Some(path)) => Outcome::OpenInNewTab(path.to_path_buf()),
                 (None, None) => Outcome::None,
+            },
+            Action::Extract => Outcome::Extract {
+                archives: self.selected_shown(),
+                // No destination: each archive gets a folder beside
+                // itself named after it, which the host works out —
+                // it is the one that knows what names are free.
+                to: None,
+            },
+            Action::ExtractTo => {
+                if self.in_archive() {
+                    // Inside an archive the selection *is* the members,
+                    // and the archive they came out of is where this
+                    // listing is.
+                    Outcome::ExtractMembers {
+                        members: self.selected_shown(),
+                        from: self.current_dir.clone(),
+                    }
+                } else {
+                    Outcome::Extract {
+                        archives: self.selected_shown(),
+                        to: Some(self.current_dir.clone()),
+                    }
+                }
+            }
+            Action::Compress => Outcome::Compress {
+                sources: self.selected_shown(),
+                into: self.current_dir.clone(),
             },
             Action::Pin | Action::Unpin | Action::PinUp | Action::PinDown => {
                 let Some(target) = self.pin_target(target.as_deref()) else {
@@ -1180,10 +1284,21 @@ impl Browser {
                 } else {
                     self.selection.focus(path);
                 }
-                match (self.in_trash(), is_dir) {
-                    (true, _) => MenuKind::Trash,
-                    (false, true) => MenuKind::Folder,
-                    (false, false) => MenuKind::Entry,
+                // Inside an archive every row gets the same menu,
+                // folder or not: what can be done to a member does not
+                // depend on whether anything is under it.
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                match (self.in_trash(), self.in_archive(), is_dir) {
+                    (true, _, _) => MenuKind::Trash,
+                    (_, true, _) => MenuKind::ArchiveMember,
+                    (_, false, true) => MenuKind::Folder,
+                    (_, false, false) if crate::archive::looks_browsable(&name) => {
+                        MenuKind::Archive
+                    }
+                    (_, false, false) => MenuKind::Entry,
                 }
             }
             None => {
@@ -1255,6 +1370,15 @@ impl Browser {
         // the result is actually for.
         if path != self.current_dir {
             return Outcome::None;
+        }
+        // The name said archive and the bytes disagree. Rather than
+        // leaving someone looking at an error where a folder should
+        // have been, the guess is taken back and the file is opened the
+        // ordinary way — which is what would have happened if
+        // `activate_path` had known, and it could not have.
+        if result.as_ref().err().map(|e| e.kind) == Some(DirErrorKind::NotAnArchive) {
+            let back = self.unwind_navigation();
+            return Outcome::Many(vec![back, Outcome::Activated(path)]);
         }
         match result {
             Ok(entries) => {
@@ -1438,11 +1562,35 @@ impl Browser {
 
     /// A folder navigates into itself; a file becomes
     /// [`Outcome::Activated`] for the host to interpret.
+    ///
+    /// An archive is a third case that resolves to the first: this suite
+    /// browses archives, so opening one means going into it, not handing
+    /// it to whatever else is installed. The decision is made on the
+    /// name, because the name is all a listing has and `Browser` does no
+    /// I/O — and a name can be wrong, which is why
+    /// [`Self::apply_dir_loaded`] has a way back out.
     fn activate_path(&mut self, is_dir: bool, path: PathBuf) -> Outcome {
         if is_dir {
-            self.go_to(path)
-        } else {
-            Outcome::Activated(path)
+            return self.go_to(path);
+        }
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if crate::archive::looks_browsable(&name) {
+            return self.go_to(path);
+        }
+        Outcome::Activated(path)
+    }
+
+    /// Takes back the navigation that just failed, without leaving it in
+    /// the forward history.
+    ///
+    /// Not [`Self::go_back`]: going back would put the failed
+    /// destination on the forward stack, so the Forward button would
+    /// offer to try it again — an offer to repeat something that did not
+    /// work. This one is "that never happened".
+    fn unwind_navigation(&mut self) -> Outcome {
+        match self.back_stack.pop() {
+            Some(previous) => self.arrive_at(previous),
+            None => Outcome::None,
         }
     }
 
@@ -1450,6 +1598,7 @@ impl Browser {
         ViewModel {
             current_dir: &self.current_dir,
             in_trash: self.in_trash(),
+            archive: self.archive.as_deref(),
             renaming: self.renaming.as_ref(),
             column_picker_open: self.column_picker_open,
             sidebar_collapsed: self
@@ -1979,7 +2128,12 @@ fn status_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> 
         return plane(iced::widget::Space::new().into());
     }
 
-    let summary = crate::format::status_summary(&vm.rows, vm.selection.selected_paths(), vm.hidden_count);
+    let summary = crate::format::status_summary(
+        &vm.rows,
+        vm.selection.selected_paths(),
+        vm.hidden_count,
+        vm.archive,
+    );
 
     // Left: what is in here. Right: where "here" is on disk, which is
     // the other question a status bar is asked and the one the path bar
@@ -2613,6 +2767,7 @@ fn entry_row<'a>(
             // frame, for a value every row in the listing shares.
             Column::Modified => format_modified_at(entry.modified, now),
             Column::Origin => format_origin(entry, home.as_deref()),
+            Column::Packed => format_packed(entry),
         };
         // Dim metadata on the *unselected* row only. `text_dim` is
         // chosen for legibility against the listing's own dark surface,
@@ -2821,6 +2976,8 @@ fn column_portion(column: Column) -> u16 {
         Column::Modified => 3,
         // A path: the widest thing any column holds.
         Column::Origin => 5,
+        // The same shape of number as Size, beside it.
+        Column::Packed => 3,
     }
 }
 
@@ -2828,12 +2985,22 @@ fn column_portion(column: Column) -> u16 {
 ///
 /// The configured ones — and, in the Trash, Original Location first,
 /// because "where did this come from" is the question the Trash is for.
-fn listing_columns(prefs: &Prefs, in_trash: bool) -> Vec<Column> {
+fn listing_columns(prefs: &Prefs, in_trash: bool, in_archive: bool) -> Vec<Column> {
     let mut columns = Vec::with_capacity(Column::ALL.len() + 1);
     if in_trash {
         columns.push(Column::Origin);
     }
     columns.extend(prefs.columns.shown());
+    // After Size, not before it, because Packed only means anything
+    // beside the number it is a fraction of — which is how mockup `1j`
+    // draws it. Only when Size is actually shown, for the same reason:
+    // a compressed size with nothing to compare it to is a number with
+    // no question attached.
+    if in_archive {
+        if let Some(after) = columns.iter().position(|c| *c == Column::Size) {
+            columns.insert(after + 1, Column::Packed);
+        }
+    }
     columns
 }
 
@@ -2856,6 +3023,12 @@ fn column_sort(column: Column) -> SortColumn {
         Column::Permissions => SortColumn::Permissions,
         Column::Modified => SortColumn::Modified,
         Column::Origin => SortColumn::Origin,
+        // Sorted by the uncompressed size, which is the number beside
+        // it and the one a person means by "biggest". A second sort key
+        // that ordered by packed size would put a well-compressed
+        // gigabyte above a barely-compressed megabyte under a heading
+        // that says nothing about compression ratios.
+        Column::Packed => SortColumn::Size,
     }
 }
 
@@ -2866,7 +3039,13 @@ fn column_sort(column: Column) -> SortColumn {
 /// and clicking again reverses, which is what every file manager anyone
 /// has used does. That also removes the need for a separate sort
 /// control entirely.
-fn list_header<'a>(prefs: &Prefs, in_trash: bool, picker_open: bool, scale: FontScale) -> Element<'a, Message> {
+fn list_header<'a>(
+    prefs: &Prefs,
+    in_trash: bool,
+    in_archive: bool,
+    picker_open: bool,
+    scale: FontScale,
+) -> Element<'a, Message> {
     let heading = |label: &'static str, column: SortColumn, portion: u16| {
         let active = prefs.sort_column() == column;
         // The arrow marks the sorted column *and* its direction, so the
@@ -2904,7 +3083,7 @@ fn list_header<'a>(prefs: &Prefs, in_trash: bool, picker_open: bool, scale: Font
 
     // `Column::ALL` order, the same walk `entry_row` makes — one list,
     // so a heading cannot end up over the wrong cells.
-    for column in listing_columns(prefs, in_trash) {
+    for column in listing_columns(prefs, in_trash, in_archive) {
         header = header.push(heading(column_heading(column, in_trash), column_sort(column), column_portion(column)));
     }
 
@@ -2993,7 +3172,7 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     let mut list = column![].spacing(1.0);
     let mut seen_file = false;
     let ctx = RowContext {
-        columns: listing_columns(vm.prefs, vm.in_trash),
+        columns: listing_columns(vm.prefs, vm.in_trash, vm.archive.is_some()),
         renaming: vm.renaming,
         home: home_dir(),
         scale,
@@ -3028,7 +3207,7 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // still horizontally would be worse than no header at all: every
     // label over the wrong column.
     let stack = column![
-        list_header(vm.prefs, vm.in_trash, vm.column_picker_open, scale),
+        list_header(vm.prefs, vm.in_trash, vm.archive.is_some(), vm.column_picker_open, scale),
         divider(),
         scrollable(list).height(Length::Fill).id(vm.list_scrollable_id.clone()),
     ]
@@ -3044,7 +3223,8 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // sideways to reach the rest of it, which is what a table does
     // everywhere else and is the reason the columns are worth having.
     let pane = density::list_pane_width(vm.viewport_width, vm.sidebar_collapsed);
-    let min_width = density::list_min_width(listing_columns(vm.prefs, vm.in_trash).len(), scale);
+    let min_width =
+        density::list_min_width(listing_columns(vm.prefs, vm.in_trash, vm.archive.is_some()).len(), scale);
     if pane >= min_width {
         return stack.into();
     }
@@ -3214,6 +3394,41 @@ fn grid_cell<'a>(
     with_row_menu(cell.into(), index)
 }
 
+/// Fixtures shared by this module's test modules.
+#[cfg(test)]
+mod tests_support {
+    use super::*;
+    use crate::types::EntryKind;
+    use std::time::SystemTime;
+
+    /// A listing of `(name, is_dir)` at `/dir`, already loaded.
+    pub fn loaded(rows: &[(&str, bool)]) -> Browser {
+        let (mut browser, _) =
+            Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
+        let entries: Vec<Entry> = rows
+            .iter()
+            .map(|(name, is_dir)| Entry {
+                name: name.to_string(),
+                path: PathBuf::from("/dir").join(name),
+                is_dir: *is_dir,
+                size: if *is_dir { EntrySize::UNCOUNTED } else { EntrySize::Bytes(10) },
+                modified: Some(SystemTime::UNIX_EPOCH),
+                is_symlink: false,
+                link_broken: false,
+                hidden: name.starts_with('.'),
+                kind: EntryKind::classify(*is_dir, name),
+                mode: 0o644,
+                uid: 1000,
+                owner: Some("alex".to_string()),
+                origin: None,
+                packed: None,
+            })
+            .collect();
+        browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(entries)));
+        browser
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3253,6 +3468,7 @@ mod tests {
             uid: 1000,
             owner: Some("alex".to_string()),
             origin: None,
+            packed: None,
         }
     }
 
@@ -3895,10 +4111,10 @@ mod tests {
     #[test]
     fn the_trash_listing_shows_original_location_and_deleted() {
         let prefs = Prefs::default();
-        let columns = listing_columns(&prefs, true);
+        let columns = listing_columns(&prefs, true, false);
         assert_eq!(columns.first(), Some(&Column::Origin));
         assert_eq!(column_heading(Column::Modified, true), "Deleted");
-        assert!(!listing_columns(&prefs, false).contains(&Column::Origin), "only in the Trash");
+        assert!(!listing_columns(&prefs, false, false).contains(&Column::Origin), "only in the Trash");
         assert_eq!(column_heading(Column::Modified, false), "Modified");
     }
 
@@ -4520,6 +4736,7 @@ mod tests {
         ViewModel {
             current_dir,
             in_trash: false,
+            archive: None,
             renaming: None,
             column_picker_open: false,
             sidebar_collapsed: false,
@@ -4602,6 +4819,229 @@ mod tests {
             row.tint,
             sidebar::Tint::Accent,
             "the row's own colour is untouched — one field decides, and it is `missing`"
+        );
+    }
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::tests_support::*;
+    use super::*;
+
+    /// This suite browses archives, so opening one means going into it.
+    /// Handing it to the desktop would open whatever else is installed —
+    /// or, on a machine with nothing registered for `application/zip`,
+    /// nothing at all.
+    #[test]
+    fn activating_an_archive_navigates_into_it_rather_than_handing_it_over() {
+        let mut browser = loaded(&[("notes.txt", false), ("sample.zip", false)]);
+        let outcome = browser.update(Message::EntryActivated(1));
+
+        assert_eq!(outcome, Outcome::ReadDir(PathBuf::from("/dir/sample.zip")));
+        assert_eq!(browser.current_dir(), Path::new("/dir/sample.zip"));
+    }
+
+    #[test]
+    fn activating_an_ordinary_file_still_goes_to_the_host() {
+        let mut browser = loaded(&[("notes.txt", false), ("sample.zip", false)]);
+        assert_eq!(
+            browser.update(Message::EntryActivated(0)),
+            Outcome::Activated(PathBuf::from("/dir/notes.txt"))
+        );
+    }
+
+    /// A folder called `backup.zip` is a folder. It already navigates,
+    /// so the visible consequence is elsewhere: it must not be offered
+    /// the archive menu or counted as an archive by Extract.
+    #[test]
+    fn a_folder_named_like_an_archive_is_treated_as_the_folder_it_is() {
+        let mut browser = loaded(&[("backup.zip", true)]);
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+        assert!(
+            !browser.action_context().selection_is_archives,
+            "a directory is not an archive however it is named"
+        );
+    }
+
+    /// The guess is made from the name, because a name is all a listing
+    /// has. When it is wrong, the way out is the file opening normally —
+    /// not an error page where the folder would have been.
+    #[test]
+    fn a_file_that_only_looked_like_an_archive_opens_the_ordinary_way() {
+        let mut browser = loaded(&[("photo.zip", false)]);
+        browser.update(Message::EntryActivated(0));
+        assert_eq!(browser.current_dir(), Path::new("/dir/photo.zip"));
+
+        let outcome = browser.update(Message::DirLoaded(
+            PathBuf::from("/dir/photo.zip"),
+            Err(DirError {
+                message: "photo.zip isn't an archive.".to_string(),
+                kind: DirErrorKind::NotAnArchive,
+            }),
+        ));
+
+        assert!(
+            matches!(&outcome, Outcome::Many(parts) if parts.contains(&Outcome::Activated(PathBuf::from("/dir/photo.zip")))),
+            "the file has to reach the host to be opened: {outcome:?}"
+        );
+        assert_eq!(
+            browser.current_dir(),
+            Path::new("/dir"),
+            "and the browser must not be left standing in a place that does not exist"
+        );
+        assert!(
+            !matches!(browser.load_state, LoadState::Error(_)),
+            "an error that was handled is not an error to show"
+        );
+    }
+
+    /// Going *back* out of a failed navigation would leave the failure
+    /// on the forward stack — a Forward button offering to do again the
+    /// thing that just did not work.
+    #[test]
+    fn a_failed_archive_navigation_is_not_offered_again_by_forward() {
+        let mut browser = loaded(&[("photo.zip", false)]);
+        browser.update(Message::EntryActivated(0));
+        browser.update(Message::DirLoaded(
+            PathBuf::from("/dir/photo.zip"),
+            Err(DirError {
+                message: "photo.zip isn't an archive.".to_string(),
+                kind: DirErrorKind::NotAnArchive,
+            }),
+        ));
+
+        assert!(!browser.action_context().can_go_forward);
+    }
+
+    // --- what the menus and the actions offer ---------------------------
+
+    #[test]
+    fn an_archive_row_is_offered_extracting_and_an_ordinary_file_is_not() {
+        let mut browser = loaded(&[("notes.txt", false), ("sample.zip", false)]);
+
+        browser.update(Message::EntryClicked { index: 1, ctrl: false, shift: false });
+        assert!(action::enabled(Action::Extract, &browser.action_context()));
+
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+        assert!(!action::enabled(Action::Extract, &browser.action_context()));
+    }
+
+    /// All of them, or the action would quietly skip the rest of the
+    /// selection.
+    #[test]
+    fn extracting_a_mixed_selection_is_not_offered() {
+        let mut browser = loaded(&[("notes.txt", false), ("sample.zip", false)]);
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+        browser.update(Message::EntryClicked { index: 1, ctrl: true, shift: false });
+
+        assert_eq!(browser.action_context().selected, 2);
+        assert!(!action::enabled(Action::Extract, &browser.action_context()));
+    }
+
+    #[test]
+    fn inside_an_archive_deleting_is_offered_and_the_trash_is_not() {
+        let mut browser = loaded(&[("guide.txt", false)]);
+        browser.set_archive(Some("zip".to_string()));
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+
+        let ctx = browser.action_context();
+        assert!(
+            !action::enabled(Action::Trash, &ctx),
+            "there is no trash inside a zip to file a member in"
+        );
+        assert!(
+            action::enabled(Action::DeletePermanently, &ctx),
+            "and removing it from the archive is what Delete means here"
+        );
+        assert!(action::enabled(Action::Rename, &ctx), "renaming is an edit the formats allow");
+        assert!(
+            action::enabled(Action::Cut, &ctx),
+            "cutting a member out is offered; the host removes it once a paste lands"
+        );
+        assert!(!action::enabled(Action::Compress, &ctx), "an archive inside an archive is nobody's want");
+        assert!(!action::enabled(Action::NewFolder, &ctx));
+        assert!(!action::enabled(Action::Pin, &ctx), "a path through an archive is not a place to pin");
+    }
+
+    #[test]
+    fn inside_an_archive_a_selection_can_be_extracted_out_of_it() {
+        let mut browser = loaded(&[("guide.txt", false)]);
+        browser.set_archive(Some("zip".to_string()));
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+
+        assert!(action::enabled(Action::ExtractTo, &browser.action_context()));
+        assert_eq!(
+            browser.perform(Action::ExtractTo),
+            Outcome::ExtractMembers {
+                members: vec![PathBuf::from("/dir/guide.txt")],
+                from: PathBuf::from("/dir"),
+            }
+        );
+    }
+
+    // --- what mockup `1j` draws ---------------------------------------
+
+    /// `1j` puts Packed beside Size. It means nothing outside an
+    /// archive, so it appears nowhere else — the same arrangement
+    /// `Origin` has for the Trash.
+    #[test]
+    fn the_packed_column_appears_only_inside_an_archive() {
+        let prefs = Prefs::default();
+        let inside = listing_columns(&prefs, false, true);
+        let outside = listing_columns(&prefs, false, false);
+
+        assert!(inside.contains(&Column::Packed));
+        assert!(!outside.contains(&Column::Packed), "not in an ordinary folder");
+        assert!(
+            !Column::ALL.contains(&Column::Packed),
+            "and not in the column picker, which would offer it everywhere"
+        );
+    }
+
+    /// Beside the number it is a fraction of, which is how `1j` draws
+    /// it — and only when that number is showing, since a compressed
+    /// size with nothing to compare it to is a number with no question
+    /// attached.
+    #[test]
+    fn packed_sits_immediately_after_size_and_not_without_it() {
+        let prefs = Prefs::default();
+        let columns = listing_columns(&prefs, false, true);
+        let size = columns.iter().position(|c| *c == Column::Size).unwrap();
+        assert_eq!(columns[size + 1], Column::Packed);
+
+        let mut hidden = Prefs::default();
+        hidden.columns.set(Column::Size, false);
+        assert!(
+            !listing_columns(&hidden, false, true).contains(&Column::Packed),
+            "with Size off there is nothing for Packed to be beside"
+        );
+    }
+
+    #[test]
+    fn extracting_without_a_destination_leaves_the_naming_to_the_host() {
+        let mut browser = loaded(&[("sample.zip", false)]);
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+
+        assert_eq!(
+            browser.perform(Action::Extract),
+            Outcome::Extract {
+                archives: vec![PathBuf::from("/dir/sample.zip")],
+                to: None,
+            }
+        );
+    }
+
+    #[test]
+    fn compressing_names_the_folder_the_new_archive_goes_into() {
+        let mut browser = loaded(&[("notes.txt", false)]);
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+
+        assert_eq!(
+            browser.perform(Action::Compress),
+            Outcome::Compress {
+                sources: vec![PathBuf::from("/dir/notes.txt")],
+                into: PathBuf::from("/dir"),
+            }
         );
     }
 }

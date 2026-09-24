@@ -34,6 +34,9 @@ hyprforge-ui.workspace = true
 hyprforge-look.workspace = true
 hyprforge-paths.workspace = true
 hyprforge-fileops.workspace = true
+# Archives browse as directories — see `archive.rs`. A leaf dependency,
+# like `hyprforge-fileops` beside it: nothing GUI, nothing Hyprland.
+hyprforge-archive.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -51,11 +54,21 @@ tempfile = "3"
 # asked for by feature, exactly as the app and the portal dialog already
 # ask for it.
 hyprforge-listing = { workspace = true, features = ["mock"] }
+# This crate's *own* tests browse a seeded archive, so this crate is
+# what has to ask for the mock. It used to arrive by feature
+# unification — `hyprforge-files` dev-depends on this crate with
+# `features = ["mock"]`, and that happened to switch the archive mock on
+# for this crate's tests too. That is a dependency on somebody else's
+# manifest to make your own tests compile, and it broke the moment
+# `hyprforge-files` named this crate as a git dependency in preparation
+# for standing alone.
+hyprforge-archive = { workspace = true, features = ["mock"] }
 
 [features]
-# The fake `FsBackend`, for the app's and the portal's own tests later.
-# It lives in `hyprforge-listing` now, along with the backend seam it
-# fakes; forwarding rather than renaming is what keeps the app's
-# dev-dependency line — and every test that drives a window against
-# `MockBackend` — exactly as it was written.
-mock = ["hyprforge-listing/mock"]
+# The fakes, for the app's and the portal's own tests: the filesystem
+# one lives in `hyprforge-listing` now, along with the backend seam it
+# fakes, and the archive one in `hyprforge-archive`. Forwarding rather
+# than renaming is what keeps the app's dev-dependency line — and every
+# test that drives a window against `MockBackend` — exactly as it was
+# written.
+mock = ["hyprforge-listing/mock", "hyprforge-archive/mock"]

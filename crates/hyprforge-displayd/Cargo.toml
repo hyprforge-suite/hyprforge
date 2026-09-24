@@ -1,8 +1,14 @@
 [package]
 name = "hyprforge-displayd"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A monitor-arrangement daemon for Hyprland: it watches wlr-output-management, recognises a set of displays it has seen before, and applies the layout you saved for it — plus hyprforge-displayctl to drive it from a script."
+repository = "https://github.com/adamrpostjr/hyprforge"
+documentation = "https://docs.rs/hyprforge-displayd"
+readme = "README.md"
+keywords = ["hyprland", "wayland", "monitors", "display", "linux"]
+categories = ["os::linux-apis", "command-line-utilities"]
 
 [lib]
 name = "hyprforge_displayd"
@@ -17,29 +23,42 @@ name = "hyprforge-displayctl"
 path = "src/bin/displayctl.rs"
 
 [dependencies]
+# Named as git dependencies, not versions, because the owner has not
+# published to crates.io yet: this manifest has to work unchanged both
+# inside the Hyprforge workspace and as the root of its own standalone
+# repository once `git subtree split` pulls it out. Inside the
+# workspace, the root Cargo.toml's `[patch]` section redirects these
+# straight back to the local `crates/` directories, so nothing here
+# touches the network; standalone, cargo fetches them from git.
+#
 # No `gui`: the daemon has no UI, so it skips iced entirely.
-hyprforge-core = { workspace = true, features = ["dbus"] }
+hyprforge-core = { git = "https://github.com/adamrpostjr/hyprforge", features = ["dbus"] }
 # For EXPORT_DIR only: the greeter reads the layout from there, and the
 # location must have exactly one definition.
-hyprforge-look.workspace = true
-zbus.workspace = true
-wayland-client.workspace = true
-wayland-protocols-wlr.workspace = true
+hyprforge-look = { git = "https://github.com/adamrpostjr/hyprforge" }
+
+# Spelled out rather than inherited, because a standalone crate has no
+# workspace to inherit from. `check.sh`'s dependency-pin step compares
+# every one of these against the workspace table, so the two cannot
+# drift apart silently.
+zbus = { version = "5.18", default-features = false, features = ["tokio"] }
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 # "process" for the best-effort `hyprctl monitors -j` call that gets
 # Hyprland's own connector descriptions for the static monitors.lua
-# fallback — see src/hyprctl_monitors.rs.
-tokio = { workspace = true, features = ["process"] }
-serde.workspace = true
-serde_json.workspace = true
-toml.workspace = true
-clap.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
-thiserror.workspace = true
-anyhow.workspace = true
-blake3.workspace = true
-futures-util.workspace = true
+# fallback — see src/hyprctl_monitors.rs. The rest is the workspace base.
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "process"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1.1"
+clap = { version = "4.6", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+anyhow = "1"
+blake3 = "1.8"
+futures-util = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }

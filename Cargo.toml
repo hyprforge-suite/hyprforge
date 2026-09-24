@@ -23,11 +23,9 @@ members = [
     "crates/hyprforge-bluetooth",
     "crates/hyprforge-clipboard",
     "crates/hyprforge-popup",
-    "crates/hyprforge-clipmenu",
     "crates/hyprforge-emoji",
     "crates/hyprforge-emojimenu",
     "crates/hyprforge-tray",
-    "crates/hyprforge-traymenu",
     "crates/hyprforge-network",
     "crates/hyprforge-power",
     "crates/hyprforge-settings",
@@ -36,6 +34,7 @@ members = [
     "crates/hyprforge-listing",
     "crates/hyprforge-image",
     "crates/hyprforge-photos",
+    "crates/hyprforge-archive",
     "crates/hyprforge-files-core",
     "crates/hyprforge-files",
 ]
@@ -60,7 +59,8 @@ license = "MIT"
 
 [workspace.dependencies]
 # default-features = false so nobody picks up the optional `dbus`
-# (zbus) support by accident; only the settings app and displayctl want it.
+# (zbus) support by accident; only the settings app, displayctl and the
+# tray want it.
 hyprforge-core = { path = "crates/hyprforge-core", default-features = false }
 hyprforge-process = { path = "crates/hyprforge-process", version = "0.1.0" }
 hyprforge-secret = { path = "crates/hyprforge-secret", version = "0.1.0" }
@@ -85,10 +85,8 @@ hyprforge-network = { path = "crates/hyprforge-network" }
 hyprforge-bluetooth = { path = "crates/hyprforge-bluetooth" }
 hyprforge-power = { path = "crates/hyprforge-power" }
 hyprforge-tray = { path = "crates/hyprforge-tray" }
-hyprforge-traymenu = { path = "crates/hyprforge-traymenu" }
 hyprforge-clipboard = { path = "crates/hyprforge-clipboard" }
 hyprforge-popup = { path = "crates/hyprforge-popup" }
-hyprforge-clipmenu = { path = "crates/hyprforge-clipmenu" }
 hyprforge-emoji = { path = "crates/hyprforge-emoji", version = "0.1.0" }
 hyprforge-emojimenu = { path = "crates/hyprforge-emojimenu" }
 hyprforge-fileops = { path = "crates/hyprforge-fileops" }
@@ -102,6 +100,9 @@ hyprforge-listing = { path = "crates/hyprforge-listing", version = "0.1.0" }
 hyprforge-image = { path = "crates/hyprforge-image", version = "0.1.0" }
 hyprforge-photos = { path = "crates/hyprforge-photos" }
 hyprforge-files-core = { path = "crates/hyprforge-files-core" }
+# Zip, tar and 7z, for the file manager's archive browsing. A leaf, like
+# hyprforge-mime beside it — nothing GUI and nothing Hyprland-shaped.
+hyprforge-archive = { path = "crates/hyprforge-archive" }
 hyprforge-mime = { path = "crates/hyprforge-mime" }
 hyprforge-files = { path = "crates/hyprforge-files" }
 
@@ -148,14 +149,20 @@ iced_tiny_skia = { version = "0.14", default-features = false }
 # load. Cargo unifies features across the dependency graph, so declaring
 # the formats here is what switches them on for iced.
 #
-# The list is every format `image` can *decode* in pure Rust, because the
-# image viewer opens whatever the file manager hands it and a viewer that
-# knows six formats is a viewer people stop using. It is a workspace-level
-# decision rather than one app's, for the unification reason above: these
-# switch on for the lock screen, the greeter, clipmenu and Settings too.
+# PNG, JPEG, WebP and GIF — what the image viewer opens, chosen rather
+# than maximal. It is a workspace-level decision rather than one app's,
+# for the unification reason above: these switch on for the lock screen,
+# the greeter, clipmenu, Settings and Files too, so every format added
+# here is a decoder linked into every app that draws an image.
 #
-# Two that are deliberately absent, and both would be easy to add by
-# mistake:
+# Pure-Rust decoders that are deliberately *not* on: tiff, bmp, ico, tga,
+# qoi, pnm, hdr, exr, ff — each is a small cost, but none is something a
+# person here has asked to open, and `hyprforge-image` answers "can I
+# open this" from what is enabled, so switching one on is also a claim in
+# the viewer's desktop entry. Add one deliberately, when someone has a
+# file in that format.
+#
+# Two that must stay off, and both would be easy to add by mistake:
 #
 # - `avif` is an *encoder* (ravif). Decoding AVIF needs `avif-native`,
 #   which links the system libdav1d — a C dependency for every one of the
@@ -168,21 +175,7 @@ iced_tiny_skia = { version = "0.14", default-features = false }
 #   unconditionally: there is no DDS decoder to switch on.
 #
 # HEIC is not on the list because `image` cannot do it under any feature.
-image = { version = "0.25", default-features = false, features = [
-    "png",
-    "jpeg",
-    "webp",
-    "gif",
-    "tiff",
-    "bmp",
-    "ico",
-    "tga",
-    "qoi",
-    "pnm",
-    "hdr",
-    "exr",
-    "ff",
-] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 # Run zbus on tokio rather than its default async-io executor. Without this
 # zbus polls connections on its own thread, so D-Bus method handlers execute
 # outside any tokio runtime and anything they spawn (the displayd revert
@@ -245,3 +238,18 @@ hyprforge-shortcuts = { path = "crates/hyprforge-shortcuts" }
 hyprforge-lua-import = { path = "crates/hyprforge-lua-import" }
 hyprforge-tray = { path = "crates/hyprforge-tray" }
 hyprforge-mime = { path = "crates/hyprforge-mime" }
+# The siblings the files, displayd and emojimenu split named by git URL,
+# and the popups' shared shell. Missing from this table, each one quietly
+# built from whatever GitHub had at the lockfile's commit instead of from
+# this checkout — so a fix here to the archive crate, the popup shell or
+# the file operations never reached Files, the tray or the clipboard, and
+# their tests ran against yesterday's copies. `check.sh`'s "Siblings build
+# from this checkout" step now fails if a manifest names a sibling this
+# table does not redirect.
+hyprforge-archive = { path = "crates/hyprforge-archive" }
+hyprforge-clipboard = { path = "crates/hyprforge-clipboard" }
+hyprforge-emoji = { path = "crates/hyprforge-emoji" }
+hyprforge-fileops = { path = "crates/hyprforge-fileops" }
+hyprforge-files-core = { path = "crates/hyprforge-files-core" }
+hyprforge-popup = { path = "crates/hyprforge-popup" }
+hyprforge-process = { path = "crates/hyprforge-process" }

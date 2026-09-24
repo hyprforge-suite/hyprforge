@@ -36,8 +36,16 @@ pub fn status_summary(
     rows: &[&Entry],
     selected: &std::collections::HashSet<std::path::PathBuf>,
     hidden: usize,
+    archive: Option<&str>,
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
+
+    // Mockup `1j` heads an archive's summary with what compressed it:
+    // "zstd \u{00B7} 3 entries \u{00B7} 20.3 MB \u{2192} 7.0 MB". Nothing in a
+    // listing of members says that otherwise.
+    if let Some(format) = archive {
+        parts.push(format.to_string());
+    }
 
     let folders = rows.iter().filter(|e| e.is_dir).count();
     let files = rows.len() - folders;
@@ -49,7 +57,25 @@ pub fn status_summary(
     }
 
     if let Some(total) = total_bytes(rows.iter().copied()) {
-        parts.push(human_readable_size(total));
+        // Inside an archive, what it comes to packed as well — but only
+        // when every file here states one. A tar says nothing per
+        // member (it is one compressed stream), and adding up the few
+        // that did answer would print a total that is not the total of
+        // anything.
+        let packed: Option<u64> = archive.and_then(|_| {
+            rows.iter()
+                .filter(|e| !e.is_dir)
+                .map(|e| e.packed)
+                .sum::<Option<u64>>()
+        });
+        match packed {
+            Some(packed) => parts.push(format!(
+                "{} \u{2192} {}",
+                human_readable_size(total),
+                human_readable_size(packed)
+            )),
+            None => parts.push(human_readable_size(total)),
+        }
     }
 
     if hidden > 0 {
@@ -152,6 +178,21 @@ pub fn format_owner(entry: &Entry) -> String {
     match &entry.owner {
         Some(name) => name.clone(),
         None => entry.uid.to_string(),
+    }
+}
+
+/// The "Packed" cell: how much room a member takes up inside its
+/// archive.
+///
+/// An em dash when the archive does not say — the ordinary case for a
+/// tar, where compression is applied to the whole stream and no
+/// individual member has a compressed size at all. The same rendering
+/// `format_size` gives a folder nobody could count, and for the same
+/// reason: a number nobody stated must not be shown as zero.
+pub fn format_packed(entry: &Entry) -> String {
+    match entry.packed {
+        Some(bytes) => format_size(EntrySize::Bytes(bytes)),
+        None => "\u{2014}".to_string(),
     }
 }
 
@@ -379,6 +420,7 @@ mod column_tests {
             uid: 1000,
             owner: Some("alex".to_string()),
             origin: None,
+            packed: None,
         }
     }
 
@@ -482,6 +524,7 @@ mod status_tests {
             uid: 1000,
             owner: Some("alex".to_string()),
             origin: None,
+            packed: None,
         }
     }
 
@@ -493,7 +536,7 @@ mod status_tests {
         let rows: Vec<&Entry> = entries.iter().collect();
         let chosen: HashSet<PathBuf> =
             selected.iter().map(|n| PathBuf::from("/dir").join(n)).collect();
-        status_summary(&rows, &chosen, hidden)
+        status_summary(&rows, &chosen, hidden, None)
     }
 
     /// "43 items" is a worse answer than "12 folders, 31 files" for the
@@ -592,6 +635,87 @@ mod size_cell_tests {
     #[test]
     fn a_file_renders_bytes_not_a_count() {
         assert_eq!(format_size(EntrySize::Bytes(2048)), "2.0 KiB");
+    }
+}
+
+#[cfg(test)]
+mod archive_summary_tests {
+    use super::*;
+    use crate::types::{EntryKind, EntrySize};
+    use std::collections::HashSet;
+
+    fn member(name: &str, size: u64, packed: Option<u64>) -> Entry {
+        Entry {
+            name: name.to_string(),
+            path: std::path::PathBuf::from("/a.zip").join(name),
+            is_dir: false,
+            size: EntrySize::Bytes(size),
+            modified: None,
+            is_symlink: false,
+            link_broken: false,
+            hidden: false,
+            kind: EntryKind::Other,
+            mode: 0o644,
+            uid: 1000,
+            owner: None,
+            origin: None,
+            packed,
+        }
+    }
+
+    /// Mockup `1j`: "zstd · 3 entries · 20.3 MB → 7.0 MB". Nothing in a
+    /// listing of members says what compressed them.
+    #[test]
+    fn an_archive_summary_names_the_format_and_both_totals() {
+        let rows = [member("a", 1_000_000, Some(400_000)), member("b", 1_000_000, Some(600_000))];
+        let rows: Vec<&Entry> = rows.iter().collect();
+
+        let summary = status_summary(&rows, &HashSet::new(), 0, Some("zstd"));
+        assert!(summary.starts_with("zstd \u{00B7} "), "{summary}");
+        assert!(summary.contains('\u{2192}'), "the arrow between the two totals: {summary}");
+    }
+
+    /// A compressed tar is one stream, so no member in it has a packed
+    /// size. Adding up the few that answered would print a total that
+    /// is not the total of anything.
+    #[test]
+    fn a_tar_gets_no_packed_total_rather_than_a_partial_one() {
+        let rows = [member("a", 1_000_000, None), member("b", 1_000_000, None)];
+        let rows: Vec<&Entry> = rows.iter().collect();
+
+        let summary = status_summary(&rows, &HashSet::new(), 0, Some("gzip"));
+        assert!(summary.starts_with("gzip \u{00B7} "), "{summary}");
+        assert!(!summary.contains('\u{2192}'), "no arrow without a second number: {summary}");
+    }
+
+    #[test]
+    fn one_member_without_a_packed_size_suppresses_the_whole_total() {
+        let rows = [member("a", 1_000_000, Some(400_000)), member("b", 1_000_000, None)];
+        let rows: Vec<&Entry> = rows.iter().collect();
+
+        let summary = status_summary(&rows, &HashSet::new(), 0, Some("zip"));
+        assert!(
+            !summary.contains('\u{2192}'),
+            "a total missing one member is not the total: {summary}"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_folder_says_nothing_about_packing() {
+        let rows = [member("a", 10, None)];
+        let rows: Vec<&Entry> = rows.iter().collect();
+
+        let summary = status_summary(&rows, &HashSet::new(), 0, None);
+        assert!(!summary.contains('\u{2192}'), "{summary}");
+        assert!(!summary.starts_with("zip"), "{summary}");
+    }
+
+    /// A number nobody stated must not render as zero — the rule
+    /// `ItemCount` already holds for a folder nobody could count.
+    #[test]
+    fn a_member_with_no_packed_size_shows_a_dash_rather_than_zero() {
+        assert_eq!(format_packed(&member("a", 10, None)), "\u{2014}");
+        assert_ne!(format_packed(&member("a", 10, Some(0))), "\u{2014}");
     }
 }
 

@@ -63,6 +63,17 @@ pub struct Entry {
     /// Location". `None` for everything that is not in the Trash, which
     /// is nearly everything.
     pub origin: Option<PathBuf>,
+    /// How many bytes this member takes up *inside* an archive — the
+    /// "Packed" column mockup `1j` draws beside Size.
+    ///
+    /// `None` for everything that is not in an archive, and also for a
+    /// member in a **tar**: a compressed tar is one stream, so no
+    /// individual member in it has a compressed size to report. That is
+    /// the same distinction `hyprforge_archive::Member::compressed`
+    /// makes, carried through rather than flattened to zero — a member
+    /// whose packed size nobody can state must not render as one that
+    /// compresses to nothing.
+    pub packed: Option<u64>,
 }
 
 /// What "size" means for one entry, as one value.
@@ -229,6 +240,37 @@ pub enum FilesError {
     /// so rather than imply the path was always wrong.
     #[error("{path} was removed while it was being read.")]
     VanishedMidRead { path: PathBuf },
+    /// This location is inside an encrypted archive and no password for
+    /// it is known yet.
+    ///
+    /// Its own variant, like [`FilesError::NotAnArchive`] beside it and
+    /// for the same reason: the host *acts* on it by asking for a
+    /// password, rather than showing it. Rendered as a sentence only if
+    /// nothing handles it.
+    #[error("{path} is encrypted. A password is needed to open it.")]
+    PasswordRequired { path: PathBuf },
+    /// A name this suite offered to open as an archive, whose contents
+    /// turn out not to be one.
+    ///
+    /// Its own variant rather than a message inside `Elsewhere` because
+    /// the browser *acts* on it: navigating into an archive is decided
+    /// from the name (the only thing a listing has), so this is the
+    /// answer to "that guess was wrong", and the right response is to
+    /// hand the file to whatever opens it rather than to show an error
+    /// where the folder would have been. See
+    /// `browser::Browser::apply_dir_loaded`.
+    #[error("{path} isn't an archive — its contents don't match any format that can be opened.")]
+    NotAnArchive { path: PathBuf },
+    /// A place that lists through a backend of its own — the trash, or
+    /// an archive — reporting something no `std::fs` call could have
+    /// said. The message is already a sentence written for the person
+    /// reading it, so this variant adds nothing to it.
+    ///
+    /// The `path` is carried anyway, because every other variant has one
+    /// and a caller matching on the enum to decide *where* a failure
+    /// happened should not have to special-case this.
+    #[error("{message}")]
+    Elsewhere { path: PathBuf, message: String },
     #[error("{path} couldn't be read: {source}")]
     Io {
         path: PathBuf,

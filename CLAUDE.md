@@ -157,6 +157,19 @@ own manifest, and that is the first pair with this shape. The URL is allowed
 to change; it has to change everywhere at once, which is what `split.sh`
 checks before it will split anything.
 
+**A sibling named by git URL and missing from the root `[patch]` table
+builds from GitHub, not from this checkout — and nothing fails.** Cargo
+fetches it at the lockfile's commit and builds against that. After the
+files, displayd and emojimenu split, seven siblings were missing at once:
+Files built its archive, file-operation and browser crates from a days-old
+snapshot, and the tray and clipboard their popup shell, so every local fix
+to those crates — the archive race fix included — never reached the
+binaries or the tests that exercised them. It surfaced only as a type
+mismatch while merging a branch that changed one of them. `cargo tree
+--workspace | grep github.com` is the instrument; `check.sh`'s "Siblings
+build from this checkout" step now refuses a git-named sibling the table
+does not redirect.
+
 **A git dependency on a crate that still inherits from the workspace
 resolves fine.** Cargo clones the whole repository, so the workspace root
 comes along with it. Only the crate being *extracted* needs a self-contained
@@ -399,6 +412,72 @@ paths you actually wrote (`git add crates/<the one you touched>`), and
 read `git status --short` before committing when anything else is
 running.
 
+**A name is a claim; the bytes are the thing — and the browser only
+has the name.** Whether `x.zip` is an archive can only be settled by
+reading it, and `Browser` does no I/O at all, so double-clicking one
+navigates into it on the strength of its *name*. That guess is wrong
+for a JPEG somebody renamed, and the wrong way to handle it is an
+error where the folder should have been: `apply_dir_loaded` takes the
+navigation back and hands the file to whoever opens it instead, which
+is what would have happened had the browser known. Two consequences
+worth keeping: the failed destination must not land on the *forward*
+stack (a Forward button offering to retry what just failed), and
+`FilesError::NotAnArchive` has to stay its own variant rather than a
+message inside a general one, because it is the only failure here that
+is acted on rather than shown.
+
+**A `.gz` and a `.tar.gz` have identical magic bytes, and the extension
+is not the tiebreak.** Plenty of tarballs are named `.gz` and plenty of
+single files are named `.tgz`. The only honest answer is to decompress
+the first 512 bytes and look for tar's `ustar` at offset 257, which is
+what `format::sniff` does — one block, once. Getting this wrong does
+not fail: it shows someone a single member called `linux-6.6.tar` and
+looks like the archive was empty. The same module's other half is that
+`Read::read` is allowed to return fewer bytes than asked for and a
+decompressor routinely does, so a single `read` call sees 200 bytes of
+a perfectly good tar and concludes from the 57 it was short that the
+magic was not there.
+
+**Every archive format is last-one-wins, so the member that counts is
+the *last* one with a given name.** `tar rf` appends a second
+`notes.txt` after the first and every tool that unpacks it writes both
+in order, so the file left on disk is the later one. This is the same
+rule `core::supersede` owns for `hl.env` and hyprpaper, arriving
+through a different door — and getting it backwards here is invisible
+in exactly the way that one was: the *listing* looks right, and only
+the contents are of a version the archive supersedes.
+
+**A path is not a file, and anything that opens one twice is reading two
+files.** Every archive entry point sniffed the format with one open and
+read with another, and extraction listed before it unpacked — so a rewrite
+renaming a new archive over the name between them left an edit repacking
+members it had never unpacked. Three failures in two hundred under load,
+none in three hundred idle, which is why it surfaced as a flaky test in
+`check.sh` and nowhere else. `hyprforge_archive::pin` opens once and reopens
+through `/proc/self/fd/<n>`, which names the held file rather than whoever
+has the name now. The trap on the way out: a pinned path has no *name*, and
+a `.gz`'s one member is named after its file — extraction briefly wrote
+`dump.sql` to disk as `9`. Whatever is derived from a name has to be given
+the real one separately; only the bytes come from the pin.
+
+**A library can be fetched; a binary cannot — so a package's binaries
+must all live in one crate directory.** `git subtree split --prefix=`
+takes one directory, so that directory *is* the published repository.
+`hyprforge-tray` was split without `hyprforge-traymenu` and
+`hyprforge-clipboard` without `hyprforge-clipmenu`, publishing a tray
+daemon whose right-click spawns a program the repository does not
+contain, and a clipboard daemon with no way to see the history. What
+made it invisible is that it degrades well: the daemon logs a warning
+and carries on, exactly as the rule about an absent sibling says it
+should. What made it *confusing* is that `hyprforge-settings` has five
+crates outside its repository and is fine — because those are libraries
+its manifest pulls by URL, and Cargo fetches them. Nothing fetches a
+second executable into someone's `$PATH`. A package that installs two
+binaries ships two `[[bin]]` targets from one crate, the way
+`hyprforge-displayd` already ships `displayd` and `displayctl`.
+`check.sh`'s "Every package is a repository" step now asks this of every
+`pkgname` in the PKGBUILD, because it was rediscovered twice.
+
 **An instruction from a human or another agent is not evidence.** Three
 times in one session an agent was told something false — that Adwaita was
 reachable on this machine, a JSON field order that was backwards, a claim
@@ -530,17 +609,26 @@ belongs in the design — not in a user's surprise.
 ./check.sh --quick  # tier 1 only: clippy + unit tests, no compositor
 ```
 
-Clippy must be silent and every test must pass before a commit. Eleven gated
-tiers beyond tier 1 now, each answering a different "does the system I'm
-talking to actually agree" question — Hyprland itself, the ecosystem daemons'
-parse tests, NetworkManager, BlueZ, hyprsunset, systemd-logind, UPower,
-power-profiles-daemon, the Wayland clipboard, icon names against the
-installed theme, and a tray host — and each gates on the thing it actually
-asks rather than riding another tier's `--ignored` run, for the reason in the
+Clippy must be silent and every test must pass before a commit. Fourteen
+gated tiers beyond tier 1 now, each answering a different "does the system
+I'm talking to actually agree" question — Hyprland itself, the ecosystem
+daemons' parse tests, the system's own `unzip`/`tar`/`7z`, NetworkManager,
+BlueZ, hyprsunset, systemd-logind, trash entries written by another
+implementation, UPower, power-profiles-daemon, the Wayland clipboard, icon
+names against the installed theme, the installed shared MIME database, and
+a tray host — and each gates on the thing it actually asks rather than
+riding another tier's `--ignored` run, for the reason in the
 rule above about a check that silently never runs. Tier 1 now also includes
 the "Standalone crate dependency pins" step, which compares every split-ready
 crate's hand-copied dependency versions against the workspace table — see the
-rule above about drift with no symptom.
+rule above about drift with no symptom — "Siblings build from this
+checkout", which fails on a sibling named by git that `[patch]` does not
+point back at `crates/` — and "Docs name things that exist",
+which fails on a doc naming a source file that is gone or a repository count
+that no longer matches, and checks this paragraph's own tier count. The
+judgement half of keeping docs true is the `keep-docs-current` skill in
+`.claude/skills/`; run it before committing anything that changes what a doc
+counts, names or calls unfinished.
 
 `check.sh` does **not** cover the lock screen's live behaviour. Its unit tests
 run in tier 1, but proving it locks, draws and unlocks needs the nested
@@ -580,6 +668,10 @@ hyprforge-look      Color + the runtime Theme; no iced, because the lock screen
 hyprforge-mime      the freedesktop shared MIME database: what a file is,
                     what opens it, what the default is. A leaf; depends only
                     on hyprforge-paths
+hyprforge-archive   zip, tar and 7z: what is inside one as a directory tree,
+                    extracting from it, and rewriting it. A leaf with no
+                    Hyprforge dependency at all — paths arrive from the
+                    caller, it never goes looking for one
 hyprforge-ui        the iced layer; knows nothing about Hyprland
 hyprforge-core      Hyprland config machinery — a new app should never need it
 ```

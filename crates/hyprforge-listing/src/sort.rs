@@ -290,6 +290,7 @@ mod tests {
             uid: 1000,
             owner: Some("alex".to_string()),
             origin: None,
+            packed: None,
         }
     }
 

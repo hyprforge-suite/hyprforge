@@ -157,15 +157,8 @@ impl Types {
     pub fn describe_from(&mut self, dirs: &[std::path::PathBuf], mime: &str, language: Option<&str>) -> Option<&str> {
         let canonical = self.canonical(mime).to_string();
         if !self.descriptions.contains_key(&canonical) {
-            let (media, subtype) = canonical.split_once('/')?;
-            for dir in dirs {
-                let path = dir.join("mime").join(media).join(format!("{subtype}.xml"));
-                if let Ok(text) = std::fs::read_to_string(&path) {
-                    if let Some(comment) = comment_in(&text, language) {
-                        self.descriptions.insert(canonical.clone(), comment);
-                        break;
-                    }
-                }
+            if let Some(comment) = description_of(dirs, &canonical, language) {
+                self.descriptions.insert(canonical.clone(), comment);
             }
         }
         self.descriptions.get(&canonical).map(String::as_str)
@@ -175,6 +168,34 @@ impl Types {
     pub fn is_empty(&self) -> bool {
         self.aliases.is_empty() && self.parents.is_empty()
     }
+}
+
+/// One type's description, read and not remembered.
+///
+/// The uncached half of [`Types::describe_from`], public because the
+/// caller that needs a screenful of descriptions at once has nowhere to
+/// put a cache: it holds the database behind an `Arc` and cannot borrow
+/// it mutably. Reading a handful of small files off the UI thread is
+/// the cheaper of the two problems.
+///
+/// `mime` must already be canonical — this reads a file named after it
+/// and resolves no aliases, which is the difference between this and
+/// the method.
+pub fn description_of(
+    dirs: &[std::path::PathBuf],
+    mime: &str,
+    language: Option<&str>,
+) -> Option<String> {
+    let (media, subtype) = mime.split_once('/')?;
+    for dir in dirs {
+        let path = dir.join("mime").join(media).join(format!("{subtype}.xml"));
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Some(comment) = comment_in(&text, language) {
+                return Some(comment);
+            }
+        }
+    }
+    None
 }
 
 /// `a b` per line, ignoring blanks and comments.

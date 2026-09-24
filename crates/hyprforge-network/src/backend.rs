@@ -31,9 +31,61 @@ pub struct Status {
     pub connected_to: Option<Ssid>,
 }
 
+/// Where one wired interface stands.
+///
+/// Four states rather than connected-or-not, because the two ways of not
+/// being connected want different things done about them: an unplugged
+/// cable is fixed at the desk, and a cable that is in with nothing
+/// active is fixed from a menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WiredState {
+    Connected,
+    /// NetworkManager is bringing a connection up — DHCP, mostly.
+    Connecting,
+    /// No carrier: nothing at the other end of the cable, or no cable.
+    CableUnplugged,
+    /// A carrier, and no connection active on it.
+    Disconnected,
+}
+
+/// One Ethernet interface NetworkManager manages.
+///
+/// Its own list rather than more fields on [`Status`]: a machine can have
+/// several (a laptop's port and a dock's), and none at all is the
+/// ordinary case for a laptop without a dock — so "no wired interfaces"
+/// is an empty list, never an error.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WiredStatus {
+    /// The kernel's name for it — `enp3s0`, `eth0`. Also the handle to
+    /// connect and disconnect it by, since it is stable while the device
+    /// exists and needs no D-Bus type in this model.
+    pub interface: String,
+    pub state: WiredState,
+    /// The active connection's name, as NetworkManager lists it, while
+    /// connected or connecting.
+    pub connection: Option<String>,
+    /// Negotiated link speed in Mb/s, when there is a link to have one.
+    pub speed_mbps: Option<u32>,
+}
+
 #[async_trait::async_trait]
 pub trait NetworkBackend: Send + Sync {
     async fn status(&self) -> Result<Status, NetworkError>;
+
+    /// Every Ethernet interface NetworkManager manages, in its own order.
+    /// Empty on a machine with none. Read-only.
+    async fn wired(&self) -> Result<Vec<WiredStatus>, NetworkError>;
+
+    /// Brings `interface` up with whichever saved connection
+    /// NetworkManager judges best for it — the same choice it makes on
+    /// its own when a cable is plugged in, which is why nothing here
+    /// picks one.
+    async fn wired_connect(&self, interface: &str) -> Result<(), NetworkError>;
+
+    /// Takes `interface` down, and keeps it down: NetworkManager does not
+    /// autoconnect a device someone disconnected until it is asked to or
+    /// the cable is replugged.
+    async fn wired_disconnect(&self, interface: &str) -> Result<(), NetworkError>;
 
     /// Access points currently visible. Does **not** trigger a scan —
     /// [`NetworkBackend::request_scan`] does, and it is separate because
@@ -74,6 +126,13 @@ pub trait NetworkBackend: Send + Sync {
     async fn forget(&self, id: &str) -> Result<(), NetworkError>;
 
     async fn set_radio(&self, on: bool) -> Result<(), NetworkError>;
+}
+
+/// The refusal for a wired interface that is not there — unplugged USB
+/// adapter, undocked laptop — shared so the mock and NetworkManager say
+/// the same thing.
+pub fn no_such_wired_interface(interface: &str) -> NetworkError {
+    NetworkError::Refused(format!("There's no wired interface called {interface} any more."))
 }
 
 /// Sorts access points the way the list shows them: strongest first, and
@@ -129,6 +188,10 @@ pub mod mock {
         pub forgotten: Mutex<Vec<String>>,
         /// When set, `connect` reports a rejected passphrase.
         pub reject_psk: Mutex<bool>,
+        pub wired: Mutex<Vec<WiredStatus>>,
+        /// Set for a machine with no Wi-Fi adapter: the Wi-Fi calls
+        /// answer [`NetworkError::NoWifiDevice`], as NetworkManager does.
+        pub no_wifi: Mutex<bool>,
     }
 
     impl MockBackend {
@@ -148,6 +211,19 @@ pub mod mock {
             }
             Ok(())
         }
+
+        fn set_wired(
+            &self,
+            interface: &str,
+            change: impl FnOnce(&mut WiredStatus) -> Result<(), NetworkError>,
+        ) -> Result<(), NetworkError> {
+            self.guard()?;
+            let mut wired = self.wired.lock().unwrap();
+            let Some(w) = wired.iter_mut().find(|w| w.interface == interface) else {
+                return Err(no_such_wired_interface(interface));
+            };
+            change(w)
+        }
     }
 
     #[async_trait::async_trait]
@@ -162,11 +238,43 @@ pub mod mock {
 
         async fn access_points(&self) -> Result<Vec<AccessPoint>, NetworkError> {
             self.guard()?;
+            if *self.no_wifi.lock().unwrap() {
+                return Err(NetworkError::NoWifiDevice);
+            }
             Ok(self.points.lock().unwrap().clone())
+        }
+
+        async fn wired(&self) -> Result<Vec<WiredStatus>, NetworkError> {
+            self.guard()?;
+            Ok(self.wired.lock().unwrap().clone())
+        }
+
+        async fn wired_connect(&self, interface: &str) -> Result<(), NetworkError> {
+            self.set_wired(interface, |w| {
+                if w.state == WiredState::CableUnplugged {
+                    return Err(NetworkError::Refused("The cable is unplugged.".to_string()));
+                }
+                w.state = WiredState::Connected;
+                w.connection = Some("Wired connection 1".to_string());
+                Ok(())
+            })
+        }
+
+        async fn wired_disconnect(&self, interface: &str) -> Result<(), NetworkError> {
+            self.set_wired(interface, |w| {
+                if w.state != WiredState::CableUnplugged {
+                    w.state = WiredState::Disconnected;
+                }
+                w.connection = None;
+                Ok(())
+            })
         }
 
         async fn request_scan(&self) -> Result<(), NetworkError> {
             self.guard()?;
+            if *self.no_wifi.lock().unwrap() {
+                return Err(NetworkError::NoWifiDevice);
+            }
             *self.scans.lock().unwrap() += 1;
             Ok(())
         }
@@ -300,6 +408,46 @@ mod tests {
         let listed = for_display(vec![ap("home", "aa", 60), ap("", "bb", 90)]);
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].ssid.to_display_string(), "home");
+    }
+
+    fn port(interface: &str, state: WiredState) -> WiredStatus {
+        WiredStatus { interface: interface.to_string(), state, connection: None, speed_mbps: None }
+    }
+
+    /// No Ethernet at all is a laptop without a dock — an empty list —
+    /// and NetworkManager being down is still its own error, here as
+    /// everywhere else in this crate.
+    #[tokio::test]
+    async fn no_wired_interfaces_is_an_empty_list_and_a_stopped_daemon_is_not() {
+        let backend = MockBackend::new();
+        assert_eq!(backend.wired().await.unwrap(), vec![]);
+        *backend.unavailable.lock().unwrap() = true;
+        assert!(matches!(backend.wired().await, Err(NetworkError::Unavailable)));
+    }
+
+    #[tokio::test]
+    async fn connecting_an_unplugged_port_is_refused_and_says_why() {
+        let backend = MockBackend::new();
+        *backend.wired.lock().unwrap() = vec![port("enp3s0", WiredState::CableUnplugged)];
+        let err = backend.wired_connect("enp3s0").await.unwrap_err();
+        assert!(err.to_string().contains("unplugged"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_interface_that_has_gone_is_refused_by_name() {
+        let backend = MockBackend::new();
+        let err = backend.wired_connect("enx001122").await.unwrap_err();
+        assert!(err.to_string().contains("enx001122"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_port_disconnected_and_reconnected_ends_up_connected() {
+        let backend = MockBackend::new();
+        *backend.wired.lock().unwrap() = vec![port("enp3s0", WiredState::Connected)];
+        backend.wired_disconnect("enp3s0").await.unwrap();
+        assert_eq!(backend.wired().await.unwrap()[0].state, WiredState::Disconnected);
+        backend.wired_connect("enp3s0").await.unwrap();
+        assert_eq!(backend.wired().await.unwrap()[0].state, WiredState::Connected);
     }
 
     #[tokio::test]

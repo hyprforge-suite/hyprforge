@@ -1,15 +1,20 @@
-//! `hyprforge-trayd`: four `org.kde.StatusNotifierItem`s — Wi-Fi and
-//! Bluetooth joined to `hyprforge-network` and `hyprforge-bluetooth`, plus
-//! keep-awake (`hyprforge-power`, over `systemd-logind`) and night light
-//! (`hyprforge-ecosystem::sunset_control`, over `hyprctl hyprsunset`).
+//! `hyprforge-trayd`: six `org.kde.StatusNotifierItem`s — network (Wi-Fi
+//! and Ethernet in one icon) and Bluetooth, joined to `hyprforge-network`
+//! and `hyprforge-bluetooth`,
+//! keep-awake (`hyprforge-power`, over `systemd-logind`), night light
+//! (`hyprforge-ecosystem::sunset_control`, over `hyprctl hyprsunset`),
+//! battery and power profile (`hyprforge-power` again, over UPower and
+//! `power-profiles-daemon`), and display layouts (`hyprforge-displayd`,
+//! through `hyprforge_core::displayd_proxy`).
 //!
 //! Everything that decides *which icon* a state deserves lives in the
 //! pure functions below (`network_item`, `bluetooth_item`, `keep_awake_item`,
-//! `night_light_item`) — no D-Bus, no I/O — so the interesting question is
-//! unit-tested without a bus, a bar, a radio, or hyprsunset, the same
-//! split `crate::item` documents. Everything else here is plumbing:
-//! polling the four backends, keeping four `TrayIcon`s in sync, and
-//! forwarding clicks to `hyprforge-settings`.
+//! `night_light_item`, `power_item`, `displays_item`) — no D-Bus, no
+//! I/O — so the
+//! interesting question is unit-tested without a bus, a bar, a radio, or
+//! hyprsunset, the same split `crate::item` documents. Everything else
+//! here is plumbing: polling the backends, keeping one `TrayIcon` per
+//! item in sync, and forwarding clicks to `hyprforge-settings`.
 //!
 //! Whether an icon is shown at all is `hyprforge_tray::prefs`, re-read
 //! every poll tick (`refresh_prefs`) so a toggle in Settings takes effect
@@ -20,17 +25,19 @@
 //! the bus name a host is showing.
 //!
 //! Every menu (`network_menu`, `bluetooth_menu`, `keep_awake_menu`,
-//! `night_light_menu`) is built through `hyprforge_tray::menu::radio_menu`,
-//! which is the one shape all four follow: a toggle (or, when there is
+//! `night_light_menu`, `power_menu`, `displays_menu`) is built through
+//! `hyprforge_tray::menu::radio_menu`, which is the one shape all of them
+//! follow: a toggle (or, when there is
 //! nothing to toggle, a single disabled row saying why), the content that
 //! toggle governs, and a settings row — never omitted, unavailable states
 //! included. See `radio_menu`'s own doc for the reasoning.
 //!
 //! # Where every menu's settings row goes
 //!
-//! All four now land somewhere real. `--screen network` and
+//! All of them land somewhere real. `--screen network` and
 //! `--screen bluetooth` open those screens directly; `--screen power`
-//! opens the Power screen, where keep-awake now lives (it moved off the
+//! opens the Power screen — for the power icon, and for keep-awake,
+//! which lives there now too (it moved off the
 //! Desktop screen's `Idle` tab); `--screen night-light` deep-links to the
 //! `NightLight` tab of the Desktop screen (`hyprforge-settings`'s
 //! `screen_from_cli`) — which is also what `TrayItem::activate_screen`
@@ -43,11 +50,18 @@
 use hyprforge_bluetooth::backend::{for_display as bt_for_display, BluetoothBackend};
 use hyprforge_bluetooth::{Address, AdapterState, BlueZBackend, Device};
 use hyprforge_bluetooth::Status as BtStatus;
+use futures_util::StreamExt;
+use hyprforge_core::displayd_proxy::DisplaydProxy;
 use hyprforge_ecosystem::sunset_control::{Hyprsunset, SunsetBackend, SunsetControlError};
 use hyprforge_network::backend::{for_display as net_for_display, NetworkBackend, SavedNetwork};
-use hyprforge_network::{AccessPoint, NetworkManagerBackend, RadioState, Ssid};
+use hyprforge_network::{
+    AccessPoint, NetworkError, NetworkManagerBackend, RadioState, Ssid, WiredState, WiredStatus,
+};
 use hyprforge_network::Status as NetStatus;
-use hyprforge_power::{InhibitBackend, InhibitorInfo, LogindBackend, WhatSet};
+use hyprforge_power::{
+    BatteryBackend, BatteryInfo, BatteryState, InhibitBackend, InhibitorInfo, LogindBackend,
+    PowerProfile, PowerProfilesBackend, PowerProfilesDaemonBackend, UPowerBackend, WhatSet,
+};
 use hyprforge_tray::menu::{radio_menu, Menu, MenuItem};
 use hyprforge_tray::prefs::{self, Prefs};
 use hyprforge_tray::{watcher_present, Category, TrayIcon, TrayItem};
@@ -207,11 +221,31 @@ async fn main() -> anyhow::Result<()> {
     )
     .await;
 
+    let power_icon = register_with_retry(
+        power_item(&BatteryReading::Unavailable, &ProfileReading::Unavailable),
+        power_menu(&BatteryReading::Unavailable, &ProfileReading::Unavailable),
+        4,
+        clicks_tx.clone(),
+        menu_clicks_tx.clone(),
+    )
+    .await;
+
+    let displays_icon = register_with_retry(
+        displays_item(&DisplaysReading::Unavailable, false),
+        displays_menu(&DisplaysReading::Unavailable, false),
+        5,
+        clicks_tx.clone(),
+        menu_clicks_tx.clone(),
+    )
+    .await;
+
     let icons = vec![
         ManagedIcon::new(network_icon, 0),
         ManagedIcon::new(bluetooth_icon, 1),
         ManagedIcon::new(keep_awake_icon, 2),
         ManagedIcon::new(night_light_icon, 3),
+        ManagedIcon::new(power_icon, 4),
+        ManagedIcon::new(displays_icon, 5),
     ];
 
     // This daemon's own memory of whether night light is on — see
@@ -219,17 +253,24 @@ async fn main() -> anyhow::Result<()> {
     // answer that question. Shared between `poll_loop`, which reads it to
     // render the icon, and `handle_menu_clicks`, the only writer.
     let night_light_belief: NightLightBelief = Arc::new(std::sync::Mutex::new(true));
+    let revert_deadline: RevertDeadline = Arc::new(std::sync::Mutex::new(None));
 
     let poll_task = tokio::spawn(poll_loop(
         icons.clone(),
         night_light_belief.clone(),
+        revert_deadline.clone(),
         clicks_tx.clone(),
         menu_clicks_tx.clone(),
         refresh_rx,
     ));
     let click_task = tokio::spawn(handle_clicks(clicks_rx));
-    let menu_click_task =
-        tokio::spawn(handle_menu_clicks(menu_clicks_rx, refresh_tx.clone(), night_light_belief));
+    let menu_click_task = tokio::spawn(handle_menu_clicks(
+        menu_clicks_rx,
+        refresh_tx.clone(),
+        night_light_belief,
+        revert_deadline.clone(),
+    ));
+    let revert_task = tokio::spawn(watch_display_reverts(revert_deadline, refresh_tx.clone()));
     let prefs_watch_task = tokio::spawn(prefs_watch_loop(refresh_tx));
     let reannounce_task = tokio::spawn(reannounce_loop(probe, icons));
 
@@ -243,6 +284,7 @@ async fn main() -> anyhow::Result<()> {
         r = menu_click_task => log_task_exit("menu-clicks", r),
         r = reannounce_task => log_task_exit("reannounce", r),
         r = prefs_watch_task => log_task_exit("prefs-watch", r),
+        r = revert_task => log_task_exit("display-reverts", r),
     }
 
     Ok(())
@@ -356,6 +398,28 @@ async fn keep_awake_backend(state: &mut Reconnecting<LogindBackend>) -> Option<A
     }
 }
 
+async fn upower_backend(state: &mut Reconnecting<UPowerBackend>) -> Option<Arc<UPowerBackend>> {
+    match state.get_or_connect(UPowerBackend::connect).await {
+        Ok(backend) => Some(backend),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not connect to UPower; will retry");
+            None
+        }
+    }
+}
+
+async fn profiles_backend(
+    state: &mut Reconnecting<PowerProfilesDaemonBackend>,
+) -> Option<Arc<PowerProfilesDaemonBackend>> {
+    match state.get_or_connect(PowerProfilesDaemonBackend::connect).await {
+        Ok(backend) => Some(backend),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not connect to power-profiles-daemon; will retry");
+            None
+        }
+    }
+}
+
 /// This daemon's own belief about whether night light is on, shared
 /// between the loop that samples it and the loop that acts on menu
 /// clicks.
@@ -393,7 +457,16 @@ async fn sample_network(state: &mut Reconnecting<NetworkManagerBackend>) -> (Tra
             // scan; that is not "unavailable", just "nothing read this
             // tick" — an empty list here still lets the item and menu
             // render, just without a signal reading or any other rows.
-            let points = backend.access_points().await.unwrap_or_default();
+            // `NoWifiDevice` is the one failure that means something: a
+            // machine with no Wi-Fi at all, whose icon is the wire's.
+            let (points, wifi_present) = match backend.access_points().await {
+                Ok(points) => (points, true),
+                Err(NetworkError::NoWifiDevice) => (Vec::new(), false),
+                Err(_) => (Vec::new(), true),
+            };
+            // Likewise a failed wired read degrades to "no wired rows
+            // this tick", never to the whole icon going unavailable.
+            let wired = backend.wired().await.unwrap_or_default();
             let strength = status
                 .connected_to
                 .as_ref()
@@ -402,9 +475,18 @@ async fn sample_network(state: &mut Reconnecting<NetworkManagerBackend>) -> (Tra
             // otherwise-fine menu disappear, only omit the "already
             // saved" distinction for this tick.
             let saved = backend.saved_networks().await.unwrap_or_default();
-            let item = network_item(Some(&status), status.connected_to.as_ref(), strength, false);
-            let menu =
-                network_menu(Some(&status), status.connected_to.as_ref(), false, &points, &saved);
+            let item = with_wired(
+                network_item(Some(&status), status.connected_to.as_ref(), strength, false),
+                status.connected_to.as_ref(),
+                &wired,
+                wifi_present,
+            );
+            let menu = with_wired_menu(
+                network_menu(Some(&status), status.connected_to.as_ref(), false, &points, &saved),
+                &wired,
+                wifi_present,
+                false,
+            );
             (item, menu)
         }
         Err(e) => {
@@ -460,6 +542,198 @@ async fn sample_keep_awake(state: &mut Reconnecting<LogindBackend>) -> (TrayItem
         Err(e) => {
             tracing::warn!(error = %e, "logind held() call failed");
             (keep_awake_item(None, &[], true), keep_awake_menu(None, &[], true))
+        }
+    }
+}
+
+/// One tick's worth of the power icon and its menu.
+///
+/// Two daemons, asked independently, and each failure kept to its own
+/// half — see [`BatteryReading`] and [`ProfileReading`].
+async fn sample_power(
+    upower: &mut Reconnecting<UPowerBackend>,
+    profiles: &mut Reconnecting<PowerProfilesDaemonBackend>,
+) -> (TrayItem, Menu) {
+    let battery = match upower_backend(upower).await {
+        None => BatteryReading::Unavailable,
+        Some(backend) => match backend.battery().await {
+            Ok(Some(info)) => BatteryReading::Present(info),
+            Ok(None) => BatteryReading::Absent,
+            Err(e) => {
+                tracing::warn!(error = %e, "UPower battery call failed");
+                BatteryReading::Unavailable
+            }
+        },
+    };
+    let profile = match profiles_backend(profiles).await {
+        None => ProfileReading::Unavailable,
+        Some(backend) => match backend.active_profile().await {
+            Ok(active) => {
+                // A failed list read still knows the active profile, and
+                // offering only that one is honest; offering all three
+                // would be a guess about what this machine supports.
+                let offered = backend.profiles().await.unwrap_or_else(|_| vec![active]);
+                ProfileReading::Known { active, offered }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "power-profiles-daemon call failed");
+                ProfileReading::Unavailable
+            }
+        },
+    };
+    (power_item(&battery, &profile), power_menu(&battery, &profile))
+}
+
+/// How long a displayd query may take — `command::TIMEOUT`, the bound
+/// every other wait on another process in this suite uses. zbus has no
+/// reply timeout on a `#[proxy]` method, so it is applied at the call.
+const DISPLAYD_CALL_TIMEOUT: Duration = hyprforge_core::command::TIMEOUT;
+
+/// Applying and reverting commit to the compositor and wait for it to
+/// settle — up to 18s of legitimate work inside displayd — so they get
+/// the same longer bound the Settings app's Monitors screen gives them,
+/// for the reason written there: a shorter one abandons an apply after
+/// the mode has already changed.
+const DISPLAYD_APPLY_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// Bounds one displayd call, naming it in the error the log will carry.
+async fn displayd_bounded<T>(
+    what: &str,
+    within: Duration,
+    call: impl std::future::Future<Output = zbus::Result<T>>,
+) -> anyhow::Result<T> {
+    match tokio::time::timeout(within, call).await {
+        Ok(result) => Ok(result?),
+        Err(_) => anyhow::bail!("{what} timed out after {}s", within.as_secs()),
+    }
+}
+
+/// The session bus, connected once and kept — displayd is reached by
+/// name over it, so the connection outlives the daemon restarting.
+async fn session_bus(state: &mut Reconnecting<zbus::Connection>) -> Option<Arc<zbus::Connection>> {
+    let connect = || async {
+        match tokio::time::timeout(DISPLAYD_CALL_TIMEOUT, zbus::Connection::session()).await {
+            Ok(result) => result.map_err(anyhow::Error::from),
+            Err(_) => Err(anyhow::anyhow!("the session bus isn't answering")),
+        }
+    };
+    match state.get_or_connect(connect).await {
+        Ok(conn) => Some(conn),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not connect to the session bus; will retry");
+            None
+        }
+    }
+}
+
+async fn read_displays(conn: &zbus::Connection) -> anyhow::Result<DisplaysReading> {
+    let proxy =
+        displayd_bounded("connecting to displayd", DISPLAYD_CALL_TIMEOUT, DisplaydProxy::new(conn))
+            .await?;
+    let profiles = displayd_bounded("listing layouts", DISPLAYD_CALL_TIMEOUT, proxy.list_profiles())
+        .await?
+        .into_iter()
+        .map(|(id, name, _heads, last_used)| DisplayProfile { id, name, last_used })
+        .collect();
+    let current =
+        displayd_bounded("reading the current layout", DISPLAYD_CALL_TIMEOUT, proxy.get_current_profile())
+            .await?;
+    Ok(DisplaysReading::Known {
+        profiles,
+        // `""` is displayd's "nothing matches", by its own contract.
+        current: Some(current).filter(|id| !id.is_empty()),
+    })
+}
+
+/// One tick's worth of the displays icon and its menu.
+async fn sample_displays(
+    bus: &mut Reconnecting<zbus::Connection>,
+    deadline: &RevertDeadline,
+) -> (TrayItem, Menu) {
+    let pending = revert_pending(
+        *deadline.lock().unwrap_or_else(|e| e.into_inner()),
+        tokio::time::Instant::now(),
+    );
+    let reading = match session_bus(bus).await {
+        None => DisplaysReading::Unavailable,
+        Some(conn) => read_displays(&conn).await.unwrap_or_else(|e| {
+            // Not running is the common case, and is exactly what the
+            // icon says; the detail is for the log.
+            tracing::debug!(error = %e, "displayd didn't answer");
+            DisplaysReading::Unavailable
+        }),
+    };
+    (displays_item(&reading, pending), displays_menu(&reading, pending))
+}
+
+/// Records that displayd will roll back in `seconds`, and makes sure the
+/// icon is redrawn both now and once the deadline passes — the second so
+/// that a countdown which simply runs out (no `RevertResolved` from a
+/// daemon that died) does not leave the icon asking.
+fn set_revert_deadline(
+    deadline: &RevertDeadline,
+    seconds: u32,
+    refresh: &tokio::sync::mpsc::UnboundedSender<()>,
+) {
+    let wait = Duration::from_secs(u64::from(seconds));
+    *deadline.lock().unwrap_or_else(|e| e.into_inner()) = Some(tokio::time::Instant::now() + wait);
+    let _ = refresh.send(());
+    let refresh = refresh.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(wait + Duration::from_secs(1)).await;
+        let _ = refresh.send(());
+    });
+}
+
+fn clear_revert_deadline(deadline: &RevertDeadline, refresh: &tokio::sync::mpsc::UnboundedSender<()>) {
+    *deadline.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    let _ = refresh.send(());
+}
+
+/// Follows displayd's revert signals for as long as this daemon runs.
+///
+/// Signals rather than polling because a revert window is shorter than
+/// two poll ticks: polled, a layout applied from the Settings app could
+/// come and go without this icon ever asking to keep it. Always
+/// subscribed, whether or not the icon is shown — a match rule costs
+/// nothing while no signal arrives, and subscribing only once the icon
+/// is switched on would miss a countdown already running.
+async fn watch_display_reverts(deadline: RevertDeadline, refresh: tokio::sync::mpsc::UnboundedSender<()>) {
+    loop {
+        if let Err(e) = follow_display_reverts(&deadline, &refresh).await {
+            tracing::debug!(error = %e, "not following displayd's revert signals; will retry");
+        }
+        tokio::time::sleep(RETRY_INTERVAL).await;
+    }
+}
+
+async fn follow_display_reverts(
+    deadline: &RevertDeadline,
+    refresh: &tokio::sync::mpsc::UnboundedSender<()>,
+) -> anyhow::Result<()> {
+    let conn = match tokio::time::timeout(DISPLAYD_CALL_TIMEOUT, zbus::Connection::session()).await {
+        Ok(result) => result?,
+        Err(_) => anyhow::bail!("the session bus isn't answering"),
+    };
+    let proxy =
+        displayd_bounded("connecting to displayd", DISPLAYD_CALL_TIMEOUT, DisplaydProxy::new(&conn))
+            .await?;
+    let mut pending =
+        displayd_bounded("subscribing to RevertPending", DISPLAYD_CALL_TIMEOUT, proxy.receive_revert_pending())
+            .await?;
+    let mut resolved = displayd_bounded(
+        "subscribing to RevertResolved",
+        DISPLAYD_CALL_TIMEOUT,
+        proxy.receive_revert_resolved(),
+    )
+    .await?;
+    loop {
+        tokio::select! {
+            Some(signal) = pending.next() => {
+                set_revert_deadline(deadline, signal.args()?.seconds, refresh);
+            }
+            Some(_) = resolved.next() => clear_revert_deadline(deadline, refresh),
+            else => anyhow::bail!("displayd's signal streams ended"),
         }
     }
 }
@@ -668,6 +942,7 @@ async fn prefs_watch_loop(refresh: tokio::sync::mpsc::UnboundedSender<()>) {
 async fn poll_loop(
     icons: Vec<ManagedIcon>,
     night_light_belief: NightLightBelief,
+    revert_deadline: RevertDeadline,
     clicks: tokio::sync::mpsc::UnboundedSender<String>,
     menu_clicks: tokio::sync::mpsc::UnboundedSender<String>,
     mut refresh_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
@@ -675,6 +950,9 @@ async fn poll_loop(
     let mut net_state = Reconnecting::new();
     let mut bt_state = Reconnecting::new();
     let mut power_state = Reconnecting::new();
+    let mut upower_state = Reconnecting::new();
+    let mut profiles_state = Reconnecting::new();
+    let mut bus_state = Reconnecting::new();
     // Every icon starts registered (see `main`), so the preferences this
     // loop starts from must match that — otherwise an icon the user
     // already switched off would flash on screen for up to one
@@ -701,8 +979,15 @@ async fn poll_loop(
         // What each icon wants, and whether it is currently registered —
         // both settled before anything is sampled, because together they
         // decide whether sampling is needed at all (`needs_sampling`).
-        let wanted = [prefs.network, prefs.bluetooth, prefs.keep_awake, prefs.night_light];
-        let mut up = [false; 4];
+        let wanted = [
+            prefs.network,
+            prefs.bluetooth,
+            prefs.keep_awake,
+            prefs.night_light,
+            prefs.power,
+            prefs.displays,
+        ];
+        let mut up = [false; 6];
         for (slot, is_up) in icons.iter().zip(up.iter_mut()) {
             *is_up = slot.slot.lock().await.is_some();
         }
@@ -724,12 +1009,20 @@ async fn poll_loop(
             true => Some(sample_night_light(&night_light_belief).await),
             false => None,
         };
+        let pw = match needs_sampling(wanted[4], up[4]) {
+            true => Some(sample_power(&mut upower_state, &mut profiles_state).await),
+            false => None,
+        };
+        let dp = match needs_sampling(wanted[5], up[5]) {
+            true => Some(sample_displays(&mut bus_state, &revert_deadline).await),
+            false => None,
+        };
 
         // One row per icon, lined up against `icons` in the same fixed
         // order `main` registered them in — see `ManagedIcon`'s doc
         // comment for why this is a loop rather than four repeated
         // `sync_icon` calls.
-        let ticks: [Option<(TrayItem, Menu)>; 4] = [net, bt, ka, nl];
+        let ticks: [Option<(TrayItem, Menu)>; 6] = [net, bt, ka, nl, pw, dp];
         for ((icon, sampled), want) in icons.iter().zip(ticks).zip(wanted) {
             let Some((item, menu)) = sampled else { continue };
             sync_icon(&icon.slot, want, item, menu, icon.index, &clicks, &menu_clicks).await;
@@ -849,7 +1142,9 @@ fn network_item(
     unavailable: bool,
 ) -> TrayItem {
     let id = NETWORK_ITEM_ID.to_string();
-    let title = "Wi-Fi".to_string();
+    // "Network", not "Wi-Fi": this one icon covers Ethernet too — see
+    // `with_wired`.
+    let title = "Network".to_string();
 
     let Some(status) = status.filter(|_| !unavailable) else {
         return TrayItem {
@@ -862,7 +1157,7 @@ fn network_item(
             status: TrayStatus::Active,
             title,
             icon_name: "dialog-warning".to_string(),
-            tooltip_title: "Wi-Fi unavailable".to_string(),
+            tooltip_title: "Network unavailable".to_string(),
             tooltip_body: "NetworkManager isn't running.".to_string(),
         };
     };
@@ -1064,7 +1359,7 @@ fn network_menu(
     let settings_row = MenuItem::standard("Network settings…", "wifi:settings");
 
     let Some(status) = status.filter(|_| !unavailable) else {
-        return radio_menu(vec![MenuItem::disabled("Wi-Fi unavailable")], Vec::new(), settings_row);
+        return radio_menu(vec![MenuItem::disabled("Network unavailable")], Vec::new(), settings_row);
     };
 
     let top = match status.radio {
@@ -1123,6 +1418,147 @@ fn network_menu(
     }
 
     radio_menu(top, content, settings_row)
+}
+
+/// How a wired interface is named in a row: plainly "Wired" when it is
+/// the only one, and with its interface name when there are several, so
+/// a laptop's port and a dock's can be told apart.
+fn wired_label(port: &WiredStatus, several: bool) -> String {
+    if several {
+        format!("Wired ({})", port.interface)
+    } else {
+        "Wired".to_string()
+    }
+}
+
+/// The network icon, given what the Wi-Fi half already decided.
+///
+/// A connected cable outranks Wi-Fi, because NetworkManager routes over it
+/// ahead of Wi-Fi (its default metrics put Ethernet at 100 and Wi-Fi at
+/// 600): the icon should name the link traffic actually uses. Otherwise
+/// Wi-Fi's own icon stands — unless this machine has no Wi-Fi hardware at
+/// all, where a Wi-Fi icon saying "not connected" would describe a radio
+/// that is not there, and the icon is the wire's instead.
+fn with_wired(
+    wifi: TrayItem,
+    connected_ssid: Option<&Ssid>,
+    wired: &[WiredStatus],
+    wifi_present: bool,
+) -> TrayItem {
+    let several = wired.len() > 1;
+    let wired_item = |icon: &str, tooltip_title: String, tooltip_body: String| TrayItem {
+        icon_name: icon.to_string(),
+        tooltip_title,
+        tooltip_body,
+        ..wifi.clone()
+    };
+
+    if let Some(port) = wired.iter().find(|p| p.state == WiredState::Connected) {
+        let mut body: Vec<String> = Vec::new();
+        if several {
+            body.push(port.interface.clone());
+        }
+        if let Some(speed) = port.speed_mbps {
+            body.push(format!("{speed} Mb/s"));
+        }
+        if let Some(ssid) = connected_ssid {
+            body.push(format!("also on Wi-Fi ({})", ssid.to_display_string()));
+        }
+        return wired_item(
+            "network-wired-activated-symbolic",
+            match &port.connection {
+                Some(name) => format!("Wired — {name}"),
+                None => "Wired".to_string(),
+            },
+            body.join(" · "),
+        );
+    }
+    // Wi-Fi connected while a cable is still getting an address: Wi-Fi is
+    // what works right now, so it keeps the icon until the wire is up.
+    if connected_ssid.is_none() {
+        if let Some(port) = wired.iter().find(|p| p.state == WiredState::Connecting) {
+            return wired_item(
+                "network-wired-symbolic",
+                format!("{} — connecting…", wired_label(port, several)),
+                String::new(),
+            );
+        }
+    }
+    if wifi_present {
+        return wifi;
+    }
+    match wired.iter().find(|p| p.state == WiredState::Disconnected) {
+        Some(port) => wired_item(
+            "network-wired-disconnected-symbolic",
+            "Not connected".to_string(),
+            format!("{} has a cable, but no connection is active", wired_label(port, several)),
+        ),
+        None if wired.is_empty() => wired_item(
+            "network-wired-unavailable-symbolic",
+            "No network devices".to_string(),
+            "NetworkManager sees no Wi-Fi or Ethernet here.".to_string(),
+        ),
+        None => wired_item(
+            "network-wired-unavailable-symbolic",
+            "Cable unplugged".to_string(),
+            String::new(),
+        ),
+    }
+}
+
+/// The network menu, given the Wi-Fi half already built.
+///
+/// Wired interfaces come first, above the Wi-Fi toggle and in a section
+/// of their own, because the toggle governs only the radio and a cable
+/// listed under it would read as switched by it. A connected port is a
+/// checkmark that disconnects it; a port with a cable and nothing active
+/// is a row that connects it; an unplugged one is information, since no
+/// menu can plug a cable in. With no Wi-Fi hardware the Wi-Fi half is
+/// dropped entirely rather than offering a radio toggle for a radio that
+/// is not there.
+fn with_wired_menu(wifi: Menu, wired: &[WiredStatus], wifi_present: bool, unavailable: bool) -> Menu {
+    if unavailable {
+        return wifi;
+    }
+    let several = wired.len() > 1;
+    let rows: Vec<MenuItem> = wired
+        .iter()
+        .map(|port| {
+            let label = wired_label(port, several);
+            match port.state {
+                WiredState::Connected => MenuItem::checkmark(
+                    match &port.connection {
+                        Some(name) => format!("{label} — {name}"),
+                        None => label,
+                    },
+                    true,
+                    format!("wired:disconnect:{}", port.interface),
+                ),
+                WiredState::Connecting => MenuItem::disabled(format!("{label} — connecting…")),
+                WiredState::Disconnected => {
+                    MenuItem::standard(label, format!("wired:connect:{}", port.interface))
+                }
+                WiredState::CableUnplugged => MenuItem::disabled(format!("{label} — cable unplugged")),
+            }
+        })
+        .collect();
+
+    if !wifi_present {
+        let settings_row = MenuItem::standard("Network settings…", "wifi:settings");
+        let top = if rows.is_empty() {
+            vec![MenuItem::disabled("No network devices")]
+        } else {
+            rows
+        };
+        return radio_menu(top, Vec::new(), settings_row);
+    }
+    if rows.is_empty() {
+        return wifi;
+    }
+    let mut items = rows;
+    items.push(MenuItem::separator());
+    items.extend(wifi.items);
+    Menu::new(items)
 }
 
 /// What the Bluetooth menu should contain, from plain data — no D-Bus, no
@@ -1445,6 +1881,355 @@ fn night_light_menu(state: &NightLightState) -> Menu {
     radio_menu(vec![toggle], content, settings_row)
 }
 
+const POWER_ITEM_ID: &str = "hyprforge-power";
+
+/// What the battery half of the power icon knows this tick.
+///
+/// Three states, not two, for the reason `BatteryBackend::battery` is an
+/// `Option` inside a `Result`: a desktop with no battery is an ordinary
+/// machine, and UPower not answering is a failure — the icon has to be
+/// able to say the second without implying the first.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum BatteryReading {
+    Present(BatteryInfo),
+    /// UPower answered: there is no system battery.
+    Absent,
+    /// UPower did not answer.
+    Unavailable,
+}
+
+/// The power-profile half. Independent of [`BatteryReading`] because it
+/// is a different daemon — `power-profiles-daemon` down leaves the
+/// battery readable, and the other way round.
+#[derive(Debug, Clone, PartialEq)]
+enum ProfileReading {
+    Known {
+        active: PowerProfile,
+        /// What the daemon says this machine can switch between, in its
+        /// own order — read rather than assumed to be all three.
+        offered: Vec<PowerProfile>,
+    },
+    Unavailable,
+}
+
+fn profile_label(profile: PowerProfile) -> &'static str {
+    match profile {
+        PowerProfile::PowerSaver => "Power saver",
+        PowerProfile::Balanced => "Balanced",
+        PowerProfile::Performance => "Performance",
+    }
+}
+
+/// Breeze's own names for the three profiles — `battery-profile-*`, not
+/// GNOME's `power-profile-*`, which exist only in Adwaita and are
+/// unreachable from this machine's theme chain (see the icon-name notes
+/// in the tests below).
+fn profile_icon(profile: PowerProfile) -> &'static str {
+    match profile {
+        PowerProfile::PowerSaver => "battery-profile-powersave-symbolic",
+        PowerProfile::Balanced => "battery-profile-balanced-symbolic",
+        PowerProfile::Performance => "battery-profile-performance-symbolic",
+    }
+}
+
+/// Whether the battery is taking charge, which is what the `-charging`
+/// icons draw — a plug over the level.
+fn is_charging(state: BatteryState) -> bool {
+    matches!(state, BatteryState::Charging | BatteryState::PendingCharge)
+}
+
+/// The level icon for a battery reading.
+///
+/// Breeze draws eleven levels in steps of ten, and the percentage is
+/// rounded to the *nearest* one: rounding down would show an empty
+/// battery at 9%, which reads as "about to die" a good while early.
+/// Fully charged gets its own name, because it is a plugged-in state
+/// that nothing about the level alone distinguishes from 100% on battery.
+fn battery_icon(info: &BatteryInfo) -> String {
+    if info.state == BatteryState::FullyCharged {
+        return "battery-full-charged-symbolic".to_string();
+    }
+    let level = ((u16::from(info.percentage) + 5) / 10 * 10).min(100);
+    let charging = if is_charging(info.state) { "-charging" } else { "" };
+    format!("battery-{level:03}{charging}-symbolic")
+}
+
+/// What the battery is doing, in the words a tooltip and a menu row
+/// share.
+fn battery_words(info: &BatteryInfo) -> String {
+    let pct = info.percentage;
+    match info.state {
+        BatteryState::FullyCharged => "Fully charged".to_string(),
+        BatteryState::Charging => match info.time_remaining_words() {
+            Some(t) => format!("{pct}% — charging, full in {t}"),
+            None => format!("{pct}% — charging"),
+        },
+        BatteryState::Discharging => match info.time_remaining_words() {
+            Some(t) => format!("{pct}% — {t} left"),
+            None => format!("{pct}% — on battery"),
+        },
+        // Plugged in and held below full (a charge limit, or the
+        // controller waiting): neither "charging" nor "on battery" is
+        // true, and saying either sends someone to check the cable.
+        BatteryState::PendingCharge => format!("{pct}% — plugged in, not charging"),
+        BatteryState::PendingDischarge | BatteryState::Empty | BatteryState::Unknown => {
+            format!("{pct}%")
+        }
+    }
+}
+
+/// What the power icon should say, from plain data — no D-Bus, no I/O.
+///
+/// The icon is the battery level when there is a battery, and the active
+/// profile when there is not: a desktop has no battery to draw, and the
+/// profile is then the only thing this icon can tell anyone. Each half
+/// failing is reported on its own, so UPower being down never hides a
+/// working profile switch and never reads as "this is a desktop".
+fn power_item(battery: &BatteryReading, profile: &ProfileReading) -> TrayItem {
+    let item = |icon_name: String, tooltip_title: String, tooltip_body: String| TrayItem {
+        id: POWER_ITEM_ID.to_string(),
+        category: Category::Hardware,
+        status: TrayStatus::Active,
+        title: "Power".to_string(),
+        icon_name,
+        tooltip_title,
+        tooltip_body,
+    };
+    let profile_words = match profile {
+        ProfileReading::Known { active, .. } => Some(format!("{} profile", profile_label(*active))),
+        ProfileReading::Unavailable => None,
+    };
+
+    match (battery, profile) {
+        (BatteryReading::Present(info), _) => item(
+            battery_icon(info),
+            battery_words(info),
+            // No profile sentence at all when it can't be read, rather
+            // than a guess — the menu says why.
+            profile_words.unwrap_or_default(),
+        ),
+        (BatteryReading::Absent, ProfileReading::Known { active, .. }) => item(
+            profile_icon(*active).to_string(),
+            profile_words.unwrap_or_default(),
+            "No battery".to_string(),
+        ),
+        (BatteryReading::Unavailable, ProfileReading::Known { active, .. }) => item(
+            profile_icon(*active).to_string(),
+            profile_words.unwrap_or_default(),
+            "Battery status unavailable — UPower isn't answering.".to_string(),
+        ),
+        // A desktop without power-profiles-daemon: nothing is broken
+        // about the battery, but this icon has nothing left to show.
+        (BatteryReading::Absent, ProfileReading::Unavailable) => item(
+            "dialog-warning".to_string(),
+            "Power profiles unavailable".to_string(),
+            "power-profiles-daemon isn't running.".to_string(),
+        ),
+        (BatteryReading::Unavailable, ProfileReading::Unavailable) => item(
+            "dialog-warning".to_string(),
+            "Power status unavailable".to_string(),
+            "Neither UPower nor power-profiles-daemon is answering.".to_string(),
+        ),
+    }
+}
+
+/// What the power menu should contain, from plain data — no D-Bus, no
+/// I/O.
+///
+/// There is no toggle to put at the top, so the top row is the battery
+/// reading, disabled: it is information, and the one thing people open
+/// this menu to read. The profiles are the content — one checkmark row
+/// per profile the daemon offers, the active one checked, and choosing
+/// one switches to it.
+fn power_menu(battery: &BatteryReading, profile: &ProfileReading) -> Menu {
+    let settings_row = MenuItem::standard("Power settings…", "power:settings");
+
+    let top = match battery {
+        BatteryReading::Present(info) => MenuItem::disabled(format!("Battery {}", battery_words(info))),
+        BatteryReading::Absent => MenuItem::disabled("Power profile"),
+        BatteryReading::Unavailable => MenuItem::disabled("Battery status unavailable"),
+    };
+
+    let content = match profile {
+        ProfileReading::Known { active, offered } => offered
+            .iter()
+            .map(|&p| {
+                let action = format!("power:profile:{}", p.as_str());
+                if p == *active {
+                    MenuItem::checkmark(profile_label(p), true, action)
+                } else {
+                    MenuItem::standard(profile_label(p), action)
+                }
+            })
+            .collect(),
+        ProfileReading::Unavailable => vec![MenuItem::disabled(
+            "Power profiles unavailable — power-profiles-daemon isn't running",
+        )],
+    };
+
+    radio_menu(vec![top], content, settings_row)
+}
+
+const DISPLAYS_ITEM_ID: &str = "hyprforge-displays";
+
+/// How many saved layouts the displays menu lists before truncating —
+/// the same reasoning as [`MAX_NETWORKS_SHOWN`].
+const MAX_DISPLAY_PROFILES_SHOWN: usize = 8;
+
+/// One saved display layout, as `ListProfiles` reports it.
+#[derive(Debug, Clone, PartialEq)]
+struct DisplayProfile {
+    id: String,
+    name: String,
+    /// RFC 3339, which is why sorting the strings sorts the times.
+    last_used: String,
+}
+
+/// What `hyprforge-displayd` said this tick.
+#[derive(Debug, Clone, PartialEq)]
+enum DisplaysReading {
+    Known {
+        profiles: Vec<DisplayProfile>,
+        /// The profile in effect, or `None` when none matches what is
+        /// plugged in — a normal state until displayd learns the new
+        /// set, not a failure.
+        current: Option<String>,
+    },
+    Unavailable,
+}
+
+/// When displayd will roll a provisional layout back, if one is waiting
+/// to be kept.
+///
+/// Written from two places: the signal watcher, which hears
+/// `RevertPending`/`RevertResolved` however the apply was started (this
+/// menu, the Settings app, `displayctl`), and this daemon's own menu
+/// actions, so its icon changes the moment it is clicked rather than when
+/// the signal arrives. Read by the poll loop. A deadline rather than a
+/// flag so that a daemon which dies mid-countdown — and so never sends
+/// `RevertResolved` — cannot leave the icon asking forever.
+type RevertDeadline = Arc<std::sync::Mutex<Option<tokio::time::Instant>>>;
+
+fn revert_pending(deadline: Option<tokio::time::Instant>, now: tokio::time::Instant) -> bool {
+    deadline.is_some_and(|d| d > now)
+}
+
+/// What the displays icon should say, from plain data — no D-Bus, no I/O.
+///
+/// A layout waiting to be kept outranks everything else: it is the one
+/// state here with a deadline, and missing it undoes what someone just
+/// chose. It is the one item in this daemon that uses `NeedsAttention`,
+/// with a name of its own, because the icon name is all a host is
+/// obliged to draw. Nothing here is ever `Passive` — see the rule in
+/// CLAUDE.md about an icon a host is asked to hide.
+fn displays_item(reading: &DisplaysReading, pending: bool) -> TrayItem {
+    let item = |status, icon: &str, tooltip_title: String, tooltip_body: String| TrayItem {
+        id: DISPLAYS_ITEM_ID.to_string(),
+        category: Category::Hardware,
+        status,
+        title: "Displays".to_string(),
+        icon_name: icon.to_string(),
+        tooltip_title,
+        tooltip_body,
+    };
+    if pending {
+        // No seconds in the text: this is rebuilt on the poll tick, so a
+        // number would be up to a whole tick stale, counting down in
+        // jumps. What matters is that it reverts on its own.
+        return item(
+            TrayStatus::NeedsAttention,
+            "preferences-desktop-display-randr-symbolic",
+            "Keep this display layout?".to_string(),
+            "It reverts on its own unless you keep it.".to_string(),
+        );
+    }
+    match reading {
+        DisplaysReading::Unavailable => item(
+            TrayStatus::Active,
+            "dialog-warning",
+            "Displays unavailable".to_string(),
+            "hyprforge-displayd isn't running.".to_string(),
+        ),
+        DisplaysReading::Known { profiles, current } => {
+            let saved = match profiles.len() {
+                1 => "1 saved layout".to_string(),
+                n => format!("{n} saved layouts"),
+            };
+            let current_name = current
+                .as_ref()
+                .and_then(|id| profiles.iter().find(|p| &p.id == id))
+                .map(|p| p.name.clone());
+            item(
+                TrayStatus::Active,
+                "monitor-symbolic",
+                current_name.unwrap_or_else(|| "No saved layout matches".to_string()),
+                saved,
+            )
+        }
+    }
+}
+
+/// What the displays menu should contain, from plain data — no D-Bus, no
+/// I/O.
+///
+/// While a layout waits to be kept, the menu is only Keep and Revert:
+/// offering to switch to a third layout in the middle of confirming a
+/// second is a way to lose track of which one is on trial. Otherwise it
+/// lists saved layouts, most recently used first, the current one
+/// checked — every one of them, as the Monitors screen offers Apply on
+/// every one, since displayd fits a layout to whatever is connected.
+fn displays_menu(reading: &DisplaysReading, pending: bool) -> Menu {
+    let settings_row = MenuItem::standard("Display settings…", "display:settings");
+
+    if pending {
+        return radio_menu(
+            vec![MenuItem::disabled("Keep this layout? It reverts on its own.")],
+            vec![
+                MenuItem::standard("Keep this layout", "display:keep"),
+                MenuItem::standard("Revert now", "display:revert"),
+            ],
+            settings_row,
+        );
+    }
+
+    let (profiles, current) = match reading {
+        DisplaysReading::Unavailable => {
+            return radio_menu(
+                vec![MenuItem::disabled("Displays unavailable — hyprforge-displayd isn't running")],
+                Vec::new(),
+                settings_row,
+            );
+        }
+        DisplaysReading::Known { profiles, current } => (profiles, current),
+    };
+    if profiles.is_empty() {
+        return radio_menu(vec![MenuItem::disabled("No saved layouts yet")], Vec::new(), settings_row);
+    }
+
+    let mut ordered: Vec<&DisplayProfile> = profiles.iter().collect();
+    ordered.sort_by(|a, b| b.last_used.cmp(&a.last_used));
+    let mut content: Vec<MenuItem> = ordered
+        .iter()
+        .take(MAX_DISPLAY_PROFILES_SHOWN)
+        .map(|p| {
+            let action = format!("display:apply:{}", p.id);
+            if current.as_deref() == Some(p.id.as_str()) {
+                MenuItem::checkmark(p.name.clone(), true, action)
+            } else {
+                MenuItem::standard(p.name.clone(), action)
+            }
+        })
+        .collect();
+    if ordered.len() > MAX_DISPLAY_PROFILES_SHOWN {
+        content.push(MenuItem::disabled(format!(
+            "+{} more — see Settings",
+            ordered.len() - MAX_DISPLAY_PROFILES_SHOWN
+        )));
+    }
+
+    radio_menu(vec![MenuItem::disabled("Display layouts")], content, settings_row)
+}
+
 /// The typed operation behind an action string a menu click sends back.
 ///
 /// Parsed in exactly one place ([`parse_menu_action`]) so every route a
@@ -1469,6 +2254,25 @@ enum MenuAction {
     /// Sets a specific colour temperature, turning night light on if it
     /// was off.
     NightLightSet(i64),
+    /// Switches `power-profiles-daemon` to this profile.
+    PowerProfile(PowerProfile),
+    /// Brings a wired interface up, by its interface name.
+    WiredConnect(String),
+    WiredDisconnect(String),
+    /// Applies a saved display layout, reversibly.
+    DisplayApply(String),
+    DisplayKeep,
+    DisplayRevert,
+}
+
+/// A Linux interface name, as far as an action string can carry one:
+/// non-empty, at most the kernel's fifteen bytes, no whitespace and no
+/// `/` — the characters the kernel itself refuses.
+fn interface_name(name: &str) -> Option<String> {
+    let valid = !name.is_empty()
+        && name.len() <= 15
+        && !name.bytes().any(|b| b == b'/' || b.is_ascii_whitespace());
+    valid.then(|| name.to_string())
 }
 
 fn parse_menu_action(action: &str) -> Option<MenuAction> {
@@ -1487,6 +2291,10 @@ fn parse_menu_action(action: &str) -> Option<MenuAction> {
         "keepawake:settings" => Some(MenuAction::OpenSettings("power")),
         "nightlight:off" => Some(MenuAction::NightLightOff),
         "nightlight:settings" => Some(MenuAction::OpenSettings("night-light")),
+        "power:settings" => Some(MenuAction::OpenSettings("power")),
+        "display:settings" => Some(MenuAction::OpenSettings("displays")),
+        "display:keep" => Some(MenuAction::DisplayKeep),
+        "display:revert" => Some(MenuAction::DisplayRevert),
         _ => {
             if let Some(hex) = action.strip_prefix("wifi:connect:") {
                 hex_decode(hex).map(MenuAction::WifiConnect)
@@ -1494,6 +2302,19 @@ fn parse_menu_action(action: &str) -> Option<MenuAction> {
                 Some(MenuAction::BtConnect(Address::new(addr)))
             } else if let Some(addr) = action.strip_prefix("bt:disconnect:") {
                 Some(MenuAction::BtDisconnect(Address::new(addr)))
+            } else if let Some(interface) = action.strip_prefix("wired:connect:") {
+                interface_name(interface).map(MenuAction::WiredConnect)
+            } else if let Some(interface) = action.strip_prefix("wired:disconnect:") {
+                interface_name(interface).map(MenuAction::WiredDisconnect)
+            } else if let Some(id) = action.strip_prefix("display:apply:") {
+                // A profile id is a blake3 hex digest. Anything else did
+                // not come from a menu this daemon built.
+                (!id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric()))
+                    .then(|| MenuAction::DisplayApply(id.to_string()))
+            } else if let Some(name) = action.strip_prefix("power:profile:") {
+                // Through `PowerProfile::parse`, so a name the daemon has
+                // never offered is ignored here rather than sent to it.
+                PowerProfile::parse(name).map(MenuAction::PowerProfile)
             } else {
                 action
                     .strip_prefix("nightlight:set:")
@@ -1553,20 +2374,35 @@ const NETWORK_ITEM_ID: &str = "hyprforge-network";
 
 const SCAN_SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// The menu-click loop's own connections, one per service — kept apart
+/// from `poll_loop`'s for the reason on [`handle_menu_clicks`].
+struct MenuClickState {
+    net: Reconnecting<NetworkManagerBackend>,
+    bt: Reconnecting<BlueZBackend>,
+    logind: Reconnecting<LogindBackend>,
+    profiles: Reconnecting<PowerProfilesDaemonBackend>,
+    bus: Reconnecting<zbus::Connection>,
+}
+
 async fn handle_menu_clicks(
     mut actions: tokio::sync::mpsc::UnboundedReceiver<String>,
     refresh: tokio::sync::mpsc::UnboundedSender<()>,
     night_light_belief: NightLightBelief,
+    revert_deadline: RevertDeadline,
 ) {
-    let mut net_state = Reconnecting::new();
-    let mut bt_state = Reconnecting::new();
-    let mut power_state = Reconnecting::new();
+    let mut state = MenuClickState {
+        net: Reconnecting::new(),
+        bt: Reconnecting::new(),
+        logind: Reconnecting::new(),
+        profiles: Reconnecting::new(),
+        bus: Reconnecting::new(),
+    };
     while let Some(action) = actions.recv().await {
         // A menu being opened is an event, not a click, and only the
         // Wi-Fi one wants anything done about it.
         if let Some(id) = action.strip_prefix(hyprforge_tray::OPENED_PREFIX) {
             if id == NETWORK_ITEM_ID {
-                scan_then_refresh(&mut net_state, refresh.clone()).await;
+                scan_then_refresh(&mut state.net, refresh.clone()).await;
             }
             // Bluetooth deliberately does nothing: starting discovery
             // costs battery on every device in range, and a popup opening
@@ -1578,21 +2414,33 @@ async fn handle_menu_clicks(
             tracing::warn!(action = %action, "unknown tray menu action; ignoring");
             continue;
         };
-        if let Err(e) =
-            perform_menu_action(parsed, &mut net_state, &mut bt_state, &mut power_state, &night_light_belief)
-                .await
+        // A profile switch pulls the next poll forward, so the icon and
+        // the menu's checkmark follow the click rather than lagging it by
+        // up to a whole `POLL_INTERVAL`.
+        // Display actions refresh on their own, through the revert
+        // deadline — see `set_revert_deadline`.
+        let refresh_after = matches!(
+            parsed,
+            MenuAction::PowerProfile(_) | MenuAction::WiredConnect(_) | MenuAction::WiredDisconnect(_)
+        );
+        match perform_menu_action(parsed, &mut state, &night_light_belief, &revert_deadline, &refresh)
+            .await
         {
-            tracing::warn!(error = %e, "tray menu action failed");
+            Ok(()) if refresh_after => {
+                let _ = refresh.send(());
+            }
+            Ok(()) => {}
+            Err(e) => tracing::warn!(error = %e, "tray menu action failed"),
         }
     }
 }
 
 async fn perform_menu_action(
     action: MenuAction,
-    net_state: &mut Reconnecting<NetworkManagerBackend>,
-    bt_state: &mut Reconnecting<BlueZBackend>,
-    power_state: &mut Reconnecting<LogindBackend>,
+    state: &mut MenuClickState,
     night_light_belief: &NightLightBelief,
+    revert_deadline: &RevertDeadline,
+    refresh: &tokio::sync::mpsc::UnboundedSender<()>,
 ) -> anyhow::Result<()> {
     match action {
         MenuAction::OpenSettings(screen) => {
@@ -1600,14 +2448,14 @@ async fn perform_menu_action(
             Ok(())
         }
         MenuAction::WifiRadio(on) => {
-            let backend = network_backend(net_state)
+            let backend = network_backend(&mut state.net)
                 .await
                 .ok_or_else(|| anyhow::anyhow!("NetworkManager unavailable"))?;
             backend.set_radio(on).await?;
             Ok(())
         }
         MenuAction::WifiConnect(ssid_bytes) => {
-            let backend = network_backend(net_state)
+            let backend = network_backend(&mut state.net)
                 .await
                 .ok_or_else(|| anyhow::anyhow!("NetworkManager unavailable"))?;
             let ssid = Ssid::new(ssid_bytes);
@@ -1641,28 +2489,28 @@ async fn perform_menu_action(
             Ok(())
         }
         MenuAction::BtRadio(on) => {
-            let backend = bluetooth_backend(bt_state)
+            let backend = bluetooth_backend(&mut state.bt)
                 .await
                 .ok_or_else(|| anyhow::anyhow!("BlueZ unavailable"))?;
             backend.set_powered(on).await?;
             Ok(())
         }
         MenuAction::BtConnect(address) => {
-            let backend = bluetooth_backend(bt_state)
+            let backend = bluetooth_backend(&mut state.bt)
                 .await
                 .ok_or_else(|| anyhow::anyhow!("BlueZ unavailable"))?;
             backend.connect(&address).await?;
             Ok(())
         }
         MenuAction::BtDisconnect(address) => {
-            let backend = bluetooth_backend(bt_state)
+            let backend = bluetooth_backend(&mut state.bt)
                 .await
                 .ok_or_else(|| anyhow::anyhow!("BlueZ unavailable"))?;
             backend.disconnect(&address).await?;
             Ok(())
         }
         MenuAction::KeepAwake(on) => {
-            let backend = keep_awake_backend(power_state)
+            let backend = keep_awake_backend(&mut state.logind)
                 .await
                 .ok_or_else(|| anyhow::anyhow!("systemd-logind unavailable"))?;
             if on {
@@ -1684,6 +2532,79 @@ async fn perform_menu_action(
         MenuAction::NightLightSet(kelvin) => {
             tokio::task::spawn_blocking(move || Hyprsunset.set_temperature(kelvin)).await??;
             *night_light_belief.lock().unwrap_or_else(|e| e.into_inner()) = true;
+            Ok(())
+        }
+        MenuAction::PowerProfile(profile) => {
+            let backend = profiles_backend(&mut state.profiles)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("power-profiles-daemon unavailable"))?;
+            backend.set_active_profile(profile).await?;
+            Ok(())
+        }
+        MenuAction::WiredConnect(interface) => {
+            let backend = network_backend(&mut state.net)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("NetworkManager unavailable"))?;
+            backend.wired_connect(&interface).await?;
+            Ok(())
+        }
+        MenuAction::WiredDisconnect(interface) => {
+            let backend = network_backend(&mut state.net)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("NetworkManager unavailable"))?;
+            backend.wired_disconnect(&interface).await?;
+            Ok(())
+        }
+        MenuAction::DisplayApply(id) => {
+            let conn = session_bus(&mut state.bus)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("session bus unavailable"))?;
+            let proxy = displayd_bounded(
+                "connecting to displayd",
+                DISPLAYD_CALL_TIMEOUT,
+                DisplaydProxy::new(&conn),
+            )
+            .await?;
+            // Always the reversible apply, the one the Monitors screen
+            // uses: a layout chosen from a menu can blank the screen the
+            // menu was on, and the countdown is what brings it back.
+            let seconds = displayd_bounded(
+                "applying the layout",
+                DISPLAYD_APPLY_TIMEOUT,
+                proxy.apply_profile_reversible(&id),
+            )
+            .await?;
+            set_revert_deadline(revert_deadline, seconds, refresh);
+            Ok(())
+        }
+        MenuAction::DisplayKeep => {
+            let conn = session_bus(&mut state.bus)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("session bus unavailable"))?;
+            let proxy = displayd_bounded(
+                "connecting to displayd",
+                DISPLAYD_CALL_TIMEOUT,
+                DisplaydProxy::new(&conn),
+            )
+            .await?;
+            displayd_bounded("keeping the layout", DISPLAYD_CALL_TIMEOUT, proxy.confirm_layout())
+                .await?;
+            clear_revert_deadline(revert_deadline, refresh);
+            Ok(())
+        }
+        MenuAction::DisplayRevert => {
+            let conn = session_bus(&mut state.bus)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("session bus unavailable"))?;
+            let proxy = displayd_bounded(
+                "connecting to displayd",
+                DISPLAYD_CALL_TIMEOUT,
+                DisplaydProxy::new(&conn),
+            )
+            .await?;
+            displayd_bounded("reverting the layout", DISPLAYD_APPLY_TIMEOUT, proxy.revert_layout())
+                .await?;
+            clear_revert_deadline(revert_deadline, refresh);
             Ok(())
         }
     }
@@ -1708,6 +2629,10 @@ mod tests {
         "network-wireless-signal-weak-symbolic",
         "network-wireless-signal-none-symbolic",
         "network-wireless-disconnected-symbolic",
+        "network-wired-activated-symbolic",
+        "network-wired-symbolic",
+        "network-wired-disconnected-symbolic",
+        "network-wired-unavailable-symbolic",
         "dialog-warning",
     ];
     const BLUETOOTH_ICON_NAMES: &[&str] = &[
@@ -1864,6 +2789,12 @@ mod tests {
             keep_awake_item(Some(false), &[], false),
             keep_awake_item(Some(true), &[], false),
             keep_awake_item(None, &[], true),
+            power_item(&BatteryReading::Present(battery(40, BatteryState::Discharging)), &balanced()),
+            power_item(&BatteryReading::Absent, &balanced()),
+            power_item(&BatteryReading::Absent, &ProfileReading::Unavailable),
+            power_item(&BatteryReading::Unavailable, &ProfileReading::Unavailable),
+            displays_item(&DisplaysReading::Unavailable, false),
+            displays_item(&desk_and_laptop(), false),
         ];
         for item in items {
             assert_eq!(item.status, TrayStatus::Active, "{} asked to be hidden", item.id);
@@ -2138,7 +3069,7 @@ mod tests {
     #[test]
     fn a_missing_tray_toml_refreshes_to_the_defaults() {
         with_temp_config_home(|_dir| {
-            let mut current = Prefs { network: false, bluetooth: false, keep_awake: false, night_light: false, menu_y_offset: 32, menu_closes_on_click_outside: true };
+            let mut current = Prefs { network: false, bluetooth: false, keep_awake: false, night_light: false, power: false, displays: false, menu_y_offset: 32, menu_closes_on_click_outside: true };
             let mut warned = false;
             refresh_prefs(&mut current, &mut warned);
             assert!(current.network, "a missing file is first run: both icons shown");
@@ -2157,12 +3088,12 @@ mod tests {
             std::fs::create_dir_all(tray_toml.parent().unwrap()).unwrap();
             std::fs::write(&tray_toml, "network = yes please\n").unwrap();
 
-            let mut current = Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false, menu_y_offset: 32, menu_closes_on_click_outside: true };
+            let mut current = Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false, power: false, displays: false, menu_y_offset: 32, menu_closes_on_click_outside: true };
             let mut warned = false;
             refresh_prefs(&mut current, &mut warned);
             assert_eq!(
                 current,
-                Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false, menu_y_offset: 32, menu_closes_on_click_outside: true },
+                Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false, power: false, displays: false, menu_y_offset: 32, menu_closes_on_click_outside: true },
                 "a failed read must not change what is currently shown"
             );
             assert!(warned, "the failure is reported");
@@ -2765,6 +3696,10 @@ mod tests {
             keep_awake_menu(None, &[], true),
             night_light_menu(&NightLightState::NotRunning),
             night_light_menu(&NightLightState::CouldNotCheck),
+            power_menu(&BatteryReading::Unavailable, &ProfileReading::Unavailable),
+            displays_menu(&DisplaysReading::Unavailable, false),
+            displays_menu(&DisplaysReading::Known { profiles: vec![], current: None }, false),
+            displays_menu(&DisplaysReading::Unavailable, true),
         ];
         for menu in menus {
             let last = menu.items.last().expect("a menu with no rows at all");
@@ -2793,6 +3728,12 @@ mod tests {
 
         let nl = night_light_menu(&NightLightState::Known { temperature: 4500, on: true });
         assert_eq!(nl.items.last().unwrap().label, "Night light settings…");
+
+        let pw = power_menu(&BatteryReading::Absent, &balanced());
+        assert_eq!(pw.items.last().unwrap().label, "Power settings…");
+
+        let dp = displays_menu(&desk_and_laptop(), false);
+        assert_eq!(dp.items.last().unwrap().label, "Display settings…");
     }
 
     /// The settings rows for keep awake and night light are new: neither
@@ -2816,6 +3757,20 @@ mod tests {
         assert_eq!(
             parse_menu_action(nl_row.action.as_deref().unwrap()),
             Some(MenuAction::OpenSettings("night-light"))
+        );
+
+        // The power icon's row and its left click both open Power — see
+        // `TrayItem::activate_screen`.
+        let pw = power_menu(&BatteryReading::Absent, &balanced());
+        assert_eq!(
+            parse_menu_action(pw.items.last().unwrap().action.as_deref().unwrap()),
+            Some(MenuAction::OpenSettings("power"))
+        );
+
+        let dp = displays_menu(&desk_and_laptop(), false);
+        assert_eq!(
+            parse_menu_action(dp.items.last().unwrap().action.as_deref().unwrap()),
+            Some(MenuAction::OpenSettings("displays"))
         );
     }
 
@@ -2843,5 +3798,495 @@ mod tests {
         let with_others_toggle =
             with_others.flatten().into_iter().find(|i| i.kind == ItemKind::Checkmark).unwrap();
         assert_eq!(alone_toggle.id, with_others_toggle.id);
+    }
+
+    // --- power: battery and profile ------------------------------------
+
+    fn battery(percentage: u8, state: BatteryState) -> BatteryInfo {
+        BatteryInfo { percentage, state, time_to_empty: None, time_to_full: None }
+    }
+
+    fn balanced() -> ProfileReading {
+        ProfileReading::Known {
+            active: PowerProfile::Balanced,
+            offered: vec![PowerProfile::PowerSaver, PowerProfile::Balanced, PowerProfile::Performance],
+        }
+    }
+
+    /// Every name `power_item` can hand a host, checked against Breeze's
+    /// own files on this machine: eleven levels, each with and without
+    /// `-charging`, plus the charged, profile and fallback names.
+    fn power_icon_names() -> Vec<String> {
+        let mut names = Vec::new();
+        for level in (0..=100).step_by(10) {
+            names.push(format!("battery-{level:03}-symbolic"));
+            names.push(format!("battery-{level:03}-charging-symbolic"));
+        }
+        names.extend(
+            [
+                "battery-full-charged-symbolic",
+                "battery-profile-powersave-symbolic",
+                "battery-profile-balanced-symbolic",
+                "battery-profile-performance-symbolic",
+                "dialog-warning",
+            ]
+            .map(String::from),
+        );
+        names
+    }
+
+    /// Every percentage through every state, so a rounding slip that
+    /// invents `battery-105-symbolic` — or a state that forgets its
+    /// suffix — fails here rather than drawing a blank gap in the bar.
+    #[test]
+    fn every_power_icon_the_function_can_return_is_a_name_breeze_ships() {
+        let known = power_icon_names();
+        let states = [
+            BatteryState::Charging,
+            BatteryState::Discharging,
+            BatteryState::Empty,
+            BatteryState::FullyCharged,
+            BatteryState::PendingCharge,
+            BatteryState::PendingDischarge,
+            BatteryState::Unknown,
+        ];
+        let profiles = [
+            ProfileReading::Unavailable,
+            ProfileReading::Known { active: PowerProfile::PowerSaver, offered: vec![] },
+            ProfileReading::Known { active: PowerProfile::Balanced, offered: vec![] },
+            ProfileReading::Known { active: PowerProfile::Performance, offered: vec![] },
+        ];
+        let mut readings = vec![BatteryReading::Absent, BatteryReading::Unavailable];
+        for pct in 0..=100 {
+            for state in states {
+                readings.push(BatteryReading::Present(battery(pct, state)));
+            }
+        }
+        for reading in &readings {
+            for profile in &profiles {
+                let icon = power_item(reading, profile).icon_name;
+                assert!(known.contains(&icon), "{icon:?} is not a name this daemon may emit");
+            }
+        }
+    }
+
+    /// Nearest ten, not rounded down: 9% is not an empty battery.
+    #[test]
+    fn the_battery_level_rounds_to_the_nearest_icon_step() {
+        let icon = |pct| battery_icon(&battery(pct, BatteryState::Discharging));
+        assert_eq!(icon(0), "battery-000-symbolic");
+        assert_eq!(icon(4), "battery-000-symbolic");
+        assert_eq!(icon(5), "battery-010-symbolic");
+        assert_eq!(icon(9), "battery-010-symbolic");
+        assert_eq!(icon(94), "battery-090-symbolic");
+        assert_eq!(icon(95), "battery-100-symbolic");
+        assert_eq!(icon(100), "battery-100-symbolic");
+    }
+
+    #[test]
+    fn a_charging_battery_draws_the_plug_and_a_full_one_its_own_icon() {
+        assert_eq!(
+            battery_icon(&battery(62, BatteryState::Charging)),
+            "battery-060-charging-symbolic"
+        );
+        assert_eq!(
+            battery_icon(&battery(62, BatteryState::PendingCharge)),
+            "battery-060-charging-symbolic"
+        );
+        assert_eq!(
+            battery_icon(&battery(100, BatteryState::FullyCharged)),
+            "battery-full-charged-symbolic"
+        );
+    }
+
+    /// A desktop has no battery, and that is not a failure: the icon
+    /// shows the profile, and nothing in it reads as a warning.
+    #[test]
+    fn a_machine_with_no_battery_shows_its_power_profile_not_a_warning() {
+        let item = power_item(&BatteryReading::Absent, &balanced());
+        assert_eq!(item.icon_name, "battery-profile-balanced-symbolic");
+        assert_eq!(item.tooltip_title, "Balanced profile");
+        assert_eq!(item.tooltip_body, "No battery");
+    }
+
+    /// UPower being down must neither hide a working profile switch nor
+    /// read as "this machine has no battery" — the two failures this
+    /// daemon keeps apart everywhere else.
+    #[test]
+    fn upower_being_down_keeps_the_profile_and_does_not_claim_there_is_no_battery() {
+        let item = power_item(&BatteryReading::Unavailable, &balanced());
+        assert_eq!(item.icon_name, "battery-profile-balanced-symbolic");
+        assert!(item.tooltip_body.contains("UPower"), "{}", item.tooltip_body);
+        assert!(!item.tooltip_body.contains("No battery"));
+
+        let menu = power_menu(&BatteryReading::Unavailable, &balanced());
+        assert_eq!(menu.items[0].label, "Battery status unavailable");
+        assert!(menu.items.iter().any(|i| i.label == "Balanced" && i.action.is_some()));
+    }
+
+    /// And the other way round: the battery still reads when the profile
+    /// daemon is down, and the menu says why there are no profiles.
+    #[test]
+    fn the_profile_daemon_being_down_keeps_the_battery_and_says_why_profiles_are_missing() {
+        let reading = BatteryReading::Present(BatteryInfo {
+            time_to_empty: Some(Duration::from_secs(92 * 60)),
+            ..battery(73, BatteryState::Discharging)
+        });
+        let item = power_item(&reading, &ProfileReading::Unavailable);
+        assert_eq!(item.icon_name, "battery-070-symbolic");
+        assert_eq!(item.tooltip_title, "73% — 1h 32m left");
+        assert_eq!(item.tooltip_body, "", "no profile claimed when it could not be read");
+
+        let menu = power_menu(&reading, &ProfileReading::Unavailable);
+        assert_eq!(menu.items[0].label, "Battery 73% — 1h 32m left");
+        assert!(!menu.items[0].enabled, "the battery row is information, not a control");
+        assert!(menu
+            .items
+            .iter()
+            .any(|i| i.label.contains("power-profiles-daemon isn't running") && !i.enabled));
+    }
+
+    /// Only what the daemon offers is listed, the active one is the one
+    /// checked, and each row's action switches to exactly that profile.
+    #[test]
+    fn the_profile_rows_are_what_the_daemon_offers_with_the_active_one_checked() {
+        let profile = ProfileReading::Known {
+            active: PowerProfile::PowerSaver,
+            offered: vec![PowerProfile::PowerSaver, PowerProfile::Balanced],
+        };
+        let menu = power_menu(&BatteryReading::Absent, &profile);
+        let rows: Vec<_> = menu
+            .items
+            .iter()
+            .filter(|i| i.action.as_deref().is_some_and(|a| a.starts_with("power:profile:")))
+            .collect();
+        assert_eq!(rows.len(), 2, "Performance was not offered and must not be listed");
+        assert_eq!(rows[0].label, "Power saver");
+        assert_eq!((rows[0].kind, rows[0].toggle), (ItemKind::Checkmark, Some(true)));
+        assert_eq!(rows[1].label, "Balanced");
+        assert_eq!(
+            parse_menu_action(rows[1].action.as_deref().unwrap()),
+            Some(MenuAction::PowerProfile(PowerProfile::Balanced))
+        );
+    }
+
+    #[test]
+    fn a_profile_name_the_daemon_never_defined_is_ignored_rather_than_sent() {
+        assert_eq!(parse_menu_action("power:profile:turbo"), None);
+        assert_eq!(parse_menu_action("power:profile:"), None);
+    }
+
+    /// "Plugged in, not charging" is neither of the two things people
+    /// would otherwise be told, and both of those send them to check the
+    /// cable.
+    #[test]
+    fn a_battery_held_below_full_on_mains_says_so() {
+        assert_eq!(
+            battery_words(&battery(80, BatteryState::PendingCharge)),
+            "80% — plugged in, not charging"
+        );
+    }
+
+    // --- displays ------------------------------------------------------
+
+    fn profile(id: &str, name: &str, last_used: &str) -> DisplayProfile {
+        DisplayProfile { id: id.to_string(), name: name.to_string(), last_used: last_used.to_string() }
+    }
+
+    /// Two saved layouts, the desk one in effect.
+    fn desk_and_laptop() -> DisplaysReading {
+        DisplaysReading::Known {
+            profiles: vec![
+                profile("aa11", "Laptop only", "2026-09-20T08:00:00Z"),
+                profile("bb22", "Desk", "2026-09-23T09:00:00Z"),
+            ],
+            current: Some("bb22".to_string()),
+        }
+    }
+
+    const DISPLAYS_ICON_NAMES: &[&str] =
+        &["monitor-symbolic", "preferences-desktop-display-randr-symbolic", "dialog-warning"];
+
+    #[test]
+    fn every_displays_icon_the_function_can_return_is_in_the_allowed_set() {
+        let readings = [
+            DisplaysReading::Unavailable,
+            DisplaysReading::Known { profiles: vec![], current: None },
+            desk_and_laptop(),
+        ];
+        for reading in &readings {
+            for pending in [false, true] {
+                let icon = displays_item(reading, pending).icon_name;
+                assert!(DISPLAYS_ICON_NAMES.contains(&icon.as_str()), "{icon:?}");
+            }
+        }
+    }
+
+    /// A layout on trial outranks everything, and is the one state here
+    /// that asks for attention — never to be hidden.
+    #[test]
+    fn a_layout_waiting_to_be_kept_asks_for_attention_with_an_icon_of_its_own() {
+        let waiting = displays_item(&desk_and_laptop(), true);
+        assert_eq!(waiting.status, TrayStatus::NeedsAttention);
+        assert_eq!(waiting.icon_name, "preferences-desktop-display-randr-symbolic");
+
+        let settled = displays_item(&desk_and_laptop(), false);
+        assert_eq!(settled.status, TrayStatus::Active);
+        assert_ne!(settled.icon_name, waiting.icon_name);
+    }
+
+    /// While a layout is on trial, the menu is Keep and Revert and
+    /// nothing else — no switching to a third layout mid-confirmation.
+    #[test]
+    fn a_pending_revert_offers_keep_and_revert_and_no_other_layouts() {
+        let menu = displays_menu(&desk_and_laptop(), true);
+        let actions: Vec<_> = menu.items.iter().filter_map(|i| i.action.as_deref()).collect();
+        assert!(actions.contains(&"display:keep"));
+        assert!(actions.contains(&"display:revert"));
+        assert!(!actions.iter().any(|a| a.starts_with("display:apply:")), "{actions:?}");
+        assert_eq!(parse_menu_action("display:keep"), Some(MenuAction::DisplayKeep));
+        assert_eq!(parse_menu_action("display:revert"), Some(MenuAction::DisplayRevert));
+    }
+
+    /// Most recently used first, the current one checked, and each row's
+    /// action applies exactly that profile.
+    #[test]
+    fn saved_layouts_are_listed_newest_first_with_the_current_one_checked() {
+        let menu = displays_menu(&desk_and_laptop(), false);
+        let rows: Vec<_> = menu
+            .items
+            .iter()
+            .filter(|i| i.action.as_deref().is_some_and(|a| a.starts_with("display:apply:")))
+            .collect();
+        assert_eq!(rows.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), ["Desk", "Laptop only"]);
+        assert_eq!((rows[0].kind, rows[0].toggle), (ItemKind::Checkmark, Some(true)));
+        assert_eq!(rows[1].kind, ItemKind::Standard);
+        assert_eq!(
+            parse_menu_action(rows[1].action.as_deref().unwrap()),
+            Some(MenuAction::DisplayApply("aa11".to_string()))
+        );
+    }
+
+    #[test]
+    fn the_tooltip_names_the_layout_in_effect_or_says_none_matches() {
+        let item = displays_item(&desk_and_laptop(), false);
+        assert_eq!(item.tooltip_title, "Desk");
+        assert_eq!(item.tooltip_body, "2 saved layouts");
+
+        let unmatched = DisplaysReading::Known {
+            profiles: vec![profile("aa11", "Laptop only", "2026-09-20T08:00:00Z")],
+            current: None,
+        };
+        let item = displays_item(&unmatched, false);
+        assert_eq!(item.tooltip_title, "No saved layout matches");
+        assert_eq!(item.tooltip_body, "1 saved layout");
+    }
+
+    /// displayd not running is its own state with its own words, not an
+    /// empty list of layouts.
+    #[test]
+    fn displayd_not_running_reads_differently_from_having_no_saved_layouts() {
+        let down = displays_menu(&DisplaysReading::Unavailable, false);
+        let empty = displays_menu(&DisplaysReading::Known { profiles: vec![], current: None }, false);
+        assert!(down.items[0].label.contains("hyprforge-displayd isn't running"));
+        assert_eq!(empty.items[0].label, "No saved layouts yet");
+    }
+
+    #[test]
+    fn an_apply_action_that_did_not_come_from_a_built_menu_is_ignored() {
+        assert_eq!(parse_menu_action("display:apply:"), None);
+        assert_eq!(parse_menu_action("display:apply:../etc"), None);
+        assert_eq!(parse_menu_action("display:apply:ab cd"), None);
+    }
+
+    /// A deadline in the past is not a pending revert — the case of a
+    /// daemon that died mid-countdown and never said it was resolved.
+    #[test]
+    fn a_revert_deadline_that_has_passed_is_not_pending() {
+        let now = tokio::time::Instant::now();
+        assert!(revert_pending(Some(now + Duration::from_secs(5)), now));
+        assert!(!revert_pending(Some(now), now));
+        assert!(!revert_pending(None, now));
+    }
+
+    #[test]
+    fn more_layouts_than_fit_are_counted_rather_than_dropped() {
+        let profiles = (0..10)
+            .map(|i| profile(&format!("id{i}"), &format!("Layout {i}"), &format!("2026-09-{:02}T00:00:00Z", i + 1)))
+            .collect();
+        let menu = displays_menu(&DisplaysReading::Known { profiles, current: None }, false);
+        assert!(menu.items.iter().any(|i| i.label == "+2 more — see Settings"));
+    }
+
+    // --- wired ---------------------------------------------------------
+
+    fn wired(interface: &str, state: WiredState, connection: Option<&str>) -> WiredStatus {
+        WiredStatus {
+            interface: interface.to_string(),
+            state,
+            connection: connection.map(str::to_string),
+            speed_mbps: (state == WiredState::Connected).then_some(1000),
+        }
+    }
+
+    fn wifi_on(ssid: Option<&str>) -> (TrayItem, Option<Ssid>) {
+        let connected = ssid.map(Ssid::new);
+        let status = net_status(RadioState::On, ssid);
+        (network_item(Some(&status), connected.as_ref(), Some(80), false), connected)
+    }
+
+    #[test]
+    fn every_wired_icon_the_function_can_return_is_in_the_allowed_set() {
+        let states = [
+            WiredState::Connected,
+            WiredState::Connecting,
+            WiredState::Disconnected,
+            WiredState::CableUnplugged,
+        ];
+        for ssid in [None, Some("home")] {
+            for wifi_present in [false, true] {
+                let mut cases: Vec<Vec<WiredStatus>> = vec![vec![]];
+                cases.extend(states.iter().map(|&s| vec![wired("enp3s0", s, Some("LAN"))]));
+                for ports in cases {
+                    let (item, connected) = wifi_on(ssid);
+                    let icon = with_wired(item, connected.as_ref(), &ports, wifi_present).icon_name;
+                    assert!(NETWORK_ICON_NAMES.contains(&icon.as_str()), "{icon:?}");
+                }
+            }
+        }
+    }
+
+    /// NetworkManager routes over the cable ahead of Wi-Fi, so the icon
+    /// names the cable — and still says Wi-Fi is up too.
+    #[test]
+    fn a_connected_cable_outranks_wifi_and_says_wifi_is_up_too() {
+        let (item, connected) = wifi_on(Some("home"));
+        let item = with_wired(
+            item,
+            connected.as_ref(),
+            &[wired("enp3s0", WiredState::Connected, Some("Home LAN"))],
+            true,
+        );
+        assert_eq!(item.icon_name, "network-wired-activated-symbolic");
+        assert_eq!(item.tooltip_title, "Wired — Home LAN");
+        assert_eq!(item.tooltip_body, "1000 Mb/s · also on Wi-Fi (home)");
+        assert_eq!(item.title, "Network");
+    }
+
+    /// Wi-Fi that works keeps the icon while a cable is still getting an
+    /// address, rather than showing a link that isn't up yet.
+    #[test]
+    fn wifi_keeps_the_icon_while_a_cable_is_still_connecting() {
+        let (item, connected) = wifi_on(Some("home"));
+        let wifi_icon = item.icon_name.clone();
+        let item = with_wired(
+            item,
+            connected.as_ref(),
+            &[wired("enp3s0", WiredState::Connecting, None)],
+            true,
+        );
+        assert_eq!(item.icon_name, wifi_icon);
+    }
+
+    /// A machine with no Wi-Fi hardware must not show a Wi-Fi icon saying
+    /// "not connected" about a radio that isn't there.
+    #[test]
+    fn with_no_wifi_hardware_the_icon_is_the_wires_not_a_missing_radios() {
+        let (item, _) = wifi_on(None);
+        let unplugged = with_wired(
+            item.clone(),
+            None,
+            &[wired("enp3s0", WiredState::CableUnplugged, None)],
+            false,
+        );
+        assert_eq!(unplugged.icon_name, "network-wired-unavailable-symbolic");
+        assert_eq!(unplugged.tooltip_title, "Cable unplugged");
+
+        let idle = with_wired(item, None, &[wired("enp3s0", WiredState::Disconnected, None)], false);
+        assert_eq!(idle.icon_name, "network-wired-disconnected-symbolic");
+        assert_ne!(idle.icon_name, unplugged.icon_name, "plugged-in-idle and unplugged look different");
+    }
+
+    /// With Wi-Fi hardware and no cable story to tell, the Wi-Fi icon
+    /// stands exactly as it was.
+    #[test]
+    fn an_unplugged_cable_does_not_displace_wifi() {
+        let (item, connected) = wifi_on(Some("home"));
+        let before = item.clone();
+        let after = with_wired(
+            item,
+            connected.as_ref(),
+            &[wired("enp3s0", WiredState::CableUnplugged, None)],
+            true,
+        );
+        assert_eq!(after, before);
+    }
+
+    fn menu_with(ports: &[WiredStatus], wifi_present: bool) -> Menu {
+        let status = net_status(RadioState::On, None);
+        with_wired_menu(network_menu(Some(&status), None, false, &[], &[]), ports, wifi_present, false)
+    }
+
+    /// Wired rows sit above the Wi-Fi toggle in their own section, so
+    /// they can't be read as governed by it.
+    #[test]
+    fn wired_rows_come_first_in_a_section_of_their_own() {
+        let menu = menu_with(&[wired("enp3s0", WiredState::Connected, Some("Home LAN"))], true);
+        assert_eq!(menu.items[0].label, "Wired — Home LAN");
+        assert_eq!((menu.items[0].kind, menu.items[0].toggle), (ItemKind::Checkmark, Some(true)));
+        assert_eq!(menu.items[1].kind, ItemKind::Separator);
+        assert_eq!(menu.items[2].label, "Wi-Fi");
+        assert_eq!(
+            parse_menu_action(menu.items[0].action.as_deref().unwrap()),
+            Some(MenuAction::WiredDisconnect("enp3s0".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_plugged_in_idle_port_offers_to_connect_and_an_unplugged_one_only_says_so() {
+        let menu = menu_with(
+            &[
+                wired("enp3s0", WiredState::Disconnected, None),
+                wired("enx0011", WiredState::CableUnplugged, None),
+            ],
+            true,
+        );
+        assert_eq!(menu.items[0].label, "Wired (enp3s0)", "several ports are told apart by name");
+        assert_eq!(
+            parse_menu_action(menu.items[0].action.as_deref().unwrap()),
+            Some(MenuAction::WiredConnect("enp3s0".to_string()))
+        );
+        assert_eq!(menu.items[1].label, "Wired (enx0011) — cable unplugged");
+        assert!(!menu.items[1].enabled);
+    }
+
+    /// No Wi-Fi hardware: no Wi-Fi toggle for a radio that isn't there.
+    #[test]
+    fn with_no_wifi_hardware_the_menu_offers_no_wifi_toggle() {
+        let menu = menu_with(&[wired("enp3s0", WiredState::Connected, Some("LAN"))], false);
+        assert!(!menu.items.iter().any(|i| i.label == "Wi-Fi"), "{:?}", menu.items);
+        assert_eq!(menu.items.last().unwrap().label, "Network settings…");
+
+        let bare = menu_with(&[], false);
+        assert_eq!(bare.items[0].label, "No network devices");
+    }
+
+    #[test]
+    fn with_no_wired_ports_the_wifi_menu_is_unchanged() {
+        let status = net_status(RadioState::On, None);
+        let wifi = network_menu(Some(&status), None, false, &[], &[]);
+        assert_eq!(with_wired_menu(wifi.clone(), &[], true, false), wifi);
+    }
+
+    #[test]
+    fn an_interface_name_the_kernel_would_refuse_is_ignored() {
+        assert_eq!(parse_menu_action("wired:connect:"), None);
+        assert_eq!(parse_menu_action("wired:connect:en p3s0"), None);
+        assert_eq!(parse_menu_action("wired:connect:../eth0"), None);
+        assert_eq!(parse_menu_action("wired:connect:abcdefghijklmnop"), None, "sixteen bytes");
+        assert_eq!(
+            parse_menu_action("wired:connect:enp197s0f4u1"),
+            Some(MenuAction::WiredConnect("enp197s0f4u1".to_string()))
+        );
     }
 }

@@ -212,6 +212,56 @@ impl MimeDb {
         set_default(self.canonical(mime), app)
     }
 
+    /// Forgets the default for `mime`, resolving an alias first — the
+    /// counterpart to [`MimeDb::set_default`], for a person undoing a
+    /// choice rather than making a different one.
+    ///
+    /// Worth telling apart from setting a different application: with
+    /// no line at all, the desktop falls back to whatever registered
+    /// for the type, which is where a fresh machine starts. Setting
+    /// "none" is not expressible, so "put it back how it was" has no
+    /// other spelling.
+    ///
+    /// This edits the one file this crate writes. A default that came
+    /// from a system-wide `mimeapps.list` is not this suite's to remove,
+    /// and clearing will leave it standing — see [`MimeDb::chosen_types`]
+    /// for the read side of the same distinction.
+    pub fn clear_default(&self, mime: &str) -> std::io::Result<()> {
+        clear_default(self.canonical(mime))
+    }
+
+    /// Every type this machine has a name rule for, or that something
+    /// registered for, or that a default was recorded for. Sorted, and
+    /// each type once.
+    ///
+    /// Aliases are left out: each resolves to a name already in the
+    /// list, and offering both makes one row of a search look like two
+    /// settings that could disagree.
+    pub fn known_types(&self) -> Vec<&str> {
+        let mut types: Vec<&str> = self
+            .lookup
+            .globs
+            .mimes()
+            .chain(self.registered.keys().map(String::as_str))
+            .chain(self.chosen.keys().map(String::as_str))
+            .collect();
+        types.sort_unstable();
+        types.dedup();
+        types
+    }
+
+    /// The types somebody has actually chosen an application for, from
+    /// every `mimeapps.list` that applies.
+    ///
+    /// The list nothing on this desktop shows. A `mimeapps.list`
+    /// accumulates over years, and an entry that has gone stale — the
+    /// fstl case in [`MimeDb::default_for`] — stays invisible until a
+    /// file quietly fails to open. Sorted, since it comes out of a
+    /// `BTreeMap`.
+    pub fn chosen_types(&self) -> Vec<&str> {
+        self.chosen.keys().map(String::as_str).collect()
+    }
+
     /// Every installed application registered for `mime`, the default
     /// first and the rest in the order the desktop lists them.
     ///
@@ -343,6 +393,25 @@ pub fn set_default(mime: &str, app: &str) -> std::io::Result<()> {
     hyprforge_paths::write_atomic(&path, &defaults::with_default(&text, mime, app))
 }
 
+/// Removes `mime`'s default from the user's own `mimeapps.list`.
+///
+/// Prefer [`MimeDb::clear_default`], which resolves an alias first.
+///
+/// Nothing recorded is already the state being asked for, so a missing
+/// file and a file with no line for this type are both `Ok(())` and
+/// neither writes anything. That is the one case where doing nothing is
+/// the whole job.
+pub fn clear_default(mime: &str) -> std::io::Result<()> {
+    let path = user_mimeapps_path();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let Some(without) = defaults::without_default(&text, mime) else { return Ok(()) };
+    hyprforge_paths::write_atomic(&path, &without)
+}
+
 /// The one file this crate writes.
 pub fn user_mimeapps_path() -> PathBuf {
     hyprforge_paths::config_home().join("mimeapps.list")
@@ -433,6 +502,24 @@ mod tests {
         let apps = db.apps_for("model/stl");
         assert_eq!(apps.len(), 1, "fstl is registered but not installed: {apps:?}");
         assert_eq!(apps[0].name, "3D Viewer");
+    }
+
+    /// The two lists a manager screen is built on: everything that
+    /// could be searched for, and the much shorter list of what
+    /// somebody actually chose.
+    #[test]
+    fn the_types_known_and_the_types_chosen_are_different_questions() {
+        let (_dir, db) = fixture();
+        let known = db.known_types();
+        assert!(known.contains(&"model/stl"), "a glob rule names it: {known:?}");
+        assert!(known.contains(&"model/3mf"));
+        assert!(known.windows(2).all(|pair| pair[0] < pair[1]), "sorted, each once: {known:?}");
+
+        assert_eq!(db.chosen_types(), vec!["model/3mf"], "the only line in the fixture's mimeapps");
+        assert!(
+            !db.chosen_types().contains(&"model/stl"),
+            "registering for a type is not choosing one for it"
+        );
     }
 
     /// The failure that started this: the user's default points at
