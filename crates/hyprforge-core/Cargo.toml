@@ -6,8 +6,8 @@ license.workspace = true
 
 [features]
 # The GUI half moved to hyprforge-ui, so nothing here needs iced any
-# more. `dbus` stays optional: only the settings app and displayctl talk
-# to the display daemon.
+# more. `dbus` stays optional: only the settings app, displayctl and the
+# tray's displays icon talk to the display daemon.
 dbus = ["dep:zbus"]
 
 [dependencies]

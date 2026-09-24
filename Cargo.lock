@@ -2099,8 +2099,10 @@ name = "hyprforge-tray"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures-util",
  "hyprforge-appearance",
  "hyprforge-bluetooth",
+ "hyprforge-core",
  "hyprforge-ecosystem",
  "hyprforge-look",
  "hyprforge-network",
