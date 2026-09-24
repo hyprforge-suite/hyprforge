@@ -253,3 +253,4 @@ hyprforge-fileops = { path = "crates/hyprforge-fileops" }
 hyprforge-files-core = { path = "crates/hyprforge-files-core" }
 hyprforge-popup = { path = "crates/hyprforge-popup" }
 hyprforge-process = { path = "crates/hyprforge-process" }
+hyprforge-image = { path = "crates/hyprforge-image" }

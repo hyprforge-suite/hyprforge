@@ -43,8 +43,48 @@ use hyprforge_ui::theme::{spacing, FontScale, BASE_TEXT_SIZE};
 use hyprforge_ui::widgets::{divider, meta_text, scaled_text};
 use iced::widget::{column, container, row, scrollable, text_input, Id};
 use iced::{Element, Length};
-use std::collections::HashSet;
+use iced::widget::image::Handle as ImageHandle;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+
+/// How many grid thumbnails one folder may hold.
+///
+/// Each is decoded at twice the grid icon's logical size (for a 2x
+/// display) — 112 pixels square, about 50KB — so the cap bounds a folder
+/// of thousands of photographs to roughly 30MB of thumbnails. Past it the
+/// rest keep their icons; a grid of 600 pictures is past what anyone
+/// scrolls through by eye.
+const MAX_THUMBNAILS: usize = 600;
+
+/// The preview pane's width, logical pixels.
+pub const PREVIEW_WIDTH: f32 = 280.0;
+
+/// Below this window width the pane stays hidden whatever the setting
+/// says — the listing needs the room more, and a pane squeezing the
+/// names into two letters is not a preview anyone asked for.
+const PREVIEW_MIN_WINDOW: f32 = 820.0;
+
+/// Pictures the host has decoded for this browser: grid thumbnails, and
+/// the one picture the preview pane shows.
+///
+/// The browser does no I/O, so it only ever *asks* — through
+/// [`Outcome::LoadThumbnails`] and [`Outcome::LoadPreview`] — and holds
+/// what comes back. Everything here belongs to one folder and is dropped
+/// the moment the listing moves somewhere else, so a result arriving late
+/// for a folder already left lands nowhere.
+#[derive(Debug, Clone, Default)]
+struct Media {
+    dir: PathBuf,
+    thumbnails: HashMap<PathBuf, ImageHandle>,
+    /// Asked for, whether or not an answer has come — so nothing is
+    /// asked for twice, including a file that could not be decoded.
+    requested: HashSet<PathBuf>,
+    /// The file the preview pane was last asked to show.
+    preview_for: Option<PathBuf>,
+    /// Its picture, once decoded. `None` while waiting, and for a file
+    /// that turned out not to decode.
+    preview: Option<ImageHandle>,
+}
 
 /// Which host is rendering this [`Browser`], and — for a dialog — what
 /// it's collecting a path for.
@@ -415,6 +455,14 @@ pub enum Outcome {
     Notice(String),
     /// Several things to do, in order.
     Many(Vec<Outcome>),
+    /// Decode these pictures as grid thumbnails and hand each back as
+    /// [`Message::ThumbnailLoaded`]. In display order, so the ones on
+    /// screen first arrive first; one at a time, so a folder of
+    /// photographs is never decoded all at once.
+    LoadThumbnails(Vec<PathBuf>),
+    /// Decode this picture for the preview pane and hand it back as
+    /// [`Message::PreviewLoaded`].
+    LoadPreview(PathBuf),
     /// Open a context menu at the pointer. The browser does not know
     /// where the pointer is — the window does, and fills it in, the same
     /// way it fills in modifier keys on a click.
@@ -457,6 +505,10 @@ pub enum Message {
     /// could not be read — never `Some(0)`, which would claim it is
     /// empty.
     CountsLoaded(Vec<(PathBuf, Option<usize>)>),
+    /// A grid thumbnail the host decoded — see [`Outcome::LoadThumbnails`].
+    ThumbnailLoaded(PathBuf, ImageHandle),
+    /// The preview pane's picture, or `None` when it would not decode.
+    PreviewLoaded(PathBuf, Option<ImageHandle>),
     GoBack,
     GoForward,
     GoUp,
@@ -559,6 +611,18 @@ struct ViewModel<'a> {
     list_scrollable_id: Id,
     can_go_back: bool,
     can_go_forward: bool,
+    /// Grid thumbnails the host has decoded, by path.
+    thumbnails: &'a HashMap<PathBuf, ImageHandle>,
+    /// What the preview pane shows, when it is on.
+    preview: Option<PreviewModel<'a>>,
+}
+
+/// The preview pane's content: what is selected, and the picture for it
+/// once the host has decoded one.
+#[derive(Debug, Clone, PartialEq)]
+struct PreviewModel<'a> {
+    selected: Vec<&'a Entry>,
+    picture: Option<&'a ImageHandle>,
 }
 
 /// Browsing state for one directory tree view. Owns no filesystem
@@ -597,6 +661,7 @@ pub struct Browser {
     /// waiting to be filled: [`sidebar_sections`] renders no Pinned
     /// heading at all for an empty list, exactly like a fresh install.
     pinned: Vec<PinnedItem>,
+    media: Media,
     /// Whether the column picker under the list header is open.
     ///
     /// Not in `Prefs`: a panel is a thing you are doing, not a thing you
@@ -654,6 +719,7 @@ impl Browser {
             prefs,
             sidebar,
             pinned: Vec::new(),
+            media: Media::default(),
             // `Id::unique()` — not a per-widget-tree literal — is what
             // makes this stable across `view()` calls: iced can only
             // preserve a `scrollable`'s offset across frames if the same
@@ -767,7 +833,26 @@ impl Browser {
     }
 
     pub fn update(&mut self, message: Message) -> Outcome {
+        let outcome = self.update_state(message);
+        self.with_media(outcome)
+    }
+
+    fn update_state(&mut self, message: Message) -> Outcome {
         match message {
+            Message::ThumbnailLoaded(path, handle) => {
+                // Only what was asked for in this folder: a thumbnail for
+                // a folder already left has nowhere to go.
+                if self.media.requested.contains(&path) {
+                    self.media.thumbnails.insert(path, handle);
+                }
+                Outcome::None
+            }
+            Message::PreviewLoaded(path, handle) => {
+                if self.media.preview_for.as_ref() == Some(&path) {
+                    self.media.preview = handle;
+                }
+                Outcome::None
+            }
             Message::Navigate(path) => self.go_to(path),
             Message::DirLoaded(path, result) => self.apply_dir_loaded(path, result),
             Message::CountsLoaded(counts) => self.apply_counts(counts),
@@ -1033,6 +1118,83 @@ impl Browser {
     /// [`crate::action::enabled`] answer a menu uses to grey an item out,
     /// so the two cannot disagree.
     pub fn perform(&mut self, action: Action) -> Outcome {
+        let outcome = self.perform_action(action);
+        self.with_media(outcome)
+    }
+
+    /// Adds whatever pictures this state now wants to `outcome`: the
+    /// preview pane's, when exactly one picture is selected and the pane
+    /// is on, and the grid's thumbnails, when the grid is showing.
+    ///
+    /// Run after every update and every action, and safe to run twice —
+    /// [`Media`] remembers what it has already asked for — so no path
+    /// through the browser can change the selection or the view mode and
+    /// forget to ask.
+    fn with_media(&mut self, outcome: Outcome) -> Outcome {
+        if self.media.dir != self.current_dir {
+            self.media = Media { dir: self.current_dir.clone(), ..Media::default() };
+        }
+        let mut asks = Vec::new();
+
+        let target = self.preview_target();
+        if target != self.media.preview_for {
+            self.media.preview = None;
+            self.media.preview_for = target.clone();
+            if let Some(path) = target {
+                asks.push(Outcome::LoadPreview(path));
+            }
+        }
+
+        let grid = self.prefs.view_mode == ViewMode::Grid && matches!(self.load_state, LoadState::Loaded);
+        if grid && self.archive.is_none() {
+            let room = MAX_THUMBNAILS.saturating_sub(self.media.requested.len());
+            let wanted: Vec<PathBuf> = self
+                .rows()
+                .into_iter()
+                .filter(|e| !e.is_dir && hyprforge_image::format::looks_decodable(&e.path))
+                .filter(|e| !self.media.requested.contains(&e.path))
+                .take(room)
+                .map(|e| e.path.clone())
+                .collect();
+            if !wanted.is_empty() {
+                self.media.requested.extend(wanted.iter().cloned());
+                asks.push(Outcome::LoadThumbnails(wanted));
+            }
+        }
+
+        if asks.is_empty() {
+            return outcome;
+        }
+        match outcome {
+            Outcome::None if asks.len() == 1 => asks.remove(0),
+            Outcome::None => Outcome::Many(asks),
+            Outcome::Many(mut parts) => {
+                parts.extend(asks);
+                Outcome::Many(parts)
+            }
+            other => {
+                let mut parts = vec![other];
+                parts.extend(asks);
+                Outcome::Many(parts)
+            }
+        }
+    }
+
+    /// The one picture the preview pane should show, if any: the pane is
+    /// on, exactly one thing is selected, and it is a file this build can
+    /// decode. Not inside an archive — a member there has no path the
+    /// decoder can open.
+    fn preview_target(&self) -> Option<PathBuf> {
+        if !self.prefs.preview_pane || self.archive.is_some() {
+            return None;
+        }
+        let selected = self.selected_shown();
+        let [only] = selected.as_slice() else { return None };
+        let entry = self.entries.iter().find(|e| &e.path == only)?;
+        (!entry.is_dir && hyprforge_image::format::looks_decodable(&entry.path)).then(|| only.clone())
+    }
+
+    fn perform_action(&mut self, action: Action) -> Outcome {
         self.perform_on(action, None)
     }
 
@@ -1164,6 +1326,10 @@ impl Browser {
             Action::ToggleHidden => {
                 self.prefs.show_hidden = !self.prefs.show_hidden;
                 self.refresh_view();
+                Outcome::PrefsChanged(self.prefs.clone())
+            }
+            Action::TogglePreview => {
+                self.prefs.preview_pane = !self.prefs.preview_pane;
                 Outcome::PrefsChanged(self.prefs.clone())
             }
             Action::Trash => Outcome::Trash(self.selected_shown()),
@@ -1620,6 +1786,11 @@ impl Browser {
             list_scrollable_id: self.list_scrollable_id.clone(),
             can_go_back: !self.back_stack.is_empty(),
             can_go_forward: !self.forward_stack.is_empty(),
+            thumbnails: &self.media.thumbnails,
+            preview: self.prefs.preview_pane.then(|| PreviewModel {
+                selected: self.rows().into_iter().filter(|e| self.selection.is_selected(&e.path)).collect(),
+                picture: self.media.preview.as_ref(),
+            }),
         }
     }
 
@@ -1725,7 +1896,10 @@ fn render<'a>(vm: ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     } else {
         sidebar_view(&vm, scale)
     };
-    let middle = row![side, file_area(&vm, scale)].height(Length::Fill);
+    let mut middle = row![side, file_area(&vm, scale)].height(Length::Fill);
+    if let Some(preview) = vm.preview.as_ref().filter(|_| vm.viewport_width >= PREVIEW_MIN_WINDOW) {
+        middle = middle.push(preview_pane(preview, scale));
+    }
 
     column![
         header_bar(&vm, scale),
@@ -1737,6 +1911,71 @@ fn render<'a>(vm: ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
+}
+
+/// The preview pane: the selected picture, and what the listing already
+/// knows about the selection, in a column beside it.
+///
+/// Nothing here is read from disk — the picture is what the host decoded
+/// on the browser's request, and every detail is one the listing
+/// already holds — so showing the pane costs a decode per selected
+/// picture and nothing else.
+fn preview_pane<'a>(preview: &PreviewModel<'a>, scale: FontScale) -> Element<'a, Message> {
+    let detail = |label: &'static str, value: String| -> Element<'a, Message> {
+        column![
+            meta_text(label, density::META_TEXT_BASE, scale),
+            scaled_text(value, BASE_TEXT_SIZE, scale).wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+        ]
+        .spacing(2)
+        .into()
+    };
+    let inner = PREVIEW_WIDTH - 2.0 * spacing::MD;
+
+    let body: Element<'a, Message> = match preview.selected.as_slice() {
+        [] => meta_text("Select a file to see it here.", BASE_TEXT_SIZE, scale).into(),
+        [entry] => {
+            let picture: Element<'a, Message> = match preview.picture {
+                Some(handle) => iced::widget::image(handle.clone())
+                    .width(Length::Fixed(inner))
+                    .height(Length::Fixed(inner))
+                    .content_fit(iced::ContentFit::Contain)
+                    .into(),
+                None => container(entry_icon(entry.kind, inner / 2.5, scale))
+                    .center_x(Length::Fixed(inner))
+                    .into(),
+            };
+            let now = chrono::Local::now();
+            column![
+                picture,
+                scaled_text(entry.name.clone(), 16.0, scale).wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                detail("Kind", format_kind(entry)),
+                detail("Size", format_size(entry.size)),
+                detail("Modified", format_modified_at(entry.modified, now)),
+            ]
+            .spacing(spacing::MD)
+            .into()
+        }
+        many => {
+            let bytes: u64 = many
+                .iter()
+                .filter_map(|e| match e.size {
+                    EntrySize::Bytes(b) => Some(b),
+                    _ => None,
+                })
+                .sum();
+            column![
+                scaled_text(format!("{} items selected", many.len()), 16.0, scale),
+                detail("Total size of the files", crate::format::human_readable_size(bytes)),
+            ]
+            .spacing(spacing::MD)
+            .into()
+        }
+    };
+
+    container(scrollable(container(body).padding(spacing::MD)).height(Length::Fill))
+        .width(Length::Fixed(PREVIEW_WIDTH))
+        .height(Length::Fill)
+        .into()
 }
 
 /// The listing and its column headers — everything right of the sidebar
@@ -2162,10 +2401,24 @@ fn status_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> 
         iced::widget::Space::new().into()
     };
 
+    // The preview pane's switch, beside the dotfiles one and for the same
+    // reason: a key nobody finds by looking.
+    let preview_switch: Element<'a, Message> =
+        iced::widget::button(scaled_text(
+            if vm.prefs.preview_pane { "Hide preview" } else { "Show preview" },
+            density::META_TEXT_BASE,
+            scale,
+        ))
+        .padding([0, spacing::XS as u16])
+        .on_press(Message::Perform(Action::TogglePreview))
+        .style(quiet_link_style)
+        .into();
+
     plane(
         row![
             meta_text(summary, density::META_TEXT_BASE, scale),
             dotfile_switch,
+            preview_switch,
             iced::widget::Space::new().width(Length::Fill),
             meta_text(
                 vm.current_dir.display().to_string(),
@@ -3251,6 +3504,7 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         .enumerate()
         .map(|(index, entry)| (index, entry, vm.selection.is_selected(&entry.path)))
         .collect();
+    let thumbnails = vm.thumbnails;
 
     // `responsive` and not a fixed column count. Five fixed columns meant
     // the cells never got wider *or* more numerous as the window grew —
@@ -3273,7 +3527,7 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
                 grid = grid.push(current);
                 current = row![].spacing(gap);
             }
-            current = current.push(grid_cell(index, entry, selected, renaming, scale));
+            current = current.push(grid_cell(index, entry, selected, renaming, thumbnails.get(&entry.path), scale));
         }
         // The last row is padded out with empty space to a full set of
         // columns, so its cells keep the width the rows above gave them
@@ -3366,6 +3620,7 @@ fn grid_cell<'a>(
     entry: &'a Entry,
     selected: bool,
     renaming: Option<&'a Renaming>,
+    thumbnail: Option<&ImageHandle>,
     scale: FontScale,
 ) -> Element<'a, Message> {
     let editing = renaming.filter(|r| r.path == entry.path);
@@ -3375,8 +3630,19 @@ fn grid_cell<'a>(
         Some(r) => rename_field(r, scale),
         None => grid_name(entry, scale),
     };
+    // The picture itself where the host has decoded one, in the same box
+    // the icon would take, so a row of thumbnails and icons lines up.
+    let size = density::grid_icon_size(scale);
+    let picture: Element<'a, Message> = match thumbnail {
+        Some(handle) => iced::widget::image(handle.clone())
+            .width(Length::Fixed(size))
+            .height(Length::Fixed(size))
+            .content_fit(iced::ContentFit::Contain)
+            .into(),
+        None => entry_icon(entry.kind, size, scale),
+    };
     let content = column![
-        entry_icon(entry.kind, density::grid_icon_size(scale), scale),
+        picture,
         name,
     ]
     .spacing(spacing::SM)
@@ -4755,6 +5021,11 @@ mod tests {
             list_scrollable_id: Id::unique(),
             can_go_back: false,
             can_go_forward: false,
+            // Borrowed for `'a` like everything else here; a test helper
+            // leaking one empty map is simpler than threading it through
+            // every caller.
+            thumbnails: Box::leak(Box::default()),
+            preview: None,
         }
     }
 
@@ -5043,5 +5314,143 @@ mod archive_tests {
                 into: PathBuf::from("/dir"),
             }
         );
+    }
+}
+
+/// The pictures a browser asks its host for — the preview pane's and the
+/// grid's — and what it does with the answers.
+#[cfg(test)]
+mod media_tests {
+    use super::tests_support::loaded;
+    use super::*;
+
+    fn index_of(browser: &Browser, name: &str) -> usize {
+        browser.rows().iter().position(|e| e.name == name).expect("that row is listed")
+    }
+
+    fn click(browser: &mut Browser, name: &str) -> Outcome {
+        let index = index_of(browser, name);
+        browser.update(Message::EntryClicked { index, ctrl: false, shift: false })
+    }
+
+    fn asks_preview_of(outcome: &Outcome) -> Option<PathBuf> {
+        match outcome {
+            Outcome::LoadPreview(path) => Some(path.clone()),
+            Outcome::Many(parts) => parts.iter().find_map(asks_preview_of),
+            _ => None,
+        }
+    }
+
+    fn asks_thumbnails(outcome: &Outcome) -> Vec<PathBuf> {
+        match outcome {
+            Outcome::LoadThumbnails(paths) => paths.clone(),
+            Outcome::Many(parts) => parts.iter().flat_map(asks_thumbnails).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn a_handle() -> ImageHandle {
+        ImageHandle::from_rgba(1, 1, vec![0, 0, 0, 255])
+    }
+
+    #[test]
+    fn selecting_one_picture_asks_the_host_for_its_preview() {
+        let mut browser = loaded(&[("a.png", false), ("notes.txt", false)]);
+        let outcome = click(&mut browser, "a.png");
+        assert_eq!(asks_preview_of(&outcome), Some(PathBuf::from("/dir/a.png")));
+    }
+
+    /// A text file gets the pane's details and its icon, and nothing is
+    /// decoded for it.
+    #[test]
+    fn selecting_something_that_is_not_a_picture_asks_for_nothing() {
+        let mut browser = loaded(&[("a.png", false), ("notes.txt", false)]);
+        assert_eq!(asks_preview_of(&click(&mut browser, "notes.txt")), None);
+    }
+
+    #[test]
+    fn with_the_pane_off_no_preview_is_decoded() {
+        let mut browser = loaded(&[("a.png", false)]);
+        browser.perform(Action::TogglePreview);
+        assert!(!browser.prefs.preview_pane);
+        assert_eq!(asks_preview_of(&click(&mut browser, "a.png")), None);
+    }
+
+    #[test]
+    fn toggling_the_pane_is_remembered_like_every_other_view_setting() {
+        let mut browser = loaded(&[]);
+        match browser.perform(Action::TogglePreview) {
+            Outcome::PrefsChanged(prefs) => assert!(!prefs.preview_pane),
+            other => panic!("expected the preference to be saved, got {other:?}"),
+        }
+    }
+
+    /// The grid asks for pictures only, in the order they are shown, so
+    /// the ones on screen first arrive first.
+    #[test]
+    fn the_grid_asks_for_thumbnails_of_the_pictures_in_display_order() {
+        let mut browser = loaded(&[("b.jpg", false), ("folder", true), ("a.png", false), ("readme.md", false)]);
+        let outcome = browser.update(Message::SetViewMode(ViewMode::Grid));
+        let expected: Vec<PathBuf> = browser
+            .rows()
+            .iter()
+            .filter(|e| e.name.ends_with(".png") || e.name.ends_with(".jpg"))
+            .map(|e| e.path.clone())
+            .collect();
+        assert_eq!(asks_thumbnails(&outcome), expected);
+        assert_eq!(expected.len(), 2);
+    }
+
+    #[test]
+    fn a_thumbnail_is_never_asked_for_twice() {
+        let mut browser = loaded(&[("a.png", false)]);
+        let first = browser.update(Message::SetViewMode(ViewMode::Grid));
+        assert_eq!(asks_thumbnails(&first).len(), 1);
+        let again = browser.update(Message::SetViewMode(ViewMode::Grid));
+        assert!(asks_thumbnails(&again).is_empty(), "{again:?}");
+    }
+
+    #[test]
+    fn the_list_view_asks_for_no_thumbnails() {
+        let mut browser = loaded(&[("a.png", false)]);
+        let outcome = browser.update(Message::SetViewMode(ViewMode::List));
+        assert!(asks_thumbnails(&outcome).is_empty());
+    }
+
+    /// A thumbnail arriving for something this browser did not ask for —
+    /// a folder it has since left — lands nowhere.
+    #[test]
+    fn a_thumbnail_nobody_asked_for_is_dropped() {
+        let mut browser = loaded(&[("a.png", false)]);
+        browser.update(Message::ThumbnailLoaded(PathBuf::from("/elsewhere/x.png"), a_handle()));
+        assert!(browser.media.thumbnails.is_empty());
+
+        browser.update(Message::SetViewMode(ViewMode::Grid));
+        browser.update(Message::ThumbnailLoaded(PathBuf::from("/dir/a.png"), a_handle()));
+        assert!(browser.media.thumbnails.contains_key(Path::new("/dir/a.png")));
+    }
+
+    /// The preview for a picture the user has already clicked away from
+    /// must not replace the one they are now looking at.
+    #[test]
+    fn a_preview_that_arrives_after_the_selection_moved_on_is_ignored() {
+        let mut browser = loaded(&[("a.png", false), ("b.png", false)]);
+        click(&mut browser, "a.png");
+        click(&mut browser, "b.png");
+        browser.update(Message::PreviewLoaded(PathBuf::from("/dir/a.png"), Some(a_handle())));
+        assert!(browser.media.preview.is_none());
+        browser.update(Message::PreviewLoaded(PathBuf::from("/dir/b.png"), Some(a_handle())));
+        assert!(browser.media.preview.is_some());
+    }
+
+    /// Everything decoded belongs to one folder; navigating drops it, so
+    /// the new folder's grid asks afresh.
+    #[test]
+    fn a_new_folder_starts_with_nothing_asked_for() {
+        let mut browser = loaded(&[("a.png", false)]);
+        browser.update(Message::SetViewMode(ViewMode::Grid));
+        assert!(!browser.media.requested.is_empty());
+        browser.update(Message::Navigate(PathBuf::from("/other")));
+        assert!(browser.media.requested.is_empty());
     }
 }

@@ -181,6 +181,7 @@ impl Default for MenuConfig {
                 Sep,
                 A(SelectAll),
                 A(ToggleHidden),
+                A(TogglePreview),
                 A(Refresh),
                 Sep,
                 A(Pin),

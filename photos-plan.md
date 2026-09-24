@@ -4,8 +4,9 @@
 the viewer grammar and the actions that touch files. The three open
 questions at the end were answered by the owner — PNG, JPEG, WebP and GIF;
 Set as Wallpaper in scope; the keyboard grammar merged as
-`hyprforge-keys`. Phase 4, the file manager's preview pane on
-`hyprforge-image`, is next. Two gaps are named rather than hidden: an
+`hyprforge-keys`. Phase 4 is built too: the file manager's preview pane
+and its grid thumbnails both decode through `hyprforge-image`. What is
+left of it is the spacebar Quick Look overlay. Two gaps are named rather than hidden: an
 animated GIF plays its first frame only, and zooming past the size that
 was decoded upsamples rather than re-decoding a sharper crop.
 

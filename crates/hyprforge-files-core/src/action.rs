@@ -45,6 +45,8 @@ pub enum Action {
     ClearSearch,
     /// Show or hide dotfiles. Remembered.
     ToggleHidden,
+    /// Show or hide the preview pane beside the listing. Remembered.
+    TogglePreview,
     /// Move the selection to the trash.
     Trash,
     /// Delete the selection for good, bypassing the trash.
@@ -145,6 +147,7 @@ impl Action {
             Action::SelectAll,
             Action::ClearSearch,
             Action::ToggleHidden,
+            Action::TogglePreview,
             Action::Trash,
             Action::DeletePermanently,
             Action::Restore,
@@ -192,6 +195,7 @@ impl Action {
             Action::SelectAll => "select-all",
             Action::ClearSearch => "clear-search",
             Action::ToggleHidden => "show-hidden",
+            Action::TogglePreview => "preview-pane",
             Action::Trash => "trash",
             Action::DeletePermanently => "delete-permanently",
             Action::Restore => "restore",
@@ -258,6 +262,7 @@ impl Action {
             Action::SelectAll => "Select All",
             Action::ClearSearch => "Clear Search",
             Action::ToggleHidden => "Show Hidden Files",
+            Action::TogglePreview => "Preview Pane",
             Action::Trash => "Move to Trash",
             Action::DeletePermanently => "Delete Permanently",
             Action::Restore => "Restore",
@@ -334,6 +339,9 @@ impl Action {
             Action::SelectAll => &["Ctrl+A"],
             Action::ClearSearch => &["Escape"],
             Action::ToggleHidden => &["Ctrl+H"],
+            // Alt+P is Windows Explorer's, the one file manager whose
+            // preview pane has a key people already know.
+            Action::TogglePreview => &["Alt+P"],
             Action::Trash => &["Delete"],
             // Unbound on purpose. A single key that skips the trash is one
             // slip away from losing a file for good; anyone who wants
@@ -476,7 +484,7 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         | Action::ExtendDown
         | Action::SelectAll => ctx.shown > 0,
         Action::ClearSearch => ctx.searching,
-        Action::ToggleHidden | Action::ContextMenu => true,
+        Action::ToggleHidden | Action::TogglePreview | Action::ContextMenu => true,
         // Not inside an archive: there is no trash in a zip, and a
         // member removed from one is gone. `DeletePermanently` is the
         // action that means that, and it is the one offered there.
