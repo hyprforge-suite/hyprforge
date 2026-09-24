@@ -61,6 +61,39 @@ pub fn presented_size(oriented: (u32, u32), turns: Turns) -> (u32, u32) {
     }
 }
 
+/// Turns decoded RGBA8 pixels clockwise by `turns`, returning the new
+/// pixels and their size.
+///
+/// The user's turn is applied to the pixels rather than asked of the
+/// renderer: iced's `Rotation` turns a picture inside the box it was laid
+/// out in, so a quarter turn of a landscape picture draws it cropped to a
+/// landscape box. Turning the pixels makes the presented size the real
+/// size, which is what every zoom and pan calculation already assumes.
+/// The buffer is window-sized (see `hyprforge_image`'s budget), so
+/// turning it is a copy of at most that, done once per turn.
+pub fn rotate_rgba(pixels: &[u8], width: u32, height: u32, turns: Turns) -> (Vec<u8>, u32, u32) {
+    let (w, h) = (width as usize, height as usize);
+    if turns.quarters() == 0 || pixels.len() != w * h * 4 {
+        return (pixels.to_vec(), width, height);
+    }
+    let (out_w, out_h) = if turns.swaps_axes() { (h, w) } else { (w, h) };
+    let mut out = vec![0u8; pixels.len()];
+    for y in 0..h {
+        for x in 0..w {
+            // Where (x, y) lands after the turn, clockwise.
+            let (nx, ny) = match turns.quarters() {
+                1 => (h - 1 - y, x),
+                2 => (w - 1 - x, h - 1 - y),
+                _ => (y, w - 1 - x),
+            };
+            let from = (y * w + x) * 4;
+            let to = (ny * out_w + nx) * 4;
+            out[to..to + 4].copy_from_slice(&pixels[from..from + 4]);
+        }
+    }
+    (out, out_w as u32, out_h as u32)
+}
+
 /// Whether the picture on screen is the right way up compared to how its
 /// pixels are stored — for an info panel that wants to say so.
 pub fn is_turned(file: Orientation, turns: Turns) -> bool {
@@ -121,5 +154,37 @@ mod tests {
         assert!(!is_turned(Orientation::Upright, Turns::none()));
         assert!(is_turned(Orientation::Rotate90, Turns::none()));
         assert!(is_turned(Orientation::Upright, Turns::none().right()));
+    }
+
+    /// A 2x1 picture, red then green. The corner that was top-left is
+    /// where a clockwise turn has to put it — the same check the plan
+    /// asks of EXIF orientation, for the user's own turn.
+    #[test]
+    fn turning_the_pixels_right_puts_the_top_left_corner_at_the_top_right() {
+        const R: [u8; 4] = [255, 0, 0, 255];
+        const G: [u8; 4] = [0, 255, 0, 255];
+        let pixels = [R, G].concat();
+
+        let (right, w, h) = rotate_rgba(&pixels, 2, 1, Turns::none().right());
+        assert_eq!((w, h), (1, 2));
+        assert_eq!(right, [R, G].concat(), "red on top, green below");
+
+        let (half, w, h) = rotate_rgba(&pixels, 2, 1, Turns::none().right().right());
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(half, [G, R].concat());
+
+        let (left, w, h) = rotate_rgba(&pixels, 2, 1, Turns::none().left());
+        assert_eq!((w, h), (1, 2));
+        assert_eq!(left, [G, R].concat(), "green on top after a turn to the left");
+    }
+
+    #[test]
+    fn four_quarter_turns_of_the_pixels_are_the_original() {
+        let pixels: Vec<u8> = (0..(3 * 2 * 4)).map(|v| v as u8).collect();
+        let mut current = (pixels.clone(), 3, 2);
+        for _ in 0..4 {
+            current = rotate_rgba(&current.0, current.1, current.2, Turns::none().right());
+        }
+        assert_eq!(current, (pixels, 3, 2));
     }
 }

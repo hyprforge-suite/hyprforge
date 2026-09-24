@@ -107,6 +107,16 @@ impl Transform {
         (image.width * scale, image.height * scale)
     }
 
+    /// Where the picture's top-left corner sits in the viewport, logical
+    /// pixels — the one number the view needs to place it.
+    pub fn top_left(&self, image: ImageSize, viewport: Viewport) -> LogicalPoint {
+        let (drawn_w, drawn_h) = self.drawn_size(image, viewport);
+        LogicalPoint {
+            x: (viewport.width - drawn_w) / 2.0 + self.pan.x,
+            y: (viewport.height - drawn_h) / 2.0 + self.pan.y,
+        }
+    }
+
     /// Fit the whole picture, centred.
     pub fn fit(&mut self) {
         self.zoom = Zoom::Fit;
@@ -357,5 +367,19 @@ mod tests {
 
         let scale = t.scale(image(0.0, 0.0), viewport(800.0, 600.0));
         assert!(scale.is_finite() && scale > 0.0, "{scale}");
+    }
+
+    #[test]
+    fn a_fitted_picture_is_centred_and_a_panned_one_moves_by_the_pan() {
+        let image = ImageSize { width: 400.0, height: 200.0 };
+        let viewport = Viewport { width: 800.0, height: 600.0 };
+        let mut t = Transform::default();
+        let at = t.top_left(image, viewport);
+        assert_eq!((at.x, at.y), (200.0, 200.0), "400x200 at 1:1, centred in 800x600");
+
+        t.zoom = Zoom::Factor(4.0);
+        t.pan = PanLogical { x: 30.0, y: -10.0 };
+        let at = t.top_left(image, viewport);
+        assert_eq!((at.x, at.y), ((800.0 - 1600.0) / 2.0 + 30.0, (600.0 - 800.0) / 2.0 - 10.0));
     }
 }

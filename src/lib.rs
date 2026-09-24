@@ -22,13 +22,12 @@
 //! | What does the info panel say? | [`info`] |
 //! | What does the filmstrip show? | [`filmstrip`] |
 //! | What did argv ask for? | [`args`] |
+//! | Which program does "Open With…" use? | [`launch`] |
 //!
 //! The window itself — the `iced` application that renders all of this —
-//! is not written yet, which is why this crate currently declares no
-//! binary. `photos-plan.md`'s phase 1 is that window; the manifest grows
-//! a `[[bin]]` again when there is a `main.rs` for it to point at. A
-//! `[[bin]]` naming a file that does not exist is a crate that cannot be
-//! built at all, which is how this one sat outside the workspace.
+//! is `src/main.rs`, and is deliberately thin: it turns these decisions
+//! into widgets and runs the slow work (decoding, trashing, the
+//! clipboard, the wallpaper) off the thread that paints.
 //!
 //! # Why the order comes from somewhere else
 //!
@@ -46,6 +45,7 @@ pub mod filmstrip;
 pub mod folder;
 pub mod info;
 pub mod keys;
+pub mod launch;
 pub mod order;
 pub mod prefs;
 pub mod rotation;

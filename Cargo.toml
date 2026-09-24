@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "hyprforge-photos"
+path = "src/main.rs"
+
 [dependencies]
 # Measuring, orienting and decoding within a budget. The whole reason
 # the viewer never hands iced a path handle — see that crate's doc.
@@ -24,6 +28,21 @@ hyprforge-ui.workspace = true
 hyprforge-look.workspace = true
 hyprforge-appearance.workspace = true
 hyprforge-paths.workspace = true
+# The actions that touch files, each through the suite's own library for
+# it rather than a copy: `trash` from the file operations the file
+# manager uses (reversible, the freedesktop spec, the cross-filesystem
+# case), the MIME database for which program "Open With…" hands a
+# picture to, the clipboard *library* — never the history daemon, which
+# need not be installed — for Copy, and the wallpaper settings the
+# Desktop screen edits for Set as Wallpaper, so the two never disagree.
+# The last is the one Hyprland-shaped dependency here, taken deliberately
+# (photos-plan.md, open question 2); without hyprpaper running it saves
+# the choice and says so.
+hyprforge-fileops.workspace = true
+hyprforge-mime.workspace = true
+hyprforge-clipboard.workspace = true
+hyprforge-ecosystem.workspace = true
+hyprforge-core.workspace = true
 # `tokio` on top of the workspace base, the same addition
 # `hyprforge-files` and `hyprforge-settings` make and for the same
 # reason: it selects iced's tokio executor, so the futures a `Task` runs
