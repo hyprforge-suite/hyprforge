@@ -157,6 +157,19 @@ own manifest, and that is the first pair with this shape. The URL is allowed
 to change; it has to change everywhere at once, which is what `split.sh`
 checks before it will split anything.
 
+**A sibling named by git URL and missing from the root `[patch]` table
+builds from GitHub, not from this checkout — and nothing fails.** Cargo
+fetches it at the lockfile's commit and builds against that. After the
+files, displayd and emojimenu split, seven siblings were missing at once:
+Files built its archive, file-operation and browser crates from a days-old
+snapshot, and the tray and clipboard their popup shell, so every local fix
+to those crates — the archive race fix included — never reached the
+binaries or the tests that exercised them. It surfaced only as a type
+mismatch while merging a branch that changed one of them. `cargo tree
+--workspace | grep github.com` is the instrument; `check.sh`'s "Siblings
+build from this checkout" step now refuses a git-named sibling the table
+does not redirect.
+
 **A git dependency on a crate that still inherits from the workspace
 resolves fine.** Cargo clones the whole repository, so the workspace root
 comes along with it. Only the crate being *extracted* needs a self-contained
@@ -608,7 +621,9 @@ riding another tier's `--ignored` run, for the reason in the
 rule above about a check that silently never runs. Tier 1 now also includes
 the "Standalone crate dependency pins" step, which compares every split-ready
 crate's hand-copied dependency versions against the workspace table — see the
-rule above about drift with no symptom — and "Docs name things that exist",
+rule above about drift with no symptom — "Siblings build from this
+checkout", which fails on a sibling named by git that `[patch]` does not
+point back at `crates/` — and "Docs name things that exist",
 which fails on a doc naming a source file that is gone or a repository count
 that no longer matches, and checks this paragraph's own tier count. The
 judgement half of keeping docs true is the `keep-docs-current` skill in

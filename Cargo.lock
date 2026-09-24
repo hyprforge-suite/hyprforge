@@ -1578,24 +1578,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hyprforge-archive"
-version = "0.1.0"
-source = "git+https://github.com/adamrpostjr/hyprforge#3f5a889c4165c5668dcaf031a6480c1d8a86c84b"
-dependencies = [
- "bzip2",
- "flate2",
- "hyprforge-secret",
- "liblzma",
- "sevenz-rust2",
- "tar",
- "tempfile",
- "thiserror 2.0.19",
- "tracing",
- "zip",
- "zstd 0.14.0",
-]
-
-[[package]]
 name = "hyprforge-authui"
 version = "0.1.0"
 dependencies = [
@@ -1618,7 +1600,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "hyprforge-process 0.1.0",
+ "hyprforge-process",
  "serde",
  "thiserror 2.0.19",
  "tokio",
@@ -1636,8 +1618,8 @@ dependencies = [
  "hyprforge-appearance",
  "hyprforge-look",
  "hyprforge-paths",
- "hyprforge-popup 0.1.0 (git+https://github.com/adamrpostjr/hyprforge)",
- "hyprforge-process 0.1.0 (git+https://github.com/adamrpostjr/hyprforge)",
+ "hyprforge-popup",
+ "hyprforge-process",
  "hyprforge-secret",
  "iced_renderer",
  "iced_runtime",
@@ -1660,36 +1642,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "hyprforge-clipboard"
-version = "0.1.0"
-source = "git+https://github.com/adamrpostjr/hyprforge#3f5a889c4165c5668dcaf031a6480c1d8a86c84b"
-dependencies = [
- "anyhow",
- "blake3",
- "hyprforge-paths",
- "hyprforge-secret",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "wayland-client",
- "wayland-protocols",
- "wayland-protocols-misc",
- "wayland-protocols-wlr",
- "xkbcommon",
-]
-
-[[package]]
 name = "hyprforge-core"
 version = "0.1.0"
 dependencies = [
  "hyprforge-look",
  "hyprforge-paths",
- "hyprforge-process 0.1.0",
+ "hyprforge-process",
  "serde",
  "serde_json",
  "tempfile",
@@ -1738,22 +1696,17 @@ name = "hyprforge-emoji"
 version = "0.1.0"
 
 [[package]]
-name = "hyprforge-emoji"
-version = "0.1.0"
-source = "git+https://github.com/adamrpostjr/hyprforge#3f5a889c4165c5668dcaf031a6480c1d8a86c84b"
-
-[[package]]
 name = "hyprforge-emojimenu"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "hyprforge-appearance",
- "hyprforge-clipboard 0.1.0 (git+https://github.com/adamrpostjr/hyprforge)",
- "hyprforge-emoji 0.1.0 (git+https://github.com/adamrpostjr/hyprforge)",
+ "hyprforge-clipboard",
+ "hyprforge-emoji",
  "hyprforge-look",
  "hyprforge-paths",
- "hyprforge-popup 0.1.0 (git+https://github.com/adamrpostjr/hyprforge)",
- "hyprforge-process 0.1.0 (git+https://github.com/adamrpostjr/hyprforge)",
+ "hyprforge-popup",
+ "hyprforge-process",
  "iced_renderer",
  "iced_runtime",
  "iced_tiny_skia",
@@ -1776,25 +1729,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "hyprforge-fileops"
-version = "0.1.0"
-source = "git+https://github.com/adamrpostjr/hyprforge#3f5a889c4165c5668dcaf031a6480c1d8a86c84b"
-dependencies = [
- "hyprforge-paths",
- "serde",
- "thiserror 2.0.19",
- "tracing",
-]
-
-[[package]]
 name = "hyprforge-files"
 version = "0.1.0"
 dependencies = [
  "hyprforge-appearance",
- "hyprforge-archive 0.1.0 (git+https://github.com/adamrpostjr/hyprforge)",
- "hyprforge-clipboard 0.1.0 (git+https://github.com/adamrpostjr/hyprforge)",
- "hyprforge-fileops 0.1.0 (git+https://github.com/adamrpostjr/hyprforge)",
- "hyprforge-files-core 0.1.0 (git+https://github.com/adamrpostjr/hyprforge)",
+ "hyprforge-archive",
+ "hyprforge-clipboard",
+ "hyprforge-fileops",
+ "hyprforge-files-core",
  "hyprforge-look",
  "hyprforge-mime",
  "hyprforge-paths",
@@ -1815,32 +1757,14 @@ name = "hyprforge-files-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "hyprforge-archive 0.1.0",
- "hyprforge-fileops 0.1.0",
+ "hyprforge-archive",
+ "hyprforge-fileops",
  "hyprforge-look",
  "hyprforge-paths",
  "hyprforge-ui",
  "iced",
  "serde",
  "tempfile",
- "thiserror 2.0.19",
- "toml",
- "tracing",
-]
-
-[[package]]
-name = "hyprforge-files-core"
-version = "0.1.0"
-source = "git+https://github.com/adamrpostjr/hyprforge#3f5a889c4165c5668dcaf031a6480c1d8a86c84b"
-dependencies = [
- "chrono",
- "hyprforge-archive 0.1.0 (git+https://github.com/adamrpostjr/hyprforge)",
- "hyprforge-fileops 0.1.0 (git+https://github.com/adamrpostjr/hyprforge)",
- "hyprforge-look",
- "hyprforge-paths",
- "hyprforge-ui",
- "iced",
- "serde",
  "thiserror 2.0.19",
  "toml",
  "tracing",
@@ -1927,7 +1851,7 @@ name = "hyprforge-mime"
 version = "0.1.0"
 dependencies = [
  "hyprforge-paths",
- "hyprforge-process 0.1.0",
+ "hyprforge-process",
  "tempfile",
 ]
 
@@ -1937,7 +1861,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "hyprforge-process 0.1.0",
+ "hyprforge-process",
  "hyprforge-secret",
  "serde",
  "thiserror 2.0.19",
@@ -1960,33 +1884,13 @@ dependencies = [
  "calloop 0.14.4",
  "calloop-wayland-source 0.4.1",
  "hyprforge-look",
- "hyprforge-process 0.1.0",
+ "hyprforge-process",
  "iced_runtime",
  "iced_tiny_skia",
  "iced_widget",
  "serde_json",
  "smithay-client-toolkit 0.20.0",
  "tempfile",
- "thiserror 2.0.19",
- "tiny-skia",
- "wayland-client",
- "wayland-protocols",
-]
-
-[[package]]
-name = "hyprforge-popup"
-version = "0.1.0"
-source = "git+https://github.com/adamrpostjr/hyprforge#3f5a889c4165c5668dcaf031a6480c1d8a86c84b"
-dependencies = [
- "calloop 0.14.4",
- "calloop-wayland-source 0.4.1",
- "hyprforge-look",
- "hyprforge-process 0.1.0 (git+https://github.com/adamrpostjr/hyprforge)",
- "iced_runtime",
- "iced_tiny_skia",
- "iced_widget",
- "serde_json",
- "smithay-client-toolkit 0.20.0",
  "thiserror 2.0.19",
  "tiny-skia",
  "wayland-client",
@@ -2009,11 +1913,6 @@ dependencies = [
 [[package]]
 name = "hyprforge-process"
 version = "0.1.0"
-
-[[package]]
-name = "hyprforge-process"
-version = "0.1.0"
-source = "git+https://github.com/adamrpostjr/hyprforge#3f5a889c4165c5668dcaf031a6480c1d8a86c84b"
 
 [[package]]
 name = "hyprforge-secret"
@@ -2107,7 +2006,7 @@ dependencies = [
  "hyprforge-look",
  "hyprforge-network",
  "hyprforge-paths",
- "hyprforge-popup 0.1.0 (git+https://github.com/adamrpostjr/hyprforge)",
+ "hyprforge-popup",
  "hyprforge-power",
  "iced_renderer",
  "iced_runtime",

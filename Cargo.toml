@@ -194,3 +194,18 @@ hyprforge-shortcuts = { path = "crates/hyprforge-shortcuts" }
 hyprforge-lua-import = { path = "crates/hyprforge-lua-import" }
 hyprforge-tray = { path = "crates/hyprforge-tray" }
 hyprforge-mime = { path = "crates/hyprforge-mime" }
+# The siblings the files, displayd and emojimenu split named by git URL,
+# and the popups' shared shell. Missing from this table, each one quietly
+# built from whatever GitHub had at the lockfile's commit instead of from
+# this checkout — so a fix here to the archive crate, the popup shell or
+# the file operations never reached Files, the tray or the clipboard, and
+# their tests ran against yesterday's copies. `check.sh`'s "Siblings build
+# from this checkout" step now fails if a manifest names a sibling this
+# table does not redirect.
+hyprforge-archive = { path = "crates/hyprforge-archive" }
+hyprforge-clipboard = { path = "crates/hyprforge-clipboard" }
+hyprforge-emoji = { path = "crates/hyprforge-emoji" }
+hyprforge-fileops = { path = "crates/hyprforge-fileops" }
+hyprforge-files-core = { path = "crates/hyprforge-files-core" }
+hyprforge-popup = { path = "crates/hyprforge-popup" }
+hyprforge-process = { path = "crates/hyprforge-process" }

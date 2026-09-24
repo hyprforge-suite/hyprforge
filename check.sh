@@ -254,6 +254,51 @@ fi
 # Discovered from the PKGBUILD, not from a list here: the next package
 # somebody adds is covered without anyone remembering to add it, the same
 # way the dependency-pin step above discovers its own crates by shape.
+step "Siblings build from this checkout"
+# A standalone manifest names its Hyprforge siblings by git URL, and the
+# root `[patch]` table is what points each one back at `crates/`. A name
+# missing from that table does not fail to build — cargo fetches the
+# sibling from GitHub at whatever commit the lockfile holds and builds
+# against that. Seven were missing at once after the files, displayd and
+# emojimenu split: Files built its archive, file-operation and
+# browser crates from a days-old GitHub snapshot, the tray and clipboard
+# their popup shell, and every local fix to those crates — and every test
+# of the apps using them — silently ran against the old copy.
+if ! command -v python3 >/dev/null; then
+    skip "sibling patch check" "python3 not available to parse Cargo.toml"
+else
+    output=$(python3 - <<'PYEOF'
+import tomllib
+from pathlib import Path
+
+URL = "https://github.com/adamrpostjr/hyprforge"
+root = tomllib.loads(Path("Cargo.toml").read_text())
+patched = set(root.get("patch", {}).get(URL, {}))
+
+named = {}
+for manifest in sorted(Path("crates").glob("*/Cargo.toml")):
+    data = tomllib.loads(manifest.read_text())
+    tables = [data.get("dependencies", {}), data.get("dev-dependencies", {}), data.get("build-dependencies", {})]
+    for target in data.get("target", {}).values():
+        tables += [target.get(k, {}) for k in ("dependencies", "dev-dependencies", "build-dependencies")]
+    for table in tables:
+        for name, spec in table.items():
+            if isinstance(spec, dict) and spec.get("git") == URL:
+                named.setdefault(name, set()).add(manifest.parent.name)
+
+print(f"CHECKED {len(named)}")
+for name in sorted(set(named) - patched):
+    print(f"PROBLEM {name} is named by git in {', '.join(sorted(named[name]))} but not redirected by [patch] — it builds from GitHub, not from crates/")
+PYEOF
+    )
+    if grep -q "^PROBLEM" <<<"$output"; then
+        bad "$(grep -c '^PROBLEM' <<<"$output") sibling(s) build from GitHub instead of this checkout"
+        sed -n 's/^PROBLEM /    • /p' <<<"$output"
+    else
+        ok "all $(sed -n 's/^CHECKED //p' <<<"$output") git-named siblings build from crates/"
+    fi
+fi
+
 step "Every package is a repository"
 if ! command -v python3 >/dev/null; then
     skip "package/repository check" "python3 not available to parse the PKGBUILD"
