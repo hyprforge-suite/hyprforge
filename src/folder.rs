@@ -220,6 +220,8 @@ mod tests {
             hidden: name.starts_with('.'),
             kind: EntryKind::classify(is_dir, name),
             mode: 0o644,
+            // A file on disk, not a member of an archive.
+            packed: None,
             uid: 1000,
             owner: Some("someone".to_string()),
             origin: None,
