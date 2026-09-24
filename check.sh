@@ -396,6 +396,21 @@ PYEOF
     fi
 fi
 
+step "The installer can plan every component"
+# `./hyprforge --install --all --dry-run` builds nothing and asks for no
+# sudo, but still runs every guard the real install does — among them
+# that each `build` names a crate that exists. That guard was written for
+# exactly this and still let a real `--install --all` die halfway: two
+# popups had moved into their parent crates as second binaries, the
+# installer kept building them by their old crate names, and nobody had
+# run the dry run since. Running it here is what makes the guard a check.
+if output=$(./hyprforge --install --all --dry-run </dev/null 2>&1); then
+    ok "every component's install plan resolves (dry run)"
+else
+    bad "./hyprforge --install --all --dry-run fails"
+    grep -E 'error|die' <<<"$output" | head -5 | sed 's/^/    • /'
+fi
+
 step "Docs name things that exist"
 # The half of keeping docs current that a machine can do. The other half
 # — "four icons" when there are five — is judgement, and lives in the

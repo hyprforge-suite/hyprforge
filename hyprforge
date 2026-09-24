@@ -753,13 +753,14 @@ EOF
 
 install_tray() {
     COMPONENT_CHANGED=false
-    build hyprforge-tray hyprforge-trayd
-    # The right-click menu's own popup, spawned directly by
-    # hyprforge-trayd rather than served over com.canonical.dbusmenu — see
-    # hyprforge-tray's own module doc. Not a component of its own: nothing
-    # launches it but the daemon, so there is no keybind to document and
-    # no reason a user would install it without --tray.
-    build hyprforge-traymenu
+    # Both binaries come out of the one crate: hyprforge-traymenu, the
+    # right-click menu's popup, is a second [[bin]] in hyprforge-tray,
+    # spawned directly by hyprforge-trayd rather than served over
+    # com.canonical.dbusmenu — see hyprforge-tray's own module doc. Not a
+    # component of its own: nothing launches it but the daemon. It was a
+    # crate of its own once, and this line kept building it by that name
+    # after it moved, failing every --install --tray.
+    build hyprforge-tray hyprforge-trayd hyprforge-traymenu
     step "Tray icons"
     install_file target/release/hyprforge-trayd "$PREFIX/hyprforge-trayd" 755
     install_file target/release/hyprforge-traymenu "$PREFIX/hyprforge-traymenu" 755
@@ -854,8 +855,10 @@ restart_if_running() {
 
 install_clipboard() {
     COMPONENT_CHANGED=false
-    build hyprforge-clipboard hyprforge-clipd
-    build hyprforge-clipmenu
+    # hyprforge-clipmenu is a second [[bin]] in hyprforge-clipboard, for the
+    # same reason the tray's menu is one in hyprforge-tray: a package's
+    # binaries all come from one crate directory.
+    build hyprforge-clipboard hyprforge-clipd hyprforge-clipmenu
     step "Clipboard"
     install_file target/release/hyprforge-clipd "$PREFIX/hyprforge-clipd" 755
     install_file target/release/hyprforge-clipmenu "$PREFIX/hyprforge-clipmenu" 755
