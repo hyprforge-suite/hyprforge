@@ -61,7 +61,7 @@ impl std::fmt::Display for FitMode {
 
 /// Where Hyprforge keeps the wallpaper settings.
 ///
-/// One definition, because two programs write them — the Desktop screen
+/// One definition, because two programs write them — the Wallpaper page
 /// in Settings and the image viewer's Set as Wallpaper — and a second
 /// spelling of the path is how one of them ends up editing a file the
 /// other never reads.

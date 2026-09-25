@@ -510,7 +510,13 @@ binds at all, deliberately, and adding a "harmless" one breaks that property. No
 amount of care in the greeter program can compensate.
 
 **Run the Settings app against an isolated `XDG_CONFIG_HOME`.** It writes real
-config, and one of its jobs is editing `hyprland.lua`.
+config, and one of its jobs is editing `hyprland.lua`. Give it a short
+`XDG_RUNTIME_DIR` of its own as well when Settings is already open: it is
+single-instance, and a copy that finds the running one's lock hands it
+the request and exits 0 — so the test drives the user's window. A
+runtime path past 108 bytes truncates the Hyprland socket path, and every
+`hyprctl` query then fails for a reason that has nothing to do with the
+code.
 
 **Do not start a second `hyprpaper`** to validate a generated file — it takes
 over the IPC socket of the running one. Skip the check when it is running.
@@ -625,7 +631,8 @@ rule above about drift with no symptom — "Siblings build from this
 checkout", which fails on a sibling named by git that `[patch]` does not
 point back at `crates/` — and "Docs name things that exist",
 which fails on a doc naming a source file that is gone or a repository count
-that no longer matches, and checks this paragraph's own tier count. The
+that no longer matches, on a Settings page the Settings README does not name
+or miscounts, and checks this paragraph's own tier count. The
 judgement half of keeping docs true is the `keep-docs-current` skill in
 `.claude/skills/`; run it before committing anything that changes what a doc
 counts, names or calls unfinished.

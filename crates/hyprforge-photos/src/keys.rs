@@ -55,7 +55,7 @@ pub enum Action {
     /// Put the picture on the clipboard, for pasting into another app.
     Copy,
     /// Make this picture the wallpaper, through the same settings the
-    /// Desktop screen in Settings edits — so the two never disagree.
+    /// Wallpaper page in Settings edits — so the two never disagree.
     SetWallpaper,
     /// Send to the trash, reversibly.
     Trash,

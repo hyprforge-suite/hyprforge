@@ -533,7 +533,36 @@ elif claimed.group(1).lower() != spelled(len(tiers)):
         f"{spelled(len(tiers))}: {', '.join(tiers)}"
     )
 
-print(f"CHECKED {named} {len(standalone)} {len(tiers)}")
+# --- the Settings README names every page the sidebar has -----------
+#
+# The published README opened with "ten screens" and a list of them
+# while the app had thirteen, and the regroup that made them eighteen
+# would have left it saying ten. Titles come from `Screen::title`, the
+# strings the sidebar actually draws.
+settings_main = Path("crates/hyprforge-settings/src/main.rs").read_text()
+title_fn = re.search(r"fn title\(self\) -> &'static str \{(.*?)\n    \}", settings_main, re.S)
+page_titles = re.findall(r'Screen::\w+ => "([^"]+)"', title_fn.group(1)) if title_fn else []
+if not page_titles:
+    problems.append("couldn't find Settings' page titles in Screen::title to check the README against")
+# Whitespace collapsed, because prose wraps: "Idle &" ending one line
+# and "lock" starting the next is still the page's name.
+settings_readme = " ".join(Path("crates/hyprforge-settings/README.md").read_text().split())
+for title in page_titles:
+    if title not in settings_readme:
+        problems.append(f"crates/hyprforge-settings/README.md does not name the {title!r} page")
+page_words = {n: w for n, w in enumerate(
+    "zero one two three four five six seven eight nine ten eleven twelve thirteen "
+    "fourteen fifteen sixteen seventeen eighteen nineteen twenty".split())}
+said = re.search(r"\b(\w+)\s+pages\b", settings_readme)
+if not said:
+    problems.append("crates/hyprforge-settings/README.md no longer says how many pages there are")
+elif said.group(1).lower() != page_words.get(len(page_titles), str(len(page_titles))):
+    problems.append(
+        f"crates/hyprforge-settings/README.md says {said.group(1)} pages; "
+        f"Screen::title has {len(page_titles)}"
+    )
+
+print(f"CHECKED {named} {len(standalone)} {len(tiers)} {len(page_titles)}")
 for problem in problems:
     print(f"PROBLEM {problem}")
 PYEOF
@@ -542,8 +571,8 @@ PYEOF
         bad "$(grep -c '^PROBLEM' <<<"$output") doc claim(s) no longer true"
         sed -n 's/^PROBLEM /    • /p' <<<"$output"
     else
-        read -r named repos tiers < <(sed -n 's/^CHECKED //p' <<<"$output")
-        ok "$named source path(s) named in docs all exist; README lists all $repos standalone repositories; CLAUDE.md counts all $tiers gated tiers"
+        read -r named repos tiers pages < <(sed -n 's/^CHECKED //p' <<<"$output")
+        ok "$named source path(s) named in docs all exist; README lists all $repos standalone repositories; CLAUDE.md counts all $tiers gated tiers; Settings' README names all $pages pages"
     fi
 fi
 
