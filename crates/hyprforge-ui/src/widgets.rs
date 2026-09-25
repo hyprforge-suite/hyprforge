@@ -240,7 +240,7 @@ pub fn confirm_dialog<'a, Message: Clone + 'a>(
     on_confirm: Message,
     on_cancel: Message,
 ) -> Element<'a, Message> {
-    let diff = container(text(diff_text).font(iced::Font::MONOSPACE).size(13))
+    let diff = container(text(diff_text).font(crate::theme::mono_font()).size(13))
         .padding(spacing::SM)
         .width(Length::Fill)
         .style(|_theme: &Theme| container::Style {

@@ -139,6 +139,17 @@ pub struct Theme {
     /// renderer resolves it through the system's own font lookup, the
     /// same as every other app on the desktop.
     pub font: String,
+    /// Monospace family, as gsettings' `monospace-font-name` reports it —
+    /// for config lines, keys and values shown as they are written.
+    ///
+    /// Empty means "the toolkit's own monospace", and is the default on
+    /// purpose rather than `"Monospace"`: that name is a fontconfig
+    /// *alias*, and a renderer that looks families up by name rather than
+    /// through fontconfig finds no family called that and falls back to
+    /// the proportional default — which is the one font this field exists
+    /// to avoid. For the same reason a family that isn't installed
+    /// resolves to empty too — gsettings will name one that isn't.
+    pub mono_font: String,
     /// Base point size before [`Self::font_scale`] is applied.
     pub font_size: f32,
     /// `strftime` format for the clock. Empty hides it.
@@ -240,6 +251,7 @@ impl Default for Theme {
             accent: Color::rgba(0xbd, 0x93, 0xf9, 0xff),
             error: Color::rgba(0xff, 0x55, 0x55, 0xff),
             font: "Sans".into(),
+            mono_font: String::new(),
             font_size: 15.0,
             clock_format: "%H:%M".into(),
             date_format: "%A, %e %B".into(),

@@ -137,6 +137,67 @@ pub fn info() -> Color {
     crate::color::to_iced(active().info)
 }
 
+/// Something went well — a change applied, a device connected, a battery
+/// charging.
+///
+/// A state colour, like [`info`]: it means something only as long as it
+/// is never used for anything else.
+pub fn success() -> Color {
+    crate::color::to_iced(active().success)
+}
+
+/// Danger or failure — a conflicting bind, a destructive button, a
+/// value the compositor refused.
+pub fn error() -> Color {
+    crate::color::to_iced(active().error)
+}
+
+/// How opaque the alternating row fill is, laid over whatever the rows
+/// sit on.
+///
+/// The mockup's 22%. A tint rather than a fifth opaque grey on purpose:
+/// the same stripe then reads correctly on a card and on the window
+/// root, where an opaque shade chosen for one would be a visible step on
+/// the other.
+const ROW_TINT_ALPHA: f32 = 0.22;
+
+/// The fill every other setting row gets, so a long page scans as rows
+/// without a divider between each one.
+///
+/// Derived from [`surface::card_border`] rather than chosen: it is the
+/// lightest step in the ramp, so a stripe of it stays inside the look
+/// whatever the user's theme does to the greys.
+pub fn row_tint() -> Color {
+    Color {
+        a: ROW_TINT_ALPHA,
+        ..surface::card_border()
+    }
+}
+
+/// The monospace font for anything shown as it is written — a config
+/// line, a key, a value.
+///
+/// The theme's family when it names one, and iced's generic monospace
+/// otherwise; `hyprforge_appearance::look` turns the fontconfig alias
+/// `Monospace` into "otherwise" before it gets here.
+///
+/// Interned once for the process, because an iced `Font` holds a
+/// `&'static str` and the theme is fixed for the process's lifetime
+/// anyway (see [`init`]).
+pub fn mono_font() -> iced::Font {
+    static MONO: std::sync::OnceLock<iced::Font> = std::sync::OnceLock::new();
+    *MONO.get_or_init(|| mono_font_for(&active().mono_font))
+}
+
+/// [`mono_font`] for a given family name, without the process-wide
+/// cache — separate so a test can reach it without installing a theme.
+fn mono_font_for(family: &str) -> iced::Font {
+    match family.trim() {
+        "" => iced::Font::MONOSPACE,
+        name => iced::Font::with_name(Box::leak(name.to_owned().into_boxed_str())),
+    }
+}
+
 fn palette() -> iced::theme::Palette {
     let theme = active();
     iced::theme::Palette {
@@ -199,6 +260,26 @@ mod palette_tests {
         assert_eq!(text(), c(0xe9, 0xea, 0xef));
         assert_eq!(text_dim(), c(0x92, 0x96, 0xa4));
         assert_eq!(warning(), c(0xf5, 0xb9, 0x42));
+    }
+
+    /// The stripe is the border colour made translucent — not a new
+    /// grey. If it ever becomes opaque it stops working on both of the
+    /// surfaces rows sit on at once.
+    #[test]
+    fn the_row_tint_is_the_border_colour_made_translucent() {
+        let tint = row_tint();
+        let border = surface::card_border();
+        assert_eq!((tint.r, tint.g, tint.b), (border.r, border.g, border.b));
+        assert!(tint.a > 0.0 && tint.a < 0.5, "a stripe, not a fill: {}", tint.a);
+    }
+
+    /// No family named means iced's own monospace, never the
+    /// proportional default a missing name would fall back to.
+    #[test]
+    fn an_unnamed_monospace_family_is_the_toolkits_monospace() {
+        assert_eq!(mono_font_for(""), iced::Font::MONOSPACE);
+        assert_eq!(mono_font_for("   "), iced::Font::MONOSPACE);
+        assert_eq!(mono_font_for("Hack"), iced::Font::with_name("Hack"));
     }
 
     /// An app that never calls `init` must render, not panic. The lock

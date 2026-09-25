@@ -2716,7 +2716,7 @@ fn path_bar<'a>(current_dir: &Path, scale: FontScale) -> Element<'a, Message> {
     for (i, (label, path)) in segments.into_iter().enumerate() {
         if previous.as_deref().is_some_and(separates_from) {
             crumbs = crumbs.push(
-                meta_text("/", density::META_TEXT_BASE, scale).font(iced::Font::MONOSPACE),
+                meta_text("/", density::META_TEXT_BASE, scale).font(hyprforge_ui::theme::mono_font()),
             );
         }
         previous = Some(label.clone());
@@ -2731,7 +2731,7 @@ fn path_bar<'a>(current_dir: &Path, scale: FontScale) -> Element<'a, Message> {
             // making its own claim.
             crumbs = crumbs.push(
                 container(
-                    scaled_text(label, density::META_TEXT_BASE, scale).font(iced::Font::MONOSPACE),
+                    scaled_text(label, density::META_TEXT_BASE, scale).font(hyprforge_ui::theme::mono_font()),
                 )
                 .padding([1, 5])
                 .style(|_t: &iced::Theme| container::Style {
@@ -2855,7 +2855,7 @@ fn crumb_button<'a>(
     accented: bool,
 ) -> Element<'a, Message> {
     iced::widget::button(
-        meta_text(label, density::META_TEXT_BASE, scale).font(iced::Font::MONOSPACE),
+        meta_text(label, density::META_TEXT_BASE, scale).font(hyprforge_ui::theme::mono_font()),
     )
         .on_press(Message::Navigate(path))
         .padding([2, 4])

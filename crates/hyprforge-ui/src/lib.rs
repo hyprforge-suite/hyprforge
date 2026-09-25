@@ -10,6 +10,7 @@
 //! require line" banner — lives in the Settings app instead.
 
 pub mod color;
+pub mod density;
 pub mod keys;
 pub mod theme;
 pub mod widgets;

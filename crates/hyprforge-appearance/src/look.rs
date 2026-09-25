@@ -71,8 +71,83 @@ pub fn resolve() -> Theme {
             theme.font_size = size as f32;
         }
     }
+    if let Ok(Some(mono)) = desktop::read("monospace-font-name") {
+        let family = mono_family(&mono);
+        if !family.is_empty() && !fontconfig_draws(&family) {
+            // The user's own setting names a font this machine doesn't
+            // have — not our file and not our mistake, but worth a line,
+            // because the alternative explanation for "config lines
+            // aren't in my font" is a bug here.
+            tracing::info!(
+                family = %family,
+                "the desktop's monospace font isn't installed; using the toolkit's own monospace"
+            );
+        } else {
+            theme.mono_font = family;
+        }
+    }
     theme.font_scale = desktop::text_scaling_factor();
     theme
+}
+
+/// Whether fontconfig would draw `family` as itself, rather than
+/// substitute something for it.
+///
+/// Asked because gsettings happily names a font that isn't installed —
+/// on the machine this was written on it says `Hack`, and nothing called
+/// Hack exists. Handing that name to iced falls back to the
+/// *proportional* default (fontconfig itself answers `Noto Sans`), which
+/// is the one font a monospace setting exists to avoid; iced's generic
+/// monospace is the right answer instead.
+///
+/// Anything short of a confirmed match — no `fc-match`, a timeout, a
+/// substitute — is "no". The cost of a wrong "no" is the generic
+/// monospace, which is always legible; the cost of a wrong "yes" is
+/// config lines in a font where `il1|` look alike.
+fn fontconfig_draws(family: &str) -> bool {
+    let out = hyprforge_core::command::output(
+        std::process::Command::new("fc-match").args(["-f", "%{family}", family]),
+        hyprforge_core::command::TIMEOUT,
+    );
+    match out {
+        Ok(out) if out.status.success() => {
+            names_family(&String::from_utf8_lossy(&out.stdout), family)
+        }
+        _ => false,
+    }
+}
+
+/// Whether `fc-match`'s family field — a comma-separated list of the
+/// matched font's names — includes `family`.
+///
+/// A list because one font carries several: `JetBrainsMono Nerd
+/// Font,JetBrainsMono NF` answers to either, and gsettings may hold the
+/// short one.
+fn names_family(matched: &str, family: &str) -> bool {
+    matched
+        .split(',')
+        .any(|name| name.trim().eq_ignore_ascii_case(family.trim()))
+}
+
+/// The family half of a `monospace-font-name` value, or empty for "the
+/// toolkit's own monospace".
+///
+/// Only the family: the size belongs to terminals, and a config line in
+/// a settings window is sized by the type ramp around it, not by what
+/// someone picked for their shell.
+///
+/// `Monospace` is GNOME's shipped default and is a fontconfig alias
+/// rather than a family. iced finds fonts by family name without asking
+/// fontconfig, so passing the alias through would resolve to nothing and
+/// fall back to the proportional default — config lines drawn in a font
+/// where `il1|` all look alike. Empty sends it to iced's generic
+/// monospace instead, which is what the alias meant.
+fn mono_family(value: &str) -> String {
+    let (family, _size) = desktop::split_font(value);
+    match family.eq_ignore_ascii_case("monospace") {
+        true => String::new(),
+        false => family,
+    }
 }
 
 /// Writes the resolved look where the other hosts can read it.
@@ -182,6 +257,44 @@ mod tests {
             let stored = with_settings(&[(ACCENT_KEY, Value::Text(bad.into()))]);
             assert_eq!(stored_color(&stored, ACCENT_KEY), None, "{bad}");
         }
+    }
+
+    /// A real family comes through without its size — the size is the
+    /// terminal's business, not a settings row's.
+    #[test]
+    fn a_monospace_family_is_kept_and_its_size_dropped() {
+        // gsettings really does pad with two spaces on this machine.
+        assert_eq!(mono_family("Hack  10"), "Hack");
+        assert_eq!(mono_family("JetBrains Mono 11"), "JetBrains Mono");
+    }
+
+    /// The alias is not a family, and naming it to iced would draw config
+    /// lines in the proportional default — see `mono_family`.
+    #[test]
+    fn the_monospace_alias_means_the_toolkits_own_monospace() {
+        assert_eq!(mono_family("Monospace 11"), "");
+        assert_eq!(mono_family("monospace"), "");
+        assert_eq!(mono_family(""), "");
+    }
+
+    /// fontconfig substitutes rather than failing: asked for a font it
+    /// doesn't have, it names a different one. That answer has to read
+    /// as "not installed", or a missing monospace font draws config
+    /// lines proportionally.
+    #[test]
+    fn a_substituted_font_is_not_the_font_that_was_asked_for() {
+        assert!(!names_family("Noto Sans", "Hack"));
+        assert!(names_family("Fira Mono", "Fira Mono"));
+    }
+
+    /// One font answers to every name in its family list, so the short
+    /// alias gsettings may hold still counts as installed.
+    #[test]
+    fn any_of_a_fonts_names_counts_as_that_font() {
+        let matched = "JetBrainsMono Nerd Font,JetBrainsMono NF";
+        assert!(names_family(matched, "JetBrainsMono NF"));
+        assert!(names_family(matched, "jetbrainsmono nerd font"));
+        assert!(!names_family(matched, "JetBrains"));
     }
 
     /// Resolving must never fail or panic: the caller is an app about to
