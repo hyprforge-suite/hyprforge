@@ -165,7 +165,12 @@ pub fn pending_label(count: usize) -> String {
 }
 
 /// The bar along the foot of a page that has changes nobody has applied
-/// yet: how many, the config line they will write, and Discard/Apply.
+/// yet: what they are, the setting they will write, and Discard/Apply.
+///
+/// `summary` is usually [`pending_label`]'s count, but not always — a
+/// layout edited on a canvas is one change with no count to give.
+/// `on_discard` is optional because not every page can take its drafts
+/// back, and a Discard button that does nothing is worse than none.
 ///
 /// One bar for every page, drawn by the shell, rather than each page's
 /// own wording of "N fields typed but not applied" — nothing is written
@@ -176,29 +181,30 @@ pub fn pending_label(count: usize) -> String {
 /// it: the suite's rule is that nothing silently rewrites a dotfile, and
 /// showing the line is how "silently" is ruled out.
 pub fn pending_bar<'a, Message: Clone + 'a>(
-    count: usize,
+    summary: String,
     preview: Option<String>,
-    on_discard: Message,
+    on_discard: Option<Message>,
     on_apply: Message,
     scale: FontScale,
 ) -> Element<'a, Message> {
     let mut info = row![
         status_dot(Tint::Warning, scale),
-        scaled_text(pending_label(count), density::META_TEXT_BASE, scale).color(theme::text()),
+        scaled_text(summary, density::META_TEXT_BASE, scale).color(theme::text()),
     ]
     .spacing(spacing::SM)
     .align_y(iced::Alignment::Center);
     if let Some(preview) = preview {
         info = info.push(config_line(preview, scale));
     }
+    let mut actions = row![].spacing(spacing::SM).align_y(iced::Alignment::Center);
+    if let Some(discard) = on_discard {
+        actions = actions.push(secondary_button("Discard").on_press(discard));
+    }
+    actions = actions.push(primary_button("Apply").on_press(on_apply));
     container(
-        row![
-            info.width(Length::Fill),
-            secondary_button("Discard").on_press(on_discard),
-            primary_button("Apply").on_press(on_apply),
-        ]
-        .spacing(spacing::SM)
-        .align_y(iced::Alignment::Center),
+        row![info.width(Length::Fill), actions]
+            .spacing(spacing::SM)
+            .align_y(iced::Alignment::Center),
     )
     .padding([spacing::SM, spacing::MD])
     .width(Length::Fill)
