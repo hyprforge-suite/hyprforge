@@ -2175,7 +2175,7 @@ fn nav_button<'a>(
 /// than discovered afterwards.
 fn search_field<'a>(query: &str, current_dir: &Path, scale: FontScale) -> Element<'a, Message> {
     let placeholder = format!("Search {}", crate::sidebar::place_name(current_dir));
-    hyprforge_ui::widgets::search_field(&placeholder, query, Message::SearchChanged, None, scale)
+    hyprforge_ui::widgets::search_field(&placeholder, query, Message::SearchChanged, None, None, scale)
         .width(Length::Fixed(scale.apply(density::SEARCH_FIELD_WIDTH)))
         .into()
 }

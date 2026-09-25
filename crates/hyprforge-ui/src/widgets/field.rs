@@ -47,6 +47,7 @@ pub fn search_field<'a, Message: Clone + 'a>(
     placeholder: &str,
     value: &str,
     on_input: impl Fn(String) -> Message + 'a,
+    on_submit: Option<Message>,
     id: Option<iced::widget::Id>,
     scale: FontScale,
 ) -> Container<'a, Message> {
@@ -81,6 +82,9 @@ pub fn search_field<'a, Message: Clone + 'a>(
         .width(Length::Fill);
     if let Some(id) = id {
         input = input.id(id);
+    }
+    if let Some(submit) = on_submit {
+        input = input.on_submit(submit);
     }
 
     container(row![ring, input].spacing(spacing::XS).align_y(iced::Alignment::Center))
