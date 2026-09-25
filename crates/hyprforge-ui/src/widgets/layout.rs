@@ -91,17 +91,23 @@ pub fn setting_row<'a, Message: 'a>(
     if let Some(hint) = hint {
         left = left.push(hint);
     }
+    // The floor: a strut as tall as the least row, so the row can grow
+    // past it but never shrink below it. iced's container has a maximum
+    // height and no minimum.
+    //
+    // One pixel wide, not zero. Measured: with a zero-width strut every
+    // row came out 37px — the height of the tallest control — as though
+    // the strut were not there, and at one pixel they are the 52 asked
+    // for. Do not "tidy" it back to zero. It sits beside the label with
+    // no spacing of its own, or the row's gap would indent every label.
+    let strut = Space::new()
+        .width(Length::Fixed(1.0))
+        .height(Length::Fixed(density::setting_row_height(scale)));
+    let label = row![strut, left.width(Length::Fill)].align_y(iced::Alignment::Center);
     container(
-        row![
-            // The floor: a zero-width strut as tall as the least row, so
-            // the row can grow past it but never shrink below it. iced's
-            // container has a maximum height and no minimum.
-            Space::new().width(Length::Fixed(0.0)).height(Length::Fixed(density::setting_row_height(scale))),
-            left.width(Length::Fill),
-            control.into(),
-        ]
-        .spacing(spacing::MD)
-        .align_y(iced::Alignment::Center),
+        row![label.width(Length::Fill), control.into()]
+            .spacing(spacing::MD)
+            .align_y(iced::Alignment::Center),
     )
     .padding([0.0, scale.apply(14.0)])
     .width(Length::Fill)

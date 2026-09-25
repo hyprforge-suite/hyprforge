@@ -24,6 +24,31 @@ pub fn inset_field_style(_t: &iced::Theme) -> container::Style {
     }
 }
 
+/// A free-standing text input's look — a setting's value, a filter —
+/// matching the inset fields and the dropdowns beside it, rather than
+/// iced's stock input with its bright outline.
+///
+/// Focus outlines in the dim text colour, like an open dropdown, not the
+/// accent: typing into a field is not a selection.
+pub fn inset_input_style(t: &iced::Theme, status: text_input::Status) -> text_input::Style {
+    let border_color = match status {
+        text_input::Status::Focused { .. } | text_input::Status::Hovered => theme::text_dim(),
+        _ => surface::card_border(),
+    };
+    text_input::Style {
+        background: iced::Background::Color(surface::card()),
+        border: iced::Border {
+            radius: density::inner_radius().into(),
+            width: 1.0,
+            color: border_color,
+        },
+        icon: theme::text_dim(),
+        placeholder: theme::text_dim(),
+        value: theme::text(),
+        selection: t.extended_palette().primary.weak.color,
+    }
+}
+
 /// The magnifier ring's diameter at 100% scale.
 const SEARCH_RING_BASE: f32 = 9.0;
 

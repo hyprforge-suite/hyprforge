@@ -15,7 +15,7 @@ pub use controls::{
     dropdown_menu_style, dropdown_style, segment_style, segmented, segmented_choice,
     slider_style, step_index, stepped_slider, toggle, toggle_style, value_slider, SegmentLook,
 };
-pub use field::{inset_field_style, search_field};
+pub use field::{inset_field_style, inset_input_style, search_field};
 pub use layout::{
     hero_card, hint_text, page_header, pending_bar, pending_label, setting_list, setting_row,
     setting_row_style, status_dot, SETTING_ROW_GAP,

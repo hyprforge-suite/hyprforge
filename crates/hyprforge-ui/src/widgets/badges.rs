@@ -30,7 +30,10 @@ pub fn chip<'a, Message: 'a>(
         text(label)
             .font(theme::mono_font())
             .size(scale.apply(density::META_TEXT_BASE * 0.9))
-            .color(color),
+            .color(color)
+            // Never wrapped: a chip broken over two lines stops reading
+            // as one mark and doubles the height of the row it sits in.
+            .wrapping(iced::widget::text::Wrapping::None),
     )
     .padding([1.0, scale.apply(6.0)])
     .style(move |_t: &iced::Theme| container::Style {

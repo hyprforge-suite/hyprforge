@@ -815,13 +815,14 @@ the settings you have taken ownership of. Everything else stays with
 Hyprland's default or your own config. That is what makes them safe to
 adopt one setting at a time rather than all at once.
 
-Each row says which of three things it is showing, and the distinction is
-the point of the screen:
+Each row shows the setting as `key = value` and says, in a chip beside
+it, which of three things that value is — and the distinction is the
+point of the screen:
 
-- **Set by Hyprforge** — this app writes it, and it wins.
-- **From your Hyprland config** — your config sets it; the app is only
-  reporting it back.
-- **Hyprland default** — nobody set it.
+- **set by hyprforge** — this app writes it, and it wins.
+- **your config** — your config sets it; the app is only reporting it
+  back.
+- **hyprland default** — nobody set it.
 
 **Reset is not "set it to the default".** It stops writing the key
 entirely, so Hyprland and your own config decide again.
