@@ -807,7 +807,7 @@ impl App {
         )
     }
 
-    /// Through the same wallpaper settings the Desktop screen edits,
+    /// Through the same wallpaper settings Settings' Wallpaper page edits,
     /// never around them: saved first, then pushed to hyprpaper, so the
     /// choice survives a restart and Settings shows what is on screen.
     fn set_wallpaper(&mut self) -> Task<Message> {
