@@ -59,28 +59,10 @@ pub struct SidebarItem {
 /// not a state-bearing thing — there is no "Pictures is in trouble" for
 /// it to be confused with — but the same trick in the entry list, where
 /// rows *do* carry state, would be a mistake.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tint {
-    Accent,
-    Info,
-    Success,
-    Warning,
-    Dim,
-}
-
-impl Tint {
-    /// Resolves to the live theme's colour for this role.
-    pub fn color(self) -> hyprforge_look::Color {
-        let t = hyprforge_ui::theme::active();
-        match self {
-            Tint::Accent => t.accent,
-            Tint::Info => t.info,
-            Tint::Success => t.success,
-            Tint::Warning => t.warning,
-            Tint::Dim => t.surfaces.text_dim,
-        }
-    }
-}
+// The roles live in `hyprforge_ui::widgets` now, where Settings' chips
+// and hero cards draw from the same set; re-exported so this module
+// still names them.
+pub use hyprforge_ui::widgets::Tint;
 
 /// One place the Places section can offer. `[sidebar] places` in
 /// `files-config.toml` lists which, in what order.

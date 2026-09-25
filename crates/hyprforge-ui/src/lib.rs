@@ -11,6 +11,7 @@
 
 pub mod color;
 pub mod density;
+pub mod glyph;
 pub mod keys;
 pub mod theme;
 pub mod widgets;

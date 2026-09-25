@@ -91,6 +91,17 @@ pub fn inner_radius() -> f32 {
     outer_radius() * INNER_OUTER_RATIO
 }
 
+/// A card's corner — a setting row, a hero card, a table row. The
+/// mockup's 9px, and its most common radius by far.
+///
+/// Three quarters of the window's radius: between the window (12) and a
+/// top-level control (6), because a card is a level between the two.
+pub fn card_radius() -> f32 {
+    outer_radius() * CARD_OUTER_RATIO
+}
+
+const CARD_OUTER_RATIO: f32 = 0.75;
+
 /// The header bar's height. 44px at 100% scale.
 ///
 /// Taller than the 28px controls inside it on purpose: the difference is
@@ -167,6 +178,7 @@ mod tests {
         assert_eq!(scale.apply(ROW_TEXT_BASE), 15.0);
         assert_eq!(outer_radius(), 12.0, "Theme::rounding's default");
         assert_eq!(inner_radius(), 6.0, "half the outer radius");
+        assert_eq!(card_radius(), 9.0, "the mockup's card corner");
     }
 
     #[test]

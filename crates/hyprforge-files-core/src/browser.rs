@@ -40,7 +40,10 @@ use crate::types::{Entry, EntrySize, FilesError, ItemCount};
 // column is gone — imported there rather than here so the lib build
 // does not carry an unused import.
 use hyprforge_ui::theme::{spacing, FontScale, BASE_TEXT_SIZE};
-use hyprforge_ui::widgets::{divider, meta_text, scaled_text};
+use hyprforge_ui::widgets::{
+    divider, inset_field_style, meta_text, scaled_text, segment_style, segmented, spaced_caps,
+    SegmentLook,
+};
 use iced::widget::{column, container, row, scrollable, text_input, Id};
 use iced::{Element, Length};
 use iced::widget::image::Handle as ImageHandle;
@@ -2172,74 +2175,9 @@ fn nav_button<'a>(
 /// than discovered afterwards.
 fn search_field<'a>(query: &str, current_dir: &Path, scale: FontScale) -> Element<'a, Message> {
     let placeholder = format!("Search {}", crate::sidebar::place_name(current_dir));
-
-    // The magnifier is a sibling widget rather than the input's own
-    // `icon`, because iced's `text_input::Icon` wants a `Font` to take
-    // the glyph from and this suite ships none — the theme's font is
-    // whatever the desktop chose, and it may have no magnifier at all. A
-    // drawn ring always renders.
-    let ring_side = scale.apply(SEARCH_RING_BASE);
-    let ring = container(iced::widget::Space::new())
-        .width(Length::Fixed(ring_side))
-        .height(Length::Fixed(ring_side))
-        .style(move |_t: &iced::Theme| container::Style {
-            border: iced::Border {
-                // Half the side: a circle, not a rounded square.
-                radius: (ring_side / 2.0).into(),
-                width: 1.5,
-                color: hyprforge_ui::theme::text_dim(),
-            },
-            ..container::Style::default()
-        });
-
-    container(
-        row![
-            ring,
-            text_input(&placeholder, query)
-                .on_input(Message::SearchChanged)
-                .size(scale.apply(density::META_TEXT_BASE))
-                .style(|t: &iced::Theme, _status| iced::widget::text_input::Style {
-                    // Transparent: the bordered container around this row
-                    // is the field. An input drawing its own background
-                    // inside it would show as a box within a box.
-                    background: iced::Background::Color(iced::Color::TRANSPARENT),
-                    border: iced::Border::default(),
-                    icon: hyprforge_ui::theme::text_dim(),
-                    placeholder: hyprforge_ui::theme::text_dim(),
-                    value: hyprforge_ui::theme::text(),
-                    selection: t.extended_palette().primary.weak.color,
-                })
-                .width(Length::Fill),
-        ]
-        .spacing(spacing::XS)
-        .align_y(iced::Alignment::Center),
-    )
-    .width(Length::Fixed(scale.apply(density::SEARCH_FIELD_WIDTH)))
-    .height(Length::Fixed(density::field_height(scale)))
-    .center_y(Length::Fixed(density::field_height(scale)))
-    .padding([0, spacing::SM as u16])
-    .style(inset_field_style)
-    .into()
-}
-
-/// The magnifier ring's diameter at 100% scale.
-const SEARCH_RING_BASE: f32 = 9.0;
-
-/// The look both text fields share: recessed into the bar, outlined.
-///
-/// One function rather than two identical closures, so the path bar and
-/// the search field cannot drift apart — they are siblings by
-/// construction, not by someone remembering to keep them matched.
-fn inset_field_style(_t: &iced::Theme) -> container::Style {
-    container::Style {
-        background: Some(iced::Background::Color(hyprforge_ui::theme::surface::card())),
-        border: iced::Border {
-            radius: density::inner_radius().into(),
-            width: 1.0,
-            color: hyprforge_ui::theme::surface::card_border(),
-        },
-        ..container::Style::default()
-    }
+    hyprforge_ui::widgets::search_field(&placeholder, query, Message::SearchChanged, None, scale)
+        .width(Length::Fixed(scale.apply(density::SEARCH_FIELD_WIDTH)))
+        .into()
 }
 
 
@@ -2262,7 +2200,7 @@ fn inset_field_style(_t: &iced::Theme) -> container::Style {
 fn view_mode_toggle<'a>(prefs: &Prefs, scale: FontScale) -> Element<'a, Message> {
     let seg_w = density::glyph_button(scale) * 0.92;
     let seg_h = density::glyph_button(scale) * 0.77;
-    let segment = |glyph_kind: glyph::View, mode: Option<ViewMode>| {
+    let segment = |glyph_kind: glyph::View, mode: Option<ViewMode>| -> Element<'a, Message> {
         let active = mode.is_some_and(|m| prefs.view_mode == m);
         let color = if active {
             hyprforge_ui::theme::text()
@@ -2280,56 +2218,20 @@ fn view_mode_toggle<'a>(prefs: &Prefs, scale: FontScale) -> Element<'a, Message>
         // the mark inside its own segment and push it off centre.
         .padding(0)
         .on_press_maybe(mode.map(Message::SetViewMode))
-        .style(move |_t: &iced::Theme, status| {
-            let hovered = matches!(status, iced::widget::button::Status::Hovered);
-            iced::widget::button::Style {
-                // `row`, not the accent. The active segment is the same
-                // "this control is live" idiom as the back button's
-                // fill, and reusing the accent here would put a second
-                // purple on the bar competing with the one that means
-                // selection.
-                background: if active || hovered {
-                    Some(iced::Background::Color(hyprforge_ui::theme::surface::row()))
-                } else {
-                    None
-                },
-                // The disabled segment is told apart by `on_press_maybe(None)`,
-                // not by a third colour — so this is only ever "is this
-                // the active view mode".
-                text_color: if active {
-                    hyprforge_ui::theme::text()
-                } else {
-                    hyprforge_ui::theme::text_dim()
-                },
-                border: iced::Border { radius: density::nested_radius().into(), ..iced::Border::default() },
-                ..iced::widget::button::Style::default()
-            }
-        })
+        // `Quiet`, not `Choice`: the view mode is a mode of the window,
+        // and lighting it in the accent would put a second purple on the
+        // bar competing with the one that means selection. The disabled
+        // segment is told apart by `on_press_maybe(None)`, not by a third
+        // colour.
+        .style(segment_style(SegmentLook::Quiet, active))
+        .into()
     };
 
-    container(
-        row![
-            segment(glyph::View::List, Some(ViewMode::List)),
-            segment(glyph::View::Grid, Some(ViewMode::Grid)),
-            segment(glyph::View::Columns, None),
-        ]
-        .spacing(3.0)
-        .align_y(iced::Alignment::Center),
-    )
-    .padding(3.0)
-    .style(|_t: &iced::Theme| container::Style {
-        // The track's fill matches the bar it sits on rather than the
-        // recessed fields beside it, so it reads as a groove cut into
-        // the bar rather than as a raised control.
-        background: Some(iced::Background::Color(hyprforge_ui::theme::surface::sidebar())),
-        border: iced::Border {
-            radius: density::inner_radius().into(),
-            width: 1.0,
-            color: hyprforge_ui::theme::surface::card_border(),
-        },
-        ..container::Style::default()
-    })
-    .into()
+    segmented([
+        segment(glyph::View::List, Some(ViewMode::List)),
+        segment(glyph::View::Grid, Some(ViewMode::Grid)),
+        segment(glyph::View::Columns, None),
+    ])
 }
 
 /// The line along the bottom: how much is here, and how much of it you
@@ -2689,23 +2591,6 @@ fn sidebar_menu_area<'a>(
     iced::widget::mouse_area(button)
         .on_right_press(Message::OpenContextMenu { spot: MenuSpot::Sidebar(path), at: (0.0, 0.0) })
         .into()
-}
-
-/// `PLACES` from `Places` — uppercased, with a hair space between
-/// letters.
-///
-/// iced has no letter-spacing, and the design's heading depends on it:
-/// small uppercase text without it reads as a cramped word rather than
-/// as a label. Inserting U+2009 THIN SPACE between characters is the
-/// approximation available — coarser than real tracking, but it buys
-/// most of the effect for a heading that is never more than two words.
-fn spaced_caps(title: &str) -> String {
-    title
-        .to_uppercase()
-        .chars()
-        .map(|c| c.to_string())
-        .collect::<Vec<_>>()
-        .join("\u{2009}")
 }
 
 fn path_bar<'a>(current_dir: &Path, scale: FontScale) -> Element<'a, Message> {
@@ -3155,48 +3040,10 @@ fn menu_item_style(
     }
 }
 
-/// The look of any row that can be *the chosen one* — an entry in the
-/// listing, or the sidebar place you are currently in.
-///
-/// **Selection is the only place `accent` appears in this file.** A
-/// hovered-but-not-chosen row uses `surface::row()`, a plain grey
-/// elevation distinct from both the unchosen default (no background at
-/// all) and the chosen state, so "this row is the selection" is never
-/// ambiguous with "the pointer happens to be over it".
-/// [`tests::only_the_selected_row_ever_uses_the_accent_colour`] pins
-/// this.
-///
-/// One function for both, because it is one rule. The sidebar and the
-/// entry list had a byte-identical copy each, with the boolean renamed;
-/// two copies of "purple means selected" is two places for it to stop
-/// being true. Public for the same reason: the window's own
-/// application chooser is a third list of rows, and it must not become
-/// a third copy.
-pub fn selectable_row_style(
-    theme: &iced::Theme,
-    status: iced::widget::button::Status,
-    selected: bool,
-) -> iced::widget::button::Style {
-    use iced::widget::button;
-    use iced::{Background, Border};
-    let palette = theme.extended_palette();
-    let background = if selected {
-        Some(Background::Color(palette.primary.weak.color))
-    } else {
-        match status {
-            button::Status::Hovered => Some(Background::Color(hyprforge_ui::theme::surface::row())),
-            _ => None,
-        }
-    };
-    button::Style {
-        background,
-        text_color: hyprforge_ui::theme::text(),
-        // The design's 6px inner radius, taken from the Theme — see
-        // `density::inner_radius`'s doc.
-        border: Border { radius: density::inner_radius().into(), ..Border::default() },
-        ..button::Style::default()
-    }
-}
+/// Moved to `hyprforge_ui::widgets` when Settings adopted the same
+/// design, and re-exported so the application chooser in the binary
+/// crate — and the tests here — still find it at this path.
+pub use hyprforge_ui::widgets::selectable_row_style;
 
 /// The list's column widths, shared by the header and every row.
 ///
@@ -4943,45 +4790,9 @@ mod tests {
 
     // --- selection colour ----------------------------------------------------
 
-    /// The design reserves purple for exactly one meaning: the current
-    /// selection. A hovered-but-unselected row using the same colour
-    /// would make "is this selected?" ambiguous the instant the pointer
-    /// moved, so hover has to read as a plainly different colour — this
-    /// pins that the accent (`palette.primary.weak.color`, what
-    /// `selectable_row_style` selects on) never appears for any non-selected
-    /// status, hover included.
-    #[test]
-    fn only_the_selected_row_ever_uses_the_accent_colour() {
-        use iced::widget::button::Status;
-        let theme = hyprforge_ui::theme::app_theme();
-        let accent_bg = theme.extended_palette().primary.weak.color;
-
-        let selected = selectable_row_style(&theme, Status::Active, true);
-        assert_eq!(selected.background, Some(iced::Background::Color(accent_bg)));
-
-        for status in [Status::Active, Status::Hovered, Status::Pressed, Status::Disabled] {
-            let unselected = selectable_row_style(&theme, status, false);
-            assert_ne!(
-                unselected.background,
-                Some(iced::Background::Color(accent_bg)),
-                "a non-selected row must never render the accent colour ({status:?})"
-            );
-        }
-    }
-
-    /// Hover has to be visibly different from *both* "plain" and
-    /// "selected" — a hover that read the same as selection would make a
-    /// row the user is merely pointing at look like one they picked.
-    #[test]
-    fn hover_is_a_distinct_elevation_from_both_plain_and_selected() {
-        use iced::widget::button::Status;
-        let theme = hyprforge_ui::theme::app_theme();
-        let plain = selectable_row_style(&theme, Status::Active, false);
-        let hovered = selectable_row_style(&theme, Status::Hovered, false);
-        let selected = selectable_row_style(&theme, Status::Active, true);
-        assert_ne!(plain.background, hovered.background);
-        assert_ne!(hovered.background, selected.background);
-    }
+    // The two selection tests — only the selected row is ever the
+    // accent, and hover is its own elevation — moved with
+    // `selectable_row_style` to `hyprforge_ui::widgets`.
 
     // --- sidebar sections ------------------------------------------------
 

@@ -1,4 +1,8 @@
-//! The navigation glyphs, drawn rather than typed.
+//! The marks every Hyprforge app draws — navigation, view modes, the
+//! sidebar toggle and the settings pages — drawn rather than typed.
+//!
+//! These began in Files and moved here when Settings adopted the same
+//! design, because the reasoning below is about fonts, not about files.
 //!
 //! These were `‹`, `›` and `↑` — characters set in the UI font — and
 //! they looked like what they are: punctuation. `‹` and `›` are
@@ -278,6 +282,244 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for ViewGlyph {
 
 /// How much of the segment the view mark occupies.
 const VIEW_EXTENT_FRACTION: f32 = 0.55;
+
+/// The marks beside a settings page in a sidebar.
+///
+/// Named for what the page is *about*, not for any one app's screen
+/// list, so a page that moves between groups — or a second app with a
+/// sidebar of its own — keeps its mark.
+///
+/// All outline, one weight, one colour. The mockup these came from gave
+/// every page its own hue, and that is the one part of it this suite
+/// does not follow: colour here is reserved for selection and state, so
+/// a mark takes the text colour and turns accent only when its page is
+/// the current one (see `selectable_row_style`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Page {
+    Display,
+    Power,
+    Keyboard,
+    Network,
+    Bluetooth,
+    Windows,
+    WindowRules,
+    Keybinds,
+    Animation,
+    Idle,
+    Session,
+    Advanced,
+    Apps,
+    Appearance,
+    Wallpaper,
+    NightLight,
+    ScreenSharing,
+    Tray,
+}
+
+/// A drawn page mark, sized to `side` and stroked `color`.
+pub fn page<'a, Message: 'a>(kind: Page, side: f32, color: iced::Color) -> Element<'a, Message> {
+    canvas(PageGlyph { kind, color }).width(Length::Fixed(side)).height(Length::Fixed(side)).into()
+}
+
+struct PageGlyph {
+    kind: Page,
+    color: iced::Color,
+}
+
+/// How much of its box a page mark occupies — a little more than the
+/// view marks, because an outline carries less ink than a filled bar
+/// and reads smaller at the same extent.
+const PAGE_EXTENT_FRACTION: f32 = 0.78;
+
+impl<Message> canvas::Program<Message, Theme, Renderer> for PageGlyph {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        use iced::{Radians, Size};
+        use std::f32::consts::PI;
+
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let side = bounds.width.min(bounds.height);
+        let extent = side * PAGE_EXTENT_FRACTION;
+        let left = bounds.width / 2.0 - extent / 2.0;
+        let top = bounds.height / 2.0 - extent / 2.0;
+        // Every coordinate below is in a unit square, so a mark is one
+        // drawing at every size rather than a pixel layout per size.
+        let at = |x: f32, y: f32| Point::new(left + x * extent, top + y * extent);
+        let len = |v: f32| v * extent;
+        let rect = |b: &mut canvas::path::Builder, x: f32, y: f32, w: f32, h: f32, r: f32| {
+            b.rounded_rectangle(at(x, y), Size::new(len(w), len(h)), len(r).into());
+        };
+        let arc = |b: &mut canvas::path::Builder, x: f32, y: f32, r: f32, from: f32, to: f32| {
+            let start = at(x, y) + iced::Vector::new(len(r) * from.cos(), len(r) * from.sin());
+            b.move_to(start);
+            b.arc(canvas::path::Arc {
+                center: at(x, y),
+                radius: len(r),
+                start_angle: Radians(from),
+                end_angle: Radians(to),
+            });
+        };
+        let line = |b: &mut canvas::path::Builder, x0: f32, y0: f32, x1: f32, y1: f32| {
+            b.move_to(at(x0, y0));
+            b.line_to(at(x1, y1));
+        };
+
+        let path = canvas::Path::new(|b| match self.kind {
+            // A screen on a short stand.
+            Page::Display => {
+                rect(b, 0.05, 0.14, 0.9, 0.58, 0.08);
+                line(b, 0.5, 0.72, 0.5, 0.86);
+                line(b, 0.3, 0.86, 0.7, 0.86);
+            }
+            // A battery on its side, with its terminal.
+            Page::Power => {
+                rect(b, 0.04, 0.26, 0.8, 0.48, 0.08);
+                line(b, 0.92, 0.42, 0.92, 0.58);
+            }
+            // A keyboard: the body and a row of keys along it.
+            Page::Keyboard => {
+                rect(b, 0.02, 0.22, 0.96, 0.56, 0.08);
+                for i in 0..4 {
+                    let x = 0.2 + i as f32 * 0.2;
+                    line(b, x, 0.42, x + 0.02, 0.42);
+                }
+                line(b, 0.28, 0.6, 0.72, 0.6);
+            }
+            // Signal: three arcs over a point.
+            Page::Network => {
+                for r in [0.44, 0.3, 0.16] {
+                    arc(b, 0.5, 0.82, r, PI * 1.25, PI * 1.75);
+                }
+                line(b, 0.5, 0.8, 0.5, 0.82);
+            }
+            // The Bluetooth rune: a spine with two bows.
+            Page::Bluetooth => {
+                b.move_to(at(0.26, 0.3));
+                b.line_to(at(0.72, 0.7));
+                b.line_to(at(0.5, 0.9));
+                b.line_to(at(0.5, 0.1));
+                b.line_to(at(0.72, 0.3));
+                b.line_to(at(0.26, 0.7));
+            }
+            // Two tiled windows.
+            Page::Windows => {
+                rect(b, 0.04, 0.12, 0.5, 0.76, 0.07);
+                rect(b, 0.62, 0.12, 0.34, 0.34, 0.07);
+                rect(b, 0.62, 0.54, 0.34, 0.34, 0.07);
+            }
+            // A window and the rule lines that describe it.
+            Page::WindowRules => {
+                rect(b, 0.04, 0.12, 0.92, 0.76, 0.07);
+                line(b, 0.04, 0.32, 0.96, 0.32);
+                line(b, 0.2, 0.52, 0.8, 0.52);
+                line(b, 0.2, 0.68, 0.6, 0.68);
+            }
+            // A single keycap, seen slightly from above.
+            Page::Keybinds => {
+                rect(b, 0.12, 0.12, 0.76, 0.76, 0.14);
+                rect(b, 0.24, 0.2, 0.52, 0.46, 0.08);
+            }
+            // A ball with the lines it left behind.
+            Page::Animation => {
+                b.circle(at(0.64, 0.5), len(0.26));
+                line(b, 0.04, 0.34, 0.26, 0.34);
+                line(b, 0.0, 0.5, 0.28, 0.5);
+                line(b, 0.04, 0.66, 0.26, 0.66);
+            }
+            // A crescent moon: two arcs sharing their tips.
+            Page::Idle => {
+                arc(b, 0.5, 0.5, 0.4, PI * 0.35, PI * 1.65);
+                let tip_top = at(0.5, 0.5)
+                    + iced::Vector::new(len(0.4) * (PI * 1.65).cos(), len(0.4) * (PI * 1.65).sin());
+                let tip_bottom = at(0.5, 0.5)
+                    + iced::Vector::new(len(0.4) * (PI * 0.35).cos(), len(0.4) * (PI * 0.35).sin());
+                b.move_to(tip_top);
+                b.quadratic_curve_to(at(0.34, 0.5), tip_bottom);
+            }
+            // Play: what starts when the session does.
+            Page::Session => {
+                b.move_to(at(0.28, 0.14));
+                b.line_to(at(0.82, 0.5));
+                b.line_to(at(0.28, 0.86));
+                b.close();
+            }
+            // Two slider tracks with their knobs — the knobs of last resort.
+            Page::Advanced => {
+                line(b, 0.04, 0.32, 0.96, 0.32);
+                line(b, 0.04, 0.68, 0.96, 0.68);
+                b.circle(at(0.34, 0.32), len(0.11));
+                b.circle(at(0.66, 0.68), len(0.11));
+            }
+            // A grid of applications.
+            Page::Apps => {
+                for (x, y) in [(0.08, 0.08), (0.56, 0.08), (0.08, 0.56), (0.56, 0.56)] {
+                    rect(b, x, y, 0.36, 0.36, 0.08);
+                }
+            }
+            // Contrast: a circle split down the middle.
+            Page::Appearance => {
+                b.circle(at(0.5, 0.5), len(0.42));
+                line(b, 0.5, 0.08, 0.5, 0.92);
+            }
+            // A picture: its frame and a mountain.
+            Page::Wallpaper => {
+                rect(b, 0.04, 0.14, 0.92, 0.72, 0.07);
+                b.move_to(at(0.14, 0.76));
+                b.line_to(at(0.4, 0.44));
+                b.line_to(at(0.58, 0.64));
+                b.line_to(at(0.7, 0.52));
+                b.line_to(at(0.86, 0.76));
+            }
+            // A low sun: warm light in the evening.
+            Page::NightLight => {
+                arc(b, 0.5, 0.7, 0.26, PI, PI * 2.0);
+                line(b, 0.04, 0.7, 0.96, 0.7);
+                line(b, 0.5, 0.14, 0.5, 0.28);
+                line(b, 0.16, 0.34, 0.25, 0.43);
+                line(b, 0.84, 0.34, 0.75, 0.43);
+            }
+            // A screen with an arrow leaving it.
+            Page::ScreenSharing => {
+                rect(b, 0.04, 0.14, 0.92, 0.64, 0.07);
+                line(b, 0.5, 0.64, 0.5, 0.32);
+                line(b, 0.36, 0.44, 0.5, 0.3);
+                line(b, 0.64, 0.44, 0.5, 0.3);
+            }
+            // A bar along the top with its icons.
+            Page::Tray => {
+                rect(b, 0.04, 0.16, 0.92, 0.68, 0.07);
+                line(b, 0.04, 0.38, 0.96, 0.38);
+                line(b, 0.62, 0.27, 0.64, 0.27);
+                line(b, 0.76, 0.27, 0.78, 0.27);
+            }
+        });
+
+        frame.stroke(
+            &path,
+            canvas::Stroke {
+                style: canvas::Style::Solid(self.color),
+                // Lighter than the nav chevrons: those are one mark in a
+                // button, these are a column of marks beside labels, and
+                // at the chevron weight the column reads louder than the
+                // text it annotates.
+                width: (side * STROKE_FRACTION * 0.85).max(1.0),
+                line_cap: canvas::LineCap::Round,
+                line_join: canvas::LineJoin::Round,
+                ..canvas::Stroke::default()
+            },
+        );
+
+        vec![frame.into_geometry()]
+    }
+}
 
 // No tests here, deliberately.
 //

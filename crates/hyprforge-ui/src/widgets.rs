@@ -1,3 +1,27 @@
+//! Every widget the suite shares.
+//!
+//! The functions in this file are the original set; the modules below
+//! arrived with the Settings redesign and are re-exported, so every
+//! widget is `hyprforge_ui::widgets::<name>` wherever it happens to live.
+
+mod badges;
+mod controls;
+mod field;
+mod layout;
+mod selection;
+
+pub use badges::{chip, config_line, keycap};
+pub use controls::{
+    dropdown_menu_style, dropdown_style, segment_style, segmented, segmented_choice,
+    slider_style, step_index, stepped_slider, toggle, toggle_style, value_slider, SegmentLook,
+};
+pub use field::{inset_field_style, search_field};
+pub use layout::{
+    hero_card, hint_text, page_header, pending_bar, pending_label, setting_list, setting_row,
+    setting_row_style, status_dot, SETTING_ROW_GAP,
+};
+pub use selection::{section_label, selectable_row_style, spaced_caps, Tint};
+
 use crate::theme::{self, spacing, surface, FontScale};
 use iced::widget::{button, column, container, row, text, text::IntoFragment, Text};
 use iced::{Background, Border, Color, Element, Length, Theme};
@@ -167,9 +191,13 @@ fn danger_style(theme: &Theme, status: button::Status) -> button::Style {
         ..button::Style::default()
     };
     match status {
+        // The stronger accent, not the danger colour it used to turn on
+        // hover: red is a state colour, and a primary button is Apply,
+        // Save, Keep — the opposite of danger. Pointing at one must not
+        // make it look like the Delete button.
         button::Status::Hovered => button::Style {
-            background: Some(Background::Color(palette.danger.base.color)),
-            text_color: palette.danger.base.text,
+            background: Some(Background::Color(palette.primary.strong.color)),
+            text_color: palette.primary.strong.text,
             ..base
         },
         _ => base,
@@ -273,3 +301,29 @@ pub fn confirm_dialog<'a, Message: Clone + 'a>(
 }
 
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pointing at Apply must not paint it the colour of Delete. It did,
+    /// from the first polish pass until the Settings redesign: hover
+    /// turned the primary button the danger red.
+    #[test]
+    fn a_primary_button_stays_the_accent_when_hovered() {
+        let t = theme::app_theme();
+        let palette = t.extended_palette();
+        for status in [button::Status::Active, button::Status::Hovered] {
+            let style = primary_style(&t, status);
+            assert_ne!(
+                style.background,
+                Some(Background::Color(palette.danger.base.color)),
+                "{status:?}"
+            );
+        }
+        assert_eq!(
+            primary_style(&t, button::Status::Hovered).background,
+            Some(Background::Color(palette.primary.strong.color))
+        );
+    }
+}

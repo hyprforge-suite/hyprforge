@@ -21,4 +21,7 @@ hyprforge-look.workspace = true
 # so it costs a link and nothing else — and it is what lets
 # `hyprforge-keys` stay free of iced, which is the point of both crates.
 hyprforge-keys.workspace = true
-iced.workspace = true
+# `canvas` for `glyph`: the drawn marks, stroked because a chevron or a
+# battery cannot be built out of axis-aligned boxes and a font's own
+# symbols are a different shape on every machine.
+iced = { workspace = true, features = ["canvas"] }
