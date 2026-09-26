@@ -141,11 +141,21 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for NavGlyph {
 /// panel. The filled rail *is* the sidebar; the outline is the window
 /// around it.
 pub fn sidebar<'a, Message: 'a>(side: f32, color: iced::Color) -> Element<'a, Message> {
-    canvas(SidebarGlyph { color }).width(Length::Fixed(side)).height(Length::Fixed(side)).into()
+    canvas(SidebarGlyph { color, right: false }).width(Length::Fixed(side)).height(Length::Fixed(side)).into()
+}
+
+/// [`sidebar`], mirrored: a pane with its *right* rail picked out, for a
+/// panel that opens on the far side of the window — Files' preview. The
+/// same shape on the same bar, so the two controls read as a pair, each
+/// sitting at the edge whose panel it shows.
+pub fn side_panel<'a, Message: 'a>(side: f32, color: iced::Color) -> Element<'a, Message> {
+    canvas(SidebarGlyph { color, right: true }).width(Length::Fixed(side)).height(Length::Fixed(side)).into()
 }
 
 struct SidebarGlyph {
     color: iced::Color,
+    /// The rail on the right rather than the left — see [`side_panel`].
+    right: bool,
 }
 
 impl<Message> canvas::Program<Message, Theme, Renderer> for SidebarGlyph {
@@ -167,9 +177,17 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for SidebarGlyph {
         let stroke = (extent * 0.12).max(1.0);
         let fill = canvas::Fill::from(self.color);
 
+        // Drawn left-railed in a local x, and mirrored on the way out
+        // when the rail belongs on the right — one drawing, so the pair
+        // can never drift apart in weight or proportion.
+        let mirror = |x: f32, width: f32| if self.right { 2.0 * left + extent - x - width } else { x };
+        let mut rect = |x: f32, y: f32, w: f32, h: f32| {
+            frame.fill_rectangle(Point::new(mirror(x, w), y), iced::Size::new(w, h), fill);
+        };
+
         // The rail, filled: this is the panel the button shows and hides.
         let rail = extent * 0.34;
-        frame.fill_rectangle(Point::new(left, top), iced::Size::new(rail, extent), fill);
+        rect(left, top, rail, extent);
 
         // The rest of the pane, outlined — four thin rectangles rather
         // than a stroked path, so the corners meet exactly at any size
@@ -177,21 +195,9 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for SidebarGlyph {
         let right = left + extent;
         let bottom = top + extent;
         let body_left = left + rail;
-        frame.fill_rectangle(
-            Point::new(body_left, top),
-            iced::Size::new(right - body_left, stroke),
-            fill,
-        );
-        frame.fill_rectangle(
-            Point::new(body_left, bottom - stroke),
-            iced::Size::new(right - body_left, stroke),
-            fill,
-        );
-        frame.fill_rectangle(
-            Point::new(right - stroke, top),
-            iced::Size::new(stroke, extent),
-            fill,
-        );
+        rect(body_left, top, right - body_left, stroke);
+        rect(body_left, bottom - stroke, right - body_left, stroke);
+        rect(right - stroke, top, stroke, extent);
 
         vec![frame.into_geometry()]
     }

@@ -59,13 +59,10 @@ use std::path::{Path, PathBuf};
 /// scrolls through by eye.
 const MAX_THUMBNAILS: usize = 600;
 
-/// The preview pane's width, logical pixels.
-pub const PREVIEW_WIDTH: f32 = 280.0;
-
-/// Below this window width the pane stays hidden whatever the setting
-/// says — the listing needs the room more, and a pane squeezing the
-/// names into two letters is not a preview anyone asked for.
-const PREVIEW_MIN_WINDOW: f32 = 820.0;
+/// The preview pane's widest, logical pixels — what the host decodes the
+/// pane's picture for. How wide it is actually drawn depends on the
+/// window: see [`density::preview_width`].
+pub const PREVIEW_WIDTH: f32 = density::PREVIEW_MAX_WIDTH;
 
 /// Pictures the host has decoded for this browser: grid thumbnails, and
 /// the one picture the preview pane shows.
@@ -616,7 +613,9 @@ struct ViewModel<'a> {
     can_go_forward: bool,
     /// Grid thumbnails the host has decoded, by path.
     thumbnails: &'a HashMap<PathBuf, ImageHandle>,
-    /// What the preview pane shows, when it is on.
+    /// What the preview pane shows, when it is on *and* the window has
+    /// room for it. The setting alone is `prefs.preview_pane`; the two
+    /// differ exactly when the status bar has to say why nothing shows.
     preview: Option<PreviewModel<'a>>,
 }
 
@@ -626,6 +625,8 @@ struct ViewModel<'a> {
 struct PreviewModel<'a> {
     selected: Vec<&'a Entry>,
     picture: Option<&'a ImageHandle>,
+    /// How wide the pane is drawn — see [`density::preview_width`].
+    width: f32,
 }
 
 /// Browsing state for one directory tree view. Owns no filesystem
@@ -1764,16 +1765,15 @@ impl Browser {
     }
 
     fn view_model(&self, viewport_width: f32) -> ViewModel<'_> {
+        let sidebar_collapsed = self.prefs.sidebar.collapsed(viewport_width, self.config.sidebar.collapse_below);
+        let preview_width = density::preview_width(viewport_width, sidebar_collapsed);
         ViewModel {
             current_dir: &self.current_dir,
             in_trash: self.in_trash(),
             archive: self.archive.as_deref(),
             renaming: self.renaming.as_ref(),
             column_picker_open: self.column_picker_open,
-            sidebar_collapsed: self
-                .prefs
-                .sidebar
-                .collapsed(viewport_width, self.config.sidebar.collapse_below),
+            sidebar_collapsed,
             viewport_width,
             hidden_count: self.hidden_count(),
             dotfiles: self.dotfiles,
@@ -1790,9 +1790,10 @@ impl Browser {
             can_go_back: !self.back_stack.is_empty(),
             can_go_forward: !self.forward_stack.is_empty(),
             thumbnails: &self.media.thumbnails,
-            preview: self.prefs.preview_pane.then(|| PreviewModel {
+            preview: preview_width.filter(|_| self.prefs.preview_pane).map(|width| PreviewModel {
                 selected: self.rows().into_iter().filter(|e| self.selection.is_selected(&e.path)).collect(),
                 picture: self.media.preview.as_ref(),
+                width,
             }),
         }
     }
@@ -1900,7 +1901,7 @@ fn render<'a>(vm: ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         sidebar_view(&vm, scale)
     };
     let mut middle = row![side, file_area(&vm, scale)].height(Length::Fill);
-    if let Some(preview) = vm.preview.as_ref().filter(|_| vm.viewport_width >= PREVIEW_MIN_WINDOW) {
+    if let Some(preview) = vm.preview.as_ref() {
         middle = middle.push(preview_pane(preview, scale));
     }
 
@@ -1932,7 +1933,7 @@ fn preview_pane<'a>(preview: &PreviewModel<'a>, scale: FontScale) -> Element<'a,
         .spacing(2)
         .into()
     };
-    let inner = PREVIEW_WIDTH - 2.0 * spacing::MD;
+    let inner = preview.width - 2.0 * spacing::MD;
 
     let body: Element<'a, Message> = match preview.selected.as_slice() {
         [] => meta_text("Select a file to see it here.", BASE_TEXT_SIZE, scale).into(),
@@ -1976,7 +1977,7 @@ fn preview_pane<'a>(preview: &PreviewModel<'a>, scale: FontScale) -> Element<'a,
     };
 
     container(scrollable(container(body).padding(spacing::MD)).height(Length::Fill))
-        .width(Length::Fixed(PREVIEW_WIDTH))
+        .width(Length::Fixed(preview.width))
         .height(Length::Fill)
         .into()
 }
@@ -2037,6 +2038,40 @@ fn sidebar_toggle<'a>(collapsed: bool, scale: FontScale) -> Element<'a, Message>
     .into()
 }
 
+/// The preview pane's show/hide control, at the far right of the header
+/// where the pane itself begins — [`sidebar_toggle`]'s mirror, drawn with
+/// the mirrored mark, filled on the same "this is on" rule.
+///
+/// Filled by the *setting*, not by whether the pane fits: on a window too
+/// narrow for it the button still says the pane is wanted, and the status
+/// bar says why it is not drawn. Pressing it then turns the setting off,
+/// which is what someone pressing a lit button expects.
+fn preview_toggle<'a>(on: bool, scale: FontScale) -> Element<'a, Message> {
+    let side = density::glyph_button(scale);
+    iced::widget::button(
+        container(glyph::side_panel(side, hyprforge_ui::theme::text()))
+            .center_x(Length::Fill)
+            .center_y(Length::Fill),
+    )
+    .width(Length::Fixed(side))
+    .height(Length::Fixed(side))
+    .padding(0)
+    .on_press(Message::Perform(Action::TogglePreview))
+    .style(move |_t: &iced::Theme, status| {
+        let hovered = matches!(status, iced::widget::button::Status::Hovered);
+        iced::widget::button::Style {
+            background: (on || hovered).then(|| iced::Background::Color(hyprforge_ui::theme::surface::row())),
+            text_color: hyprforge_ui::theme::text(),
+            border: iced::Border {
+                radius: density::nested_radius().into(),
+                ..iced::Border::default()
+            },
+            ..iced::widget::button::Style::default()
+        }
+    })
+    .into()
+}
+
 /// The 44px bar across the top.
 ///
 /// Three depth levels, used consistently everywhere in this window: the
@@ -2065,6 +2100,7 @@ fn header_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> 
             path_bar(vm.current_dir, scale),
             search_field(vm.search_query, vm.current_dir, scale),
             view_mode_toggle(vm.prefs, scale),
+            preview_toggle(vm.prefs.preview_pane, scale),
         ]
         .spacing(spacing::SM)
         .align_y(iced::Alignment::Center),
@@ -2304,17 +2340,24 @@ fn status_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> 
     };
 
     // The preview pane's switch, beside the dotfiles one and for the same
-    // reason: a key nobody finds by looking.
-    let preview_switch: Element<'a, Message> =
+    // reason: a key nobody finds by looking. It names what is on screen,
+    // not the setting — the two part company on a narrow window, and a
+    // switch offering to hide a pane nobody can see reads as broken. That
+    // case says why instead, and is not a button: pressing it would only
+    // turn off a setting the user cannot see the effect of either way.
+    let preview_switch: Element<'a, Message> = if vm.prefs.preview_pane && vm.preview.is_none() {
+        meta_text("Preview needs a wider window", density::META_TEXT_BASE, scale).into()
+    } else {
         iced::widget::button(scaled_text(
-            if vm.prefs.preview_pane { "Hide preview" } else { "Show preview" },
+            if vm.preview.is_some() { "Hide preview" } else { "Show preview" },
             density::META_TEXT_BASE,
             scale,
         ))
         .padding([0, spacing::XS as u16])
         .on_press(Message::Perform(Action::TogglePreview))
         .style(quiet_link_style)
-        .into();
+        .into()
+    };
 
     plane(
         row![
@@ -3322,7 +3365,10 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // width the list is drawn at its own minimum and the pane scrolls
     // sideways to reach the rest of it, which is what a table does
     // everywhere else and is the reason the columns are worth having.
-    let pane = density::list_pane_width(vm.viewport_width, vm.sidebar_collapsed);
+    // Less whatever the preview pane takes beside it: the columns share
+    // what is left, not the width the pane used to leave them.
+    let pane = density::list_pane_width(vm.viewport_width, vm.sidebar_collapsed)
+        - vm.preview.as_ref().map_or(0.0, |p| p.width);
     let min_width =
         density::list_min_width(listing_columns(vm.prefs, vm.in_trash, vm.archive.is_some()).len(), scale);
     if pane >= min_width {
