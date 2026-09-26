@@ -1999,6 +1999,7 @@ dependencies = [
  "hyprforge-process",
  "hyprforge-thumbnails",
  "hyprforge-ui",
+ "hyprforge-video",
  "iced",
  "serde",
  "serde_json",
@@ -2152,6 +2153,7 @@ dependencies = [
  "bytemuck",
  "glam",
  "memmap2",
+ "png 0.18.1",
  "quick-xml",
  "rayon",
  "rustc-hash 2.1.3",
@@ -2211,9 +2213,12 @@ dependencies = [
  "hyprforge-mime",
  "hyprforge-paths",
  "hyprforge-process",
+ "hyprforge-thumbnails",
  "hyprforge-ui",
+ "hyprforge-video",
  "iced",
  "image",
+ "naga",
  "serde",
  "serde_json",
  "tempfile",
@@ -2387,6 +2392,18 @@ dependencies = [
  "hyprforge-keys",
  "hyprforge-look",
  "iced",
+]
+
+[[package]]
+name = "hyprforge-video"
+version = "0.1.0"
+dependencies = [
+ "hyprforge-process",
+ "libloading",
+ "png 0.18.1",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tracing",
 ]
 
 [[package]]
