@@ -79,6 +79,44 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// The entry claims what this build can open, and nothing else: a
+    /// type claimed and not decodable is a file association that opens a
+    /// window with an error, and one decodable and not claimed is a
+    /// format the viewer never gets asked about.
+    ///
+    /// Asked of the build rather than of the root manifest's feature
+    /// list, because the two differ — iced's `image` feature brings
+    /// `image`'s default codecs — and the build is what opens the file.
+    #[test]
+    fn the_desktop_entry_claims_exactly_what_this_build_decodes() {
+        // The decoder's name for a type, and the shared MIME database's
+        // canonical one, which is what the entry claims.
+        const CANONICAL: [(&str, &str); 3] = [
+            ("image/x-icon", "image/vnd.microsoft.icon"),
+            ("image/x-targa", "image/x-tga"),
+            ("image/x-qoi", "image/qoi"),
+        ];
+        let canonical = |kind: &'static str| CANONICAL.iter().find(|(d, _)| *d == kind).map_or(kind, |(_, c)| *c);
+        let entry = include_str!("../packaging/hyprforge-photos.desktop");
+        let mut claimed: Vec<&str> = entry
+            .lines()
+            .find_map(|l| l.strip_prefix("MimeType="))
+            .expect("declares its types")
+            .split(';')
+            .filter(|t| !t.is_empty())
+            .collect();
+        // Farbfeld has no MIME type at all — `image` answers
+        // octet-stream — so there is nothing an entry could claim for it.
+        let mut decodable: Vec<&str> = hyprforge_image::format::decodable_mime_types()
+            .into_iter()
+            .filter(|k| *k != "application/octet-stream")
+            .map(canonical)
+            .collect();
+        claimed.sort_unstable();
+        decodable.sort_unstable();
+        assert_eq!(claimed, decodable);
+    }
+
     fn app(id: &str, installed: bool) -> App {
         App {
             id: id.to_string(),
