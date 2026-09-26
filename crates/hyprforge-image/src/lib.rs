@@ -52,6 +52,7 @@
 //! with and without it.
 
 pub mod budget;
+pub mod camera;
 pub mod decode;
 pub mod error;
 pub mod format;
@@ -59,6 +60,7 @@ pub mod measure;
 pub mod orientation;
 
 pub use budget::{Budget, DecodePixels, ViewportPixels};
+pub use camera::Camera;
 pub use decode::{decode_to_fit, Decoded};
 pub use error::ImageError;
 pub use measure::{measure, Measured, SourcePixels};
