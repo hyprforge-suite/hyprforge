@@ -8,6 +8,7 @@ mod badges;
 mod controls;
 mod field;
 mod layout;
+mod ring;
 mod selection;
 
 pub use badges::{chip, config_line, keycap};
@@ -20,6 +21,7 @@ pub use layout::{
     hero_card, hint_text, page_header, pending_bar, pending_label, setting_list, setting_row,
     setting_row_style, status_dot, SETTING_ROW_GAP,
 };
+pub use ring::{countdown_ring, remaining_fraction};
 pub use selection::{section_label, selectable_row_style, spaced_caps, Tint};
 
 use crate::theme::{self, spacing, surface, FontScale};
