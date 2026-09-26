@@ -173,6 +173,11 @@ pub struct Conversation<B: Backend> {
     /// [`Conversation`]'s own `Debug` below still gets a hand-written
     /// impl, but only because it also has to redact `state`.
     pending: Secret<String>,
+    /// How many characters the last submitted answer had — a count, never
+    /// the characters — so the screen can keep the dots up while it is
+    /// checked and turn *those* dots red if it is refused, rather than
+    /// emptying the field the instant Enter is pressed.
+    submitted: usize,
 }
 
 /// Renders no part of what was typed.
@@ -203,6 +208,7 @@ impl<B: Backend> Conversation<B> {
             last_prompt: None,
             pending: Secret::default(),
             failures: 0,
+            submitted: 0,
         };
         conversation.backend.start(&conversation.username.clone());
         conversation.pump();
@@ -260,6 +266,11 @@ impl<B: Backend> Conversation<B> {
         self.failures
     }
 
+    /// The length, in characters, of the last answer submitted.
+    pub fn submitted(&self) -> usize {
+        self.submitted
+    }
+
     /// What the user has typed so far, if anything is being asked.
     pub fn entered(&self) -> &str {
         match &self.state {
@@ -308,6 +319,7 @@ impl<B: Backend> Conversation<B> {
         // the backend then does with it is the backend's (and PAM's);
         // this is the last copy this crate owns.
         let answer = Secret::new(entered.expose().clone());
+        self.submitted = answer.expose().chars().count();
         self.state = State::Working;
         self.backend.answer(answer.expose());
         self.pump();
@@ -1011,6 +1023,16 @@ mod tests {
             State::Asking { prompt, .. } => assert_eq!(prompt.text, "Code:"),
             other => panic!("the last response should have won, got {other:?}"),
         }
+    }
+
+    /// The screen keeps the attempt's dots up while it is checked, so the
+    /// conversation remembers how long it was — as a number.
+    #[test]
+    fn a_submitted_answer_is_remembered_only_as_its_length() {
+        let mut c = Conversation::new(password_then(Response::Failure { reason: "no".into() }), "apost");
+        c.type_into("é😀abc".into());
+        c.submit();
+        assert_eq!(c.submitted(), 5, "characters, not bytes");
     }
 
     /// What was typed is a password. It must not reach a log, a panic

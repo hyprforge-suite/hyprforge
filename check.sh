@@ -30,6 +30,11 @@
 #                             shape hyprforge-power claims. Never sets the
 #                             active profile. Needs power-profiles-daemon
 #                             running.
+#   3f. fprintd             — does fprintd agree? Read-only checks that the
+#                             reader, the enrolled list and VerifyStatus are
+#                             the shape the lock's fingerprint path claims.
+#                             Never claims the reader. Needs fprintd
+#                             installed (it is bus-activated).
 #
 # Tiers 2, 3, 3b and 3c each gate on the thing they actually ask, rather
 # than sharing one --ignored run: a check that silently never runs is
@@ -515,7 +520,7 @@ if directories and directories.group(1).lower() != spelled(len(standalone)):
         f"there are {spelled(len(standalone))}"
     )
 
-# CLAUDE.md's "Fourteen gated tiers": the indented `step` lines below
+# CLAUDE.md's "Fifteen gated tiers": the indented `step` lines below
 # are the gated tiers — `--quick` skips the block they sit in — less the
 # one that only announces the skip. It said twelve while there were
 # fourteen, and named neither of the two it was missing.
@@ -902,6 +907,37 @@ else
             grep -E '^test .* FAILED' <<<"$output" | head -20
         else
             ok "$(count_tests <<<"$output") power-profiles-daemon tests passed"
+            while IFS= read -r reason; do
+                [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
+            done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^(]*\).*/\1/p' <<<"$output" | sort -u)
+        fi
+    fi
+
+    # Answers to fprintd, the lock screen's fingerprint path. Gated on the
+    # system bus knowing fprintd's name — running or activatable — and not
+    # on `systemctl is-active`: fprintd is bus-activated and exits when
+    # idle, so it is "inactive" on nearly every machine that has it.
+    #
+    # Read-only: it asks for the default reader, lists this user's
+    # enrolled fingers and reads the device's introspection. It never
+    # claims the reader or starts a verification, so the sensor does not
+    # even light. The first version of the lock's fingerprint code named
+    # the wrong manager path and passed every unit test; this is the step
+    # that would have said so.
+    step "Live tests against fprintd"
+    if ! command -v busctl >/dev/null; then
+        skip "fprintd tests" "busctl not available to ask"
+    elif ! busctl --system list --acquired --activatable --no-legend 2>/dev/null \
+            | awk '{print $1}' | grep -qx 'net.reactivated.Fprint'; then
+        skip "fprintd tests" "fprintd isn't installed"
+    else
+        output=$(cargo test -p hyprforge-lock --bin hyprforge-lock live_fprintd \
+            -- --ignored --test-threads=1 --nocapture 2>&1)
+        if grep -q "test result: FAILED" <<<"$output"; then
+            bad "fprintd tests failed — the lock disagrees with the running fprintd"
+            grep -E '^test .* FAILED' <<<"$output" | head -20
+        else
+            ok "$(count_tests <<<"$output") fprintd tests passed"
             while IFS= read -r reason; do
                 [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
             done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^(]*\).*/\1/p' <<<"$output" | sort -u)

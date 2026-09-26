@@ -37,7 +37,7 @@ toml = "1.1"
 # `iced_tiny_skia::Renderer` the same way, with no windowing backend of
 # its own beyond the Wayland layer-shell surface `hyprforge-popup` sets
 # up.
-iced_tiny_skia = { version = "0.14", default-features = false, features = ["wayland"] }
+iced_tiny_skia = { version = "0.14.1", default-features = false, features = ["wayland"] }
 iced_runtime = "0.14"
 iced_widget = "0.14"
 # `iced_widget` depends on `iced_renderer` unconditionally (not behind

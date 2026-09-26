@@ -143,7 +143,7 @@ iced = { version = "0.14", default-features = false, features = [
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 iced_widget = "0.14"
 iced_runtime = "0.14"
-iced_tiny_skia = { version = "0.14", default-features = false }
+iced_tiny_skia = { version = "0.14.1", default-features = false }
 # iced_graphics enables the `image` crate with no format features at all,
 # so without this there is no PNG decoder and every wallpaper fails to
 # load. Cargo unifies features across the dependency graph, so declaring

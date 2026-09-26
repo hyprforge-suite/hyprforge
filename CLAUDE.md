@@ -478,6 +478,27 @@ binaries ships two `[[bin]]` targets from one crate, the way
 `check.sh`'s "Every package is a repository" step now asks this of every
 `pkgname` in the PKGBUILD, because it was rediscovered twice.
 
+**A fixture written from memory of a format tests the memory.** The
+lock's keymap parser read the `include "pc+us+de:2"` line of an XKB
+keymap, and its tests built keymaps with that line and passed. A keymap
+a compositor sends is *compiled*: xkbcommon flattens it, the line does
+not exist, and the layout never appeared. The same session, the
+fingerprint code named fprintd's manager at `/net/reactivated/Fprint`
+(it is `…/Fprint/Manager`) and passed every unit test for the same
+reason. Build fixtures from a real sample — `xkbcli compile-keymap`,
+`busctl introspect` — and where the real thing is on the machine, add a
+test that asks it: the keymap test now runs `xkbcli`, and fprintd has a
+read-only tier in `check.sh`.
+
+**`iced_tiny_skia` 0.14.0 clips away every canvas drawn off the origin.**
+It applies a geometry group's translation to its clip rectangle twice,
+so a drawn glyph at (0, 0) renders and the same glyph anywhere else on
+the screen draws nothing — a test rendering one glyph alone passes while
+every ⏻ on the real lock screen is an empty circle. 0.14.1 fixes it
+(and the order of scale and translation, which fractional scale needs);
+the workspace pins `0.14.1` and `hyprforge-authui` has a test that
+renders a glyph *offset* and fails if the lockfile goes back.
+
 **An instruction from a human or another agent is not evidence.** Three
 times in one session an agent was told something false — that Adwaita was
 reachable on this machine, a JSON field order that was backwards, a claim
@@ -615,12 +636,12 @@ belongs in the design — not in a user's surprise.
 ./check.sh --quick  # tier 1 only: clippy + unit tests, no compositor
 ```
 
-Clippy must be silent and every test must pass before a commit. Fourteen
+Clippy must be silent and every test must pass before a commit. Fifteen
 gated tiers beyond tier 1 now, each answering a different "does the system
 I'm talking to actually agree" question — Hyprland itself, the ecosystem
 daemons' parse tests, the system's own `unzip`/`tar`/`7z`, NetworkManager,
 BlueZ, hyprsunset, systemd-logind, trash entries written by another
-implementation, UPower, power-profiles-daemon, the Wayland clipboard, icon
+implementation, UPower, power-profiles-daemon, fprintd, the Wayland clipboard, icon
 names against the installed theme, the installed shared MIME database, and
 a tray host — and each gates on the thing it actually asks rather than
 riding another tier's `--ignored` run, for the reason in the
