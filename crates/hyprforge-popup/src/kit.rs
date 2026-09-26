@@ -70,6 +70,8 @@ pub struct Look {
     pub outline: Color,
     /// An inset well: the search field and the tab track.
     pub inset: Color,
+    /// Something floating over the popup — the tone picker.
+    pub raised: Color,
     pub inset_border: Color,
     pub text: Color,
     pub dim: Color,
@@ -102,6 +104,7 @@ impl Look {
             background: to_iced(s.root),
             outline: tint(theme.accent, 0.28),
             inset: to_iced(s.sidebar),
+            raised: to_iced(s.card),
             inset_border: to_iced(s.card_border),
             text: to_iced(s.text),
             dim: to_iced(s.text_dim),

@@ -4,9 +4,17 @@ An emoji picker for Hyprland — the one GNOME and KDE ship and Hyprland
 users otherwise go without.
 
 Bound to a key, it opens a layer-shell popup at the pointer with the full
-set of fully-qualified Unicode emoji, type-to-filter search, skin tones
-behind a long press, and a default tone it remembers. Picking one puts it
-on the clipboard and pastes it into whatever had focus.
+set of fully-qualified Unicode emoji in sections, the ones you pick most
+first, and type-to-filter search. Hold an emoji (or press Shift+Enter)
+for its skin tones; the ✋ button beside the search sets the default tone
+every emoji is shown in. Two more tabs hold kaomoji and everyday symbols
+— arrows, maths, currency, dashes and quotes — and Tab steps between
+them. Picking one puts it on the clipboard and pastes it into whatever
+had focus.
+
+The kaomoji that use Japanese characters (the shrug's ツ among them) need
+a CJK font such as `noto-fonts-cjk`; without one those few draw with
+gaps and everything else is unaffected.
 
 Part of [Hyprforge](https://github.com/adamrpostjr/hyprforge), a suite of
 native Hyprland desktop applications. This repository is a split of the

@@ -16,7 +16,7 @@
 //!
 //! Everything that is specific to *what* a popup shows — a clipboard
 //! history's rows, or a future grid of emoji — is behind [`PopupApp`].
-//! [`Popup`] itself never names a `Model`, a `RowLayout`, or any other
+//! [`Popup`] itself never names a `Model`, a `Layout`, or any other
 //! consumer type; it only calls the trait.
 //!
 //! # Rendering at the output's actual scale
@@ -52,7 +52,7 @@
 //! coordinates [`PointerEvent::position`] reports. Wayland delivers
 //! pointer input in surface-local logical coordinates by contract,
 //! never in buffer pixels, so nothing downstream of an event
-//! (`RowLayout::row_at`, `GridLayout::cell_at`, `MenuLayout::row_at`,
+//! (each popup's `Layout::hit`, `MenuLayout::row_at`,
 //! the scrollbar's own thumb) has to know the scale changed at all —
 //! changing what the buffer holds cannot change what coordinate space
 //! the compositor hands back for a click. That invariant is why this
@@ -67,7 +67,7 @@
 //! choice, not the only one possible, and the reason is the bug this
 //! whole popup shape exists to keep from recurring: CLAUDE.md's "the
 //! thing drawn, the thing hit-tested, and the number of things that fit
-//! must all be the same." A `RowLayout` used for one theme's font size
+//! must all be the same." A `Layout` built for one theme's font size
 //! passed alongside a `Model` windowed for another is exactly the class
 //! of drift that produced the original clicking-does-nothing bug and the
 //! auto-scroll bug both — two independently-constructed values that

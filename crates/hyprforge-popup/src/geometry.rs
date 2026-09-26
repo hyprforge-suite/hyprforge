@@ -8,7 +8,7 @@
 //! click on. Moved here unchanged from `hyprforge-clipmenu::geometry`,
 //! which is where it was originally written and tested — see this
 //! crate's own module doc for why this half of that file moved and
-//! `RowLayout` did not.
+//! the row geometry did not.
 //!
 //! Units are logical pixels throughout — `hyprctl cursorpos` and the
 //! `x`/`y` fields of `hyprctl monitors -j` are already logical, and

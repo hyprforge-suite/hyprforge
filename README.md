@@ -107,7 +107,9 @@ Hyprland-facing
                             checked before an offer's bytes are ever read,
                             so a password manager's clipboard contents are
                             never hashed, stored or logged. Also ships
-                            hyprforge-clipmenu, the history popup, launched
+                            hyprforge-clipmenu, the history popup — search,
+                            filter tabs, a preview pane, pin and delete —
+                            launched
                             per invocation by a keybind rather than run as
                             a daemon — a short-lived process cannot leak a
                             stuck layer surface holding exclusive keyboard
@@ -178,7 +180,8 @@ Hyprland-facing
                             same way as hyprforge-clipmenu — a PopupApp
                             consumer of hyprforge-popup and
                             hyprforge-emoji, with long-press support for
-                            picking a skin tone.
+                            picking a skin tone, frequently used emoji
+                            first, and tabs for kaomoji and symbols.
 
 Apps
   hyprforge-files/         the file manager window: the chrome around the
@@ -239,7 +242,7 @@ today; the intent is to make them public once they've had more use.
 | [hyprforge-tray](https://github.com/adamrpostjr/hyprforge-tray) | A StatusNotifierItem tray library, plus `hyprforge-trayd`, the daemon that puts network (Wi-Fi and Ethernet), Bluetooth, keep-awake, night-light, battery/power-profile and display-layout icons in whatever bar is running, and draws its own right-click menu through `hyprforge-traymenu` rather than `com.canonical.dbusmenu`. |
 | [hyprforge-settings](https://github.com/adamrpostjr/hyprforge-settings) | The Settings app: an iced GUI over Hyprland's config, appearance, displays, network, Bluetooth, shortcuts and more. |
 | [hyprforge-displayd](https://github.com/adamrpostjr/hyprforge-displayd) | A monitor-arrangement daemon: it watches `wlr-output-management`, recognises a set of displays it has seen before and applies the layout saved for it, plus `hyprforge-displayctl` to drive it from a script. |
-| [hyprforge-emojimenu](https://github.com/adamrpostjr/hyprforge-emojimenu) | An emoji picker: a layer-shell popup at the pointer with type-to-filter search over the full Unicode set, skin tones, and a remembered default tone. |
+| [hyprforge-emojimenu](https://github.com/adamrpostjr/hyprforge-emojimenu) | An emoji picker: a layer-shell popup at the pointer with type-to-filter search over the full Unicode set, frequently used first, skin tones and a remembered default tone, plus kaomoji and symbols. |
 | [hyprforge-files](https://github.com/adamrpostjr/hyprforge-files) | A file manager: tabs, a sidebar, list and grid views, the freedesktop trash, copy and paste with other applications, and zip/tar/7z archives browsed and edited in place. |
 
 Seven of the eight are meant to be installed on their own: clone
@@ -429,7 +432,7 @@ Binaries land in `target/release/`: `hyprforge-displayd`,
 | `$XDG_CONFIG_HOME/hypr/hyprland.lua.hyprforge.bak` | Backup taken automatically the one time that line is inserted |
 | `$XDG_CONFIG_HOME/hyprforge/lock.toml` | The lock screen's theme, written by Settings, read by `hyprforge-lock` (the greeter reads an exported copy — it runs as its own user and cannot read your home) |
 | `$XDG_CONFIG_HOME/hyprforge/tray.toml` | Which tray icons show, how far below the bar their menu opens, and whether clicking away dismisses it — written by Settings' Tray screen and re-read by `hyprforge-trayd` on every poll (and by `hyprforge-traymenu` on every right click), so a change takes effect without restarting anything |
-| `$XDG_CONFIG_HOME/hyprforge/emojimenu.toml` | The emoji picker's default skin tone |
+| `$XDG_CONFIG_HOME/hyprforge/emojimenu.toml` | The emoji picker's default skin tone, and how often each emoji is picked (its "Frequently used" section) |
 | `$XDG_CONFIG_HOME/hyprforge/files.toml` | The file manager's remembered state — sort order, view mode, whether the preview pane is on, window size |
 | `$XDG_CONFIG_HOME/hyprforge/clipboard/` | The clipboard history: `history.toml` for the index, `images/` for one file per image entry — never image bytes in the index itself |
 
