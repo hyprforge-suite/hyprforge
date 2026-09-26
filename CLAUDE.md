@@ -478,6 +478,49 @@ binaries ships two `[[bin]]` targets from one crate, the way
 `check.sh`'s "Every package is a repository" step now asks this of every
 `pkgname` in the PKGBUILD, because it was rediscovered twice.
 
+**A fixture written from memory of a format tests the memory.** The
+lock's keymap parser read the `include "pc+us+de:2"` line of an XKB
+keymap, and its tests built keymaps with that line and passed. A keymap
+a compositor sends is *compiled*: xkbcommon flattens it, the line does
+not exist, and the layout never appeared. The same session, the
+fingerprint code named fprintd's manager at `/net/reactivated/Fprint`
+(it is `…/Fprint/Manager`) and passed every unit test for the same
+reason. Build fixtures from a real sample — `xkbcli compile-keymap`,
+`busctl introspect` — and where the real thing is on the machine, add a
+test that asks it: the keymap test now runs `xkbcli`, and fprintd has a
+read-only tier in `check.sh`.
+
+**`iced_tiny_skia` 0.14.0 clips away every canvas drawn off the origin.**
+It applies a geometry group's translation to its clip rectangle twice,
+so a drawn glyph at (0, 0) renders and the same glyph anywhere else on
+the screen draws nothing — a test rendering one glyph alone passes while
+every ⏻ on the real lock screen is an empty circle. 0.14.1 fixes it
+(and the order of scale and translation, which fractional scale needs);
+the workspace pins `0.14.1` and `hyprforge-authui` has a test that
+renders a glyph *offset* and fails if the lockfile goes back.
+
+**A loop that takes one message per unit of work falls behind a
+callback that signals faster than the work.** The video player's thread
+took one message from its channel and then drew a frame, a few tens of
+milliseconds in software; mpv's callbacks sent a wake on every frame and
+every property change, faster than frames were drawn, so the queue grew
+for as long as a video played. Three bugs arrived at once and read as
+three: closing the window hung for 3.5 seconds (measured — freeing mpv
+itself took 40ms; the thread took 3.5s to *see* the quit), scrubbing
+lagged, and mute was "hit or miss". Every turn now drains the channel,
+drops the wakes, and collapses a run of seeks into one (`player::batch`).
+When something signals "look", treat the signal as idempotent and drain
+it; never do work per signal.
+
+**iced draws nothing for an image it is still uploading, and anything
+over 2MB is uploaded on a worker.** `iced_wgpu`'s `MAX_SYNC_SIZE`: a
+video frame handed over as a new `image::Handle` thirty times a second —
+3.3MB each — never finished uploading before it was replaced, so a
+playing video showed an empty pane and only the last frame appeared once
+it stopped. A picture that changes every frame belongs in a `shader`
+primitive that writes one texture (`hyprforge-photos/src/film.rs`); a
+still is fine as a handle.
+
 **An instruction from a human or another agent is not evidence.** Three
 times in one session an agent was told something false — that Adwaita was
 reachable on this machine, a JSON field order that was backwards, a claim
@@ -615,12 +658,12 @@ belongs in the design — not in a user's surprise.
 ./check.sh --quick  # tier 1 only: clippy + unit tests, no compositor
 ```
 
-Clippy must be silent and every test must pass before a commit. Fourteen
+Clippy must be silent and every test must pass before a commit. Fifteen
 gated tiers beyond tier 1 now, each answering a different "does the system
 I'm talking to actually agree" question — Hyprland itself, the ecosystem
 daemons' parse tests, the system's own `unzip`/`tar`/`7z`, NetworkManager,
 BlueZ, hyprsunset, systemd-logind, trash entries written by another
-implementation, UPower, power-profiles-daemon, the Wayland clipboard, icon
+implementation, UPower, power-profiles-daemon, fprintd, the Wayland clipboard, icon
 names against the installed theme, the installed shared MIME database, and
 a tray host — and each gates on the thing it actually asks rather than
 riding another tier's `--ignored` run, for the reason in the
@@ -673,8 +716,15 @@ hyprforge-process   a bounded subprocess wait (Command::output that gives up);
 hyprforge-look      Color + the runtime Theme; no iced, because the lock screen
                     and greeter paint into a raw Wayland buffer
 hyprforge-mime      the freedesktop shared MIME database: what a file is,
-                    what opens it, what the default is. A leaf; depends only
-                    on hyprforge-paths
+                    what opens it, what the default is, which icon name it
+                    has. A leaf; depends only on hyprforge-paths and
+                    hyprforge-process
+hyprforge-icons     the freedesktop icon theme lookup: which file an icon
+                    name is, through the configured theme and everything it
+                    inherits. A leaf; depends only on hyprforge-process
+hyprforge-thumbnails the freedesktop thumbnail cache, shared with every other
+                    program: pixels in, pixels out. A leaf with no Hyprforge
+                    dependency
 hyprforge-archive   zip, tar and 7z: what is inside one as a directory tree,
                     extracting from it, and rewriting it. A leaf with no
                     Hyprforge dependency at all — paths arrive from the
@@ -683,6 +733,11 @@ hyprforge-keys      the keyboard grammar every app binds keys through; no iced
 hyprforge-listing   a directory listing and its order, under both Files and
                     the image viewer so they agree which picture is next
 hyprforge-image     bounded, orientation-correct decoding; no iced, no Wayland
+hyprforge-mesh      STL/3MF/OBJ into a welded mesh, fstl's camera, and a CPU
+                    thumbnail; no iced, no wgpu — the renderer lives with the
+                    window, on iced's wgpu
+hyprforge-video     play a video into memory through libmpv (dlopen'd, so mpv
+                    is optional), and a video's first real frame via ffmpeg
 hyprforge-ui        the iced layer; knows nothing about Hyprland
 hyprforge-core      Hyprland config machinery — a new app should never need it
 ```

@@ -12,13 +12,13 @@ hyprforge-ui.workspace = true
 # `hyprforge-network`'s Wi-Fi passphrase uses, rather than a second
 # hand-written "never render this".
 hyprforge-secret.workspace = true
-iced_widget = { workspace = true, features = ["image"] }
+iced_widget = { workspace = true, features = ["image", "canvas"] }
 iced_runtime.workspace = true
 chrono.workspace = true
 image.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
-iced_tiny_skia = { workspace = true, features = ["image"] }
+iced_tiny_skia = { workspace = true, features = ["image", "geometry"] }
 tiny-skia = "0.11"
 png = "0.17"

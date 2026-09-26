@@ -19,6 +19,7 @@
 //! it's an export. See [`theme::Theme::export`].
 
 pub mod conversation;
+pub mod scene;
 pub mod screen;
 
 pub use conversation::{Backend, Conversation, Prompt, Response, State};

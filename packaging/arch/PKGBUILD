@@ -104,7 +104,7 @@ package_hyprforge-files() {
 }
 
 package_hyprforge-photos() {
-  pkgdesc="Image viewer for Hyprland"
+  pkgdesc="Photo, video and 3D model viewer for Hyprland"
   depends=(wayland libxkbcommon)
   optdepends=(
     # Each of these is an action that degrades to a sentence without its
@@ -113,6 +113,10 @@ package_hyprforge-photos() {
     'glib2: "Open With…" hands a picture to another program through gio'
     'hyprpaper: "Set as Wallpaper" shows it now, not only at next login'
     'hyprforge-files: "Show in Files"'
+    # libmpv is opened at run time, not linked: without it every picture
+    # and model still shows, and a video says what is missing.
+    'mpv: playing videos'
+    'ffmpeg: thumbnails of videos, from their first real frame'
   )
   cd "$startdir/../.."
   _bin hyprforge-photos
@@ -196,6 +200,11 @@ package_hyprforge-emojimenu() {
   # deliberately has no runtime check or fallback message for a missing
   # emoji font — the package requiring one is what keeps that true.
   depends=(wayland libxkbcommon noto-fonts-emoji)
+  # The Kaomoji tab is the opposite case: most of it draws from any Latin
+  # font, but the shrug's ツ and several others are Japanese characters,
+  # and without a CJK font those few render with gaps. The tab still
+  # works — degraded, not broken — so this is an optdepend.
+  optdepends=('noto-fonts-cjk: kaomoji that use Japanese characters, like the shrug')
   cd "$startdir/../.."
   _bin hyprforge-emojimenu
 }

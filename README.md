@@ -14,8 +14,9 @@ has never heard of Hyprland.
 
 ```
 Shared by every app in the suite
-  hyprforge-paths/         where config lives and how to write it atomically.
-                            No dependencies at all.
+  hyprforge-paths/         where config lives and how to write it atomically,
+                            and where your Pictures and Downloads are
+                            (user-dirs.dirs). No dependencies at all.
   hyprforge-look/          the Color type with the one rgba() parser, and the
                             runtime Theme every app draws from. No iced — the
                             lock screen and greeter paint into a raw Wayland
@@ -66,7 +67,23 @@ Shared by every app in the suite
                             anything is allocated, the EXIF orientation is
                             applied once, and a 36-megapixel photograph is
                             decoded to fit the window rather than at full
-                            size. No iced, no Wayland, no Hyprland.
+                            size; and what the camera wrote — body, lens,
+                            exposure, date, GPS. No iced, no Wayland, no
+                            Hyprland.
+  hyprforge-video/         videos: playing one into memory through libmpv
+                            (opened at run time, so nothing needs mpv to
+                            start), and a video's first real frame — past
+                            the black most open on — for the thumbnail
+                            cache, through ffmpeg. No iced, no async
+                            runtime; the only unsafe code in the suite's
+                            viewer is in its libmpv binding.
+  hyprforge-mesh/          3D models — STL, 3MF and OBJ — loaded into a
+                            welded, indexed mesh, with fstl's camera and
+                            draw modes: the model half of view3d, brought in
+                            so the image viewer opens a model the way it
+                            opens a picture. Memory-mapped, parallel
+                            parsing. No iced, no wgpu; carries its own MIT
+                            LICENSE with fstl's copyright line.
 
 Hyprland-facing
   hyprforge-core/          the config machinery: hlconfig (the generic
@@ -107,7 +124,9 @@ Hyprland-facing
                             checked before an offer's bytes are ever read,
                             so a password manager's clipboard contents are
                             never hashed, stored or logged. Also ships
-                            hyprforge-clipmenu, the history popup, launched
+                            hyprforge-clipmenu, the history popup — search,
+                            filter tabs, a preview pane, pin and delete —
+                            launched
                             per invocation by a keybind rather than run as
                             a daemon — a short-lived process cannot leak a
                             stuck layer surface holding exclusive keyboard
@@ -130,6 +149,15 @@ Hyprland-facing
                             content sniffing, which calls an STL a stream
                             of bytes and opens 3D models in a browser.
                             A leaf, like hyprforge-look.
+  hyprforge-icons/         which file is the icon called image-png: the
+                            freedesktop icon theme lookup, through the
+                            configured theme's Inherits= chain to hicolor.
+                            hyprforge-mime says which name a type's icon
+                            has; this finds the file. A leaf.
+  hyprforge-thumbnails/    the freedesktop thumbnail cache every program
+                            shares: a thumbnail found while its file is
+                            unchanged, stored as small as a PNG can be,
+                            failures remembered, orphans pruned. A leaf.
   hyprforge-archive/       zip, tar and 7z: what is inside one as a
                             directory tree, extracting from it, making
                             one, and rewriting it. Pure Rust, so a
@@ -178,18 +206,29 @@ Hyprland-facing
                             same way as hyprforge-clipmenu — a PopupApp
                             consumer of hyprforge-popup and
                             hyprforge-emoji, with long-press support for
-                            picking a skin tone.
+                            picking a skin tone, frequently used emoji
+                            first, and tabs for kaomoji and symbols.
 
 Apps
   hyprforge-files/         the file manager window: the chrome around the
                             shared browsing view, plus what a dialog
                             deliberately does not have — launching what
                             you double-click, and file operations.
-  hyprforge-photos/        the image viewer: one picture at a time, paged
-                            through its folder in the order Files shows
-                            it, with zoom, pan, rotation, an info panel and
-                            a filmstrip; trash with undo, copy, Open With,
-                            Show in Files and Set as Wallpaper.
+  hyprforge-photos/        the photo, video and 3D model viewer, in the
+                            file manager's shell: a Places sidebar, and
+                            Photo, Grid and Library as modes of one window.
+                            A picture opened on its own gets a compact,
+                            floating viewer instead. Photo pages through
+                            the folder in the order Files shows it, with
+                            zoom, pan, rotation and a filmstrip; Grid groups
+                            it by day; Library is the folder tree as cards.
+                            Videos play in the pane through libmpv, with a
+                            seek bar; 3D models (STL, 3MF, OBJ) are drawn by
+                            view3d's renderer in an iced shader widget. An
+                            inspector with the camera's EXIF, a video's
+                            length or a model's geometry, a slideshow, and
+                            trash with undo, copy, Open With, Show in Files
+                            and Set as Wallpaper.
   hyprforge-settings/      the iced GUI, hosting the settings modules
   hyprforge-authui/        the authentication conversation model, shared by
                             the lock screen and the greeter
@@ -234,12 +273,12 @@ today; the intent is to make them public once they've had more use.
 | Repository | What it is |
 |---|---|
 | [hyprforge-clipboard](https://github.com/adamrpostjr/hyprforge-clipboard) | A Wayland clipboard history library over `wlr-data-control`/`ext-data-control`, plus `hyprforge-clipd`, the daemon that watches the compositor's clipboard and writes its history. |
-| [hyprforge-lock](https://github.com/adamrpostjr/hyprforge-lock) | An `ext-session-lock-v1` lock screen for Hyprland, authenticating against PAM and sharing its look with the greeter. |
+| [hyprforge-lock](https://github.com/adamrpostjr/hyprforge-lock) | An `ext-session-lock-v1` lock screen for Hyprland: PAM and fingerprint unlock, a status line, media and notification counts, a power menu, and a look shared with the greeter. |
 | [hyprforge-greet](https://github.com/adamrpostjr/hyprforge-greet) | A greetd greeter for Hyprland, sharing its look and authentication conversation with the lock screen. |
 | [hyprforge-tray](https://github.com/adamrpostjr/hyprforge-tray) | A StatusNotifierItem tray library, plus `hyprforge-trayd`, the daemon that puts network (Wi-Fi and Ethernet), Bluetooth, keep-awake, night-light, battery/power-profile and display-layout icons in whatever bar is running, and draws its own right-click menu through `hyprforge-traymenu` rather than `com.canonical.dbusmenu`. |
 | [hyprforge-settings](https://github.com/adamrpostjr/hyprforge-settings) | The Settings app: an iced GUI over Hyprland's config, appearance, displays, network, Bluetooth, shortcuts and more. |
 | [hyprforge-displayd](https://github.com/adamrpostjr/hyprforge-displayd) | A monitor-arrangement daemon: it watches `wlr-output-management`, recognises a set of displays it has seen before and applies the layout saved for it, plus `hyprforge-displayctl` to drive it from a script. |
-| [hyprforge-emojimenu](https://github.com/adamrpostjr/hyprforge-emojimenu) | An emoji picker: a layer-shell popup at the pointer with type-to-filter search over the full Unicode set, skin tones, and a remembered default tone. |
+| [hyprforge-emojimenu](https://github.com/adamrpostjr/hyprforge-emojimenu) | An emoji picker: a layer-shell popup at the pointer with type-to-filter search over the full Unicode set, frequently used first, skin tones and a remembered default tone, plus kaomoji and symbols. |
 | [hyprforge-files](https://github.com/adamrpostjr/hyprforge-files) | A file manager: tabs, a sidebar, list and grid views, the freedesktop trash, copy and paste with other applications, and zip/tar/7z archives browsed and edited in place. |
 
 Seven of the eight are meant to be installed on their own: clone
@@ -429,7 +468,7 @@ Binaries land in `target/release/`: `hyprforge-displayd`,
 | `$XDG_CONFIG_HOME/hypr/hyprland.lua.hyprforge.bak` | Backup taken automatically the one time that line is inserted |
 | `$XDG_CONFIG_HOME/hyprforge/lock.toml` | The lock screen's theme, written by Settings, read by `hyprforge-lock` (the greeter reads an exported copy — it runs as its own user and cannot read your home) |
 | `$XDG_CONFIG_HOME/hyprforge/tray.toml` | Which tray icons show, how far below the bar their menu opens, and whether clicking away dismisses it — written by Settings' Tray screen and re-read by `hyprforge-trayd` on every poll (and by `hyprforge-traymenu` on every right click), so a change takes effect without restarting anything |
-| `$XDG_CONFIG_HOME/hyprforge/emojimenu.toml` | The emoji picker's default skin tone |
+| `$XDG_CONFIG_HOME/hyprforge/emojimenu.toml` | The emoji picker's default skin tone, and how often each emoji is picked (its "Frequently used" section) |
 | `$XDG_CONFIG_HOME/hyprforge/files.toml` | The file manager's remembered state — sort order, view mode, whether the preview pane is on, window size |
 | `$XDG_CONFIG_HOME/hyprforge/clipboard/` | The clipboard history: `history.toml` for the index, `images/` for one file per image entry — never image bytes in the index itself |
 
@@ -896,6 +935,79 @@ authenticates against PAM. It shares `hyprforge-authui`'s conversation
 model with the greeter, because the problem being solved is that a
 greeter and a lock screen usually look like two different systems.
 
+### What the screen shows
+
+The layout is the "Hyprlock: glass card" mockup, drawn by
+`hyprforge-authui` for both hosts, with every colour taken from the shared
+theme at an alpha:
+
+- **Idle**: the clock alone, large, with "Type to unlock" — or "Type, or
+  touch the sensor, to unlock" while the fingerprint reader is listening.
+  Any key brings the card up; Enter, Escape or Backspace on the idle clock
+  only wake it, and are never sent as an empty password (which would spend
+  a `pam_faillock` attempt). Twelve quiet seconds with nothing typed puts
+  it back, and Escape on an empty card does so at once.
+- **The card**: avatar (`~/.face`, then AccountsService, else the initial),
+  name, a dot per character with a caret, and under it the keyboard layout
+  and Caps Lock. A rejected password turns the field red, keeps *that
+  attempt's* dots up while it shakes three times, then clears; "attempt N"
+  sits beside PAM's own message.
+- **Status**, top right: layout from the keymap the compositor sent, the
+  network from NetworkManager, the battery from UPower — each part simply
+  absent when its daemon is. A low battery turns the reading orange and
+  adds a warning to the card.
+- **Extras on the idle clock**: what an MPRIS player is playing, with
+  previous / play-pause / next (media keys work too), and notification
+  counts per application — the app and the count, never the text.
+- **Power menu** from ⏻, or Tab: Suspend, Hibernate, Reboot, Shut down,
+  each only when logind answers `yes`, chosen by pointer, arrows and
+  Enter, or its letter. While it is open, nothing typed reaches the
+  password. Switch user is not offered: greetd has no session switching
+  to hand over to.
+- **Several monitors**: the card, status and ⏻ are drawn on the output
+  that has the keyboard; every other output shows the clock alone.
+
+Notification counts come from watching `Notify` calls on the session bus
+as a D-Bus monitor, because the freedesktop protocol has no way to ask a
+server how many are unread. That also makes them mean the right thing
+for a lock screen: what arrived while you were away. Summary and body are
+dropped the moment the application's name has been read.
+
+### The fingerprint goes to fprintd, not PAM
+
+PAM asks its modules in turn, so with `pam_fprintd` in the stack either
+the password prompt waits for the reader to give up or the reader waits
+for a password to be refused — it cannot offer both at once, which is
+what the card does. So, like hyprlock, the lock talks to fprintd on the
+system bus beside the password conversation (`src/fingerprint.rs`).
+
+It is not a way round PAM's *policy*: a match is followed by the PAM
+account stack (`pam_acct_mgmt`) before anything unlocks, so an account
+PAM would bar on a correct password is barred on a correct finger. Only
+`VerifyStatus` signals from the process that owns fprintd's bus name,
+about the device that was claimed, are believed. Three unrecognised
+fingers — `pam_fprintd`'s own default — stop the reader, because fprintd
+keeps no count of its own and `pam_faillock` never sees these; a bad
+*read* (too short, off-centre) is not counted. `check.sh`'s fprintd tier
+asks the running daemon the lock's own questions, read-only; the first
+version of this code named the wrong manager path and passed every unit
+test.
+
+### It draws at the output's real resolution
+
+The lock used to paint a logical-size buffer at scale 1.0 and let the
+compositor stretch it — blurry on a 1.6 output, the mistake CLAUDE.md
+records for the popups. It now uses `wp_fractional_scale_v1` with
+`wp_viewporter`, per output.
+
+At a real resolution, resampling a 4K wallpaper onto the output every
+frame was more than half of each frame: 45ms with it, 20ms without, at
+1440×900 physical. So each output's wallpaper is prepared once on a
+worker thread (`src/backdrop.rs`) — decoded through `hyprforge-image`'s
+budget, cropped to cover, dim baked in — and drawn one-to-one: 32ms. The
+first frames still draw from the path, since the session is not locked
+until they exist.
+
 ### It needs its own PAM file
 
 ```
@@ -945,6 +1057,21 @@ one.
 Passing something other than the fake password exercises the failure path
 against the fake backend, so no real account collects a failed attempt —
 which matters where `pam_faillock` is active.
+
+A test lock still talks to the real system bus, so under
+`--fake-password` the power menu only *rehearses* — "would Shut down now"
+on stderr — rather than asking logind to act on the machine the test is
+running on. The fingerprint reader stays on for a hand-driven run (a
+real finger unlocks the nested session) and off under `--type-in`, so a
+self test's result never depends on who touched the sensor.
+
+Hyprland does not deliver synthetic keys or clicks to a lock surface —
+`send_shortcut` targets windows, and a lock is not one — so the nested
+compositor cannot be typed at from a script. `--type-in` is the way in;
+the card, the shake and the settled failure can be screenshotted with
+`grim -o <output>` after `--type-in wrong`. Screenshot a headless output
+(`hyprctl output create headless`), not the nested window, whose frames
+go stale while the host is not showing it.
 
 ### Surfaces are created when the lock is *requested*, not when it is granted
 
@@ -1024,7 +1151,7 @@ and it is why this ships its own PAM file rather than borrowing one.
 
 ### What it does not do yet
 
-Three gaps, none of them a security hole, all of them things an
+Four gaps, none of them a security hole, the first three things an
 established lock screen has:
 
 - **No input-method support.** A password typed through an IME cannot be
@@ -1039,9 +1166,14 @@ established lock screen has:
   outside this code: PAM and greetd copy the answer once it is handed
   over, and a core dump or a swapped page taken while they hold it can
   still contain it.
-- **No attempt limiting of its own**, on purpose: rate limiting belongs in
-  `/etc/pam.d`, where an administrator can see and change it, rather than
-  hidden in a settings app.
+- **No attempt limiting of its own for passwords**, on purpose: rate
+  limiting belongs in `/etc/pam.d`, where an administrator can see and
+  change it, rather than hidden in a settings app. The fingerprint path is
+  the exception, because nothing in PAM sees it — see above.
+- **No blur behind the card.** The mockup's frosted glass is a
+  `backdrop-filter`; a software renderer that draws each widget once has
+  no equivalent, and the translucent tint does most of the work of
+  keeping text legible over a photograph.
 
 Caps Lock *is* shown, which is not decoration: without it a stuck key
 looks exactly like a forgotten password, and where `pam_faillock` is
