@@ -70,9 +70,14 @@ pub enum Update {
 pub enum Command {
     Pause(bool),
     TogglePause,
-    /// Seconds; relative to where playback is, or from the start.
-    Seek { seconds: f64, relative: bool },
+    /// Seconds; relative to where playback is, or from the start. `exact`
+    /// lands on the frame asked for; without it mpv lands on the nearest
+    /// keyframe, which is what keeps dragging a seek bar responsive.
+    Seek { seconds: f64, relative: bool, exact: bool },
     Mute(bool),
+    /// Sound off if on, on if off — decided by mpv, which knows, rather
+    /// than by the window from a state report that can be a press behind.
+    ToggleMute,
     /// The size to draw frames at, physical pixels.
     Size(u32, u32),
     /// Back to the start and playing — what play at the end means.
@@ -91,10 +96,66 @@ pub struct Options {
     pub muted: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
 enum Msg {
     Wake,
     Cmd(Command),
     Quit,
+}
+
+/// What one turn of the player's loop has to do: everything the window
+/// asked since the last turn, and whether it asked to stop.
+#[derive(Debug, Default, PartialEq)]
+struct Batch {
+    quit: bool,
+    commands: Vec<Command>,
+}
+
+/// Folds every message waiting on the channel into one turn's work.
+///
+/// This is the fix for three bugs that were one bug. The loop used to
+/// take one message per turn and draw a frame after it, a few tens of
+/// milliseconds in software; mpv's callbacks send a wake on every frame
+/// and every property change, faster than frames are drawn, so the queue
+/// grew for as long as a video played. A Quit waited behind thousands of
+/// wakes — closing the window hung for three and a half seconds, measured
+/// — and so did every seek from a dragged seek bar and every press of
+/// mute, which is what "laggy" and "hit or miss" were.
+///
+/// So each turn drains the channel: wakes are dropped (they only ever
+/// meant "look"), a Quit ends the turn at once, a run of seeks collapses
+/// into the one position they add up to, and a run of sizes into the
+/// last. Everything else keeps its order.
+fn batch(messages: impl IntoIterator<Item = Msg>) -> Batch {
+    let mut out = Batch::default();
+    for message in messages {
+        match message {
+            Msg::Wake => {}
+            Msg::Quit => {
+                out.quit = true;
+                return out;
+            }
+            Msg::Cmd(command) => match (out.commands.last_mut(), command) {
+                (
+                    Some(Command::Seek { seconds: s0, relative: r0, exact: e0 }),
+                    Command::Seek { seconds, relative, exact },
+                ) => {
+                    // An absolute seek replaces whatever was pending; a
+                    // relative one adds to it.
+                    if relative {
+                        *s0 += seconds;
+                    } else {
+                        *s0 = seconds;
+                        *r0 = false;
+                    }
+                    *e0 = exact;
+                }
+                (Some(Command::Size(w0, h0)), Command::Size(w, h)) => (*w0, *h0) = (w, h),
+                (_, command) => out.commands.push(command),
+            },
+        }
+    }
+    out
 }
 
 /// A playing video. Dropping it stops playback and frees mpv.
@@ -259,18 +320,32 @@ fn play(
     let mut size_changed = false;
 
     'outer: loop {
-        match rx.recv_timeout(Duration::from_millis(250)) {
-            Ok(Msg::Quit) | Err(RecvTimeoutError::Disconnected) => break,
-            Ok(Msg::Cmd(command)) => match command {
+        let first = match rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(message) => Some(message),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
+        let work = batch(first.into_iter().chain(std::iter::from_fn(|| rx.try_recv().ok())));
+        if work.quit {
+            break;
+        }
+        for command in work.commands {
+            match command {
                 Command::Pause(on) => mpv.set_flag("pause", on)?,
                 Command::TogglePause => mpv.command(&["cycle", "pause"])?,
-                Command::Seek { seconds, relative } => {
-                    let mode = if relative { "relative" } else { "absolute" };
+                Command::Seek { seconds, relative, exact } => {
+                    let mode = match (relative, exact) {
+                        (true, true) => "relative+exact",
+                        (true, false) => "relative+keyframes",
+                        (false, true) => "absolute+exact",
+                        (false, false) => "absolute+keyframes",
+                    };
                     // A seek past either end is mpv's to clamp; an error
                     // here (nothing loaded yet) is not worth failing for.
                     let _ = mpv.command(&["seek", &format!("{seconds:.3}"), mode]);
                 }
                 Command::Mute(on) => mpv.set_flag("mute", on)?,
+                Command::ToggleMute => mpv.command(&["cycle", "mute"])?,
                 Command::Size(w, h) => {
                     let (w, h) = draw_size(w, h);
                     if (w, h) != (width, height) {
@@ -280,11 +355,10 @@ fn play(
                     }
                 }
                 Command::Restart => {
-                    let _ = mpv.command(&["seek", "0", "absolute"]);
+                    let _ = mpv.command(&["seek", "0", "absolute+exact"]);
                     mpv.set_flag("pause", false)?;
                 }
-            },
-            Ok(Msg::Wake) | Err(RecvTimeoutError::Timeout) => {}
+            }
         }
 
         loop {
@@ -344,6 +418,51 @@ fn play(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn seek(seconds: f64, relative: bool, exact: bool) -> Msg {
+        Msg::Cmd(Command::Seek { seconds, relative, exact })
+    }
+
+    /// The close that hung for 3.5 seconds: a Quit behind a flood of
+    /// wakes is seen in the same turn, not thousands of turns later.
+    #[test]
+    fn a_quit_behind_a_flood_of_wakes_is_seen_at_once() {
+        let mut queue = vec![Msg::Wake; 5000];
+        queue.push(Msg::Quit);
+        let work = batch(queue);
+        assert!(work.quit);
+        assert!(work.commands.is_empty());
+    }
+
+    /// A dragged seek bar sends a seek per pixel; only where it ended up
+    /// is worth decoding to.
+    #[test]
+    fn a_run_of_seeks_collapses_into_where_they_end_up() {
+        let work = batch([seek(1.0, false, false), Msg::Wake, seek(2.0, false, false), seek(7.5, false, true)]);
+        assert_eq!(work.commands, [Command::Seek { seconds: 7.5, relative: false, exact: true }]);
+        let work = batch([seek(5.0, true, true), seek(5.0, true, true), seek(-5.0, true, true)]);
+        assert_eq!(work.commands, [Command::Seek { seconds: 5.0, relative: true, exact: true }]);
+        let work = batch([seek(10.0, false, true), seek(5.0, true, true)]);
+        assert_eq!(work.commands, [Command::Seek { seconds: 15.0, relative: false, exact: true }]);
+    }
+
+    /// Everything that is not a seek or a size keeps its order and its
+    /// count: two presses of mute are two toggles, not one.
+    #[test]
+    fn other_commands_keep_their_order_and_count() {
+        let work = batch([
+            Msg::Cmd(Command::ToggleMute),
+            Msg::Wake,
+            Msg::Cmd(Command::TogglePause),
+            Msg::Cmd(Command::ToggleMute),
+            Msg::Cmd(Command::Size(100, 50)),
+            Msg::Cmd(Command::Size(200, 100)),
+        ]);
+        assert_eq!(
+            work.commands,
+            [Command::ToggleMute, Command::TogglePause, Command::ToggleMute, Command::Size(200, 100)]
+        );
+    }
 
     #[test]
     fn a_drawn_width_is_always_a_whole_number_of_64_byte_rows() {

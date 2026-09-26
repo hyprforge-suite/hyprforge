@@ -518,7 +518,7 @@ impl App {
         let scale = self.font_scale;
         let p = &v.playback;
         let duration = p.duration.unwrap_or(0.0);
-        let at = self.seeking.unwrap_or(p.position).min(duration.max(0.0));
+        let at = self.seeking.map_or(p.position, |s| s.target).min(duration.max(0.0));
         let play_label = if p.ended {
             "↺"
         } else if p.paused {
