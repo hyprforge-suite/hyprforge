@@ -436,6 +436,11 @@ pub enum Outcome {
     SetClipboard(crate::clipboard::FileClip),
     /// Put this text on the clipboard — the paths, for Copy Path.
     CopyText(String),
+    /// Hand these files to the compositor as a drag, for another
+    /// application to drop. Real paths only — never members of an
+    /// archive, which no other program could open. A host that cannot
+    /// start a drag (the open/save dialog) ignores it.
+    DragOut(Vec<PathBuf>),
     /// Ask the window which application should open this file. The
     /// browser cannot answer: the mime database and the launching are
     /// both the host's, and the open/save dialog has no business
@@ -517,6 +522,9 @@ pub enum Message {
     GoUp,
     EntryClicked { index: usize, ctrl: bool, shift: bool },
     EntryActivated(usize),
+    /// A press on this row travelled far enough to be a drag — see
+    /// [`crate::drag`].
+    DragStarted(usize),
     SearchChanged(String),
     SearchCleared,
     SortBy(SortColumn),
@@ -890,6 +898,7 @@ impl Browser {
                 Outcome::None
             }
             Message::EntryActivated(index) => self.activate(index),
+            Message::DragStarted(index) => self.start_drag(index),
             Message::SearchChanged(query) => {
                 self.search_query = query;
                 self.refresh_view();
@@ -1711,6 +1720,30 @@ impl Browser {
         };
         let (is_dir, path) = (entry.is_dir, entry.path.clone());
         self.activate_path(is_dir, path)
+    }
+
+    /// A press on row `index` became a drag.
+    ///
+    /// Dragging a selected row takes the whole selection with it;
+    /// dragging one that is not selected takes that row alone and
+    /// selects it first, so what is highlighted is always what is being
+    /// carried — the rule Nautilus and Dolphin both follow. As with every
+    /// other action, only what is on screen goes ([`Self::selected_shown`]).
+    fn start_drag(&mut self, index: usize) -> Outcome {
+        let Some(path) = self.rows().get(index).map(|e| e.path.clone()) else {
+            return Outcome::None;
+        };
+        if self.in_archive() {
+            // A member's path is `~/x.zip/notes.txt`, which nothing
+            // outside this app can open, and a drag has to hand over its
+            // files the moment another application asks — no time to
+            // unpack them first the way Copy does.
+            return Outcome::Notice("Files inside an archive can't be dragged out yet — copy them instead.".to_string());
+        }
+        if !self.selection.is_selected(&path) {
+            self.with_rows(|selection, rows| selection.click_with(rows, index, false, false));
+        }
+        Outcome::DragOut(self.selected_shown())
     }
 
     /// Activates whatever the keyboard cursor is on. `None` when nothing
@@ -2934,7 +2967,13 @@ fn entry_row<'a>(
         // text past 100%.
         .height(Length::Fixed(density::row_height(scale)))
         .style(move |t: &iced::Theme, status| selectable_row_style(t, status, selected));
-    with_row_menu(styled.into(), index)
+    with_row_menu(with_drag(styled.into(), index, editing.is_none()), index)
+}
+
+/// Lets a row or cell be dragged out of the window. Inert on a row being
+/// renamed, where dragging across the field selects its text.
+fn with_drag<'a>(inner: Element<'a, Message>, index: usize, draggable: bool) -> Element<'a, Message> {
+    crate::drag::drag_source(inner, draggable.then_some(Message::DragStarted(index))).into()
 }
 
 /// Lets a row or cell open the context menu on a right click.
@@ -3504,7 +3543,7 @@ fn grid_cell<'a>(
         // fill's edge.
         .padding(spacing::SM)
         .style(move |t: &iced::Theme, status| selectable_row_style(t, status, selected));
-    with_row_menu(cell.into(), index)
+    with_row_menu(with_drag(cell.into(), index, editing.is_none()), index)
 }
 
 /// Fixtures shared by this module's test modules.
@@ -3591,6 +3630,41 @@ mod tests {
         let entries: Vec<Entry> = names.iter().map(|n| entry(n, false)).collect();
         browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(entries)));
         browser
+    }
+
+    // --- dragging out ------------------------------------------------------
+
+    fn dragged(outcome: Outcome) -> Vec<PathBuf> {
+        match outcome {
+            Outcome::DragOut(paths) => paths,
+            other => panic!("expected a drag, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dragging_a_selected_row_carries_the_whole_selection() {
+        let mut browser = loaded_browser(&["a", "b", "c"]);
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+        browser.update(Message::EntryClicked { index: 2, ctrl: true, shift: false });
+        let paths = dragged(browser.update(Message::DragStarted(2)));
+        assert_eq!(paths, vec![PathBuf::from("/dir/a"), PathBuf::from("/dir/c")]);
+    }
+
+    #[test]
+    fn dragging_an_unselected_row_carries_it_alone_and_selects_it() {
+        let mut browser = loaded_browser(&["a", "b", "c"]);
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+        let paths = dragged(browser.update(Message::DragStarted(1)));
+        assert_eq!(paths, vec![PathBuf::from("/dir/b")]);
+        assert!(row_selected(&browser, 1), "what is highlighted must be what is carried");
+        assert!(!row_selected(&browser, 0));
+    }
+
+    #[test]
+    fn nothing_is_dragged_out_of_an_archive() {
+        let mut browser = loaded_browser(&["a"]);
+        browser.set_archive(Some("zip".to_string()));
+        assert!(matches!(browser.update(Message::DragStarted(0)), Outcome::Notice(_)));
     }
 
     // --- selection: ctrl-toggle and shift-range ---------------------------

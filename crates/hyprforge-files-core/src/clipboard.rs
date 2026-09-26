@@ -134,6 +134,21 @@ pub fn clip_offers(clip: &FileClip) -> Vec<(&'static str, String)> {
     offers
 }
 
+/// What a drag of files offers, as `(type, content)`: the URI list
+/// every file manager, browser and chat client reads from a drop, and
+/// the paths as plain text for a terminal or an editor.
+///
+/// Not [`clip_offers`]: GNOME's copied-files type and KDE's cut marker
+/// are clipboard vocabulary, and a drop's copy-or-move is negotiated by
+/// the compositor's drag actions, not spelled out in the data.
+pub fn drag_offers(paths: &[PathBuf]) -> Vec<(&'static str, String)> {
+    let clip = FileClip { paths: paths.to_vec(), verb: ClipVerb::Copy };
+    clip_offers(&clip)
+        .into_iter()
+        .filter(|(mime, _)| *mime != GNOME_COPIED_FILES && *mime != KDE_CUT_SELECTION)
+        .collect()
+}
+
 /// The types worth asking for when pasting, best first.
 pub const PASTE_TYPES: [&str; 2] = [GNOME_COPIED_FILES, URI_LIST];
 
@@ -274,6 +289,15 @@ mod tests {
             }]
         );
         assert!(p.refused.is_empty());
+    }
+
+    #[test]
+    fn a_drag_offers_a_uri_list_every_receiver_can_read_and_no_clipboard_vocabulary() {
+        let offers = drag_offers(&[PathBuf::from("/a/my notes.txt"), PathBuf::from("/b")]);
+        let types: Vec<&str> = offers.iter().map(|(m, _)| *m).collect();
+        assert_eq!(types, [URI_LIST, "text/plain;charset=utf-8", "text/plain"]);
+        assert_eq!(offers[0].1, "file:///a/my%20notes.txt\r\nfile:///b\r\n");
+        assert_eq!(offers[2].1, "/a/my notes.txt\n/b");
     }
 
     #[test]
