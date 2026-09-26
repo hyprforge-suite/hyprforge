@@ -521,7 +521,74 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for PageGlyph {
     }
 }
 
-// No tests here, deliberately.
+/// Signal strength as four rising bars, lit up to `strength` percent —
+/// the mark beside a network in a list.
+///
+/// Lit bars take `on`, the rest `off`, so a weak network still shows the
+/// shape of the scale it is low on rather than one lonely bar.
+pub fn signal<'a, Message: 'a>(
+    strength: u8,
+    side: f32,
+    on: iced::Color,
+    off: iced::Color,
+) -> Element<'a, Message> {
+    canvas(SignalGlyph { lit: signal_bars(strength), on, off })
+        .width(Length::Fixed(side))
+        .height(Length::Fixed(side))
+        .into()
+}
+
+/// How many of the four bars a strength lights: at least one for any
+/// signal at all, four only near the top.
+pub fn signal_bars(strength: u8) -> u8 {
+    match strength {
+        0 => 0,
+        1..=29 => 1,
+        30..=54 => 2,
+        55..=79 => 3,
+        _ => 4,
+    }
+}
+
+struct SignalGlyph {
+    lit: u8,
+    on: iced::Color,
+    off: iced::Color,
+}
+
+impl<Message> canvas::Program<Message, Theme, Renderer> for SignalGlyph {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let side = bounds.width.min(bounds.height);
+        let extent = side * PAGE_EXTENT_FRACTION;
+        let left = bounds.width / 2.0 - extent / 2.0;
+        let bottom = bounds.height / 2.0 + extent / 2.0;
+        let bar = extent / 5.5;
+        let gap = (extent - bar * 4.0) / 3.0;
+        for i in 0..4u8 {
+            let height = extent * (0.25 + 0.25 * i as f32);
+            let colour = if i < self.lit { self.on } else { self.off };
+            frame.fill_rectangle(
+                Point::new(left + i as f32 * (bar + gap), bottom - height),
+                iced::Size::new(bar, height),
+                canvas::Fill::from(colour),
+            );
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
+// Only `signal_bars` is tested below, because it is a decision rather
+// than a shape. For the rest there are no tests, deliberately.
 //
 // What this module decides is a *shape*, and the only instrument that
 // can check a shape is a screenshot. The two things a test could reach —
@@ -536,3 +603,20 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for PageGlyph {
 // honest at other sizes is that every dimension is a fraction of the
 // button rather than a pixel count, and that is visible in the source
 // above rather than assertable below.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Any signal at all lights a bar — a network that is there but weak
+    /// must not look like one that is gone — and four is kept for strong.
+    #[test]
+    fn any_signal_lights_a_bar_and_only_a_strong_one_lights_four() {
+        assert_eq!(signal_bars(0), 0);
+        assert_eq!(signal_bars(1), 1);
+        assert_eq!(signal_bars(54), 2);
+        assert_eq!(signal_bars(79), 3);
+        assert_eq!(signal_bars(97), 4);
+        assert_eq!(signal_bars(100), 4);
+    }
+}
