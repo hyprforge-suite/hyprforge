@@ -128,7 +128,15 @@ pub fn row_field<'a, Message: 'a>(
         1,
         label,
         None,
-        container(control.into()).max_width(CONTROL_MAX_WIDTH).width(Length::Shrink),
+        // Fill, capped, and aligned right — not Shrink. A text field
+        // fills whatever it is put in, and inside a Shrink container that
+        // was nearly nothing: every field on the Window rules editor and
+        // Displays' Advanced section drew as a sliver a few pixels wide.
+        // A switch or a button still sits at the row's right end.
+        container(control.into())
+            .max_width(CONTROL_MAX_WIDTH)
+            .width(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Right),
         scale,
     )
 }
