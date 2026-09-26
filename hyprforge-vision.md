@@ -208,12 +208,14 @@ occurring inside the suite. A new app should depend on `hyprforge-ui` and get
 the look for free; if it ever needs to define a colour of its own, that is a
 sign something belongs in `hyprforge-look` instead.
 
-### Where things stand (as of 2026-09-24)
+### Where things stand (as of 2026-09-25)
 
 The Settings modules above marked *in progress* are functional, and their
-look is now being brought in line with the Settings mockup: the shared
-widget kit, the search-first shell with its search palette, and the
-mockup's sidebar are in, and restyling the pages themselves is next. The
+look now follows the Settings mockup: the shared widget kit, the
+search-first shell with its search palette, the mockup's sidebar, and the
+pages themselves — most drawn to the mockup, the rest through the shared
+row and card helpers (see `crates/hyprforge-settings/DESIGN.md` for which,
+and for what waits on a backend). The
 app is eighteen pages in four groups — System (Displays, Power & battery,
 Keyboard & mouse, Default apps), Connectivity (Network, Bluetooth),
 Hyprland (Windows & workspaces, Keybinds, Animations, Window rules, Idle &
