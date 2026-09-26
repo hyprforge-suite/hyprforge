@@ -115,7 +115,7 @@ const CURSOR_SYNC: Contested = Contested {
     option: "cursor:sync_gsettings_theme",
     warning: "Hyprland is set to push its own cursor theme and size here, so this \
               will be overwritten on the next reload. Turn off \"Share cursor theme \
-              with GTK apps\" under Windows to control it from here.",
+              with GTK apps\" on the Windows & workspaces page to control it from here.",
 };
 
 /// The keys this screen offers.
