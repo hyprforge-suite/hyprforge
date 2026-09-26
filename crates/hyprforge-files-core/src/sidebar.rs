@@ -39,8 +39,12 @@ pub struct SidebarItem {
     pub label: String,
     /// Where clicking it navigates.
     pub path: PathBuf,
-    /// Which theme colour this row's folder mark takes.
+    /// Which theme colour this row's folder mark takes — the fallback,
+    /// when no icon theme answers for the place.
     pub tint: Tint,
+    /// Which place this is, for its icon — `[sidebar.icons]` names places
+    /// by id. `None` only for a row built without one, in a test.
+    pub place: Option<Place>,
 }
 
 /// A sidebar row's colour, named by *role* rather than by value.
@@ -118,6 +122,22 @@ impl Place {
         }
     }
 
+    /// The icon theme's name for this place's folder — the freedesktop
+    /// icon naming specification's `folder-*` and `user-*` names, which
+    /// every theme that draws special folders uses. `[sidebar.icons]`
+    /// replaces it.
+    pub fn icon_name(self) -> &'static str {
+        match self {
+            Place::Home => "user-home",
+            Place::Documents => "folder-documents",
+            Place::Downloads => "folder-download",
+            Place::Pictures => "folder-pictures",
+            Place::Music => "folder-music",
+            Place::Videos => "folder-videos",
+            Place::Desktop => "user-desktop",
+        }
+    }
+
     /// A colour per place, so a row is findable before it is read. The
     /// assignment is arbitrary but *fixed*: what matters is that
     /// Downloads is always the same colour, not which colour it is.
@@ -164,7 +184,7 @@ pub fn build<B: FsBackend + ?Sized>(backend: &B, user_dirs: &UserDirs, places: &
         if place != Place::Home && !exists_as_dir(backend, &path) {
             continue;
         }
-        items.push(SidebarItem { label: place.label().to_string(), path, tint: place.tint() });
+        items.push(SidebarItem { label: place.label().to_string(), path, tint: place.tint(), place: Some(place) });
     }
     items
 }

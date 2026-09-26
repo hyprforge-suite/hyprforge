@@ -32,6 +32,7 @@ use hyprforge_ui::theme::{self, FontScale};
 use iced::widget::container;
 use iced::{Background, Border, Element, Length, Theme as IcedTheme};
 use crate::preview::Picture;
+use std::path::Path;
 
 /// Which theme icon an entry takes, named by what decides its type:
 /// `".png"`, `".tar.gz"`, a whole name with no extension (`"Makefile"`),
@@ -60,6 +61,53 @@ pub fn icon_key(entry: &Entry) -> &str {
 /// A folder's key. A slash cannot appear in a file name, so it cannot
 /// collide with one.
 pub const FOLDER_KEY: &str = "/";
+
+/// The key for a folder drawn with the icon theme's `name` — a place's
+/// `folder-download`, or a name `[sidebar.icons]` chose.
+///
+/// Starts with a slash, which is what keeps it apart from every file's
+/// key: those are an extension (starting with a dot) or a whole file
+/// name, and a file name cannot contain a slash. Without it, a file
+/// literally called `icon:x` would have been read as a theme name. The
+/// host reads a key back with [`IconSource::of`].
+pub fn themed_key(name: &str) -> String {
+    format!("/icon:{name}")
+}
+
+/// The key for what `[sidebar.icons]` chose.
+pub fn choice_key(choice: &crate::config::IconChoice) -> String {
+    match choice {
+        crate::config::IconChoice::Themed(name) => themed_key(name),
+        crate::config::IconChoice::File(path) => format!("/file:{}", path.display()),
+    }
+}
+
+/// What a key asks the host to find.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IconSource<'a> {
+    /// An icon theme name, for a folder with an icon of its own.
+    Themed(&'a str),
+    /// An image of the user's own.
+    File(&'a Path),
+    /// A file's type, by a stand-in name — [`sample_name`]'s.
+    Type(String),
+    /// An ordinary folder.
+    Folder,
+}
+
+impl<'a> IconSource<'a> {
+    pub fn of(key: &'a str) -> IconSource<'a> {
+        if key == FOLDER_KEY {
+            IconSource::Folder
+        } else if let Some(name) = key.strip_prefix("/icon:") {
+            IconSource::Themed(name)
+        } else if let Some(path) = key.strip_prefix("/file:") {
+            IconSource::File(Path::new(path))
+        } else {
+            IconSource::Type(sample_name(key))
+        }
+    }
+}
 
 /// A file name a by-name MIME lookup can be asked about, for `key`.
 pub fn sample_name(key: &str) -> String {
@@ -177,7 +225,6 @@ const OUTLINE_WIDTH: f32 = 1.5;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     /// Only the name and whether it is a folder matter to a key.
     fn entry(name: &str, is_dir: bool) -> Entry {
@@ -206,6 +253,19 @@ mod tests {
         assert_eq!(icon_key(&entry("a.png", false)), icon_key(&entry("b.png", false)));
         assert_ne!(icon_key(&entry("a.png", false)), icon_key(&entry("a.jpg", false)));
         assert_eq!(icon_key(&entry("photos.2024", true)), FOLDER_KEY, "a folder is a folder whatever its name");
+    }
+
+    /// A folder's own icon is never mistaken for a file's type, whatever
+    /// the file is called — the prefix starts with a slash no file name
+    /// can hold.
+    #[test]
+    fn a_file_named_like_an_icon_key_is_still_a_file() {
+        let odd = entry("icon:folder-cloud", false);
+        assert_eq!(IconSource::of(icon_key(&odd)), IconSource::Type("icon:folder-cloud".into()));
+        assert_eq!(IconSource::of(&themed_key("folder-cloud")), IconSource::Themed("folder-cloud"));
+        let chosen = crate::config::IconChoice::File("/home/a/p.svg".into());
+        assert_eq!(IconSource::of(&choice_key(&chosen)), IconSource::File(Path::new("/home/a/p.svg")));
+        assert_eq!(IconSource::of(FOLDER_KEY), IconSource::Folder);
     }
 
     /// A compound extension stays whole — `.tar.gz` is a tarball, `.gz`
