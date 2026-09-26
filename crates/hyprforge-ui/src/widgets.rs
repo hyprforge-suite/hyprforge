@@ -55,7 +55,7 @@ fn card_style(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(surface::card())),
         border: Border {
-            radius: 10.0.into(),
+            radius: crate::density::card_radius().into(),
             width: 1.0,
             color: surface::card_border(),
         },
@@ -74,7 +74,9 @@ pub fn section<'a, Message: 'a>(
     content: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     column![
-        meta_text(title.as_ref().to_uppercase(), 12.0, scale),
+        // The same heading every restyled page uses over its groups, so a
+        // page still built from cards reads as the same app.
+        section_label(title.as_ref(), scale),
         container(content.into())
             .padding(spacing::MD)
             .width(Length::Fill)
@@ -106,20 +108,29 @@ pub fn divider<'a, Message: 'a>() -> Element<'a, Message> {
 /// roughly this width regardless of window size.
 const CONTROL_MAX_WIDTH: f32 = 340.0;
 
-/// A label paired with its control, aligned into a settings-style row.
+/// A label paired with its control, as a setting row.
+///
+/// The same row [`setting_row`] draws — label at the left end, control
+/// at the right, at least one row tall — so a page not yet built from
+/// striped groups still lines up with those that are. It is never
+/// striped, because it is not told its place in a list; it used to be a
+/// 2:3 split that put a wide gap between a label and its control.
+///
+/// Takes no `FontScale` of its own, as it never did; it reads the scale
+/// from the active theme instead, so its text scales like every row
+/// beside it rather than staying at 100%.
 pub fn row_field<'a, Message: 'a>(
     label: impl IntoFragment<'a>,
     control: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
-    row![
-        text(label).width(Length::FillPortion(2)),
-        container(control.into())
-            .max_width(CONTROL_MAX_WIDTH)
-            .width(Length::FillPortion(3)),
-    ]
-    .spacing(spacing::MD)
-    .align_y(iced::Alignment::Center)
-    .into()
+    let scale = FontScale(theme::active().font_scale);
+    setting_row(
+        1,
+        label,
+        None,
+        container(control.into()).max_width(CONTROL_MAX_WIDTH).width(Length::Shrink),
+        scale,
+    )
 }
 
 fn primary_style(theme: &Theme, status: button::Status) -> button::Style {
