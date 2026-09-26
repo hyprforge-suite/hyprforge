@@ -69,6 +69,11 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "ti
 # spans and the inspector's "Sat 12 Sep 2026 · 18:42". The same crate and
 # features the file manager formats its Modified column with.
 chrono.workspace = true
+# A picture opened on its own floats itself on Hyprland (`float.rs`):
+# three `hyprctl` calls, each bounded by hyprforge-process's timeout, and
+# `hyprctl -j`'s JSON read back to find the monitor and the window.
+hyprforge-process.workspace = true
+serde_json.workspace = true
 serde.workspace = true
 toml.workspace = true
 thiserror.workspace = true

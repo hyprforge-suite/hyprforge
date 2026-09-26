@@ -48,6 +48,7 @@ pub mod args;
 pub mod cache;
 pub mod config;
 pub mod filmstrip;
+pub mod float;
 pub mod folder;
 pub mod grid;
 pub mod history;

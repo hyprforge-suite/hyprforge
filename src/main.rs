@@ -163,6 +163,15 @@ fn main() -> iced::Result {
         Args::Nothing => (places.first().map(|p| p.path.clone()), None, Mode::Grid),
     };
 
+    // A picture opened on its own is a glance: the viewer starts compact —
+    // no sidebar, no inspector — and floats itself on Hyprland. A folder,
+    // or nothing, is a session in the library and gets the whole shell.
+    let compact = matches!(&args, Args::Picture(path) if !path.is_dir()).then_some(Compact { sidebar: false, info: false });
+    let float_picture = match &args {
+        Args::Picture(path) if !path.is_dir() => Some(path.clone()),
+        _ => None,
+    };
+
     let mut app = App {
         keymap: config.keymap,
         order: ordering.order,
@@ -206,6 +215,9 @@ fn main() -> iced::Result {
         model_loading: None,
         model_generation: 0,
         model_drag: None,
+        compact,
+        float_picture,
+        floated: false,
         notice: problems.first().cloned(),
         undo: None,
         clipboard: Arc::new(hyprforge_clipboard::WaylandWriter::new()),
@@ -324,6 +336,14 @@ struct ModelView {
     modified: Option<std::time::SystemTime>,
 }
 
+/// The compact viewer's panels: off until asked for, and not saved — a
+/// panel opened in a glance is not a preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Compact {
+    sidebar: bool,
+    info: bool,
+}
+
 /// Which way a drag on a model moves the camera.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModelDrag {
@@ -428,6 +448,15 @@ struct App {
     model_generation: u64,
     /// The drag in progress on a model, and where the pointer last was.
     model_drag: Option<(ModelDrag, Point)>,
+    /// `Some` while the window is the compact viewer a picture opened on
+    /// its own gets: which of the two panels the user has asked for since.
+    /// Showing Grid or Library ends it — that is when the panels are
+    /// needed — and the window returns to the shell and its usual size.
+    compact: Option<Compact>,
+    /// The picture to size the floating window to, until it has been.
+    float_picture: Option<PathBuf>,
+    /// Whether this window floated itself, so ending compact grows it back.
+    floated: bool,
     /// One line in the status bar: a problem to report, or what just
     /// happened. Replaced by the next one; closed by the user.
     notice: Option<String>,
@@ -478,6 +507,8 @@ enum Message {
     ModelScrolled(mouse::ScrollDelta),
     CheckModelFile,
     SetDrawMode(DrawMode),
+    /// The window floated (or did not) — logged, never shown.
+    Floated(Result<(), String>),
     SlideshowPause,
     SlideshowShuffle,
     SlideshowLoop,
@@ -526,11 +557,67 @@ impl App {
     // --- geometry ------------------------------------------------------
 
     fn sidebar_shown(&self) -> bool {
-        self.prefs.sidebar && !self.fullscreen
+        !self.fullscreen && self.compact.map_or(self.prefs.sidebar, |c| c.sidebar)
     }
 
     fn inspector_shown(&self) -> bool {
-        self.prefs.info_panel && !self.fullscreen
+        !self.fullscreen && self.compact.map_or(self.prefs.info_panel, |c| c.info)
+    }
+
+    /// Whether the inspector is on — what the header's `i` shows lit.
+    fn info_on(&self) -> bool {
+        self.compact.map_or(self.prefs.info_panel, |c| c.info)
+    }
+
+    /// Whether the sidebar is on — what the header's toggle shows filled.
+    fn sidebar_on(&self) -> bool {
+        self.compact.map_or(self.prefs.sidebar, |c| c.sidebar)
+    }
+
+    /// Floats this window and sizes it to the picture it opened on. Once,
+    /// off the UI thread, and only on Hyprland — see `float.rs`.
+    fn float_to_picture(&mut self) -> Task<Message> {
+        let Some(path) = self.float_picture.take() else { return Task::none() };
+        if !hyprforge_photos::float::on_hyprland() {
+            return Task::none();
+        }
+        // The chrome around the picture in compact: header, status bar and
+        // filmstrip, each with its 1px edge.
+        let scale = self.font_scale;
+        let mut chrome_h = hyprforge_ui::density::bar_height(scale) + 1.0 + scale.apply(STATUS_HEIGHT) + 1.0;
+        if self.prefs.filmstrip {
+            chrome_h += FILMSTRIP_HEIGHT + 1.0;
+        }
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let picture = hyprforge_image::measure(&path).ok().map(|m| m.display_size());
+                    let usable = hyprforge_photos::float::focused_monitor()?;
+                    let size = hyprforge_photos::float::floating_size(picture, usable, (0.0, chrome_h));
+                    hyprforge_photos::float::float_self(size)
+                })
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()))
+            },
+            Message::Floated,
+        )
+    }
+
+    /// Leaves the compact viewer for the whole shell, growing a floating
+    /// window to the size the shell was last left at.
+    fn expand(&mut self) -> Task<Message> {
+        if self.compact.take().is_none() || !self.floated {
+            return Task::none();
+        }
+        let size = (self.prefs.window_width, self.prefs.window_height);
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || hyprforge_photos::float::resize_self(size))
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()))
+            },
+            Message::Floated,
+        )
     }
 
     fn filmstrip_shown(&self) -> bool {
@@ -611,10 +698,18 @@ impl App {
         match message {
             Message::WindowFound(id) => {
                 self.window = id;
+                let float = self.float_to_picture();
                 match id {
-                    Some(id) => window::scale_factor(id).map(Message::ScaleFactor),
-                    None => Task::none(),
+                    Some(id) => Task::batch([window::scale_factor(id).map(Message::ScaleFactor), float]),
+                    None => float,
                 }
+            }
+            Message::Floated(result) => {
+                match result {
+                    Ok(()) => self.floated = true,
+                    Err(e) => tracing::warn!(error = %e, "the viewer could not float itself"),
+                }
+                Task::none()
             }
             Message::ScaleFactor(scale) => {
                 if (scale - self.scale_factor).abs() > f32::EPSILON {
@@ -803,11 +898,16 @@ impl App {
                 if generation != self.resize_generation || self.fullscreen {
                     return Task::none();
                 }
-                let (width, height) = (self.window_size.width as u32, self.window_size.height as u32);
-                save_pref(|p| {
-                    p.window_width = width;
-                    p.window_height = height;
-                });
+                // The compact viewer's size is the picture's, not a choice
+                // about the shell — saving it would open the next library
+                // session at the shape of the last photograph.
+                if self.compact.is_none() {
+                    let (width, height) = (self.window_size.width as u32, self.window_size.height as u32);
+                    save_pref(|p| {
+                        p.window_width = width;
+                        p.window_height = height;
+                    });
+                }
                 Task::batch([self.sharpen_if_needed(), self.request_thumbs()])
             }
             Message::ToggleMenu => {
@@ -1093,6 +1193,13 @@ impl App {
     fn set_mode(&mut self, mode: Mode) -> Task<Message> {
         self.menu_open = false;
         self.mode = mode;
+        // Grid and Library are where the sidebar is needed.
+        let grow = if mode == Mode::Photo { Task::none() } else { self.expand() };
+        let shown = self.set_mode_inner(mode);
+        Task::batch([grow, shown])
+    }
+
+    fn set_mode_inner(&mut self, mode: Mode) -> Task<Message> {
         match mode {
             Mode::Photo => self.show_current(),
             Mode::Grid => {
@@ -1553,9 +1660,14 @@ impl App {
                 return self.set_window_mode();
             }
             Action::ToggleInfo => {
-                self.prefs.info_panel = !self.prefs.info_panel;
-                let on = self.prefs.info_panel;
-                save_pref(|p| p.info_panel = on);
+                match &mut self.compact {
+                    Some(c) => c.info = !c.info,
+                    None => {
+                        self.prefs.info_panel = !self.prefs.info_panel;
+                        let on = self.prefs.info_panel;
+                        save_pref(|p| p.info_panel = on);
+                    }
+                }
                 return Task::batch([self.request_details(), self.request_thumbs()]);
             }
             Action::ToggleFilmstrip => {
@@ -1565,9 +1677,14 @@ impl App {
                 return self.request_thumbs();
             }
             Action::ToggleSidebar => {
-                self.prefs.sidebar = !self.prefs.sidebar;
-                let on = self.prefs.sidebar;
-                save_pref(|p| p.sidebar = on);
+                match &mut self.compact {
+                    Some(c) => c.sidebar = !c.sidebar,
+                    None => {
+                        self.prefs.sidebar = !self.prefs.sidebar;
+                        let on = self.prefs.sidebar;
+                        save_pref(|p| p.sidebar = on);
+                    }
+                }
                 return self.request_thumbs();
             }
             Action::ShowPhoto => return self.set_mode(Mode::Photo),
