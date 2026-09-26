@@ -212,10 +212,9 @@ sign something belongs in `hyprforge-look` instead.
 
 The Settings modules above marked *in progress* are functional, and their
 look now follows the Settings mockup: the shared widget kit, the
-search-first shell with its search palette, the mockup's sidebar, and the
-pages themselves — most drawn to the mockup, the rest through the shared
-row and card helpers (see `crates/hyprforge-settings/DESIGN.md` for which,
-and for what waits on a backend). The
+search-first shell with its search palette, the mockup's sidebar, and every
+page (see `crates/hyprforge-settings/DESIGN.md` for how, and for what waits
+on a backend). The
 app is eighteen pages in four groups — System (Displays, Power & battery,
 Keyboard & mouse, Default apps), Connectivity (Network, Bluetooth),
 Hyprland (Windows & workspaces, Keybinds, Animations, Window rules, Idle &
