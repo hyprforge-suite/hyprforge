@@ -15,23 +15,25 @@
 
 mod chooser;
 mod config;
+mod extras;
 mod geometry;
 mod model;
 mod popup_app;
 mod target;
 mod view;
 
-use geometry::GridLayout;
+use geometry::Layout;
 use hyprforge_popup::geometry::Size;
-use model::Model;
+use model::{Model, Tab};
 use popup_app::{ChoiceOutcome, EmojiApp};
 
-/// The popup's fixed size in logical pixels — a plain, roughly-square
-/// picker, wide enough for a comfortable number of columns and tall
-/// enough to show several rows without a monitor's own screen height
-/// mattering.
-const POPUP_WIDTH: f64 = 360.0;
-const POPUP_HEIGHT: f64 = 420.0;
+/// Hands every tab its grid shape from `layout` — the same `Layout` the
+/// view draws and the hit-test measures, never a second set of numbers.
+fn apply_layout(model: &mut Model, layout: &Layout) {
+    for tab in Tab::ALL {
+        model.set_geometry(tab, layout.grid_geometry(tab));
+    }
+}
 
 /// The name this popup's single-instance lock is filed under — see
 /// `hyprforge_popup::singleton`'s own doc for why a name rather than a
@@ -67,40 +69,36 @@ fn main() -> std::process::ExitCode {
         eprintln!("couldn't read any monitors from hyprctl — is Hyprland running?");
         return std::process::ExitCode::FAILURE;
     }
-    let popup_size = Size { width: POPUP_WIDTH, height: POPUP_HEIGHT };
+    // Resolved before placing: the popup's height follows the theme's
+    // font (see `geometry::Layout::for_font_size`), and placement needs
+    // the real size to keep the whole popup on screen.
+    let mut theme = hyprforge_appearance::look::resolve();
+    theme.font_size = theme.drawable_font_size();
+    let layout = Layout::for_font_size(theme.font_size);
+
+    let popup_size = Size { width: layout.width, height: layout.height };
     let Some(placement) = hyprforge_popup::place(&monitors, hyprforge_popup::cursor_position(), popup_size) else {
         eprintln!("couldn't work out where to place the popup");
         return std::process::ExitCode::FAILURE;
     };
 
-    // A missing config file is first-run and means the neutral tone —
-    // never an error. A file that exists but will not parse is a
-    // problem worth a word on stderr, but still not a reason to refuse
-    // to open — see `config::ToneSetting`'s own doc for why the two
-    // must never read the same to a caller.
-    let default_tone = match config::load() {
-        config::ToneSetting::Neutral => None,
-        config::ToneSetting::Tone(tone) => Some(tone),
-        config::ToneSetting::Unreadable(reason) => {
-            eprintln!("couldn't read the saved default skin tone ({reason}) — using the neutral tone");
-            None
+    // A missing file is first run — defaults, nothing said. A file that
+    // exists and will not parse is worth a word on stderr but not a
+    // reason to refuse to open; and it is never saved over, because the
+    // defaults this picker falls back to would replace whatever the user
+    // had with nothing. See `config`'s module doc.
+    let (prefs, writable) = match config::load() {
+        config::Stored::Fresh => (config::Prefs::default(), true),
+        config::Stored::Found(prefs) => (prefs, true),
+        config::Stored::Unreadable(reason) => {
+            eprintln!("couldn't read the emoji picker's saved settings ({reason}) — using defaults, and not saving over the file");
+            (config::Prefs::default(), false)
         }
     };
 
-    let mut theme = hyprforge_appearance::look::resolve();
-    theme.font_size = theme.drawable_font_size();
-
-    let mut model = Model::new(default_tone);
+    let mut model = Model::new(prefs.tone, &prefs.frequent);
     model.set_paste_target(paste_target_label);
-
-    // The grid's own shape, derived from the popup's fixed size at this
-    // theme's font size — the same discipline
-    // `hyprforge-clipmenu::main`'s own regression test pins for its row
-    // window: the number of cells the model is allowed to build has to
-    // be derived from what actually fits, never a separate hardcoded
-    // number that can silently drift out of step with it.
-    let grid = GridLayout::for_font_size(theme.font_size);
-    model.set_grid(grid.columns(POPUP_WIDTH), grid.viewport_height(POPUP_HEIGHT), grid.row_stride(), grid.spacing);
+    apply_layout(&mut model, &layout);
 
     let connection = match hyprforge_popup::Connection::connect_to_env() {
         Ok(connection) => connection,
@@ -118,7 +116,7 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    let app = EmojiApp::new(model, chooser, paste_shortcut, POPUP_WIDTH);
+    let app = EmojiApp::new(model, chooser, paste_shortcut, prefs, writable);
 
     match hyprforge_popup::Popup::run(connection, placement, app, theme) {
         Ok(hyprforge_popup::Outcome::App(ChoiceOutcome::Chosen | ChoiceOutcome::Cancelled)) => {
@@ -140,32 +138,24 @@ mod tests {
     use super::*;
 
     /// The regression test `hyprforge-clipmenu::main` pins for its own
-    /// row window, adapted to a grid: the number of cells `Model` is
-    /// allowed to show has to be derived from the popup's actual fixed
-    /// size, not a separate hardcoded number.
+    /// list, adapted to a grid: the model's rows have to be as many as
+    /// the layout's grid really shows — derived, wired exactly the way
+    /// `main` wires it — not a separate number that can drift.
     #[test]
-    fn the_models_grid_is_derived_from_the_popups_actual_size() {
-        let grid = GridLayout::for_font_size(15.0);
-        let columns = grid.columns(POPUP_WIDTH);
-        let rows = grid.rows_that_fit(POPUP_HEIGHT);
+    fn the_models_grid_is_derived_from_the_popups_actual_layout() {
+        let layout = Layout::for_font_size(15.0);
+        let mut model = Model::new(None, &[]);
+        apply_layout(&mut model, &layout);
 
-        let mut model = Model::new(None);
-        model.set_grid(columns, grid.viewport_height(POPUP_HEIGHT), grid.row_stride(), grid.spacing);
+        let first_row = model.lines().iter().find_map(|l| match *l {
+            model::Line::Cells { start, end, .. } => Some(end - start),
+            _ => None,
+        });
+        assert_eq!(first_row, Some(layout.columns(Tab::Emoji)), "a row is as wide as the layout's columns");
 
-        // At least as many cells as the whole rows that fully fit — a
-        // pixel viewport can now show one further partially-visible row
-        // too (see `Model::visible_range`'s own doc), so this is no
-        // longer required to be an exact upper bound.
-        let visible = model.visible_range();
-        assert!(visible.len() >= rows.saturating_sub(1) * columns);
-
-        // Every whole row `rows_that_fit` claims fits must actually fit
-        // inside the popup.
-        let stride = grid.cell_size + grid.spacing;
-        let last_row_bottom = grid.padding + grid.header_height + (rows as f64 - 1.0) * stride + grid.cell_size;
-        assert!(last_row_bottom <= POPUP_HEIGHT - grid.padding);
-        let last_column_right = grid.padding + (columns as f64) * stride - grid.spacing;
-        assert!(last_column_right <= POPUP_WIDTH - grid.padding);
+        let fit = (layout.grid.height / (layout.cell + layout.row_gap(Tab::Emoji))).floor() as usize;
+        let built = model.stack().visible(0.0, layout.grid.height).len();
+        assert!(built >= fit && built <= fit + 2, "{built} lines built for about {fit} that fit");
     }
 
     #[test]

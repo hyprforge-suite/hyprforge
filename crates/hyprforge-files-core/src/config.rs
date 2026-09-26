@@ -31,6 +31,13 @@
 //! places = ["home", "downloads", "documents"]
 //! show-trash = true
 //! collapse-below = 760   # window width; 0 never collapses on its own
+//!
+//! [sidebar.icons]
+//! # A place, "trash", or a folder's path = an icon theme name, or an
+//! # image file (anything with a slash in it).
+//! downloads = "folder-cloud"
+//! trash = "user-trash-full"
+//! "~/Projects" = "~/.local/share/icons/projects.svg"
 //! ```
 
 use crate::keymap::Keymap;
@@ -62,6 +69,36 @@ pub struct SidebarConfig {
     /// The window width below which the sidebar folds to its rail on its
     /// own. `0` never folds it; the toggle still does.
     pub collapse_below: f32,
+    /// `[sidebar.icons]`: the icons the user chose over the theme's, in
+    /// the file's order.
+    pub icons: Vec<(IconFor, IconChoice)>,
+}
+
+/// What a `[sidebar.icons]` line is about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IconFor {
+    Place(Place),
+    Trash,
+    /// Any folder, by absolute path — a pinned one, or one that only
+    /// ever shows up in a listing.
+    Folder(std::path::PathBuf),
+}
+
+/// What a `[sidebar.icons]` line chose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IconChoice {
+    /// A name the icon theme is asked for, like `folder-cloud`.
+    Themed(String),
+    /// An image of the user's own — SVG, or any picture this build
+    /// decodes.
+    File(std::path::PathBuf),
+}
+
+impl SidebarConfig {
+    /// The icon the user chose for `target`, if they chose one.
+    pub fn icon_for(&self, target: &IconFor) -> Option<&IconChoice> {
+        self.icons.iter().find(|(t, _)| t == target).map(|(_, c)| c)
+    }
 }
 
 impl Default for SidebarConfig {
@@ -70,6 +107,7 @@ impl Default for SidebarConfig {
             places: Place::ALL.to_vec(),
             show_trash: true,
             collapse_below: crate::density::SIDEBAR_COLLAPSE_BELOW,
+            icons: Vec::new(),
         }
     }
 }
@@ -191,6 +229,7 @@ struct RawSidebar {
     places: Option<toml::Value>,
     show_trash: Option<toml::Value>,
     collapse_below: Option<toml::Value>,
+    icons: Option<toml::Value>,
 }
 
 /// `[behaviour]` as written. Values are strings checked by hand rather
@@ -395,7 +434,60 @@ fn sidebar_with(raw: &RawSidebar, problems: &mut Vec<ConfigProblem>) -> SidebarC
         "a width in pixels",
         problems,
     ) as f32;
+    sidebar.icons = icons_with(&raw.icons, problems);
     sidebar
+}
+
+/// `[sidebar.icons]`. Each bad line costs that line and is reported;
+/// the rest still apply.
+fn icons_with(raw: &Option<toml::Value>, problems: &mut Vec<ConfigProblem>) -> Vec<(IconFor, IconChoice)> {
+    let table = match raw {
+        None => return Vec::new(),
+        Some(toml::Value::Table(table)) => table,
+        Some(other) => {
+            problems.push(problem(format!(
+                "[sidebar] icons = {other}: use a table, like [sidebar.icons] with downloads = \"folder-cloud\""
+            )));
+            return Vec::new();
+        }
+    };
+    let mut icons = Vec::new();
+    for (key, value) in table {
+        let target = if key == "trash" {
+            Some(IconFor::Trash)
+        } else if let Some(place) = Place::from_id(key) {
+            Some(IconFor::Place(place))
+        } else {
+            expand_home(key).filter(|p| p.is_absolute()).map(IconFor::Folder)
+        };
+        let Some(target) = target else {
+            problems.push(problem(format!(
+                "[sidebar.icons] {key} is not a place ({}, trash) or a folder's path, so it was left out",
+                Place::ALL.map(Place::id).join(", ")
+            )));
+            continue;
+        };
+        let choice = match value.as_str().map(str::trim) {
+            Some(v) if v.contains('/') => expand_home(v).map(IconChoice::File),
+            Some(v) if !v.is_empty() => Some(IconChoice::Themed(v.to_string())),
+            _ => None,
+        };
+        match choice {
+            Some(choice) => icons.push((target, choice)),
+            None => problems.push(problem(format!(
+                "[sidebar.icons] {key} = {value}: use an icon name like \"folder-cloud\", or an image's path"
+            ))),
+        }
+    }
+    icons
+}
+
+/// `~/x` to the home directory's `x`; anything else as written.
+fn expand_home(text: &str) -> Option<std::path::PathBuf> {
+    match text.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(rest)),
+        None => Some(std::path::PathBuf::from(text)),
+    }
 }
 
 /// The default menus with `[menu]` applied.
@@ -660,6 +752,46 @@ mod tests {
         assert_eq!(config.sidebar.places, vec![Place::Downloads, Place::Home]);
         assert!(!config.sidebar.show_trash);
         assert_eq!(config.sidebar.collapse_below, SidebarConfig::default().collapse_below);
+    }
+
+    /// A place, the trash, or a folder's path, each given a theme icon
+    /// name or an image — and a slash is what tells the two apart.
+    #[test]
+    fn sidebar_icons_are_chosen_by_place_trash_or_path() {
+        let home = std::env::var("HOME").unwrap();
+        let (config, problems) = parsed(
+            "[sidebar.icons]\ndownloads = \"folder-cloud\"\ntrash = \"user-trash-full\"\n\
+             \"~/Projects\" = \"~/icons/p.svg\"\n\"/mnt/data\" = \"drive-harddisk\"\n",
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+        let icons = &config.sidebar;
+        assert_eq!(
+            icons.icon_for(&IconFor::Place(Place::Downloads)),
+            Some(&IconChoice::Themed("folder-cloud".into()))
+        );
+        assert_eq!(icons.icon_for(&IconFor::Trash), Some(&IconChoice::Themed("user-trash-full".into())));
+        assert_eq!(
+            icons.icon_for(&IconFor::Folder(format!("{home}/Projects").into())),
+            Some(&IconChoice::File(format!("{home}/icons/p.svg").into())),
+            "~ is the home directory, in the folder and in the file"
+        );
+        assert_eq!(
+            icons.icon_for(&IconFor::Folder("/mnt/data".into())),
+            Some(&IconChoice::Themed("drive-harddisk".into()))
+        );
+        assert_eq!(icons.icon_for(&IconFor::Place(Place::Home)), None, "unchosen keeps the theme's");
+    }
+
+    /// One bad line costs that line: a key that is neither a place nor a
+    /// path, and a value that is not a name.
+    #[test]
+    fn a_bad_sidebar_icon_line_is_reported_and_the_rest_apply() {
+        let (config, problems) =
+            parsed("[sidebar.icons]\ndownlaods = \"x\"\nmusic = 3\npictures = \"folder-images\"\n");
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems.iter().any(|p| p.message.contains("downlaods")));
+        assert!(problems.iter().any(|p| p.message.contains("music")));
+        assert_eq!(config.sidebar.icons.len(), 1);
     }
 
     /// One misspelled place costs that place, not the list.

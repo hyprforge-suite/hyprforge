@@ -620,8 +620,8 @@ struct ViewModel<'a> {
     can_go_forward: bool,
     /// Grid thumbnails the host has decoded, by path.
     thumbnails: &'a HashMap<PathBuf, Picture>,
-    /// Theme icons by key — see [`Browser`]'s field of the same name.
-    icons: &'a HashMap<String, Option<Picture>>,
+    /// Theme icons, and which folders have their own.
+    icons: IconSet<'a>,
     /// What the preview pane shows, when it is on *and* the window has
     /// room for it. The setting alone is `prefs.preview_pane`; the two
     /// differ exactly when the status bar has to say why nothing shows.
@@ -638,7 +638,7 @@ struct PreviewModel<'a> {
     /// How wide the pane is drawn — see [`density::preview_width`].
     width: f32,
     /// For the selection's icon, while there is no picture to show.
-    icons: &'a HashMap<String, Option<Picture>>,
+    icons: IconSet<'a>,
 }
 
 /// Browsing state for one directory tree view. Owns no filesystem
@@ -684,6 +684,11 @@ pub struct Browser {
     icons: HashMap<String, Option<Picture>>,
     /// Keys asked for and not yet answered, so none is asked twice.
     icons_asked: HashSet<String>,
+    /// The icon key of each folder with an icon of its own — every place
+    /// in the sidebar, the Trash, and whatever `[sidebar.icons]` names —
+    /// by path, so the same folder draws the same icon in the sidebar
+    /// and wherever it turns up in a listing. See [`folder_icon_keys`].
+    folder_icons: HashMap<PathBuf, String>,
     /// Whether the column picker under the list header is open.
     ///
     /// Not in `Prefs`: a panel is a thing you are doing, not a thing you
@@ -727,7 +732,7 @@ impl Browser {
     /// see that function's own doc). Returns the [`Outcome::ReadDir`]
     /// the host must fulfil to show anything at all.
     pub fn new(mode: Mode, prefs: Prefs, start_dir: PathBuf, sidebar: Vec<SidebarItem>) -> (Browser, Outcome) {
-        let browser = Browser {
+        let mut browser = Browser {
             column_picker_open: false,
             mode,
             current_dir: start_dir.clone(),
@@ -744,6 +749,7 @@ impl Browser {
             media: Media::default(),
             icons: HashMap::new(),
             icons_asked: HashSet::new(),
+            folder_icons: HashMap::new(),
             // `Id::unique()` — not a per-widget-tree literal — is what
             // makes this stable across `view()` calls: iced can only
             // preserve a `scrollable`'s offset across frames if the same
@@ -765,6 +771,7 @@ impl Browser {
                 .first()
                 .map(|combo| combo.to_string()),
         };
+        browser.folder_icons = folder_icon_keys(&browser.sidebar, &browser.config.sidebar);
         (browser, Outcome::ReadDir(start_dir))
     }
 
@@ -988,6 +995,7 @@ impl Browser {
     pub fn set_config(&mut self, config: Arc<Config>) {
         self.hidden_key =
             config.keymap.combos_for(Action::ToggleHidden).first().map(|combo| combo.to_string());
+        self.folder_icons = folder_icon_keys(&self.sidebar, &config.sidebar);
         self.config = config;
     }
 
@@ -1199,10 +1207,20 @@ impl Browser {
         // a folder are a handful however many rows there are, and asking
         // for all of them at once means scrolling never shows a badge
         // turning into an icon.
+        //
+        // The sidebar's own icons ride along with the first listing's:
+        // that arrives within milliseconds of the window, and nothing at
+        // all is asked for before it — a rule the navigation tests pin.
         if matches!(self.load_state, LoadState::Loaded) {
+            let set = IconSet { icons: &self.icons, folders: &self.folder_icons };
+            let wanted = self
+                .rows()
+                .into_iter()
+                .map(|entry| set.key_of(entry))
+                .chain(self.folder_icons.values().map(String::as_str))
+                .chain(std::iter::once(icon::FOLDER_KEY));
             let mut keys: Vec<String> = Vec::new();
-            for entry in self.rows() {
-                let key = crate::icon::icon_key(entry);
+            for key in wanted {
                 if !self.icons.contains_key(key) && !self.icons_asked.contains(key) && !keys.iter().any(|k| k == key) {
                     keys.push(key.to_string());
                 }
@@ -1838,12 +1856,12 @@ impl Browser {
             can_go_back: !self.back_stack.is_empty(),
             can_go_forward: !self.forward_stack.is_empty(),
             thumbnails: &self.media.thumbnails,
-            icons: &self.icons,
+            icons: IconSet { icons: &self.icons, folders: &self.folder_icons },
             preview: preview_width.filter(|_| self.prefs.preview_pane).map(|width| PreviewModel {
                 selected: self.rows().into_iter().filter(|e| self.selection.is_selected(&e.path)).collect(),
                 found: self.media.preview.as_ref(),
                 width,
-                icons: &self.icons,
+                icons: IconSet { icons: &self.icons, folders: &self.folder_icons },
             }),
         }
     }
@@ -1991,7 +2009,7 @@ fn preview_pane<'a>(preview: &PreviewModel<'a>, scale: FontScale) -> Element<'a,
             let found = preview.found;
             let picture: Element<'a, Message> = match found.and_then(|f| f.picture.as_ref()) {
                 Some(picture) => picture.view_width(inner),
-                None => container(entry_icon(entry.kind, themed(preview.icons, entry), inner / 2.5, scale))
+                None => container(entry_icon(entry.kind, preview.icons.for_entry(entry), inner / 2.5, scale))
                     .center_x(Length::Fixed(inner))
                     .into(),
             };
@@ -2536,6 +2554,8 @@ struct SidebarRow {
     /// the user pinned it, and it may only be unmounted — but reads as
     /// unavailable, so a click that fails is not a surprise.
     missing: bool,
+    /// Its icon key — the folder's own, or an ordinary folder's.
+    icon: String,
 }
 
 impl SidebarRow {
@@ -2573,6 +2593,7 @@ fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
                 meta: None,
                 tint: item.tint,
                 missing: false,
+                icon: row_icon(vm, &item.path),
             })
             .collect(),
     };
@@ -2599,6 +2620,7 @@ fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
                 // disagree.
                 tint: sidebar::Tint::Accent,
                 missing: item.item_count.is_none(),
+                icon: row_icon(vm, &item.path),
             })
             .collect(),
     };
@@ -2613,9 +2635,31 @@ fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
             meta: None,
             tint: sidebar::Tint::Dim,
             missing: false,
+            icon: row_icon(vm, &sidebar::trash_path()),
         }],
     });
     [Some(places), Some(pinned), trash].into_iter().flatten().filter(|s| !s.rows.is_empty()).collect()
+}
+
+/// A sidebar row's icon key: its folder's own, or an ordinary folder's.
+fn row_icon(vm: &ViewModel<'_>, path: &Path) -> String {
+    vm.icons.folders.get(path).cloned().unwrap_or_else(|| icon::FOLDER_KEY.to_string())
+}
+
+/// A sidebar row's mark: the icon theme's (or the user's) icon for the
+/// folder, and the coloured shape while there is none — before the host
+/// answers, or with no icon theme at all. A pin that cannot be read keeps
+/// the dim shape whatever its icon: the icon would say the folder is
+/// there, and it is not.
+fn sidebar_mark<'a>(row_item: &SidebarRow, icons: IconSet<'a>, scale: FontScale) -> Element<'a, Message> {
+    match icons.for_key(&row_item.icon).filter(|_| !row_item.missing) {
+        Some(picture) => picture.view(scale.apply(density::SIDEBAR_ICON_BASE)),
+        None => icon::folder_mark(
+            hyprforge_ui::color::to_iced(row_item.shown_tint().color()),
+            density::SIDEBAR_MARK_BASE,
+            scale,
+        ),
+    }
 }
 
 /// The collapsed sidebar: a rail of marks, still clickable.
@@ -2641,11 +2685,7 @@ fn sidebar_rail<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
         }
         for row_item in section.rows {
             let is_current = row_item.path == vm.current_dir;
-            let mark = icon::folder_mark(
-                hyprforge_ui::color::to_iced(row_item.shown_tint().color()),
-                density::SIDEBAR_MARK_BASE,
-                scale,
-            );
+            let mark = sidebar_mark(&row_item, vm.icons, scale);
             let button = iced::widget::button(
                 container(mark).center_x(Length::Fill).center_y(Length::Fill),
             )
@@ -2685,11 +2725,7 @@ fn sidebar_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
         let mut group = column![heading].spacing(1.0);
         for row_item in section.rows {
             let is_current = row_item.path == vm.current_dir;
-            let mark = icon::folder_mark(
-                hyprforge_ui::color::to_iced(row_item.shown_tint().color()),
-                density::SIDEBAR_MARK_BASE,
-                scale,
-            );
+            let mark = sidebar_mark(&row_item, vm.icons, scale);
             let label = if row_item.missing {
                 meta_text(row_item.label, density::ROW_TEXT_BASE, scale)
             } else {
@@ -3005,13 +3041,63 @@ struct RowContext<'a> {
     /// per row was both wasted work and a way for the top and bottom of a
     /// long list to disagree about what "Today" means.
     now: chrono::DateTime<chrono::Local>,
-    icons: &'a HashMap<String, Option<Picture>>,
+    icons: IconSet<'a>,
     thumbnails: &'a HashMap<PathBuf, Picture>,
 }
 
-/// The theme icon the host found for `entry`, if it has answered with one.
-fn themed<'a>(icons: &'a HashMap<String, Option<Picture>>, entry: &Entry) -> Option<&'a Picture> {
-    icons.get(icon::icon_key(entry)).and_then(Option::as_ref)
+/// The icons the host has found, and which folders have one of their
+/// own — everything a row needs to know which icon it draws.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct IconSet<'a> {
+    icons: &'a HashMap<String, Option<Picture>>,
+    folders: &'a HashMap<PathBuf, String>,
+}
+
+impl<'a> IconSet<'a> {
+    /// `entry`'s icon key: its folder's own when it has one, and
+    /// otherwise the one its name gives it — see [`icon::icon_key`].
+    fn key_of(&self, entry: &'a Entry) -> &'a str {
+        match self.folders.get(&entry.path).filter(|_| entry.is_dir) {
+            Some(key) => key,
+            None => icon::icon_key(entry),
+        }
+    }
+
+    /// The icon the host found for `entry`, if it has answered with one.
+    fn for_entry(&self, entry: &'a Entry) -> Option<&'a Picture> {
+        self.for_key(self.key_of(entry))
+    }
+
+    fn for_key(&self, key: &str) -> Option<&'a Picture> {
+        self.icons.get(key).and_then(Option::as_ref)
+    }
+}
+
+/// Every folder with an icon of its own, and its key.
+///
+/// The places take the theme's `folder-*`/`user-*` icon unless
+/// `[sidebar.icons]` chose another, and the Trash `user-trash`; a folder
+/// the file names by path — pinned or not — takes what it chose. A
+/// pinned folder nobody chose an icon for is an ordinary folder.
+fn folder_icon_keys(places: &[SidebarItem], config: &crate::config::SidebarConfig) -> HashMap<PathBuf, String> {
+    use crate::config::IconFor;
+    let mut keys = HashMap::new();
+    for item in places {
+        if let Some(place) = item.place {
+            let key = config
+                .icon_for(&IconFor::Place(place))
+                .map_or_else(|| icon::themed_key(place.icon_name()), icon::choice_key);
+            keys.insert(item.path.clone(), key);
+        }
+    }
+    let trash = config.icon_for(&IconFor::Trash).map_or_else(|| icon::themed_key("user-trash"), icon::choice_key);
+    keys.insert(sidebar::trash_path(), trash);
+    for (target, choice) in &config.icons {
+        if let IconFor::Folder(path) = target {
+            keys.insert(path.clone(), icon::choice_key(choice));
+        }
+    }
+    keys
 }
 
 fn entry_row<'a>(
@@ -3041,7 +3127,7 @@ fn entry_row<'a>(
         // The picture itself when the host has one, in the icon's square.
         match thumbnails.get(&entry.path) {
             Some(picture) => picture.view(scale.apply(20.0)),
-            None => entry_icon(entry.kind, themed(icons, entry), 20.0, scale),
+            None => entry_icon(entry.kind, icons.for_entry(entry), 20.0, scale),
         },
         // `&entry.name`, not a clone: `scaled_text` borrows for `'a`,
         // and this row is rebuilt for every visible entry on every
@@ -3545,7 +3631,7 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
                 grid = grid.push(current);
                 current = row![].spacing(gap);
             }
-            current = current.push(grid_cell(index, entry, selected, renaming, thumbnails.get(&entry.path), themed(icons, entry), scale));
+            current = current.push(grid_cell(index, entry, selected, renaming, thumbnails.get(&entry.path), icons.for_entry(entry), scale));
         }
         // The last row is padded out with empty space to a full set of
         // columns, so its cells keep the width the rows above gave them
@@ -3754,6 +3840,35 @@ mod tests {
         }
     }
 
+    /// Downloads draws its own icon wherever it appears — not only in the
+    /// sidebar but in its parent's listing — and `[sidebar.icons]`
+    /// replaces it in both.
+    #[test]
+    fn a_places_folder_keeps_its_icon_in_the_listing_and_the_config_can_change_it() {
+        let downloads = PathBuf::from("/dir/Downloads");
+        let sidebar = vec![SidebarItem {
+            label: "Downloads".into(),
+            path: downloads.clone(),
+            tint: sidebar::Tint::Success,
+            place: Some(sidebar::Place::Downloads),
+        }];
+        let (mut browser, _) = Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), sidebar);
+        browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(vec![entry("Downloads", true), entry("other", true)])));
+        let key = |b: &Browser, name: &str| {
+            let set = IconSet { icons: &b.icons, folders: &b.folder_icons };
+            let entry = b.entries.iter().find(|e| e.name == name).unwrap();
+            set.key_of(entry).to_string()
+        };
+        assert_eq!(key(&browser, "Downloads"), "/icon:folder-download");
+        assert_eq!(key(&browser, "other"), icon::FOLDER_KEY, "an ordinary folder stays one");
+
+        let mut config = Config::default();
+        config.sidebar.icons =
+            vec![(crate::config::IconFor::Place(sidebar::Place::Downloads), crate::config::IconChoice::Themed("folder-cloud".into()))];
+        browser.set_config(Arc::new(config));
+        assert_eq!(key(&browser, "Downloads"), "/icon:folder-cloud");
+    }
+
     /// A loaded listing asks its host for every icon key it holds, once.
     #[test]
     fn a_loaded_listing_asks_for_each_icon_key_once() {
@@ -3771,9 +3886,10 @@ mod tests {
             }
         };
         let outcome = browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(entries.clone())));
-        let mut keys = asked(&outcome);
+        let mut keys: Vec<String> = asked(&outcome).into_iter().filter(|k| !k.starts_with('/')).collect();
         keys.sort();
         assert_eq!(keys, [".png", ".txt"], "two keys for three files");
+        assert!(asked(&outcome).iter().any(|k| k == "/icon:user-trash"), "and the sidebar's, with the first listing");
 
         let again = browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(entries)));
         assert!(asked(&again).is_empty(), "nothing is asked twice, answered or not");
@@ -5052,7 +5168,7 @@ mod tests {
             // leaking one empty map is simpler than threading it through
             // every caller.
             thumbnails: Box::leak(Box::default()),
-            icons: Box::leak(Box::default()),
+            icons: IconSet { icons: Box::leak(Box::default()), folders: Box::leak(Box::default()) },
             preview: None,
         }
     }
@@ -5065,7 +5181,7 @@ mod tests {
     #[test]
     fn an_empty_pinned_list_produces_no_pinned_section_at_all() {
         let places =
-            vec![SidebarItem { label: "Home".to_string(), path: PathBuf::from("/home/alex"), tint: sidebar::Tint::Accent }];
+            vec![SidebarItem { label: "Home".to_string(), path: PathBuf::from("/home/alex"), tint: sidebar::Tint::Accent, place: None }];
         let (selection, prefs, load_state) = (Selection::default(), Prefs::default(), LoadState::Loaded);
         let vm = view_model_with(&places, &[], Path::new("/home/alex"), &selection, &prefs, &load_state);
         let sections = sidebar_sections(&vm);
@@ -5077,7 +5193,7 @@ mod tests {
     #[test]
     fn a_non_empty_pinned_list_appears_with_its_item_counts() {
         let places =
-            vec![SidebarItem { label: "Home".to_string(), path: PathBuf::from("/home/alex"), tint: sidebar::Tint::Accent }];
+            vec![SidebarItem { label: "Home".to_string(), path: PathBuf::from("/home/alex"), tint: sidebar::Tint::Accent, place: None }];
         let pinned = vec![PinnedItem { label: "Projects".to_string(), path: PathBuf::from("/pin"), item_count: Some(7) }];
         let (selection, prefs, load_state) = (Selection::default(), Prefs::default(), LoadState::Loaded);
         let vm = view_model_with(&places, &pinned, Path::new("/home/alex"), &selection, &prefs, &load_state);

@@ -92,6 +92,19 @@ fn main() -> iced::Result {
     // suite does it.
     hyprforge_ui::theme::init(hyprforge_appearance::look::resolve());
 
+    // Sweep the thumbnail cache of files that are gone, at most once a
+    // day, on its own thread: it reads the head of every cached PNG, and
+    // the window has no reason to wait for that. Nothing is joined — a
+    // sweep cut short by the window closing has lost nothing but time.
+    std::thread::spawn(|| {
+        if let Some(cache) = hyprforge_thumbnails::Cache::standard() {
+            let removed = cache.prune(PRUNE_EVERY);
+            if removed > 0 {
+                tracing::debug!(removed, "thumbnails of deleted files removed");
+            }
+        }
+    });
+
     // One backend, held for the life of the window and handed to every
     // read. `RoutingBackend` is what decides that the trash lists by its
     // records rather than by its storage directory — see
@@ -4462,9 +4475,9 @@ const COUNT_BUDGET: usize = 400;
 /// settings, over whatever is on disk for everything a tab does not own.
 /// A tab's `Prefs` was copied when it opened, so its pinned list and
 /// window size are out of date by the time it saves.
-/// A grid thumbnail's decode edge, physical pixels: twice the grid icon's
-/// logical size, so it stays sharp on a 2x display.
-const THUMBNAIL_EDGE: u32 = 112;
+/// How often the shared thumbnail cache is swept for thumbnails of files
+/// that no longer exist — see `hyprforge_thumbnails::Cache::prune`.
+const PRUNE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The preview pane's picture, physical pixels, for the same reason.
 const PREVIEW_EDGE: u32 = (hyprforge_files_core::browser::PREVIEW_WIDTH as u32) * 2;
@@ -4480,12 +4493,17 @@ const PREVIEW_EDGE: u32 = (hyprforge_files_core::browser::PREVIEW_WIDTH as u32) 
 fn thumbnail_stream(
     paths: Vec<PathBuf>,
 ) -> impl iced::futures::Stream<Item = (PathBuf, hyprforge_files_core::preview::Picture)> {
+    // The freedesktop cache every other program shares — a thumbnail is
+    // made once per version of a file, and a picture another program
+    // already thumbnailed costs nothing here. See `preview::thumbnail`.
+    let cache = hyprforge_thumbnails::Cache::standard();
     iced::stream::channel(16, async move |mut out| {
         use iced::futures::SinkExt;
         for path in paths {
             let for_task = path.clone();
+            let cache = cache.clone();
             let handle = tokio::task::spawn_blocking(move || {
-                hyprforge_files::preview::thumbnail(&for_task, THUMBNAIL_EDGE)
+                hyprforge_files::preview::thumbnail(&for_task, cache.as_ref())
             })
                 .await
                 .ok()
@@ -4535,40 +4553,65 @@ fn theme_icons() -> &'static hyprforge_icons::Icons {
     ICONS.get_or_init(hyprforge_icons::Icons::load)
 }
 
-/// The icon names worth asking the theme for, for one browser key.
+/// The icon for one browser key — see `hyprforge_files_core::icon`'s
+/// `IconSource` for the four kinds of key.
 ///
-/// By name alone, as the key is: sniffing contents would mean opening
-/// every file in the folder to draw its icon.
-fn icon_names_for(key: &str, mime: &hyprforge_mime::MimeDb) -> Vec<String> {
-    use hyprforge_files_core::icon;
-    if key == icon::FOLDER_KEY {
-        return vec!["folder".to_string(), "inode-directory".to_string()];
-    }
-    match mime.type_of(Path::new(&icon::sample_name(key))) {
-        Some(kind) => mime.icon_names(kind),
-        // Not a claim that it is binary — only that no rule names it. The
-        // theme's own "unknown" keeps the listing one theme's drawing
-        // rather than a badge among icons.
-        None => vec!["application-octet-stream".to_string(), "unknown".to_string()],
+/// A file's type is decided by name alone, as its key is: sniffing
+/// contents would mean opening every file in the folder to draw its icon.
+fn resolve_icon(key: &str, mime: &hyprforge_mime::MimeDb) -> Option<hyprforge_files_core::preview::Picture> {
+    use hyprforge_files_core::icon::IconSource;
+    use hyprforge_files_core::preview::Picture;
+    let themed = |names: &[&str]| theme_icons().lookup(names, ICON_SIZE, ICON_SCALE).map(|p| Picture::from_path(&p));
+    match IconSource::of(key) {
+        IconSource::Folder => themed(&["folder", "inode-directory"]),
+        // The place's own name first, and a plain folder when the theme
+        // has nothing by that name — a theme without `folder-cloud` still
+        // draws a folder rather than the coloured mark.
+        IconSource::Themed(name) => themed(&[name, "folder"]),
+        IconSource::File(path) => user_icon(path).or_else(|| {
+            tracing::warn!(path = %path.display(), "[sidebar.icons] names an image that cannot be drawn; using the theme's folder");
+            themed(&["folder"])
+        }),
+        IconSource::Type(sample) => {
+            let names = match mime.type_of(Path::new(&sample)) {
+                Some(kind) => mime.icon_names(kind),
+                // Not a claim that it is binary — only that no rule names
+                // it. The theme's own "unknown" keeps the listing one
+                // theme's drawing rather than a badge among icons.
+                None => vec!["application-octet-stream".to_string(), "unknown".to_string()],
+            };
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            themed(&names)
+        }
     }
 }
 
-/// Theme icons for each key, found on a worker thread — every lookup
-/// stats files, the first one reads the theme's index files, and none of
-/// that belongs on the thread drawing the window.
+/// An image the user chose for a folder: an SVG as itself, and anything
+/// else decoded to icon size by the budgeted decode — a user's file can
+/// be a 40-megapixel photograph, and it is drawn at eighteen pixels.
+fn user_icon(path: &Path) -> Option<hyprforge_files_core::preview::Picture> {
+    use hyprforge_files_core::preview::Picture;
+    if !path.is_file() {
+        return None;
+    }
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
+        return Some(Picture::from_path(path));
+    }
+    let decoded = hyprforge_image::decode_to_fit(path, &hyprforge_image::Budget::for_edge(ICON_SIZE * ICON_SCALE)).ok()?;
+    Some(Picture::Raster(iced::widget::image::Handle::from_rgba(decoded.size.width, decoded.size.height, decoded.pixels)))
+}
+
+/// Icons for each key, found on a worker thread — every lookup stats
+/// files, the first one reads the theme's index files, and none of that
+/// belongs on the thread drawing the window.
 async fn resolve_icons(
     keys: Vec<String>,
     mime: Arc<hyprforge_mime::MimeDb>,
 ) -> Vec<(String, Option<hyprforge_files_core::preview::Picture>)> {
     tokio::task::spawn_blocking(move || {
-        let icons = theme_icons();
         keys.into_iter()
             .map(|key| {
-                let names = icon_names_for(&key, &mime);
-                let names: Vec<&str> = names.iter().map(String::as_str).collect();
-                let found = icons
-                    .lookup(&names, ICON_SIZE, ICON_SCALE)
-                    .map(|path| hyprforge_files_core::preview::Picture::from_path(&path));
+                let found = resolve_icon(&key, &mime);
                 (key, found)
             })
             .collect()
@@ -6593,6 +6636,7 @@ mod tests {
             label: "Home".to_string(),
             path: PathBuf::from("/home"),
             tint: hyprforge_files_core::sidebar::Tint::Accent,
+            place: None,
         };
     }
 }

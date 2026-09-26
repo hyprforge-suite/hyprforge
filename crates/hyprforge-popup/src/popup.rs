@@ -16,7 +16,7 @@
 //!
 //! Everything that is specific to *what* a popup shows — a clipboard
 //! history's rows, or a future grid of emoji — is behind [`PopupApp`].
-//! [`Popup`] itself never names a `Model`, a `RowLayout`, or any other
+//! [`Popup`] itself never names a `Model`, a `Layout`, or any other
 //! consumer type; it only calls the trait.
 //!
 //! # Rendering at the output's actual scale
@@ -52,7 +52,7 @@
 //! coordinates [`PointerEvent::position`] reports. Wayland delivers
 //! pointer input in surface-local logical coordinates by contract,
 //! never in buffer pixels, so nothing downstream of an event
-//! (`RowLayout::row_at`, `GridLayout::cell_at`, `MenuLayout::row_at`,
+//! (each popup's `Layout::hit`, `MenuLayout::row_at`,
 //! the scrollbar's own thumb) has to know the scale changed at all —
 //! changing what the buffer holds cannot change what coordinate space
 //! the compositor hands back for a click. That invariant is why this
@@ -67,7 +67,7 @@
 //! choice, not the only one possible, and the reason is the bug this
 //! whole popup shape exists to keep from recurring: CLAUDE.md's "the
 //! thing drawn, the thing hit-tested, and the number of things that fit
-//! must all be the same." A `RowLayout` used for one theme's font size
+//! must all be the same." A `Layout` built for one theme's font size
 //! passed alongside a `Model` windowed for another is exactly the class
 //! of drift that produced the original clicking-does-nothing bug and the
 //! auto-scroll bug both — two independently-constructed values that
@@ -289,7 +289,19 @@ pub trait PopupApp {
 
     /// A key was pressed (or is auto-repeating). `Some` ends the popup
     /// with that outcome.
-    fn key(&mut self, keysym: smithay_client_toolkit::seat::keyboard::Keysym, utf8: Option<String>) -> Option<Self::Outcome>;
+    ///
+    /// `modifiers` is the state as of this press. The compositor sends it
+    /// as its own event, ahead of the key it applies to, so [`Popup`]
+    /// remembers it and hands it over here — which is what lets an app
+    /// tell `Enter` from `Shift+Enter` or recognise `Ctrl+P`. Check it
+    /// before `utf8` for anything bound to a chord: `Ctrl+P` arrives with
+    /// `utf8` set to the control character `U+0010`, not to `p`.
+    fn key(
+        &mut self,
+        keysym: smithay_client_toolkit::seat::keyboard::Keysym,
+        utf8: Option<String>,
+        modifiers: Modifiers,
+    ) -> Option<Self::Outcome>;
 
     /// How this popup holds the keyboard, and therefore what a click
     /// somewhere else means. Defaults to [`Dismissal::HoldKeyboard`],
@@ -438,6 +450,11 @@ pub struct Popup<A: PopupApp> {
     /// see [`PopupApp::pointer_drag_start`]'s own doc for why this is
     /// gated the same way long-press detection is.
     dragging: bool,
+    /// The modifiers as the compositor last reported them.
+    /// `wl_keyboard.modifiers` is its own event, sent ahead of the key it
+    /// applies to, so it is remembered here and handed to
+    /// [`PopupApp::key`] with each press.
+    modifiers: Modifiers,
 }
 
 impl<A: PopupApp + 'static> Popup<A> {
@@ -496,6 +513,7 @@ impl<A: PopupApp + 'static> Popup<A> {
             long_press_checked: false,
             long_press_fired: false,
             dragging: false,
+            modifiers: Modifiers::default(),
         };
 
         // Outputs have to be known before a surface can be pinned to
@@ -766,7 +784,7 @@ impl<A: PopupApp + 'static> Popup<A> {
     }
 
     fn key(&mut self, keysym: smithay_client_toolkit::seat::keyboard::Keysym, utf8: Option<String>) {
-        if let Some(outcome) = self.app.key(keysym, utf8) {
+        if let Some(outcome) = self.app.key(keysym, utf8, self.modifiers) {
             self.outcome = Some(Outcome::App(outcome));
         }
         self.mark_dirty();
@@ -952,10 +970,11 @@ impl<A: PopupApp + 'static> KeyboardHandler for Popup<A> {
         _: &QueueHandle<Self>,
         _: &wl_keyboard::WlKeyboard,
         _: u32,
-        _: Modifiers,
+        modifiers: Modifiers,
         _: smithay_client_toolkit::seat::keyboard::RawModifiers,
         _: u32,
     ) {
+        self.modifiers = modifiers;
     }
 
     fn repeat_key(

@@ -265,6 +265,12 @@ const SCROLLBAR_LANE: f32 = 10.0;
 /// The folder mark beside a sidebar row, at 100% scale.
 pub const SIDEBAR_MARK_BASE: f32 = 13.0;
 
+/// A sidebar row's icon when the icon theme draws it. Larger than the
+/// drawn mark it replaces: a theme icon is detailed artwork with its own
+/// margin, and at 13 pixels a folder with a download arrow on it is a
+/// smudge.
+pub const SIDEBAR_ICON_BASE: f32 = 18.0;
+
 /// The status bar's height — the design's 30px at 100% scale, derived
 /// the same way the header is so it grows with the text inside it.
 pub fn status_height(scale: FontScale) -> f32 {
