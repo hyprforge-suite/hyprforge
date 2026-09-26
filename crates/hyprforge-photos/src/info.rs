@@ -99,7 +99,7 @@ pub fn sections(
             // Said plainly rather than left blank. A viewer that shows
             // nothing for a clip looks broken; one that says what it is
             // and what Enter will do is simply honest about its scope.
-            file.push(row("Kind", "Video — press Enter to play it"));
+            file.push(row("Kind", "Video"));
         }
         Media::Model => {
             if let Some(format) = hyprforge_mesh::detect(&item.path) {
@@ -136,6 +136,44 @@ pub fn sections(
 
     out.retain(|s| !s.rows.is_empty());
     out
+}
+
+/// A video's section, once the player knows its length and size: the
+/// two things a file listing cannot say about it.
+pub fn video_section(duration: Option<f64>, size: Option<(u32, u32)>) -> Option<Section> {
+    let mut rows = Vec::new();
+    if let Some(d) = duration {
+        rows.push(row("Length", clock(d)));
+    }
+    if let Some((w, h)) = size.filter(|(w, h)| *w > 0 && *h > 0) {
+        rows.push(row("Pixels", format!("{w} × {h}")));
+    }
+    (!rows.is_empty()).then_some(Section { title: "Video", rows })
+}
+
+/// Seconds as a player's clock: `0:07`, `4:56`, `1:02:03`.
+pub fn clock(seconds: f64) -> String {
+    let total = seconds.max(0.0).floor() as u64;
+    let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+/// The status bar's line for a video: "clip.mp4 · 1:23 / 4:56 · 38.2 MB".
+pub fn video_status_line(item: &Item, position: Option<f64>, duration: Option<f64>, size_on_disk: Option<u64>) -> String {
+    let mut parts = vec![item.name.clone()];
+    match (position, duration) {
+        (Some(p), Some(d)) => parts.push(format!("{} / {}", clock(p), clock(d))),
+        (None, Some(d)) => parts.push(clock(d)),
+        _ => {}
+    }
+    if let Some(bytes) = size_on_disk.or(item.bytes) {
+        parts.push(human_size(bytes));
+    }
+    parts.join(" · ")
 }
 
 /// A model's rows: how much geometry, how big, and whether it brought
@@ -319,13 +357,34 @@ mod tests {
         assert_eq!(value_of(&s, "Rotation"), Some("Turned 90° by you"));
     }
 
-    /// A clip is not a blank panel. It says what it is and what will
-    /// happen if you press Enter.
+    /// A clip is not a blank panel: it says what it is before the player
+    /// has said anything about it.
     #[test]
     fn a_clip_says_what_it_is_rather_than_showing_nothing() {
         let s = sections(&clip("holiday.mp4"), None, None, None, Turns::none(), None);
-        assert!(value_of(&s, "Kind").unwrap().contains("Enter"));
+        assert_eq!(value_of(&s, "Kind"), Some("Video"));
         assert_eq!(value_of(&s, "Pixels"), None);
+    }
+
+    #[test]
+    fn a_clock_reads_like_a_players() {
+        assert_eq!(clock(7.9), "0:07");
+        assert_eq!(clock(296.0), "4:56");
+        assert_eq!(clock(3723.0), "1:02:03");
+        assert_eq!(clock(-1.0), "0:00");
+    }
+
+    #[test]
+    fn a_video_section_appears_once_the_player_knows_something() {
+        assert_eq!(video_section(None, None), None);
+        let s = video_section(Some(83.0), Some((1920, 1080))).unwrap();
+        assert_eq!(s.title, "Video");
+        assert_eq!(value_of(std::slice::from_ref(&s), "Length"), Some("1:23"));
+        assert_eq!(value_of(std::slice::from_ref(&s), "Pixels"), Some("1920 × 1080"));
+        assert_eq!(
+            video_status_line(&clip("a.mp4"), Some(12.0), Some(83.0), Some(2048)),
+            "a.mp4 · 0:12 / 1:23 · 2.0 KB"
+        );
     }
 
     /// Before the decode lands there is still something to show, rather

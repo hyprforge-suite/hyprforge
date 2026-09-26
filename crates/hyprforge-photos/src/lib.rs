@@ -60,4 +60,5 @@ pub mod order;
 pub mod prefs;
 pub mod rotation;
 pub mod slideshow;
+pub mod thumbs;
 pub mod transform;

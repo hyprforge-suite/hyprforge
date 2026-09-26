@@ -690,8 +690,11 @@ hyprforge-keys      the keyboard grammar every app binds keys through; no iced
 hyprforge-listing   a directory listing and its order, under both Files and
                     the image viewer so they agree which picture is next
 hyprforge-image     bounded, orientation-correct decoding; no iced, no Wayland
-hyprforge-mesh      STL/3MF/OBJ into a welded mesh, and fstl's camera; no iced,
-                    no wgpu — the renderer lives with the window, on iced's wgpu
+hyprforge-mesh      STL/3MF/OBJ into a welded mesh, fstl's camera, and a CPU
+                    thumbnail; no iced, no wgpu — the renderer lives with the
+                    window, on iced's wgpu
+hyprforge-video     play a video into memory through libmpv (dlopen'd, so mpv
+                    is optional), and a video's first real frame via ffmpeg
 hyprforge-ui        the iced layer; knows nothing about Hyprland
 hyprforge-core      Hyprland config machinery — a new app should never need it
 ```
