@@ -1,0 +1,36 @@
+[package]
+name = "hyprforge-mesh"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+description = "Loads STL, 3MF and OBJ models into a welded indexed mesh, with fstl's camera and draw modes — the model half of view3d."
+
+# The model half of view3d, as a leaf: parsing, welding, the camera's
+# matrices and the draw-mode choices, with no iced and no wgpu. The
+# renderer lives in hyprforge-photos, where its wgpu is iced's.
+#
+# `license` is spelled out rather than inherited, and `LICENSE` beside
+# this file is a real file rather than the symlink the other foundation
+# crates carry: it holds fstl's copyright line as well as view3d's,
+# because parts of `camera.rs` are translations of fstl's source.
+[dependencies]
+# glam at the version already in the tree, not view3d's 0.33: every call
+# here (`from_axis_angle`, `project_point3`, `transform_vector3`) is in
+# both, and a second glam is a second copy of the same maths.
+glam = "0.25"
+bytemuck = { version = "1", features = ["derive"] }
+# The parallel parse and the parallel sort the weld is built on — the
+# reason a two-million-triangle STL opens in a fraction of a second.
+rayon = "1"
+memmap2 = "0.9"
+rustc-hash = "2"
+# A 3MF is a zip of XML. Deflate only: the 3MF spec allows nothing else,
+# and every other method would be decoder code no model can reach.
+zip = { version = "8", default-features = false, features = ["deflate"] }
+quick-xml = "0.41"
+tobj = "4"
+anyhow.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+zip = { version = "8", default-features = false, features = ["deflate"] }
