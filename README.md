@@ -137,6 +137,10 @@ Hyprland-facing
                             configured theme's Inherits= chain to hicolor.
                             hyprforge-mime says which name a type's icon
                             has; this finds the file. A leaf.
+  hyprforge-thumbnails/    the freedesktop thumbnail cache every program
+                            shares: a thumbnail found while its file is
+                            unchanged, stored as small as a PNG can be,
+                            failures remembered, orphans pruned. A leaf.
   hyprforge-archive/       zip, tar and 7z: what is inside one as a
                             directory tree, extracting from it, making
                             one, and rewriting it. Pure Rust, so a
