@@ -14,8 +14,9 @@ has never heard of Hyprland.
 
 ```
 Shared by every app in the suite
-  hyprforge-paths/         where config lives and how to write it atomically.
-                            No dependencies at all.
+  hyprforge-paths/         where config lives and how to write it atomically,
+                            and where your Pictures and Downloads are
+                            (user-dirs.dirs). No dependencies at all.
   hyprforge-look/          the Color type with the one rgba() parser, and the
                             runtime Theme every app draws from. No iced — the
                             lock screen and greeter paint into a raw Wayland
@@ -66,7 +67,9 @@ Shared by every app in the suite
                             anything is allocated, the EXIF orientation is
                             applied once, and a 36-megapixel photograph is
                             decoded to fit the window rather than at full
-                            size. No iced, no Wayland, no Hyprland.
+                            size; and what the camera wrote — body, lens,
+                            exposure, date, GPS. No iced, no Wayland, no
+                            Hyprland.
 
 Hyprland-facing
   hyprforge-core/          the config machinery: hlconfig (the generic
@@ -185,11 +188,15 @@ Apps
                             shared browsing view, plus what a dialog
                             deliberately does not have — launching what
                             you double-click, and file operations.
-  hyprforge-photos/        the image viewer: one picture at a time, paged
-                            through its folder in the order Files shows
-                            it, with zoom, pan, rotation, an info panel and
-                            a filmstrip; trash with undo, copy, Open With,
-                            Show in Files and Set as Wallpaper.
+  hyprforge-photos/        the image viewer, in the file manager's shell:
+                            a Places sidebar, and Photo, Grid and Library
+                            as modes of one window. Photo pages through the
+                            folder in the order Files shows it, with zoom,
+                            pan, rotation and a filmstrip; Grid groups the
+                            folder by day; Library is the folder tree as
+                            cards. An inspector with the camera's EXIF, a
+                            slideshow, and trash with undo, copy, Open
+                            With, Show in Files and Set as Wallpaper.
   hyprforge-settings/      the iced GUI, hosting the settings modules
   hyprforge-authui/        the authentication conversation model, shared by
                             the lock screen and the greeter

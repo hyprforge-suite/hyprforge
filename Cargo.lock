@@ -2100,6 +2100,7 @@ dependencies = [
 name = "hyprforge-photos"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "hyprforge-appearance",
  "hyprforge-clipboard",
  "hyprforge-core",

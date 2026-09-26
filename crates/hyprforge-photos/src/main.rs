@@ -2,10 +2,23 @@
 //!
 //! Everything this draws is decided in the library — which picture is
 //! next ([`folder`]), where it sits and how big ([`transform`]), what a
-//! key means ([`keys`]), what the info panel says ([`info`]). What is
-//! here is the part that cannot be asserted without a display: turning
-//! those decisions into widgets, and running the slow work (decoding,
+//! key means ([`keys`]), what the inspector says ([`info`]), how the
+//! grid falls into days and rows ([`grid`]), what a folder card says
+//! ([`library`]). What is here is the part that cannot be asserted
+//! without a display: turning those decisions into widgets (`view.rs`),
+//! and running the slow work (decoding, reading EXIF, listing folders,
 //! trashing, the clipboard, the wallpaper) off the thread that paints.
+//!
+//! # One window, three modes
+//!
+//! The design (the `Hyprview Photo Viewer` mockups, `2a`–`2c`) puts the
+//! viewer in the file manager's shell — the same header, the same Places
+//! sidebar, the same status bar — and makes Photo, Grid and Library
+//! *modes* of that one window rather than overlays over a photograph.
+//! [`Mode`] is that switch. The folder, the selection and the history
+//! are shared by all three, so moving between them never loses your
+//! place: the tile selected in the grid is the photograph Photo mode
+//! opens on, and the folder the library opens is the one the grid shows.
 //!
 //! # Pixels, never paths
 //!
@@ -18,40 +31,77 @@
 //! because the RGBA path does not. Turning a picture is done to those
 //! pixels too (`rotation::rotate_rgba`), so the size on screen is the
 //! size every zoom calculation assumes.
+//!
+//! Thumbnails follow the same rule and one more: only the tiles that can
+//! be seen are decoded (`grid::visible`), and the store of them is capped
+//! at [`MAX_THUMBS`]. A folder of four thousand photographs costs what a
+//! screenful of tiles costs.
 
-use hyprforge_image::{decode_to_fit, Budget, Decoded, ViewportPixels};
+mod view;
+
+use hyprforge_image::{decode_to_fit, Budget, Camera, Decoded, Measured, ViewportPixels};
 use hyprforge_listing::backend::{FsBackend, StdBackend};
 use hyprforge_photos::args::{self, Args};
 use hyprforge_photos::cache::Cache;
 use hyprforge_photos::folder::{Folder, Media};
+use hyprforge_photos::history::History;
 use hyprforge_photos::keys::{Action, Resolved};
+use hyprforge_photos::library::Summary;
 use hyprforge_photos::rotation::{rotate_rgba, Turns};
+use hyprforge_photos::slideshow::{Interval, Show};
 use hyprforge_photos::transform::{ImageSize, LogicalPoint, Transform, Viewport};
-use hyprforge_photos::{config, filmstrip, info, launch, order, prefs};
-use hyprforge_ui::theme::{app_theme, spacing, FontScale, BASE_TEXT_SIZE};
-use hyprforge_ui::widgets::{meta_text, scaled_text, secondary_button};
-use iced::widget::{button, column, container, image, mouse_area, pin, row, scrollable, Space};
-use iced::{keyboard, mouse, window, Element, Length, Point, Size, Subscription, Task, Theme};
+use hyprforge_photos::{config, filmstrip, grid, launch, library, order, prefs};
+use hyprforge_ui::theme::FontScale;
+use hyprforge_ui::widgets::Tint;
+use iced::widget::{image, Id};
+use iced::{keyboard, mouse, window, Point, Size, Subscription, Task, Theme};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const APP_ID: &str = "hyprforge-photos";
 
-/// The toolbar across the top, hidden in fullscreen.
-const TOOLBAR_HEIGHT: f32 = 44.0;
-/// The filmstrip along the bottom, when shown.
-const FILMSTRIP_HEIGHT: f32 = 92.0;
-/// One filmstrip tile, logical pixels, square.
-const THUMB: f32 = 72.0;
-const THUMB_GAP: f32 = 8.0;
-/// The info panel down the right, when shown.
-const INFO_WIDTH: f32 = 300.0;
+/// The Places sidebar, logical pixels — the mockup's 200.
+const SIDEBAR_WIDTH: f32 = 200.0;
+/// The inspector down the right — mockup `2c`'s 300.
+const INSPECTOR_WIDTH: f32 = 300.0;
+/// The filmstrip along the bottom of Photo mode — mockup `2a`'s 84.
+const FILMSTRIP_HEIGHT: f32 = 84.0;
+/// A filmstrip tile, 3:2, and the larger one the current picture gets.
+const STRIP_TILE: (f32, f32) = (66.0, 44.0);
+const STRIP_CURRENT: (f32, f32) = (78.0, 52.0);
+const STRIP_GAP: f32 = 6.0;
+/// The status bar — the file manager's 30px, so the two shells match.
+const STATUS_HEIGHT: f32 = 30.0;
+/// The narrowest a grid tile may be before the grid drops a column.
+const TILE_MIN_WIDTH: f32 = 170.0;
+/// Padding inside a tile and around the grid, and the gap between tiles.
+const TILE_PAD: f32 = 8.0;
+const TILE_GAP: f32 = 10.0;
+const GRID_PAD: f32 = 16.0;
+/// A tile's name line, and a library card's second line under it.
+const TILE_LINE: f32 = 18.0;
+/// A day's heading in the grid.
+const GROUP_HEADER: f32 = 30.0;
+const GROUP_GAP: f32 = 18.0;
+/// The long edge thumbnails are decoded at, logical pixels. One size for
+/// the filmstrip, the grid and the library covers, so one decode serves
+/// all three.
+const THUMB_EDGE: f32 = 200.0;
+/// How many thumbnails are kept. At `THUMB_EDGE` on a 1.6-scale output a
+/// 3:2 thumbnail is 320×213 RGBA, about 270KB, so this caps the store near
+/// 65MB however large the folder — the grid only ever *wants* a
+/// screenful plus a screen of margin either side, well under this.
+const MAX_THUMBS: usize = 240;
 /// How long a resize has to settle before the window size is saved and a
 /// sharper decode is considered — a drag produces a resize per frame.
 const RESIZE_SETTLE_MS: u64 = 400;
 /// Wheel pixels per zoom step, for a touchpad's smooth scrolling.
 const PIXELS_PER_ZOOM_STEP: f32 = 60.0;
+/// How long a slideshow's controls stay up after the pointer stops —
+/// mockup `1e`'s "controls fade after 2 s".
+const SLIDESHOW_CONTROLS_FOR: Duration = Duration::from_secs(2);
 
 fn main() -> iced::Result {
     // `warn` unless RUST_LOG says otherwise — a viewer opened from the
@@ -87,32 +137,42 @@ fn main() -> iced::Result {
     problems.extend(prefs_problem);
 
     let size = Size::new(
-        (prefs.window_width as f32).max(480.0),
-        (prefs.window_height as f32).max(360.0),
+        (prefs.window_width as f32).max(640.0),
+        (prefs.window_height as f32).max(420.0),
     );
 
-    let (start, focus) = match &args {
-        Args::Picture(path) if path.is_dir() => (Some(path.clone()), None),
-        Args::Picture(path) => (path.parent().map(Path::to_path_buf), Some(path.clone())),
-        Args::Folder(path) => (Some(path.clone()), None),
-        Args::Nothing => (None, None),
+    let places = places();
+
+    // A picture opens in Photo mode on that picture; a folder opens as
+    // its grid; nothing at all opens the grid of Pictures, because a
+    // shell with a sidebar has somewhere better to start than a sentence.
+    let (start, focus, mode) = match &args {
+        Args::Picture(path) if path.is_dir() => (Some(path.clone()), None, Mode::Grid),
+        Args::Picture(path) => (path.parent().map(Path::to_path_buf), Some(path.clone()), Mode::Photo),
+        Args::Folder(path) => (Some(path.clone()), None, Mode::Grid),
+        Args::Nothing => (places.first().map(|p| p.path.clone()), None, Mode::Grid),
     };
 
-    let app = App {
+    let mut app = App {
         keymap: config.keymap,
         order: ordering.order,
         prefs,
+        mode,
         folder: Folder::default(),
-        folder_path: start.clone(),
-        focus,
-        loading_folder: start.is_some(),
+        folder_path: None,
+        focus: None,
+        loading_folder: false,
         folder_error: None,
+        history: History::default(),
+        last_selected: HashMap::new(),
         cache: Cache::default(),
         decoding: HashSet::new(),
         failed: HashMap::new(),
         shown: None,
         turns: Turns::none(),
         transform: Transform::default(),
+        details: None,
+        details_wanted: None,
         window: None,
         window_size: size,
         scale_factor: 1.0,
@@ -124,6 +184,14 @@ fn main() -> iced::Result {
         thumbs: HashMap::new(),
         thumbs_wanted: HashSet::new(),
         current_bytes: None,
+        places,
+        folders: HashMap::new(),
+        library_dir: None,
+        library_cursor: 0,
+        grid_scroll: (0.0, size.height),
+        library_scroll: (0.0, size.height),
+        menu_open: false,
+        show: None,
         notice: problems.first().cloned(),
         undo: None,
         clipboard: Arc::new(hyprforge_clipboard::WaylandWriter::new()),
@@ -132,7 +200,7 @@ fn main() -> iced::Result {
 
     let mut boot_tasks = vec![window::latest().map(Message::WindowFound)];
     if let Some(dir) = start {
-        boot_tasks.push(read_folder(dir));
+        boot_tasks.push(app.load_folder(dir, focus));
     }
     let boot = std::cell::RefCell::new(Some((app, Task::batch(boot_tasks))));
 
@@ -146,7 +214,7 @@ fn main() -> iced::Result {
     .subscription(App::subscription)
     .window(window::Settings {
         size,
-        min_size: Some(Size::new(480.0, 360.0)),
+        min_size: Some(Size::new(640.0, 420.0)),
         platform_specific: window::settings::PlatformSpecific {
             application_id: APP_ID.to_string(),
             ..window::settings::PlatformSpecific::default()
@@ -154,6 +222,47 @@ fn main() -> iced::Result {
         ..window::Settings::default()
     })
     .run()
+}
+
+/// The three modes of the window — mockup `2a`'s segmented switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Photo,
+    Grid,
+    Library,
+}
+
+/// A row under PLACES.
+struct Place {
+    label: String,
+    path: PathBuf,
+    tint: Tint,
+}
+
+/// Pictures, its Screenshots folder and Downloads — the places a photo
+/// viewer is opened on — from the user's own `user-dirs.dirs`, so a
+/// machine set up in German lists `Bilder`. Only the ones that exist.
+///
+/// The tints are the file manager's for the same folders (Pictures in
+/// the warning hue, and so on): identity, not state, which is the
+/// borrowing `Tint`'s own doc names and defends for a sidebar.
+fn places() -> Vec<Place> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    let dirs = hyprforge_paths::user_dirs::load(&hyprforge_paths::config_home(), &home);
+    let label = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut out = Vec::new();
+    if let Some(pictures) = dirs.pictures {
+        let screenshots = pictures.join("Screenshots");
+        out.push(Place { label: label(&pictures), path: pictures, tint: Tint::Warning });
+        out.push(Place { label: label(&screenshots), path: screenshots, tint: Tint::Info });
+    }
+    if let Some(downloads) = dirs.download {
+        out.push(Place { label: label(&downloads), path: downloads, tint: Tint::Success });
+    }
+    out.retain(|p| p.path.is_dir());
+    out
 }
 
 /// The picture on screen: its pixels as iced takes them, already turned,
@@ -169,6 +278,35 @@ struct Shown {
     size: ImageSize,
 }
 
+/// What the header of a file says, for the inspector and the status bar
+/// — read without decoding, so the grid can show it for a tile.
+struct Details {
+    path: PathBuf,
+    measured: Option<Measured>,
+    camera: Camera,
+}
+
+/// A folder's subfolders, summarised, as the sidebar and the library
+/// read them.
+enum Listing {
+    Loading,
+    Loaded(Vec<Summary>),
+    Failed(String),
+}
+
+/// A slideshow in progress.
+struct Slideshow {
+    show: Show,
+    interval: Interval,
+    /// When the picture on screen went up.
+    since: Instant,
+    /// When the pointer last moved, for the fading controls.
+    pointer_moved: Instant,
+    /// Whether the window was fullscreen before, so ending the show puts
+    /// it back the way it was rather than always windowed.
+    was_fullscreen: bool,
+}
+
 /// Something that has just happened and can be taken back.
 enum Undo {
     Trashed { item: hyprforge_fileops::trash::TrashedItem, name: String },
@@ -178,12 +316,17 @@ struct App {
     keymap: hyprforge_photos::keys::Keymap,
     order: hyprforge_listing::order::Order,
     prefs: prefs::Prefs,
+    mode: Mode,
     folder: Folder,
     folder_path: Option<PathBuf>,
-    /// The picture argv named, focused once the folder arrives.
+    /// The picture to select once the folder arrives.
     focus: Option<PathBuf>,
     loading_folder: bool,
     folder_error: Option<String>,
+    history: History,
+    /// The picture that was selected in each folder when it was left, so
+    /// Back returns to where you were rather than to the first picture.
+    last_selected: HashMap<PathBuf, PathBuf>,
     cache: Cache,
     /// Decodes in flight, so a picture is never decoded twice at once.
     decoding: HashSet<PathBuf>,
@@ -192,6 +335,8 @@ struct App {
     shown: Option<Shown>,
     turns: Turns,
     transform: Transform,
+    details: Option<Details>,
+    details_wanted: Option<PathBuf>,
     window: Option<window::Id>,
     window_size: Size,
     scale_factor: f32,
@@ -202,11 +347,25 @@ struct App {
     /// Smooth-scroll pixels not yet worth a zoom step.
     scroll_pixels: f32,
     resize_generation: u64,
-    /// Filmstrip thumbnails: `None` for one that could not be made.
+    /// Thumbnails for the filmstrip, the grid and the library covers:
+    /// `None` for one that could not be made. Capped at [`MAX_THUMBS`].
     thumbs: HashMap<PathBuf, Option<image::Handle>>,
     thumbs_wanted: HashSet<PathBuf>,
     current_bytes: Option<u64>,
-    /// One line across the top: a problem to report, or what just
+    places: Vec<Place>,
+    /// Subfolder summaries, by the folder they are inside.
+    folders: HashMap<PathBuf, Listing>,
+    /// The folder whose subfolders Library mode is showing.
+    library_dir: Option<PathBuf>,
+    library_cursor: usize,
+    /// Scroll offset and visible height of the grid and the library, as
+    /// their scrollables last reported them.
+    grid_scroll: (f32, f32),
+    library_scroll: (f32, f32),
+    /// The header's ⋯ menu.
+    menu_open: bool,
+    show: Option<Slideshow>,
+    /// One line in the status bar: a problem to report, or what just
     /// happened. Replaced by the next one; closed by the user.
     notice: Option<String>,
     undo: Option<Undo>,
@@ -219,11 +378,24 @@ enum Message {
     WindowFound(Option<window::Id>),
     ScaleFactor(f32),
     FolderRead(PathBuf, Result<Vec<hyprforge_listing::types::Entry>, String>),
+    Summaries(PathBuf, Result<Vec<Summary>, String>),
     Decoded(PathBuf, Result<Arc<Decoded>, String>),
+    Details(PathBuf, Option<Measured>, Camera),
     Thumb(PathBuf, Option<image::Handle>),
     Key(hyprforge_keys::KeyPress),
     Perform(Action),
+    /// A single click on a filmstrip tile or a grid tile.
     Select(usize),
+    /// A double click on a grid tile: open it in Photo mode.
+    OpenTile(usize),
+    SelectCard(usize),
+    OpenCard(usize),
+    /// A sidebar row, a path crumb, or anything else that goes to a
+    /// folder.
+    OpenFolder(PathBuf),
+    SetMode(Mode),
+    GridScrolled(iced::widget::scrollable::Viewport),
+    LibraryScrolled(iced::widget::scrollable::Viewport),
     Scrolled(mouse::ScrollDelta),
     PointerMoved(Point),
     DragStart,
@@ -231,6 +403,13 @@ enum Message {
     ToggleZoom,
     Resized(Size),
     ResizeSettled(u64),
+    ToggleMenu,
+    MenuAction(Action),
+    Tick(Instant),
+    SlideshowPause,
+    SlideshowShuffle,
+    SlideshowLoop,
+    SlideshowInterval(Interval),
     Trashed(PathBuf, Result<hyprforge_fileops::trash::TrashedItem, String>),
     UndoPressed,
     Restored(Result<String, String>),
@@ -240,38 +419,73 @@ enum Message {
 
 impl App {
     fn title(&self) -> String {
-        match self.folder.current() {
-            Some(item) => format!("{} — Photos", item.name),
-            None => "Photos".to_string(),
+        match (self.mode, self.folder.current(), &self.folder_path) {
+            (Mode::Photo, Some(item), _) => format!("{} — Photos", item.name),
+            (_, _, Some(dir)) => format!("{} — Photos", display_name(dir)),
+            _ => "Photos".to_string(),
         }
     }
 
     fn theme(&self) -> Theme {
-        app_theme()
+        hyprforge_ui::theme::app_theme()
     }
 
     fn subscription(&self) -> Subscription<Message> {
+        let tick = match &self.show {
+            // Four times a second: fine enough for the controls to fade
+            // on time, coarse enough to cost nothing, and only while a
+            // show is running.
+            Some(_) => iced::time::every(Duration::from_millis(250)).map(Message::Tick),
+            None => Subscription::none(),
+        };
         Subscription::batch([
             keyboard::listen().filter_map(|event| hyprforge_ui::keys::key_press(&event).map(Message::Key)),
             window::resize_events().map(|(_, size)| Message::Resized(size)),
+            tick,
         ])
+    }
+
+    // --- geometry ------------------------------------------------------
+
+    fn sidebar_shown(&self) -> bool {
+        self.prefs.sidebar && !self.fullscreen
+    }
+
+    fn inspector_shown(&self) -> bool {
+        self.prefs.info_panel && !self.fullscreen
+    }
+
+    fn filmstrip_shown(&self) -> bool {
+        self.prefs.filmstrip && !self.fullscreen && self.mode == Mode::Photo
+    }
+
+    /// The width between the sidebar and the inspector, logical pixels.
+    fn pane_width(&self) -> f32 {
+        let mut width = self.window_size.width;
+        if self.sidebar_shown() {
+            width -= SIDEBAR_WIDTH + 1.0;
+        }
+        if self.inspector_shown() {
+            width -= INSPECTOR_WIDTH + 1.0;
+        }
+        width.max(1.0)
     }
 
     /// The area the picture is drawn in, logical pixels: the window less
     /// whatever chrome is showing.
     fn viewport(&self) -> Viewport {
-        let mut width = self.window_size.width;
+        if self.show.is_some() {
+            return Viewport { width: self.window_size.width.max(1.0), height: self.window_size.height.max(1.0) };
+        }
         let mut height = self.window_size.height;
         if !self.fullscreen {
-            height -= TOOLBAR_HEIGHT;
+            height -= hyprforge_ui::density::bar_height(self.font_scale) + 1.0;
+            height -= self.font_scale.apply(STATUS_HEIGHT) + 1.0;
         }
-        if self.prefs.filmstrip && !self.fullscreen {
+        if self.filmstrip_shown() {
             height -= FILMSTRIP_HEIGHT;
         }
-        if self.prefs.info_panel && !self.fullscreen {
-            width -= INFO_WIDTH;
-        }
-        Viewport { width: width.max(1.0), height: height.max(1.0) }
+        Viewport { width: self.pane_width(), height: height.max(1.0) }
     }
 
     /// How much may be decoded for the viewport as it is now.
@@ -279,6 +493,41 @@ impl App {
         let v = self.viewport();
         Budget::for_viewport(ViewportPixels::from_logical(v.width, v.height, self.scale_factor))
     }
+
+    /// The grid's (or the library's) column count and tile sizes for the
+    /// pane as it is now. `lines` is how many lines of text sit under a
+    /// tile's picture: one for a photo's name, two for a folder card.
+    fn tiles(&self, lines: usize) -> Tiles {
+        let inner = (self.pane_width() - 2.0 * GRID_PAD).max(TILE_MIN_WIDTH);
+        let columns = (((inner + TILE_GAP) / (TILE_MIN_WIDTH + TILE_GAP)).floor() as usize).max(1);
+        let tile = (inner - TILE_GAP * (columns - 1) as f32) / columns as f32;
+        let picture = ((tile - 2.0 * TILE_PAD) * 2.0 / 3.0).floor();
+        let row = TILE_PAD + picture + TILE_PAD + TILE_LINE * lines as f32 + TILE_PAD;
+        Tiles {
+            width: tile,
+            picture,
+            metrics: grid::Metrics {
+                columns,
+                header: GROUP_HEADER,
+                row,
+                row_gap: TILE_GAP,
+                group_gap: GROUP_GAP,
+            },
+        }
+    }
+
+    fn groups(&self) -> Vec<grid::Group> {
+        grid::groups(self.folder.items(), &chrono::Local)
+    }
+
+    fn library_summaries(&self) -> &[Summary] {
+        match self.library_dir.as_ref().and_then(|d| self.folders.get(d)) {
+            Some(Listing::Loaded(list)) => list,
+            _ => &[],
+        }
+    }
+
+    // --- update --------------------------------------------------------
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
@@ -296,29 +545,53 @@ impl App {
                     // window does not have; the picture on screen stays
                     // up until its sharper replacement arrives.
                     self.cache = Cache::default();
-                    return self.redecode_current();
+                    self.thumbs.clear();
+                    return Task::batch([self.redecode_current(), self.request_thumbs()]);
                 }
                 Task::none()
             }
             Message::FolderRead(dir, result) => {
+                // A folder the user has since left: its listing is of no
+                // use, and applying it would show the wrong pictures.
+                if self.folder_path.as_deref() != Some(dir.as_path()) {
+                    return Task::none();
+                }
                 self.loading_folder = false;
                 match result {
                     Ok(entries) => {
                         self.folder = Folder::build(entries, &self.order);
                         if let Some(path) = self.focus.take() {
-                            if !self.folder.focus_on(&path) {
+                            // A remembered selection that has since gone
+                            // (trashed, renamed) is simply not there; only
+                            // a file that exists and cannot be shown is
+                            // worth a sentence.
+                            if !self.folder.focus_on(&path) && path.exists() {
                                 self.notice =
                                     Some(format!("{} isn't a picture this viewer can show.", path.display()));
                             }
                         }
-                        self.folder_path = Some(dir);
-                        self.show_current()
+                        self.after_selection_moved()
                     }
                     Err(e) => {
                         self.folder_error = Some(e);
                         Task::none()
                     }
                 }
+            }
+            Message::Summaries(dir, result) => {
+                let listing = match result {
+                    Ok(list) => {
+                        if self.library_dir.as_deref() == Some(dir.as_path()) {
+                            if let Some(i) = self.folder_path.as_ref().and_then(|f| list.iter().position(|s| &s.path == f)) {
+                                self.library_cursor = i;
+                            }
+                        }
+                        Listing::Loaded(list)
+                    }
+                    Err(e) => Listing::Failed(e),
+                };
+                self.folders.insert(dir, listing);
+                self.request_thumbs()
             }
             Message::Decoded(path, result) => {
                 self.decoding.remove(&path);
@@ -335,6 +608,15 @@ impl App {
                 }
                 Task::none()
             }
+            Message::Details(path, measured, camera) => {
+                if self.details_wanted.as_deref() == Some(path.as_path()) {
+                    self.details_wanted = None;
+                }
+                if self.current_path().as_deref() == Some(path.as_path()) {
+                    self.details = Some(Details { path, measured, camera });
+                }
+                Task::none()
+            }
             Message::Thumb(path, handle) => {
                 self.thumbs_wanted.remove(&path);
                 self.thumbs.insert(path, handle);
@@ -347,16 +629,37 @@ impl App {
             },
             Message::Perform(action) => self.perform(action),
             Message::Select(index) => {
-                if self.folder.items().get(index).is_some() {
-                    while self.folder.cursor() < index {
-                        self.folder.next();
-                    }
-                    while self.folder.cursor() > index {
-                        self.folder.previous();
-                    }
-                    return self.show_current();
+                if self.folder.select(index) {
+                    return self.after_selection_moved();
                 }
                 Task::none()
+            }
+            Message::OpenTile(index) => {
+                if self.folder.select(index) {
+                    return self.set_mode(Mode::Photo);
+                }
+                Task::none()
+            }
+            Message::SelectCard(index) => {
+                self.library_cursor = index;
+                Task::none()
+            }
+            Message::OpenCard(index) => {
+                self.library_cursor = index;
+                self.open_card()
+            }
+            Message::OpenFolder(dir) => {
+                self.menu_open = false;
+                self.open_folder(dir, None)
+            }
+            Message::SetMode(mode) => self.set_mode(mode),
+            Message::GridScrolled(viewport) => {
+                self.grid_scroll = (viewport.absolute_offset().y, viewport.bounds().height);
+                self.request_thumbs()
+            }
+            Message::LibraryScrolled(viewport) => {
+                self.library_scroll = (viewport.absolute_offset().y, viewport.bounds().height);
+                self.request_thumbs()
             }
             Message::Scrolled(delta) => {
                 let steps = match delta {
@@ -372,12 +675,7 @@ impl App {
                     if let Some(shown) = &self.shown {
                         let viewport = self.viewport();
                         let at = self.cursor.unwrap_or(Point::new(viewport.width / 2.0, viewport.height / 2.0));
-                        self.transform.zoom_about(
-                            steps,
-                            LogicalPoint { x: at.x, y: at.y },
-                            shown.size,
-                            viewport,
-                        );
+                        self.transform.zoom_about(steps, LogicalPoint { x: at.x, y: at.y }, shown.size, viewport);
                     }
                 }
                 Task::none()
@@ -389,9 +687,13 @@ impl App {
                     self.dragging = Some(point);
                 }
                 self.cursor = Some(point);
+                if let Some(show) = &mut self.show {
+                    show.pointer_moved = Instant::now();
+                }
                 Task::none()
             }
             Message::DragStart => {
+                self.menu_open = false;
                 self.dragging = self.cursor;
                 Task::none()
             }
@@ -415,7 +717,7 @@ impl App {
                 self.resize_generation += 1;
                 let generation = self.resize_generation;
                 Task::perform(
-                    tokio::time::sleep(std::time::Duration::from_millis(RESIZE_SETTLE_MS)),
+                    tokio::time::sleep(Duration::from_millis(RESIZE_SETTLE_MS)),
                     move |_| Message::ResizeSettled(generation),
                 )
             }
@@ -424,13 +726,55 @@ impl App {
                     return Task::none();
                 }
                 let (width, height) = (self.window_size.width as u32, self.window_size.height as u32);
-                if let Err(e) = prefs::update(|p| {
+                save_pref(|p| {
                     p.window_width = width;
                     p.window_height = height;
-                }) {
-                    tracing::warn!(error = %e, "window size not saved");
+                });
+                Task::batch([self.sharpen_if_needed(), self.request_thumbs()])
+            }
+            Message::ToggleMenu => {
+                self.menu_open = !self.menu_open;
+                Task::none()
+            }
+            Message::MenuAction(action) => {
+                self.menu_open = false;
+                self.perform(action)
+            }
+            Message::Tick(now) => self.slideshow_tick(now),
+            Message::SlideshowPause => {
+                if let Some(show) = &mut self.show {
+                    show.show.paused = !show.show.paused;
+                    show.since = Instant::now();
                 }
-                self.sharpen_if_needed()
+                Task::none()
+            }
+            Message::SlideshowShuffle => {
+                if let Some(show) = &mut self.show {
+                    let seed = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(1);
+                    let on = !show.show.is_shuffled();
+                    show.show.set_shuffled(on, seed);
+                }
+                Task::none()
+            }
+            Message::SlideshowLoop => {
+                if let Some(show) = &mut self.show {
+                    show.show.looping = !show.show.looping;
+                    let on = show.show.looping;
+                    self.prefs.slideshow_loop = on;
+                    save_pref(|p| p.slideshow_loop = on);
+                }
+                Task::none()
+            }
+            Message::SlideshowInterval(interval) => {
+                if let Some(show) = &mut self.show {
+                    show.interval = interval;
+                }
+                self.prefs.slideshow_seconds = interval.seconds();
+                save_pref(|p| p.slideshow_seconds = interval.seconds());
+                Task::none()
             }
             Message::Trashed(path, result) => match result {
                 Ok(item) => {
@@ -442,7 +786,9 @@ impl App {
                     self.thumbs.remove(&path);
                     self.notice = Some(format!("Moved {name} to the trash."));
                     self.undo = Some(Undo::Trashed { item, name });
-                    self.show_current()
+                    // The sidebar's count for this folder is now one high.
+                    self.refresh_parent_summaries();
+                    self.after_selection_moved()
                 }
                 Err(e) => {
                     self.notice = Some(e);
@@ -469,12 +815,15 @@ impl App {
             Message::Restored(result) => match result {
                 Ok(name) => {
                     self.notice = Some(format!("Put {name} back."));
+                    self.refresh_parent_summaries();
                     match self.folder_path.clone() {
                         Some(dir) => {
                             // Re-read rather than re-insert: where it
                             // belongs in the order is the listing's
                             // question, not this window's.
-                            self.focus = self.current_path();
+                            let focus = self.current_path();
+                            self.focus = focus;
+                            self.loading_folder = true;
                             read_folder(dir)
                         }
                         None => Task::none(),
@@ -503,9 +852,162 @@ impl App {
         self.folder.current().map(|i| i.path.clone())
     }
 
-    /// Everything that follows the cursor moving: the new picture (from
-    /// the cache, or decoded), its neighbours made ready, the filmstrip's
-    /// thumbnails, and the size shown in the info panel.
+    // --- folders and modes -----------------------------------------------
+
+    /// Goes to `dir` as a new step in the history.
+    fn open_folder(&mut self, dir: PathBuf, focus: Option<PathBuf>) -> Task<Message> {
+        if self.folder_path.as_deref() == Some(dir.as_path()) && focus.is_none() {
+            return Task::none();
+        }
+        if let Some(from) = self.folder_path.clone() {
+            self.history.leave(from);
+        }
+        self.load_folder(dir, focus)
+    }
+
+    /// Shows `dir`, without touching the history — what Back and Forward
+    /// use, and the first folder at startup.
+    fn load_folder(&mut self, dir: PathBuf, focus: Option<PathBuf>) -> Task<Message> {
+        if let (Some(from), Some(selected)) = (self.folder_path.clone(), self.current_path()) {
+            self.last_selected.insert(from, selected);
+        }
+        let focus = focus.or_else(|| self.last_selected.get(&dir).cloned());
+        self.folder_path = Some(dir.clone());
+        self.folder = Folder::default();
+        self.focus = focus;
+        self.loading_folder = true;
+        self.folder_error = None;
+        self.shown = None;
+        self.details = None;
+        self.grid_scroll.0 = 0.0;
+        let mut tasks = vec![
+            read_folder(dir.clone()),
+            iced::widget::operation::scroll_to(grid_id(), iced::widget::operation::AbsoluteOffset { x: None, y: Some(0.0) }),
+        ];
+        if let Some(parent) = dir.parent() {
+            tasks.push(self.ensure_summaries(parent.to_path_buf()));
+        }
+        // The library follows the folder: a new folder means its parent's
+        // cards, with it selected, the next time Library is shown — and
+        // now, if Library is what is showing.
+        self.library_dir = None;
+        if self.mode == Mode::Library {
+            tasks.push(self.set_mode(Mode::Library));
+        }
+        Task::batch(tasks)
+    }
+
+    /// Reads `dir`'s subfolder summaries if nothing has asked yet.
+    fn ensure_summaries(&mut self, dir: PathBuf) -> Task<Message> {
+        if matches!(self.folders.get(&dir), Some(Listing::Loading | Listing::Loaded(_))) {
+            return Task::none();
+        }
+        self.folders.insert(dir.clone(), Listing::Loading);
+        read_summaries(dir, self.order)
+    }
+
+    /// The counts beside the current folder's siblings have changed.
+    fn refresh_parent_summaries(&mut self) {
+        if let Some(parent) = self.folder_path.as_ref().and_then(|d| d.parent()) {
+            self.folders.remove(parent);
+        }
+    }
+
+    fn set_mode(&mut self, mode: Mode) -> Task<Message> {
+        self.menu_open = false;
+        self.mode = mode;
+        match mode {
+            Mode::Photo => self.show_current(),
+            Mode::Grid => {
+                let mut tasks = vec![self.request_thumbs()];
+                if let Some(index) = (!self.folder.is_empty()).then_some(self.folder.cursor()) {
+                    tasks.push(self.scroll_grid_to(index));
+                }
+                Task::batch(tasks)
+            }
+            Mode::Library => {
+                let dir = match &self.library_dir {
+                    Some(dir) => dir.clone(),
+                    None => {
+                        let Some(current) = &self.folder_path else { return Task::none() };
+                        let dir = current.parent().map(Path::to_path_buf).unwrap_or_else(|| current.clone());
+                        // Start on the folder you came from. The sidebar
+                        // has usually loaded this listing already, so the
+                        // same choice made when it arrives would never run.
+                        self.library_cursor = match self.folders.get(&dir) {
+                            Some(Listing::Loaded(list)) => list.iter().position(|s| &s.path == current).unwrap_or(0),
+                            _ => 0,
+                        };
+                        self.library_dir = Some(dir.clone());
+                        dir
+                    }
+                };
+                Task::batch([self.ensure_summaries(dir), self.request_thumbs()])
+            }
+        }
+    }
+
+    /// Enter on a library card, or a double click: a folder with pictures
+    /// opens as its grid; one with none is a level of the tree, and the
+    /// library goes down into it instead.
+    fn open_card(&mut self) -> Task<Message> {
+        let Some(card) = self.library_summaries().get(self.library_cursor).cloned() else {
+            return Task::none();
+        };
+        if card.photos == 0 {
+            self.library_dir = Some(card.path.clone());
+            self.library_cursor = 0;
+            return Task::batch([self.ensure_summaries(card.path), self.request_thumbs()]);
+        }
+        self.mode = Mode::Grid;
+        self.open_folder(card.path, None)
+    }
+
+    /// Library mode one level up, keeping the folder you came from
+    /// selected.
+    fn library_up(&mut self) -> Task<Message> {
+        let Some(dir) = self.library_dir.clone() else {
+            return self.set_mode(Mode::Library);
+        };
+        let Some(parent) = dir.parent().map(Path::to_path_buf) else { return Task::none() };
+        self.library_dir = Some(parent.clone());
+        self.library_cursor = match self.folders.get(&parent) {
+            Some(Listing::Loaded(list)) => list.iter().position(|s| s.path == dir).unwrap_or(0),
+            _ => 0,
+        };
+        Task::batch([self.ensure_summaries(parent), self.request_thumbs()])
+    }
+
+    /// Everything that follows the selection moving, in whichever mode.
+    fn after_selection_moved(&mut self) -> Task<Message> {
+        match self.mode {
+            Mode::Photo => self.show_current(),
+            Mode::Grid | Mode::Library => {
+                let mut tasks = vec![self.request_details(), self.request_thumbs()];
+                if self.mode == Mode::Grid && !self.folder.is_empty() {
+                    tasks.push(self.scroll_grid_to(self.folder.cursor()));
+                }
+                Task::batch(tasks)
+            }
+        }
+    }
+
+    fn scroll_grid_to(&self, index: usize) -> Task<Message> {
+        let tiles = self.tiles(1);
+        let bands = grid::bands(&self.groups(), tiles.metrics);
+        let (top, height) = self.grid_scroll;
+        match grid::scroll_to_show(&bands, tiles.metrics, index, top, height - 2.0 * GRID_PAD) {
+            Some(y) => iced::widget::operation::scroll_to(
+                grid_id(),
+                iced::widget::operation::AbsoluteOffset { x: None, y: Some(y) },
+            ),
+            None => Task::none(),
+        }
+    }
+
+    /// The new picture in Photo mode (from the cache, or decoded), its
+    /// neighbours made ready, the filmstrip's thumbnails, and the
+    /// details for the inspector and the status bar.
     fn show_current(&mut self) -> Task<Message> {
         self.transform = Transform::default();
         self.turns = Turns::none();
@@ -513,7 +1015,7 @@ impl App {
             self.shown = None;
             return Task::none();
         };
-        self.current_bytes = std::fs::metadata(&item.path).ok().map(|m| m.len());
+        self.current_bytes = item.bytes;
 
         let mut tasks = Vec::new();
         match self.cache.get(&item.path) {
@@ -533,6 +1035,7 @@ impl App {
                 tasks.push(self.decode(neighbour));
             }
         }
+        tasks.push(self.request_details());
         tasks.push(self.request_thumbs());
         Task::batch(tasks)
     }
@@ -547,6 +1050,35 @@ impl App {
             .filter(|i| i.media == Media::Still)
             .map(|i| i.path.clone())
             .collect()
+    }
+
+    /// The header and EXIF of the selected file, read without decoding.
+    fn request_details(&mut self) -> Task<Message> {
+        let Some(item) = self.folder.current().cloned() else { return Task::none() };
+        self.current_bytes = item.bytes;
+        if self.details.as_ref().is_some_and(|d| d.path == item.path)
+            || self.details_wanted.as_deref() == Some(item.path.as_path())
+        {
+            return Task::none();
+        }
+        self.details_wanted = Some(item.path.clone());
+        let path = item.path;
+        let still = item.media == Media::Still;
+        Task::perform(
+            async move {
+                let for_task = path.clone();
+                let (measured, camera) = tokio::task::spawn_blocking(move || {
+                    if !still {
+                        return (None, Camera::default());
+                    }
+                    (hyprforge_image::measure(&for_task).ok(), hyprforge_image::camera::read(&for_task))
+                })
+                .await
+                .unwrap_or((None, Camera::default()));
+                (path, measured, camera)
+            },
+            |(path, measured, camera)| Message::Details(path, measured, camera),
+        )
     }
 
     fn decode(&mut self, path: PathBuf) -> Task<Message> {
@@ -574,10 +1106,8 @@ impl App {
     fn present(&mut self, path: PathBuf, decoded: Arc<Decoded>) {
         let (pixels, width, height) =
             rotate_rgba(&decoded.pixels, decoded.size.width, decoded.size.height, self.turns);
-        let (source_w, source_h) = hyprforge_photos::rotation::presented_size(
-            decoded.measured.display_size(),
-            self.turns,
-        );
+        let (source_w, source_h) =
+            hyprforge_photos::rotation::presented_size(decoded.measured.display_size(), self.turns);
         self.shown = Some(Shown {
             path,
             handle: image::Handle::from_rgba(width, height, pixels),
@@ -587,6 +1117,9 @@ impl App {
     }
 
     fn redecode_current(&mut self) -> Task<Message> {
+        if self.mode != Mode::Photo {
+            return Task::none();
+        }
         match self.current_path() {
             Some(path) => {
                 self.cache.remove(&path);
@@ -611,28 +1144,66 @@ impl App {
         Task::none()
     }
 
-    fn visible_thumbs(&self) -> filmstrip::Window {
-        let visible = filmstrip::fits(self.window_size.width, THUMB, THUMB_GAP);
+    // --- thumbnails ------------------------------------------------------
+
+    fn strip_window(&self) -> filmstrip::Window {
+        let visible = filmstrip::fits(self.pane_width() - 28.0, STRIP_TILE.0, STRIP_GAP);
         filmstrip::window(self.folder.len(), self.folder.cursor(), visible)
     }
 
-    fn request_thumbs(&mut self) -> Task<Message> {
-        if !self.prefs.filmstrip {
-            return Task::none();
+    /// The paths whose thumbnails the window can show right now.
+    fn wanted_thumbs(&self) -> Vec<PathBuf> {
+        let items = self.folder.items();
+        let path_of = |i: usize| items.get(i).map(|item| item.path.clone());
+        match self.mode {
+            Mode::Photo if self.filmstrip_shown() => self.strip_window().indices().filter_map(path_of).collect(),
+            Mode::Photo => Vec::new(),
+            Mode::Grid => {
+                let tiles = self.tiles(1);
+                let bands = grid::bands(&self.groups(), tiles.metrics);
+                let (top, height) = self.grid_scroll;
+                grid::visible(&bands, tiles.metrics, top, height, height).into_iter().filter_map(path_of).collect()
+            }
+            Mode::Library => {
+                let cards = self.library_summaries();
+                let one = [grid::Group { day: None, indices: (0..cards.len()).collect() }];
+                let tiles = self.tiles(2);
+                let metrics = grid::Metrics { header: 0.0, ..tiles.metrics };
+                let (top, height) = self.library_scroll;
+                grid::visible(&grid::bands(&one, metrics), metrics, top, height, height)
+                    .into_iter()
+                    .filter_map(|i| cards.get(i).and_then(|c| c.cover.clone()))
+                    .collect()
+            }
         }
-        let edge = (THUMB * self.scale_factor).ceil() as u32;
+    }
+
+    fn request_thumbs(&mut self) -> Task<Message> {
+        let wanted = self.wanted_thumbs();
+        // Over the cap, keep only what is wanted now. The cap is on what
+        // is held, so this runs before anything new is asked for.
+        if self.thumbs.len() > MAX_THUMBS {
+            let keep: HashSet<&PathBuf> = wanted.iter().collect();
+            self.thumbs.retain(|path, _| keep.contains(path));
+        }
+        let edge = (THUMB_EDGE * self.scale_factor).ceil() as u32;
+        let clips: HashSet<&Path> = self
+            .folder
+            .items()
+            .iter()
+            .filter(|i| i.media == Media::Clip)
+            .map(|i| i.path.as_path())
+            .collect();
         let mut tasks = Vec::new();
-        for index in self.visible_thumbs().indices() {
-            let Some(item) = self.folder.items().get(index) else { continue };
-            if self.thumbs.contains_key(&item.path) || self.thumbs_wanted.contains(&item.path) {
+        for path in wanted {
+            if self.thumbs.contains_key(&path) || self.thumbs_wanted.contains(&path) {
                 continue;
             }
-            if item.media == Media::Clip {
-                self.thumbs.insert(item.path.clone(), None);
+            if clips.contains(path.as_path()) {
+                self.thumbs.insert(path, None);
                 continue;
             }
-            self.thumbs_wanted.insert(item.path.clone());
-            let path = item.path.clone();
+            self.thumbs_wanted.insert(path.clone());
             tasks.push(Task::perform(
                 async move {
                     let for_task = path.clone();
@@ -652,28 +1223,16 @@ impl App {
         Task::batch(tasks)
     }
 
+    // --- actions -----------------------------------------------------------
+
     fn perform(&mut self, action: Action) -> Task<Message> {
+        if self.show.is_some() {
+            return self.perform_in_slideshow(action);
+        }
         let viewport = self.viewport();
         match action {
-            Action::Next => {
-                if self.folder.next().is_some() {
-                    return self.show_current();
-                }
-            }
-            Action::Previous => {
-                if self.folder.previous().is_some() {
-                    return self.show_current();
-                }
-            }
-            Action::First => {
-                if self.folder.first().is_some() {
-                    return self.show_current();
-                }
-            }
-            Action::Last => {
-                if self.folder.last().is_some() {
-                    return self.show_current();
-                }
+            Action::Next | Action::Previous | Action::Below | Action::Above | Action::First | Action::Last => {
+                return self.move_selection(action);
             }
             Action::ZoomIn | Action::ZoomOut => {
                 if let Some(shown) = &self.shown {
@@ -698,6 +1257,7 @@ impl App {
                 self.prefs.info_panel = !self.prefs.info_panel;
                 let on = self.prefs.info_panel;
                 save_pref(|p| p.info_panel = on);
+                return Task::batch([self.request_details(), self.request_thumbs()]);
             }
             Action::ToggleFilmstrip => {
                 self.prefs.filmstrip = !self.prefs.filmstrip;
@@ -705,6 +1265,46 @@ impl App {
                 save_pref(|p| p.filmstrip = on);
                 return self.request_thumbs();
             }
+            Action::ToggleSidebar => {
+                self.prefs.sidebar = !self.prefs.sidebar;
+                let on = self.prefs.sidebar;
+                save_pref(|p| p.sidebar = on);
+                return self.request_thumbs();
+            }
+            Action::ShowPhoto => return self.set_mode(Mode::Photo),
+            Action::ShowGrid => return self.set_mode(Mode::Grid),
+            Action::ShowLibrary => return self.set_mode(Mode::Library),
+            Action::Activate => {
+                return match self.mode {
+                    Mode::Grid if !self.folder.is_empty() => self.set_mode(Mode::Photo),
+                    Mode::Library => self.open_card(),
+                    Mode::Photo => self.open_externally(),
+                    Mode::Grid => Task::none(),
+                };
+            }
+            Action::Up => {
+                return match self.mode {
+                    Mode::Library => self.library_up(),
+                    // One level up from a folder's pictures is the folders
+                    // beside it — mockup `1h`'s Backspace.
+                    Mode::Photo | Mode::Grid => self.set_mode(Mode::Library),
+                };
+            }
+            Action::Back => {
+                if let Some(current) = self.folder_path.clone() {
+                    if let Some(to) = self.history.back(current) {
+                        return self.load_folder(to, None);
+                    }
+                }
+            }
+            Action::Forward => {
+                if let Some(current) = self.folder_path.clone() {
+                    if let Some(to) = self.history.forward(current) {
+                        return self.load_folder(to, None);
+                    }
+                }
+            }
+            Action::Slideshow => return self.start_slideshow(),
             Action::OpenExternally => return self.open_externally(),
             Action::ShowInFiles => {
                 if let Some(path) = self.current_path() {
@@ -718,11 +1318,21 @@ impl App {
             Action::SetWallpaper => return self.set_wallpaper(),
             Action::Trash => return self.trash(),
             Action::Close => {
-                // Escape leaves fullscreen first — the keymap cannot
-                // know which state the window is in, so this decides.
+                // Escape unwinds one layer at a time — the menu, then
+                // fullscreen, then the grid or library back to the
+                // photograph — and closes only from a plain photo. The
+                // keymap cannot know which state the window is in, so
+                // this decides.
+                if self.menu_open {
+                    self.menu_open = false;
+                    return Task::none();
+                }
                 if self.fullscreen {
                     self.fullscreen = false;
                     return self.set_window_mode();
+                }
+                if self.mode != Mode::Photo && !self.folder.is_empty() {
+                    return self.set_mode(Mode::Photo);
                 }
                 return match self.window {
                     Some(id) => window::close(id),
@@ -733,16 +1343,121 @@ impl App {
         Task::none()
     }
 
+    /// The arrows, Home and End, which mean different things per mode.
+    fn move_selection(&mut self, action: Action) -> Task<Message> {
+        match self.mode {
+            Mode::Photo => {
+                let moved = match action {
+                    Action::Next | Action::Below => self.folder.next().is_some(),
+                    Action::Previous | Action::Above => self.folder.previous().is_some(),
+                    Action::First => self.folder.first().is_some(),
+                    _ => self.folder.last().is_some(),
+                };
+                if moved {
+                    return self.show_current();
+                }
+                Task::none()
+            }
+            Mode::Grid => {
+                let movement = grid_move(action);
+                let tiles = self.tiles(1);
+                match grid::step(&self.groups(), tiles.metrics.columns, self.folder.cursor(), movement) {
+                    Some(index) if self.folder.select(index) => self.after_selection_moved(),
+                    _ => Task::none(),
+                }
+            }
+            Mode::Library => {
+                let count = self.library_summaries().len();
+                let one = [grid::Group { day: None, indices: (0..count).collect() }];
+                let columns = self.tiles(2).metrics.columns;
+                if let Some(index) = grid::step(&one, columns, self.library_cursor, grid_move(action)) {
+                    self.library_cursor = index;
+                }
+                Task::none()
+            }
+        }
+    }
+
     fn set_window_mode(&mut self) -> Task<Message> {
         self.transform.fit();
-        match self.window {
+        let redecode = self.sharpen_if_needed();
+        let mode = match self.window {
             Some(id) => window::set_mode(
                 id,
                 if self.fullscreen { window::Mode::Fullscreen } else { window::Mode::Windowed },
             ),
             None => Task::none(),
+        };
+        Task::batch([mode, redecode])
+    }
+
+    // --- slideshow ---------------------------------------------------------
+
+    fn start_slideshow(&mut self) -> Task<Message> {
+        if self.folder.is_empty() {
+            return Task::none();
+        }
+        self.menu_open = false;
+        let now = Instant::now();
+        self.show = Some(Slideshow {
+            show: Show::new(self.folder.len(), self.folder.cursor(), self.prefs.slideshow_loop),
+            interval: Interval::from_seconds(self.prefs.slideshow_seconds),
+            since: now,
+            pointer_moved: now,
+            was_fullscreen: self.fullscreen,
+        });
+        self.mode = Mode::Photo;
+        self.fullscreen = true;
+        Task::batch([self.set_window_mode(), self.show_current()])
+    }
+
+    fn stop_slideshow(&mut self) -> Task<Message> {
+        let Some(show) = self.show.take() else { return Task::none() };
+        self.fullscreen = show.was_fullscreen;
+        Task::batch([self.set_window_mode(), self.show_current()])
+    }
+
+    fn perform_in_slideshow(&mut self, action: Action) -> Task<Message> {
+        let Some(show) = &mut self.show else { return Task::none() };
+        let target = match action {
+            Action::Next | Action::Below => show.show.advance(),
+            Action::Previous | Action::Above => show.show.back(),
+            Action::Close | Action::Slideshow => return self.stop_slideshow(),
+            _ => return Task::none(),
+        };
+        show.since = Instant::now();
+        match target {
+            Some(index) if self.folder.select(index) => self.show_current(),
+            Some(_) => Task::none(),
+            None => self.stop_slideshow(),
         }
     }
+
+    fn slideshow_tick(&mut self, now: Instant) -> Task<Message> {
+        let Some(show) = &mut self.show else { return Task::none() };
+        if show.show.paused || now.duration_since(show.since) < Duration::from_secs(show.interval.seconds()) {
+            return Task::none();
+        }
+        // The next picture only once this one is actually on screen: a
+        // slow decode must not be skipped past before anyone saw it.
+        let on_screen = self.shown.as_ref().map(|s| &s.path) == self.folder.current().map(|i| &i.path)
+            || self.folder.current().is_some_and(|i| i.media == Media::Clip || self.failed.contains_key(&i.path));
+        if !on_screen {
+            return Task::none();
+        }
+        show.since = now;
+        match show.show.advance() {
+            Some(index) if self.folder.select(index) => self.show_current(),
+            Some(_) => Task::none(),
+            None => self.stop_slideshow(),
+        }
+    }
+
+    fn slideshow_controls_visible(&self) -> bool {
+        self.show.as_ref().is_some_and(|s| s.show.paused || s.pointer_moved.elapsed() < SLIDESHOW_CONTROLS_FOR)
+    }
+
+    // --- things that touch files ---------------------------------------------
 
     fn open_externally(&mut self) -> Task<Message> {
         let Some(path) = self.current_path() else { return Task::none() };
@@ -837,181 +1552,38 @@ impl App {
             |(path, result)| Message::Trashed(path, result),
         )
     }
+}
 
-    fn view(&self) -> Element<'_, Message> {
-        let mut body = column![].width(Length::Fill).height(Length::Fill);
-        if !self.fullscreen {
-            body = body.push(self.toolbar());
-        }
+/// The grid's (or library's) tile geometry for the pane as it is now.
+#[derive(Debug, Clone, Copy)]
+struct Tiles {
+    width: f32,
+    picture: f32,
+    metrics: grid::Metrics,
+}
 
-        let mut middle = row![self.canvas()].height(Length::Fill);
-        if self.prefs.info_panel && !self.fullscreen {
-            middle = middle.push(self.info_panel());
-        }
-        body = body.push(middle);
-
-        if self.prefs.filmstrip && !self.fullscreen {
-            body = body.push(self.filmstrip());
-        }
-        body.into()
+fn grid_move(action: Action) -> grid::Move {
+    match action {
+        Action::Next => grid::Move::Next,
+        Action::Previous => grid::Move::Previous,
+        Action::Below => grid::Move::Down,
+        Action::Above => grid::Move::Up,
+        Action::First => grid::Move::First,
+        _ => grid::Move::Last,
     }
+}
 
-    fn toolbar(&self) -> Element<'_, Message> {
-        let scale = self.font_scale;
-        let position = match self.folder.position() {
-            Some((at, of)) => format!("{at} of {of}"),
-            None => String::new(),
-        };
-        let name = self.folder.current().map(|i| i.name.clone()).unwrap_or_default();
-        let tool = |label: &'static str, action: Action| secondary_button(label).on_press(Message::Perform(action));
+fn grid_id() -> Id {
+    Id::new("photos-grid")
+}
 
-        let mut bar = row![
-            tool("‹", Action::Previous),
-            tool("›", Action::Next),
-            column![scaled_text(name, BASE_TEXT_SIZE, scale), meta_text(position, 12.0, scale)]
-                .width(Length::Fill),
-        ]
-        .spacing(spacing::SM)
-        .align_y(iced::Alignment::Center);
+fn library_id() -> Id {
+    Id::new("photos-library")
+}
 
-        if let Some(notice) = &self.notice {
-            bar = bar.push(meta_text(notice.clone(), 13.0, scale));
-            if self.undo.is_some() {
-                bar = bar.push(secondary_button("Undo").on_press(Message::UndoPressed));
-            }
-            bar = bar.push(secondary_button("×").on_press(Message::DismissNotice));
-        }
-
-        bar = bar
-            .push(tool("−", Action::ZoomOut))
-            .push(tool("Fit", Action::ZoomFit))
-            .push(tool("+", Action::ZoomIn))
-            .push(tool("⟲", Action::RotateLeft))
-            .push(tool("⟳", Action::RotateRight))
-            .push(tool("Wallpaper", Action::SetWallpaper))
-            .push(tool("Info", Action::ToggleInfo));
-
-        container(bar)
-            .padding([spacing::XS, spacing::SM])
-            .height(Length::Fixed(TOOLBAR_HEIGHT))
-            .width(Length::Fill)
-            .into()
-    }
-
-    /// The picture itself, placed by the transform and clipped to the
-    /// viewport; or a sentence where there is no picture to place.
-    fn canvas(&self) -> Element<'_, Message> {
-        let scale = self.font_scale;
-        let viewport = self.viewport();
-        let centred = |text: String| -> Element<'_, Message> {
-            container(meta_text(text, BASE_TEXT_SIZE, scale)).center(Length::Fill).into()
-        };
-
-        let content: Element<'_, Message> = if let Some(e) = &self.folder_error {
-            centred(format!("Couldn't read the folder: {e}"))
-        } else if self.folder_path.is_none() {
-            centred("Open a picture from Files, or name one on the command line.".to_string())
-        } else if self.loading_folder {
-            centred("Loading…".to_string())
-        } else if let Some(item) = self.folder.current() {
-            if item.media == Media::Clip {
-                centred(format!("{} is a video. Press Enter to open it in a video player.", item.name))
-            } else if let Some(e) = self.failed.get(&item.path) {
-                centred(e.clone())
-            } else if let Some(shown) = &self.shown {
-                let (w, h) = self.transform.drawn_size(shown.size, viewport);
-                let at = self.transform.top_left(shown.size, viewport);
-                pin(image(shown.handle.clone())
-                    .width(Length::Fixed(w))
-                    .height(Length::Fixed(h))
-                    .content_fit(iced::ContentFit::Fill))
-                .x(at.x)
-                .y(at.y)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into()
-            } else {
-                centred("Loading…".to_string())
-            }
-        } else {
-            centred("There are no pictures in this folder.".to_string())
-        };
-
-        mouse_area(
-            container(content)
-                .width(Length::Fixed(viewport.width))
-                .height(Length::Fixed(viewport.height))
-                .clip(true),
-        )
-        .on_scroll(Message::Scrolled)
-        .on_move(Message::PointerMoved)
-        .on_press(Message::DragStart)
-        .on_release(Message::DragEnd)
-        .on_double_click(Message::ToggleZoom)
-        .into()
-    }
-
-    fn info_panel(&self) -> Element<'_, Message> {
-        let scale = self.font_scale;
-        let rows = match self.folder.current() {
-            Some(item) => info::rows(
-                item,
-                self.shown.as_ref().filter(|s| s.path == item.path).map(|s| &s.decoded.measured),
-                self.turns,
-                self.folder.position(),
-                self.current_bytes,
-            ),
-            None => Vec::new(),
-        };
-        let mut list = column![].spacing(spacing::SM);
-        for row in rows {
-            list = list.push(column![meta_text(row.label, 12.0, scale), scaled_text(row.value, BASE_TEXT_SIZE, scale)]);
-        }
-        container(scrollable(list).height(Length::Fill))
-            .padding(spacing::MD)
-            .width(Length::Fixed(INFO_WIDTH))
-            .height(Length::Fill)
-            .into()
-    }
-
-    fn filmstrip(&self) -> Element<'_, Message> {
-        let scale = self.font_scale;
-        let window = self.visible_thumbs();
-        let mut strip = row![].spacing(THUMB_GAP).align_y(iced::Alignment::Center);
-        for index in window.indices() {
-            let Some(item) = self.folder.items().get(index) else { continue };
-            let tile: Element<'_, Message> = match self.thumbs.get(&item.path) {
-                Some(Some(handle)) => image(handle.clone())
-                    .width(Length::Fixed(THUMB))
-                    .height(Length::Fixed(THUMB))
-                    .content_fit(iced::ContentFit::Contain)
-                    .into(),
-                Some(None) if item.media == Media::Clip => container(meta_text("▶", 18.0, scale))
-                    .center(Length::Fixed(THUMB))
-                    .into(),
-                _ => Space::new().width(Length::Fixed(THUMB)).height(Length::Fixed(THUMB)).into(),
-            };
-            let selected = index == self.folder.cursor();
-            strip = strip.push(
-                button(tile)
-                    .padding(2)
-                    .style(move |theme: &Theme, status| {
-                        let mut style = button::secondary(theme, status);
-                        if selected {
-                            style.border.color = theme.palette().primary;
-                            style.border.width = 2.0;
-                        }
-                        style
-                    })
-                    .on_press(Message::Select(index)),
-            );
-        }
-        container(strip)
-            .center_x(Length::Fill)
-            .height(Length::Fixed(FILMSTRIP_HEIGHT))
-            .padding(spacing::XS)
-            .into()
-    }
+/// A folder's name as the title and headings show it; the root is `/`.
+fn display_name(dir: &Path) -> String {
+    dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| dir.display().to_string())
 }
 
 fn read_folder(dir: PathBuf) -> Task<Message> {
@@ -1024,6 +1596,32 @@ fn read_folder(dir: PathBuf) -> Task<Message> {
             (dir, result)
         },
         |(dir, result)| Message::FolderRead(dir, result),
+    )
+}
+
+/// Lists `dir`'s subfolders and summarises each from its own listing —
+/// one directory read per subfolder, capped at `library::MOST_FOLDERS`.
+/// A subfolder that cannot be read still gets its card, with no
+/// pictures: it is there, and hiding it would be a claim that it is not.
+fn read_summaries(dir: PathBuf, order: hyprforge_listing::order::Order) -> Task<Message> {
+    Task::perform(
+        async move {
+            let for_task = dir.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let entries = StdBackend.read_dir(&for_task).map_err(|e| e.to_string())?;
+                Ok(library::subfolders(entries, &order)
+                    .into_iter()
+                    .map(|(name, path)| {
+                        let entries = StdBackend.read_dir(&path).unwrap_or_default();
+                        library::summarise(name, path, entries, &order)
+                    })
+                    .collect())
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+            (dir, result)
+        },
+        |(dir, result)| Message::Summaries(dir, result),
     )
 }
 

@@ -30,8 +30,15 @@ pub struct Prefs {
     /// `Default` is not relied on and [`Default`] below sets it
     /// explicitly.
     pub filmstrip: bool,
-    /// Whether the info panel shows.
+    /// Whether the inspector shows, docked right — mockup `2c`.
     pub info_panel: bool,
+    /// Whether the Places sidebar shows — `Ctrl+B`.
+    pub sidebar: bool,
+    /// Seconds per picture in a slideshow; see `slideshow::Interval` for
+    /// the values that exist.
+    pub slideshow_seconds: u64,
+    /// Whether a slideshow starts again after the last picture.
+    pub slideshow_loop: bool,
     pub window_width: u32,
     pub window_height: u32,
 }
@@ -39,12 +46,17 @@ pub struct Prefs {
 impl Default for Prefs {
     fn default() -> Self {
         Prefs {
-            // Off: the first thing a viewer should show is the
-            // photograph, filling the window. A filmstrip is something
-            // you ask for when you know there is a folder behind it.
-            filmstrip: false,
+            // On, since the window became the file manager's shell
+            // (mockup `2a`). It used to default off so a bare photograph
+            // filled the window; now there is a sidebar and a status bar
+            // around it anyway, and the strip is how the shell shows
+            // that there is a folder behind the picture.
+            filmstrip: true,
             info_panel: false,
-            window_width: 1100,
+            sidebar: true,
+            slideshow_seconds: 5,
+            slideshow_loop: false,
+            window_width: 1180,
             window_height: 760,
         }
     }
@@ -136,7 +148,15 @@ mod tests {
     fn everything_written_reads_back_as_itself() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("photos.toml");
-        let prefs = Prefs { filmstrip: true, info_panel: true, window_width: 640, window_height: 480 };
+        let prefs = Prefs {
+            filmstrip: false,
+            info_panel: true,
+            sidebar: false,
+            slideshow_seconds: 10,
+            slideshow_loop: true,
+            window_width: 640,
+            window_height: 480,
+        };
         save_to(&path, &prefs).unwrap();
         assert_eq!(load_from(&path).unwrap(), prefs);
     }
