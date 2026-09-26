@@ -57,6 +57,29 @@ pub struct Listing {
     pub total: usize,
 }
 
+/// Whether an entry is worth asking the host for a thumbnail of, by its
+/// name alone — the browser does no I/O, and this is asked of every row.
+///
+/// Pictures and SVGs in either view; PDFs and videos in the grid only.
+/// Those two need another program run per file — a video's frame costs
+/// about half a second of `ffmpeg` — which is worth it for a grid cell
+/// big enough to show a page or a scene, and not for a list row's
+/// twenty-pixel icon. Like the picture check it can be wrong about a
+/// misnamed file; the host then answers nothing and the icon stays.
+pub fn wants_thumbnail(path: &Path, grid: bool) -> bool {
+    if hyprforge_image::format::looks_decodable(path) {
+        return true;
+    }
+    let Some(ext) = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    match ext.as_str() {
+        "svg" => true,
+        "pdf" | "mp4" | "mkv" | "webm" | "mov" | "avi" | "m4v" | "wmv" | "mpg" | "mpeg" | "ogv" => grid,
+        _ => false,
+    }
+}
+
 /// Something to draw in a box: decoded pixels, or an SVG iced renders at
 /// whatever size it is given.
 ///
@@ -110,5 +133,26 @@ impl Picture {
                 .content_fit(iced::ContentFit::Contain)
                 .into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The grid shows pages and scenes; a list row shows only what is
+    /// cheap to draw at twenty pixels.
+    #[test]
+    fn pdfs_and_videos_get_thumbnails_in_the_grid_alone() {
+        for name in ["a.png", "b.JPG", "c.svg"] {
+            assert!(wants_thumbnail(Path::new(name), false), "{name} in a list");
+            assert!(wants_thumbnail(Path::new(name), true), "{name} in a grid");
+        }
+        for name in ["doc.pdf", "clip.mp4", "film.MKV"] {
+            assert!(!wants_thumbnail(Path::new(name), false), "{name} in a list");
+            assert!(wants_thumbnail(Path::new(name), true), "{name} in a grid");
+        }
+        assert!(!wants_thumbnail(Path::new("notes.txt"), true));
+        assert!(!wants_thumbnail(Path::new("Makefile"), true));
     }
 }

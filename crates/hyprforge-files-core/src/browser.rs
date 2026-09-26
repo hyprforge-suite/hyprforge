@@ -47,11 +47,10 @@ use hyprforge_ui::widgets::{
 };
 use iced::widget::{column, container, row, scrollable, text_input, Id};
 use iced::{Element, Length};
-use iced::widget::image::Handle as ImageHandle;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-/// How many grid thumbnails one folder may hold.
+/// How many thumbnails one folder may hold, grid and list together.
 ///
 /// Each is decoded at twice the grid icon's logical size (for a 2x
 /// display) — 112 pixels square, about 50KB — so the cap bounds a folder
@@ -76,7 +75,7 @@ pub const PREVIEW_WIDTH: f32 = density::PREVIEW_MAX_WIDTH;
 #[derive(Debug, Clone, Default)]
 struct Media {
     dir: PathBuf,
-    thumbnails: HashMap<PathBuf, ImageHandle>,
+    thumbnails: HashMap<PathBuf, Picture>,
     /// Asked for, whether or not an answer has come — so nothing is
     /// asked for twice, including a file that could not be decoded.
     requested: HashSet<PathBuf>,
@@ -510,7 +509,7 @@ pub enum Message {
     /// empty.
     CountsLoaded(Vec<(PathBuf, Option<usize>)>),
     /// A grid thumbnail the host decoded — see [`Outcome::LoadThumbnails`].
-    ThumbnailLoaded(PathBuf, ImageHandle),
+    ThumbnailLoaded(PathBuf, Picture),
     /// The preview pane's picture, or `None` when it would not decode.
     PreviewLoaded(PathBuf, Option<Preview>),
     /// Theme icons the host looked up, by key — `None` for a key the
@@ -620,7 +619,7 @@ struct ViewModel<'a> {
     can_go_back: bool,
     can_go_forward: bool,
     /// Grid thumbnails the host has decoded, by path.
-    thumbnails: &'a HashMap<PathBuf, ImageHandle>,
+    thumbnails: &'a HashMap<PathBuf, Picture>,
     /// Theme icons by key — see [`Browser`]'s field of the same name.
     icons: &'a HashMap<String, Option<Picture>>,
     /// What the preview pane shows, when it is on *and* the window has
@@ -1174,13 +1173,18 @@ impl Browser {
             }
         }
 
-        let grid = self.prefs.view_mode == ViewMode::Grid && matches!(self.load_state, LoadState::Loaded);
-        if grid && self.archive.is_none() {
+        // Both views now: the grid for everything worth a picture, the
+        // list for what is cheap enough at row size — see
+        // `preview::wants_thumbnail`. One map for both, so switching view
+        // asks only for what the other view did not already want.
+        let grid = self.prefs.view_mode == ViewMode::Grid;
+        let loaded = matches!(self.load_state, LoadState::Loaded);
+        if loaded && self.archive.is_none() {
             let room = MAX_THUMBNAILS.saturating_sub(self.media.requested.len());
             let wanted: Vec<PathBuf> = self
                 .rows()
                 .into_iter()
-                .filter(|e| !e.is_dir && hyprforge_image::format::looks_decodable(&e.path))
+                .filter(|e| !e.is_dir && crate::preview::wants_thumbnail(&e.path, grid))
                 .filter(|e| !self.media.requested.contains(&e.path))
                 .take(room)
                 .map(|e| e.path.clone())
@@ -3002,6 +3006,7 @@ struct RowContext<'a> {
     /// long list to disagree about what "Today" means.
     now: chrono::DateTime<chrono::Local>,
     icons: &'a HashMap<String, Option<Picture>>,
+    thumbnails: &'a HashMap<PathBuf, Picture>,
 }
 
 /// The theme icon the host found for `entry`, if it has answered with one.
@@ -3015,7 +3020,7 @@ fn entry_row<'a>(
     selected: bool,
     ctx: &RowContext<'a>,
 ) -> Element<'a, Message> {
-    let RowContext { columns, renaming, home, scale, now, icons } = ctx;
+    let RowContext { columns, renaming, home, scale, now, icons, thumbnails } = ctx;
     let (renaming, scale, now) = (*renaming, *scale, *now);
     // The icon, then the name, then whichever optional columns are
     // switched on — in `Column::ALL` order, which is the same order
@@ -3033,7 +3038,11 @@ fn entry_row<'a>(
     // what marks the row instead.
     let selected = selected && editing.is_none();
     let mut row_content = row![
-        entry_icon(entry.kind, themed(icons, entry), 20.0, scale),
+        // The picture itself when the host has one, in the icon's square.
+        match thumbnails.get(&entry.path) {
+            Some(picture) => picture.view(scale.apply(20.0)),
+            None => entry_icon(entry.kind, themed(icons, entry), 20.0, scale),
+        },
         // `&entry.name`, not a clone: `scaled_text` borrows for `'a`,
         // and this row is rebuilt for every visible entry on every
         // redraw — a hover anywhere in the window allocated one `String`
@@ -3434,6 +3443,7 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         scale,
         now: chrono::Local::now(),
         icons: vm.icons,
+        thumbnails: vm.thumbnails,
     };
     for (index, entry) in vm.rows.iter().copied().enumerate() {
         // One rule, where the directories end and the files begin.
@@ -3628,7 +3638,7 @@ fn grid_cell<'a>(
     entry: &'a Entry,
     selected: bool,
     renaming: Option<&'a Renaming>,
-    thumbnail: Option<&ImageHandle>,
+    thumbnail: Option<&Picture>,
     icon: Option<&Picture>,
     scale: FontScale,
 ) -> Element<'a, Message> {
@@ -3643,11 +3653,7 @@ fn grid_cell<'a>(
     // the icon would take, so a row of thumbnails and icons lines up.
     let size = density::grid_icon_size(scale);
     let picture: Element<'a, Message> = match thumbnail {
-        Some(handle) => iced::widget::image(handle.clone())
-            .width(Length::Fixed(size))
-            .height(Length::Fixed(size))
-            .content_fit(iced::ContentFit::Contain)
-            .into(),
+        Some(picture) => picture.view(size),
         None => entry_icon(entry.kind, icon, size, scale),
     };
     let content = column![
@@ -3678,6 +3684,11 @@ mod tests_support {
 
     /// A listing of `(name, is_dir)` at `/dir`, already loaded.
     pub fn loaded(rows: &[(&str, bool)]) -> Browser {
+        loaded_asking(rows).0
+    }
+
+    /// [`loaded`], and what the load asked its host for.
+    pub fn loaded_asking(rows: &[(&str, bool)]) -> (Browser, Outcome) {
         let (mut browser, _) =
             Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
         let entries: Vec<Entry> = rows
@@ -3699,8 +3710,8 @@ mod tests_support {
                 packed: None,
             })
             .collect();
-        browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(entries)));
-        browser
+        let outcome = browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(entries)));
+        (browser, outcome)
     }
 }
 
@@ -5338,7 +5349,8 @@ mod archive_tests {
 /// grid's — and what it does with the answers.
 #[cfg(test)]
 mod media_tests {
-    use super::tests_support::loaded;
+    use super::tests_support::{loaded, loaded_asking};
+    use iced::widget::image::Handle as ImageHandle;
     use super::*;
 
     fn index_of(browser: &Browser, name: &str) -> usize {
@@ -5408,12 +5420,13 @@ mod media_tests {
         }
     }
 
-    /// The grid asks for pictures only, in the order they are shown, so
-    /// the ones on screen first arrive first.
+    /// A listing asks for its pictures' thumbnails as it loads — in the
+    /// order they are shown, so the ones on screen first arrive first,
+    /// and nothing for a folder or a text file.
     #[test]
-    fn the_grid_asks_for_thumbnails_of_the_pictures_in_display_order() {
-        let mut browser = loaded(&[("b.jpg", false), ("folder", true), ("a.png", false), ("readme.md", false)]);
-        let outcome = browser.update(Message::SetViewMode(ViewMode::Grid));
+    fn a_listing_asks_for_thumbnails_of_its_pictures_in_display_order() {
+        let (browser, outcome) =
+            loaded_asking(&[("b.jpg", false), ("folder", true), ("a.png", false), ("readme.md", false)]);
         let expected: Vec<PathBuf> = browser
             .rows()
             .iter()
@@ -5426,18 +5439,26 @@ mod media_tests {
 
     #[test]
     fn a_thumbnail_is_never_asked_for_twice() {
-        let mut browser = loaded(&[("a.png", false)]);
-        let first = browser.update(Message::SetViewMode(ViewMode::Grid));
+        let (mut browser, first) = loaded_asking(&[("a.png", false)]);
         assert_eq!(asks_thumbnails(&first).len(), 1);
         let again = browser.update(Message::SetViewMode(ViewMode::Grid));
         assert!(asks_thumbnails(&again).is_empty(), "{again:?}");
     }
 
+    /// The list view shows pictures at row size, and leaves the costly
+    /// kinds — a PDF's page, a video's frame — to the grid.
     #[test]
-    fn the_list_view_asks_for_no_thumbnails() {
-        let mut browser = loaded(&[("a.png", false)]);
-        let outcome = browser.update(Message::SetViewMode(ViewMode::List));
-        assert!(asks_thumbnails(&outcome).is_empty());
+    fn the_list_view_asks_for_pictures_and_leaves_videos_to_the_grid() {
+        let mut browser = loaded(&[("a.png", false), ("clip.mp4", false)]);
+        let listed = browser.update(Message::SetViewMode(ViewMode::List));
+        let gridded = browser.update(Message::SetViewMode(ViewMode::Grid));
+        let listed = asks_thumbnails(&listed);
+        let gridded = asks_thumbnails(&gridded);
+        // The first listing already asked for the PNG, so the list's own
+        // switch may ask for nothing new; what matters is that it never
+        // asks for the video, and the grid then asks for that alone.
+        assert!(!listed.iter().any(|p| p.ends_with("clip.mp4")));
+        assert_eq!(gridded, [PathBuf::from("/dir/clip.mp4")]);
     }
 
     /// A thumbnail arriving for something this browser did not ask for —
@@ -5445,11 +5466,11 @@ mod media_tests {
     #[test]
     fn a_thumbnail_nobody_asked_for_is_dropped() {
         let mut browser = loaded(&[("a.png", false)]);
-        browser.update(Message::ThumbnailLoaded(PathBuf::from("/elsewhere/x.png"), a_handle()));
+        browser.update(Message::ThumbnailLoaded(PathBuf::from("/elsewhere/x.png"), Picture::Raster(a_handle())));
         assert!(browser.media.thumbnails.is_empty());
 
         browser.update(Message::SetViewMode(ViewMode::Grid));
-        browser.update(Message::ThumbnailLoaded(PathBuf::from("/dir/a.png"), a_handle()));
+        browser.update(Message::ThumbnailLoaded(PathBuf::from("/dir/a.png"), Picture::Raster(a_handle())));
         assert!(browser.media.thumbnails.contains_key(Path::new("/dir/a.png")));
     }
 
