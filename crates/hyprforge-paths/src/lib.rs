@@ -8,6 +8,12 @@
 //!
 //! Paths that *are* Hyprland-specific (`hypr/hyprforge/*.lua`, the
 //! generated config artifacts) live in `hyprforge-core` instead.
+//!
+//! [`user_dirs`] is the one module with a third answer — where *your*
+//! Pictures and Downloads are — and it belongs here for the same reason:
+//! two apps ask it, and it needs nothing but `std`.
+
+pub mod user_dirs;
 
 use std::path::PathBuf;
 

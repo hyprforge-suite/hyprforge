@@ -39,7 +39,9 @@ pub mod prefs;
 pub mod sidebar;
 pub mod trash;
 pub mod undo;
-pub mod xdg_user_dirs;
+/// Moved to `hyprforge-paths` when the photo viewer's sidebar needed it
+/// too; re-exported under its old name so nothing here had to change.
+pub use hyprforge_paths::user_dirs as xdg_user_dirs;
 
 pub use action::{Action, ActionContext, Scope};
 pub use backend::{FsBackend, StdBackend};
