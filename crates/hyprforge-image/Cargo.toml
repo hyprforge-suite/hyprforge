@@ -23,6 +23,10 @@ license.workspace = true
 # every crate in the tree including iced's own. `format.rs` reads the
 # answer back out of `image` rather than keeping a second list.
 image.workspace = true
+# Body, lens, exposure and GPS for the viewer's inspector — `camera.rs`.
+# Already in the tree through iced_graphics, so this is a line, not a
+# download.
+exif.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

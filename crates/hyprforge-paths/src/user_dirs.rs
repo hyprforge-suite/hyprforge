@@ -14,15 +14,19 @@
 //! the one `$HOME` substitution the format actually uses, because a
 //! general shell parser is a dependency this crate does not need for a
 //! file with eight fixed keys.
+//!
+//! Here rather than in `hyprforge-files-core`, where it started, because
+//! the photo viewer's sidebar needs Pictures and Downloads too, and the
+//! alternatives were a dependency on the whole file browser or a second
+//! parser. `hyprforge-files-core` re-exports it as `xdg_user_dirs`.
 
 use std::path::{Path, PathBuf};
 
-/// The subset of XDG user directories this browser's sidebar cares
-/// about. `None` for a directory the file doesn't mention — a partially
-/// customised file is common (someone deletes the `XDG_TEMPLATES_DIR`
-/// line and nothing else), and a missing key is not this module's
-/// business to guess at; [`build_sidebar`]/[`crate::sidebar::build`]
-/// simply won't offer a shortcut for it.
+/// The subset of XDG user directories a sidebar cares about. `None` for
+/// a directory the file doesn't mention — a partially customised file is
+/// common (someone deletes the `XDG_TEMPLATES_DIR` line and nothing
+/// else), and a missing key is not this module's business to guess at;
+/// a sidebar built from it simply won't offer a shortcut for it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UserDirs {
     pub desktop: Option<PathBuf>,
@@ -46,7 +50,7 @@ pub struct UserDirs {
 /// to be "present but unparseable" as a whole, unlike a TOML file: every
 /// line either matches the one shape this parser looks for, or it
 /// doesn't and is ignored. Performs blocking file I/O — call this off
-/// the UI thread, the same as [`crate::backend::FsBackend`].
+/// the UI thread.
 pub fn load(config_dir: &Path, home: &Path) -> UserDirs {
     let path = config_dir.join("user-dirs.dirs");
     match std::fs::read_to_string(&path) {
@@ -56,7 +60,7 @@ pub fn load(config_dir: &Path, home: &Path) -> UserDirs {
 }
 
 /// The conventional English names, used only when there is no
-/// `user-dirs.dirs` to read at all (see [`load`]). [`crate::sidebar::build`]
+/// `user-dirs.dirs` to read at all (see [`load`]). A sidebar
 /// still checks each of these against the real filesystem before
 /// offering it, so a guess that doesn't exist on this machine is dropped
 /// rather than shown as a dead shortcut.

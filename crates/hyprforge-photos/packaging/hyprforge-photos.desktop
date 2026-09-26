@@ -2,16 +2,21 @@
 Type=Application
 Name=Hyprforge Photos
 GenericName=Image Viewer
-Comment=View pictures, one folder at a time
+Comment=View pictures and 3D models, one folder at a time
 # No absolute path, for the reason hyprforge-files.desktop gives.
 Exec=hyprforge-photos %U
 Icon=image-viewer
 Terminal=false
 Categories=Graphics;Viewer;
-Keywords=image;picture;photo;viewer;
+Keywords=image;picture;photo;viewer;3d;model;stl;3mf;obj;
 StartupNotify=true
-# Exactly the four formats the workspace root's `image` features decode —
-# PNG, JPEG, WebP and GIF. A type claimed here and not decodable is a
-# viewer that opens with an error for a file it offered to open; add a
-# type here only in the same change that switches its decoder on.
-MimeType=image/png;image/jpeg;image/webp;image/gif;
+# Exactly the formats this build decodes. That is more than the
+# workspace root's `image` features list: iced's own `image` feature
+# switches on `image`'s default codecs, so TGA, PNM, EXR, QOI and Radiance
+# HDR decode here too. A type claimed and not decodable is a viewer that
+# opens with an error for a file it offered to open; `launch.rs`'s
+# `the_desktop_entry_claims_exactly_what_this_build_decodes` fails if the
+# two drift. Names are the shared MIME database's canonical ones, which
+# is what an opener looks up — image/x-tga where the decoder says
+# image/x-targa, and so on; the test holds the pairs.
+MimeType=image/png;image/jpeg;image/webp;image/gif;image/bmp;image/tiff;image/vnd.microsoft.icon;image/x-tga;image/x-portable-anymap;image/x-exr;image/qoi;image/vnd.radiance;model/stl;model/3mf;model/obj;

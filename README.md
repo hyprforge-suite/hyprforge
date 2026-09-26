@@ -14,8 +14,9 @@ has never heard of Hyprland.
 
 ```
 Shared by every app in the suite
-  hyprforge-paths/         where config lives and how to write it atomically.
-                            No dependencies at all.
+  hyprforge-paths/         where config lives and how to write it atomically,
+                            and where your Pictures and Downloads are
+                            (user-dirs.dirs). No dependencies at all.
   hyprforge-look/          the Color type with the one rgba() parser, and the
                             runtime Theme every app draws from. No iced — the
                             lock screen and greeter paint into a raw Wayland
@@ -66,7 +67,16 @@ Shared by every app in the suite
                             anything is allocated, the EXIF orientation is
                             applied once, and a 36-megapixel photograph is
                             decoded to fit the window rather than at full
-                            size. No iced, no Wayland, no Hyprland.
+                            size; and what the camera wrote — body, lens,
+                            exposure, date, GPS. No iced, no Wayland, no
+                            Hyprland.
+  hyprforge-mesh/          3D models — STL, 3MF and OBJ — loaded into a
+                            welded, indexed mesh, with fstl's camera and
+                            draw modes: the model half of view3d, brought in
+                            so the image viewer opens a model the way it
+                            opens a picture. Memory-mapped, parallel
+                            parsing. No iced, no wgpu; carries its own MIT
+                            LICENSE with fstl's copyright line.
 
 Hyprland-facing
   hyprforge-core/          the config machinery: hlconfig (the generic
@@ -107,7 +117,9 @@ Hyprland-facing
                             checked before an offer's bytes are ever read,
                             so a password manager's clipboard contents are
                             never hashed, stored or logged. Also ships
-                            hyprforge-clipmenu, the history popup, launched
+                            hyprforge-clipmenu, the history popup — search,
+                            filter tabs, a preview pane, pin and delete —
+                            launched
                             per invocation by a keybind rather than run as
                             a daemon — a short-lived process cannot leak a
                             stuck layer surface holding exclusive keyboard
@@ -130,6 +142,15 @@ Hyprland-facing
                             content sniffing, which calls an STL a stream
                             of bytes and opens 3D models in a browser.
                             A leaf, like hyprforge-look.
+  hyprforge-icons/         which file is the icon called image-png: the
+                            freedesktop icon theme lookup, through the
+                            configured theme's Inherits= chain to hicolor.
+                            hyprforge-mime says which name a type's icon
+                            has; this finds the file. A leaf.
+  hyprforge-thumbnails/    the freedesktop thumbnail cache every program
+                            shares: a thumbnail found while its file is
+                            unchanged, stored as small as a PNG can be,
+                            failures remembered, orphans pruned. A leaf.
   hyprforge-archive/       zip, tar and 7z: what is inside one as a
                             directory tree, extracting from it, making
                             one, and rewriting it. Pure Rust, so a
@@ -178,18 +199,27 @@ Hyprland-facing
                             same way as hyprforge-clipmenu — a PopupApp
                             consumer of hyprforge-popup and
                             hyprforge-emoji, with long-press support for
-                            picking a skin tone.
+                            picking a skin tone, frequently used emoji
+                            first, and tabs for kaomoji and symbols.
 
 Apps
   hyprforge-files/         the file manager window: the chrome around the
                             shared browsing view, plus what a dialog
                             deliberately does not have — launching what
                             you double-click, and file operations.
-  hyprforge-photos/        the image viewer: one picture at a time, paged
-                            through its folder in the order Files shows
-                            it, with zoom, pan, rotation, an info panel and
-                            a filmstrip; trash with undo, copy, Open With,
-                            Show in Files and Set as Wallpaper.
+  hyprforge-photos/        the image viewer, in the file manager's shell:
+                            a Places sidebar, and Photo, Grid and Library
+                            as modes of one window. Photo pages through the
+                            folder in the order Files shows it, with zoom,
+                            pan, rotation and a filmstrip; Grid groups the
+                            folder by day; Library is the folder tree as
+                            cards. 3D models (STL, 3MF, OBJ) page with the
+                            pictures and are drawn by view3d's renderer in
+                            an iced shader widget: drag to turn, five draw
+                            modes, viewpoints, autoreload. An inspector with
+                            the camera's EXIF or the model's geometry, a
+                            slideshow, and trash with undo, copy, Open
+                            With, Show in Files and Set as Wallpaper.
   hyprforge-settings/      the iced GUI, hosting the settings modules
   hyprforge-authui/        the authentication conversation model, shared by
                             the lock screen and the greeter
@@ -239,7 +269,7 @@ today; the intent is to make them public once they've had more use.
 | [hyprforge-tray](https://github.com/adamrpostjr/hyprforge-tray) | A StatusNotifierItem tray library, plus `hyprforge-trayd`, the daemon that puts network (Wi-Fi and Ethernet), Bluetooth, keep-awake, night-light, battery/power-profile and display-layout icons in whatever bar is running, and draws its own right-click menu through `hyprforge-traymenu` rather than `com.canonical.dbusmenu`. |
 | [hyprforge-settings](https://github.com/adamrpostjr/hyprforge-settings) | The Settings app: an iced GUI over Hyprland's config, appearance, displays, network, Bluetooth, shortcuts and more. |
 | [hyprforge-displayd](https://github.com/adamrpostjr/hyprforge-displayd) | A monitor-arrangement daemon: it watches `wlr-output-management`, recognises a set of displays it has seen before and applies the layout saved for it, plus `hyprforge-displayctl` to drive it from a script. |
-| [hyprforge-emojimenu](https://github.com/adamrpostjr/hyprforge-emojimenu) | An emoji picker: a layer-shell popup at the pointer with type-to-filter search over the full Unicode set, skin tones, and a remembered default tone. |
+| [hyprforge-emojimenu](https://github.com/adamrpostjr/hyprforge-emojimenu) | An emoji picker: a layer-shell popup at the pointer with type-to-filter search over the full Unicode set, frequently used first, skin tones and a remembered default tone, plus kaomoji and symbols. |
 | [hyprforge-files](https://github.com/adamrpostjr/hyprforge-files) | A file manager: tabs, a sidebar, list and grid views, the freedesktop trash, copy and paste with other applications, and zip/tar/7z archives browsed and edited in place. |
 
 Seven of the eight are meant to be installed on their own: clone
@@ -429,7 +459,7 @@ Binaries land in `target/release/`: `hyprforge-displayd`,
 | `$XDG_CONFIG_HOME/hypr/hyprland.lua.hyprforge.bak` | Backup taken automatically the one time that line is inserted |
 | `$XDG_CONFIG_HOME/hyprforge/lock.toml` | The lock screen's theme, written by Settings, read by `hyprforge-lock` (the greeter reads an exported copy — it runs as its own user and cannot read your home) |
 | `$XDG_CONFIG_HOME/hyprforge/tray.toml` | Which tray icons show, how far below the bar their menu opens, and whether clicking away dismisses it — written by Settings' Tray screen and re-read by `hyprforge-trayd` on every poll (and by `hyprforge-traymenu` on every right click), so a change takes effect without restarting anything |
-| `$XDG_CONFIG_HOME/hyprforge/emojimenu.toml` | The emoji picker's default skin tone |
+| `$XDG_CONFIG_HOME/hyprforge/emojimenu.toml` | The emoji picker's default skin tone, and how often each emoji is picked (its "Frequently used" section) |
 | `$XDG_CONFIG_HOME/hyprforge/files.toml` | The file manager's remembered state — sort order, view mode, whether the preview pane is on, window size |
 | `$XDG_CONFIG_HOME/hyprforge/clipboard/` | The clipboard history: `history.toml` for the index, `images/` for one file per image entry — never image bytes in the index itself |
 

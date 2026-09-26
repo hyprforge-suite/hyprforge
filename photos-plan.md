@@ -10,6 +10,34 @@ left of it is the spacebar Quick Look overlay. Two gaps are named rather than hi
 animated GIF plays its first frame only, and zooming past the size that
 was decoded upsamples rather than re-decoding a sharper crop.
 
+**2026-09-25: the shell.** The `Hyprview Photo Viewer` design moved the
+window into the file manager's shell — header, Places sidebar, status
+bar — with Photo, Grid and Library as modes of one window, a docked
+inspector reading the camera's EXIF (`hyprforge_image::camera`), and a
+slideshow. That goes past "What the viewer is, in v1" below, on
+purpose and in one direction only: the Library is the folder tree the
+user already keeps, summarised as cards, so it is still not a
+catalogue and still cannot disagree with Files. The editor the same
+design draws (crop, straighten, exposure) is not built, for the reason
+Phase 3 gives about writing to someone's original; its toolbar button
+is shown disabled. The mode switch is drawn in the quiet style rather
+than the design's purple, because purple means *selected* here.
+
+**2026-09-26: 3D models.** The viewer took over view3d, the owner's
+separate STL/3MF/OBJ viewer, rather than the suite gaining a second
+window for it. Its loaders, mesh and camera became `hyprforge-mesh`, a
+leaf like `hyprforge-image`; its wgpu renderer moved into this crate
+(`src/model/`) as an iced `shader` primitive, because its wgpu has to be
+iced's (27, where view3d was on 30). iced's shared render pass has no
+depth buffer, so the primitive draws its own pass with its own depth
+texture. fstl's teal backdrop became the theme's root surface, handed in
+as a uniform and linearised for an sRGB target — the centre-pixel check
+reads (25, 26, 33) in the model view and the photo view alike. Porting
+the camera turned up a sign error in view3d's zoom-about-the-pointer
+that made the point under the cursor slide away; a property test pins
+the fix. Not carried: thumbnails of models, `--screenshot`, and 3D under
+iced's software renderer, where the pane says it needs the GPU.
+
 `hyprforge-photos`, the "Photo Viewer" row the inventory in
 `hyprforge-vision.md` has carried as *not started*. This is the plan for
 it, written the way `repo-plan.md` is: the decisions, what each one costs,

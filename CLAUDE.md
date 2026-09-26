@@ -694,8 +694,15 @@ hyprforge-process   a bounded subprocess wait (Command::output that gives up);
 hyprforge-look      Color + the runtime Theme; no iced, because the lock screen
                     and greeter paint into a raw Wayland buffer
 hyprforge-mime      the freedesktop shared MIME database: what a file is,
-                    what opens it, what the default is. A leaf; depends only
-                    on hyprforge-paths
+                    what opens it, what the default is, which icon name it
+                    has. A leaf; depends only on hyprforge-paths and
+                    hyprforge-process
+hyprforge-icons     the freedesktop icon theme lookup: which file an icon
+                    name is, through the configured theme and everything it
+                    inherits. A leaf; depends only on hyprforge-process
+hyprforge-thumbnails the freedesktop thumbnail cache, shared with every other
+                    program: pixels in, pixels out. A leaf with no Hyprforge
+                    dependency
 hyprforge-archive   zip, tar and 7z: what is inside one as a directory tree,
                     extracting from it, and rewriting it. A leaf with no
                     Hyprforge dependency at all — paths arrive from the
@@ -704,6 +711,8 @@ hyprforge-keys      the keyboard grammar every app binds keys through; no iced
 hyprforge-listing   a directory listing and its order, under both Files and
                     the image viewer so they agree which picture is next
 hyprforge-image     bounded, orientation-correct decoding; no iced, no Wayland
+hyprforge-mesh      STL/3MF/OBJ into a welded mesh, and fstl's camera; no iced,
+                    no wgpu — the renderer lives with the window, on iced's wgpu
 hyprforge-ui        the iced layer; knows nothing about Hyprland
 hyprforge-core      Hyprland config machinery — a new app should never need it
 ```

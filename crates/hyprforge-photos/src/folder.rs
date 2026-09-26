@@ -34,6 +34,9 @@ pub enum Media {
     /// A video. Shown as a poster frame when one is already cached, and
     /// handed to the user's player when asked — never decoded here.
     Clip,
+    /// A 3D model — STL, 3MF or OBJ — loaded by `hyprforge-mesh` and
+    /// drawn by the viewer's own renderer (what view3d did on its own).
+    Model,
 }
 
 /// One thing in the folder.
@@ -42,6 +45,12 @@ pub struct Item {
     pub path: PathBuf,
     pub name: String,
     pub media: Media,
+    /// From the listing, never a second `stat`: the grid groups by it and
+    /// the library summarises a folder's span of dates with it.
+    pub modified: Option<std::time::SystemTime>,
+    /// Bytes on disk, from the listing — what the grid's status bar adds
+    /// up for a selection.
+    pub bytes: Option<u64>,
 }
 
 /// The items in a folder, and which one is showing.
@@ -56,10 +65,14 @@ pub struct Folder {
 /// Stills are decided by [`hyprforge_image::format::looks_decodable`] —
 /// the build's real decoder list rather than a second one kept here —
 /// and clips by the listing's own classification, since nothing decodes
-/// them and their extension is all anyone needs.
+/// them and their extension is all anyone needs. Models by
+/// `hyprforge-mesh`'s own format list, for the same reason as stills.
 fn media_of(entry: &Entry) -> Option<Media> {
     if entry.is_dir {
         return None;
+    }
+    if hyprforge_mesh::detect(&entry.path).is_some() {
+        return Some(Media::Model);
     }
     if hyprforge_image::format::looks_decodable(&entry.path) {
         return Some(Media::Still);
@@ -86,6 +99,11 @@ impl Folder {
             .into_iter()
             .map(|e| Item {
                 media: media_of(&e).expect("filtered to items above"),
+                bytes: match e.size {
+                    hyprforge_listing::types::EntrySize::Bytes(b) => Some(b),
+                    hyprforge_listing::types::EntrySize::Items(_) => None,
+                },
+                modified: e.modified,
                 name: e.name,
                 path: e.path,
             })
@@ -180,6 +198,18 @@ impl Folder {
         self.current()
     }
 
+    /// Points the cursor at `index` directly — a click on a tile. Out of
+    /// range is ignored rather than clamped: a click on something that
+    /// is no longer there should not select something else.
+    pub fn select(&mut self, index: usize) -> bool {
+        if index < self.items.len() {
+            self.cursor = index;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Drops the item at the cursor — what trashing one leaves behind.
     ///
     /// The cursor stays put so the *next* picture slides into view,
@@ -248,6 +278,34 @@ mod tests {
         assert_eq!(f.current().unwrap().media, Media::Still);
         assert_eq!(f.next().unwrap().media, Media::Clip);
         assert_eq!(f.next().unwrap().name, "c.jpg");
+    }
+
+    /// A folder of prints: the models page with the pictures, in the
+    /// same order, rather than being skipped as files a viewer cannot
+    /// show.
+    #[test]
+    fn a_model_is_an_item_you_can_page_to() {
+        let mut f = folder(&["a.jpg", "bracket.stl", "case.3mf", "notes.txt", "teapot.obj"]);
+        let kinds: Vec<Media> = f.items().iter().map(|i| i.media).collect();
+        assert_eq!(kinds, [Media::Still, Media::Model, Media::Model, Media::Model]);
+        assert_eq!(f.next().unwrap().name, "bracket.stl");
+    }
+
+    #[test]
+    fn an_item_carries_what_the_listing_already_knew() {
+        let f = folder(&["a.jpg"]);
+        let item = f.current().unwrap();
+        assert_eq!(item.bytes, Some(1024));
+        assert_eq!(item.modified, Some(SystemTime::UNIX_EPOCH));
+    }
+
+    #[test]
+    fn selecting_past_the_end_selects_nothing_else() {
+        let mut f = folder(&["a.jpg", "b.jpg"]);
+        assert!(f.select(1));
+        assert_eq!(f.current().unwrap().name, "b.jpg");
+        assert!(!f.select(5));
+        assert_eq!(f.current().unwrap().name, "b.jpg");
     }
 
     #[test]

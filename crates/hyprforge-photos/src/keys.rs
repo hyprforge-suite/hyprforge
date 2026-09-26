@@ -30,6 +30,11 @@ pub enum Action {
     /// shows it.
     Next,
     Previous,
+    /// One row down in the grid or the library; the next picture in
+    /// Photo mode, where there are no rows.
+    Below,
+    /// One row up; the previous picture in Photo mode.
+    Above,
     First,
     Last,
     ZoomIn,
@@ -46,6 +51,42 @@ pub enum Action {
     ToggleFullscreen,
     ToggleInfo,
     ToggleFilmstrip,
+    /// The Places sidebar — `Ctrl+B`, as in the file manager.
+    ToggleSidebar,
+    /// The three modes of the window, mockup `2a`'s segmented switch.
+    ShowPhoto,
+    ShowGrid,
+    ShowLibrary,
+    /// Whatever Enter means where you are: open the tile in the grid,
+    /// the folder in the library, and hand a clip to its player in Photo
+    /// mode. The app decides, the way it decides what Escape means.
+    Activate,
+    /// The library one folder up — mockup `1h`'s Backspace.
+    Up,
+    /// The folder this window showed before, and back again.
+    Back,
+    Forward,
+    /// Fullscreen, one picture after another — mockup `1e`.
+    Slideshow,
+    /// A 3D model seen from below, the front, the back, the left or the
+    /// right — view3d's keys 2 to 6. The top and iso views are `1` and
+    /// `0`, which a model reads as `ZoomActual` and `ZoomFit`: see
+    /// `Action::default_keys`.
+    ViewBottom,
+    ViewFront,
+    ViewBack,
+    ViewLeft,
+    ViewRight,
+    /// The model back in the middle at its fitted size, keeping the angle.
+    ViewCenter,
+    /// Shaded, wireframe, surface angle, mesh light, material colour.
+    CycleDrawMode,
+    /// Perspective or orthographic.
+    ToggleProjection,
+    /// The model's X/Y/Z axes and the little axis flower in the corner.
+    ToggleAxes,
+    /// Read the model from disk again, keeping the view.
+    Reload,
     /// Hand this file to whatever the desktop opens it with — how a clip
     /// gets played, since nothing here decodes video.
     OpenExternally,
@@ -68,6 +109,8 @@ impl Action {
         vec![
             Action::Next,
             Action::Previous,
+            Action::Below,
+            Action::Above,
             Action::First,
             Action::Last,
             Action::ZoomIn,
@@ -79,6 +122,25 @@ impl Action {
             Action::ToggleFullscreen,
             Action::ToggleInfo,
             Action::ToggleFilmstrip,
+            Action::ToggleSidebar,
+            Action::ShowPhoto,
+            Action::ShowGrid,
+            Action::ShowLibrary,
+            Action::Activate,
+            Action::Up,
+            Action::Back,
+            Action::Forward,
+            Action::Slideshow,
+            Action::ViewBottom,
+            Action::ViewFront,
+            Action::ViewBack,
+            Action::ViewLeft,
+            Action::ViewRight,
+            Action::ViewCenter,
+            Action::CycleDrawMode,
+            Action::ToggleProjection,
+            Action::ToggleAxes,
+            Action::Reload,
             Action::OpenExternally,
             Action::ShowInFiles,
             Action::Copy,
@@ -94,6 +156,8 @@ impl Action {
         match self {
             Action::Next => "next",
             Action::Previous => "previous",
+            Action::Below => "below",
+            Action::Above => "above",
             Action::First => "first",
             Action::Last => "last",
             Action::ZoomIn => "zoom-in",
@@ -105,6 +169,25 @@ impl Action {
             Action::ToggleFullscreen => "fullscreen",
             Action::ToggleInfo => "info",
             Action::ToggleFilmstrip => "filmstrip",
+            Action::ToggleSidebar => "sidebar",
+            Action::ShowPhoto => "photo-mode",
+            Action::ShowGrid => "grid-mode",
+            Action::ShowLibrary => "library-mode",
+            Action::Activate => "activate",
+            Action::Up => "up",
+            Action::Back => "back",
+            Action::Forward => "forward",
+            Action::Slideshow => "slideshow",
+            Action::ViewBottom => "view-bottom",
+            Action::ViewFront => "view-front",
+            Action::ViewBack => "view-back",
+            Action::ViewLeft => "view-left",
+            Action::ViewRight => "view-right",
+            Action::ViewCenter => "view-center",
+            Action::CycleDrawMode => "draw-mode",
+            Action::ToggleProjection => "projection",
+            Action::ToggleAxes => "axes",
+            Action::Reload => "reload",
             Action::OpenExternally => "open-externally",
             Action::ShowInFiles => "show-in-files",
             Action::Copy => "copy",
@@ -119,6 +202,8 @@ impl Action {
         match self {
             Action::Next => "Next",
             Action::Previous => "Previous",
+            Action::Below => "Down",
+            Action::Above => "Up",
             Action::First => "First",
             Action::Last => "Last",
             Action::ZoomIn => "Zoom In",
@@ -130,6 +215,25 @@ impl Action {
             Action::ToggleFullscreen => "Fullscreen",
             Action::ToggleInfo => "Information",
             Action::ToggleFilmstrip => "Filmstrip",
+            Action::ToggleSidebar => "Sidebar",
+            Action::ShowPhoto => "Photo",
+            Action::ShowGrid => "Grid",
+            Action::ShowLibrary => "Library",
+            Action::Activate => "Open",
+            Action::Up => "Enclosing Folder",
+            Action::Back => "Back",
+            Action::Forward => "Forward",
+            Action::Slideshow => "Slideshow",
+            Action::ViewBottom => "Bottom View",
+            Action::ViewFront => "Front View",
+            Action::ViewBack => "Back View",
+            Action::ViewLeft => "Left View",
+            Action::ViewRight => "Right View",
+            Action::ViewCenter => "Recentre",
+            Action::CycleDrawMode => "Next Draw Mode",
+            Action::ToggleProjection => "Perspective / Orthographic",
+            Action::ToggleAxes => "Axes",
+            Action::Reload => "Reload",
             Action::OpenExternally => "Open With…",
             Action::ShowInFiles => "Show in Files",
             Action::Copy => "Copy",
@@ -150,8 +254,12 @@ impl Action {
             // `Space` alongside the arrows: it is how people page
             // through a folder of photographs, and this app has no text
             // field for it to type into.
-            Action::Next => &["Right", "Down", "Space", "N", "PageDown"],
-            Action::Previous => &["Left", "Up", "P", "PageUp"],
+            Action::Next => &["Right", "Space", "N", "PageDown"],
+            Action::Previous => &["Left", "P", "PageUp"],
+            // Down and Up were Next and Previous before the grid had
+            // rows; in Photo mode they still are — see `Action::Below`.
+            Action::Below => &["Down"],
+            Action::Above => &["Up"],
             Action::First => &["Home"],
             Action::Last => &["End"],
             Action::ZoomIn => &["Plus", "Ctrl+Plus"],
@@ -163,7 +271,36 @@ impl Action {
             Action::ToggleFullscreen => &["F11", "Ctrl+F"],
             Action::ToggleInfo => &["I"],
             Action::ToggleFilmstrip => &["F9"],
-            Action::OpenExternally => &["Enter"],
+            Action::ToggleSidebar => &["Ctrl+B"],
+            // Nothing by default: Escape leaves the grid and the library
+            // for the photo, and the switch is one click. Bindable.
+            Action::ShowPhoto => &[],
+            Action::ShowGrid => &["G"],
+            Action::ShowLibrary => &["L"],
+            // Enter moved here from `OpenExternally`, which kept it on
+            // a still for years; in Photo mode `Activate` still hands a
+            // clip to its player, and Shift+Enter always opens outside.
+            Action::Activate => &["Enter"],
+            Action::Up => &["Backspace"],
+            Action::Back => &["Alt+Left"],
+            Action::Forward => &["Alt+Right"],
+            Action::Slideshow => &["F5"],
+            // view3d's (and fstl's) viewpoint keys, so the hands that
+            // learned them there keep them. `0` (iso) and `1` (top) are
+            // already Fit and Actual Size; on a model those two mean iso
+            // and top, and "fit" is what iso does anyway — it recentres.
+            Action::ViewBottom => &["2"],
+            Action::ViewFront => &["3"],
+            Action::ViewBack => &["4"],
+            Action::ViewLeft => &["5"],
+            Action::ViewRight => &["6"],
+            Action::ViewCenter => &["9"],
+            Action::CycleDrawMode => &["M"],
+            Action::ToggleProjection => &["O"],
+            Action::ToggleAxes => &["X"],
+            // view3d reloaded on F5, which is the slideshow here.
+            Action::Reload => &["Ctrl+R"],
+            Action::OpenExternally => &["Shift+Enter"],
             Action::ShowInFiles => &["Ctrl+O"],
             Action::Copy => &["Ctrl+C"],
             Action::SetWallpaper => &["W"],
@@ -210,6 +347,40 @@ pub type Resolved = hyprforge_keys::Resolved<Action>;
 
 pub fn defaults() -> Keymap {
     Keymap::defaults(BARE_KEYS)
+}
+
+/// The key to name for `action` in a hint — "G grid", "I info" — or
+/// `None` when nothing is bound to it.
+///
+/// Read from the live keymap, never written into the hint: a status bar
+/// that says "G grid" after the user moved the grid to `Ctrl+G` is
+/// teaching them a key that does nothing. The first *default* that is
+/// still bound wins, so the hint names the key people expect (`Right`,
+/// not `N`) for as long as it works.
+pub fn hint(keymap: &Keymap, action: Action) -> Option<String> {
+    let bound = keymap.combos_for(action);
+    let preferred = action
+        .default_keys()
+        .iter()
+        .filter_map(|text| hyprforge_keys::Combo::parse(text).ok())
+        .find(|combo| bound.contains(combo));
+    preferred.or_else(|| bound.first().copied()).map(|combo| key_label(&combo))
+}
+
+/// A binding as a hint prints it: arrows as arrows, everything else as
+/// the config file spells it.
+pub fn key_label(combo: &hyprforge_keys::Combo) -> String {
+    use hyprforge_keys::Key;
+    let plain = combo.mods == hyprforge_keys::Modifiers::default();
+    match combo.key {
+        Key::Left if plain => "←".to_string(),
+        Key::Right if plain => "→".to_string(),
+        Key::Up if plain => "↑".to_string(),
+        Key::Down if plain => "↓".to_string(),
+        Key::Escape if plain => "Esc".to_string(),
+        Key::Delete if plain => "Del".to_string(),
+        _ => combo.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -268,6 +439,21 @@ mod tests {
             text: Some('z'),
         };
         assert_eq!(keys.resolve(&z), None);
+    }
+
+    /// The hint follows the keymap, not the defaults: rebinding the grid
+    /// changes what the status bar teaches.
+    #[test]
+    fn a_hint_names_the_key_that_is_actually_bound() {
+        let keys = defaults();
+        assert_eq!(hint(&keys, Action::ShowGrid).as_deref(), Some("G"));
+        assert_eq!(hint(&keys, Action::Next).as_deref(), Some("→"));
+        assert_eq!(hint(&keys, Action::ShowPhoto), None);
+
+        let overrides = std::collections::BTreeMap::from([("grid-mode".to_string(), vec!["Ctrl+G".to_string()])]);
+        let (rebound, problems) = hyprforge_keys::merge::keymap_with::<Action>(&overrides, BARE_KEYS);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(hint(&rebound, Action::ShowGrid).as_deref(), Some("Ctrl+G"));
     }
 
     #[test]

@@ -196,6 +196,11 @@ package_hyprforge-emojimenu() {
   # deliberately has no runtime check or fallback message for a missing
   # emoji font — the package requiring one is what keeps that true.
   depends=(wayland libxkbcommon noto-fonts-emoji)
+  # The Kaomoji tab is the opposite case: most of it draws from any Latin
+  # font, but the shrug's ツ and several others are Japanese characters,
+  # and without a CJK font those few render with gaps. The tab still
+  # works — degraded, not broken — so this is an optdepend.
+  optdepends=('noto-fonts-cjk: kaomoji that use Japanese characters, like the shrug')
   cd "$startdir/../.."
   _bin hyprforge-emojimenu
 }
