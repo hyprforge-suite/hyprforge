@@ -20,8 +20,8 @@
 //!
 //! Two popups now compute "which row/cell is under the pointer" and
 //! "where is the thumb" independently, each against its own geometry
-//! (`hyprforge-clipmenu::geometry::RowLayout`,
-//! `hyprforge-emojimenu::geometry::GridLayout`). What is shared here —
+//! (`hyprforge-clipmenu::geometry::Layout`,
+//! `hyprforge-emojimenu::geometry::Layout`). What is shared here —
 //! [`clamp_offset`], [`scroll_into_view`], and [`Scrollbar`] itself — is
 //! exactly the piece that is the same shape in both: pixel arithmetic
 //! over content height, viewport height and offset, with no idea what a
@@ -29,7 +29,7 @@
 //! the *same* `Model::scroll_offset()` (or equivalent) before doing
 //! their own content-shaped math on top of it — that is what keeps the
 //! thing drawn and the thing hit-tested from disagreeing about where the
-//! scroll took them, the same discipline `RowLayout`/`GridLayout` already
+//! scroll took them, the same discipline each popup's `Layout` already
 //! apply to positions before scrolling existed at all.
 
 /// Clamps a content-scroll `offset` so the viewport never shows space

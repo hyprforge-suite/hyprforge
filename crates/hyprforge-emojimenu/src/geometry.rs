@@ -1,553 +1,423 @@
-//! The emoji grid's own cell geometry — which cell a pointer position
-//! lands on, how many columns fit a popup of a given width, and how many
-//! rows fit a popup of a given height.
+//! Where everything in the emoji picker is, and what a pointer position
+//! lands on.
 //!
-//! This is the grid analogue of `hyprforge-clipmenu::geometry::RowLayout`,
-//! and deliberately not shared with it — `hyprforge-popup::popup`'s
-//! module doc explains why a list's row geometry and a grid's cell
-//! geometry are not the same shape, and why each `PopupApp` gets its own.
-//! The one property this module exists to guarantee, the same one
-//! `RowLayout` guarantees for the clipboard popup, is CLAUDE.md's rule
-//! that the thing drawn, the thing hit-tested, and the number of things
-//! that fit must never be three different numbers: [`GridLayout::columns`]
-//! is the single source both [`view`](crate::view) (how many cells per
-//! row to draw) and [`GridLayout::cell_at`] (which cell a pointer lands
-//! on) read, and [`GridLayout::rows_that_fit`] is the same kind of
-//! single source for how many rows [`crate::model::Model`] is allowed to
-//! build into its own visible window.
+//! The popup builds a fresh iced `UserInterface` every frame and throws
+//! it away (see `hyprforge_popup::popup::Popup::draw`), so there is no
+//! live layout tree to ask "what's under the cursor". This module has to
+//! already agree with `view.rs` about where everything is — and it does
+//! so by being the only place any of it is decided. `view.rs` sizes every
+//! region from [`Layout`]; [`Layout::hit`] measures with the same
+//! numbers; the grid's lines come from the model's
+//! [`hyprforge_popup::Stack`]. CLAUDE.md's rule that the thing drawn and
+//! the thing hit-tested must never be two different numbers is the whole
+//! contract.
 //!
-//! Everything here is free of `hyprctl`, Wayland or iced — pure
-//! arithmetic over points and sizes, the same discipline `RowLayout`
-//! follows for the same reason: the piece most likely to be wrong (an
-//! off-by-one at an edge, a hit that lands in the gap between two cells)
-//! is exactly the piece a unit test can pin directly.
+//! # The shape, top to bottom
+//!
+//! ```text
+//! ┌────────────────────────────────────┐
+//! │ [ search                    ] [✋▾]│
+//! │ [ Emoji | Kaomoji | Symbols        ]│
+//! │ SMILEYS & EMOTION        (sticky)  │
+//! │ 😀 😃 😄 😁 😆 🥹 😅 😂 🤣          │  grid: 9 × 34px, or 2 pills
+//! │ …                                  │
+//! ├────────────────────────────────────┤
+//! │ 😂  Face with tears of joy  Enter  │  footer
+//! └────────────────────────────────────┘
+//! ```
+//!
+//! Pure arithmetic — no `hyprctl`, Wayland or iced — so an off-by-one at
+//! an edge, or a hit in the gap between two cells, is something a unit
+//! test can pin.
 
-/// Where the grid's cells are, in the same logical-pixel space
-/// `view::view` draws into and [`crate::popup_app::EmojiApp`]'s pointer
-/// handling reads positions in.
-///
-/// Every number here is a value `view.rs` sets explicitly on the widgets
-/// it builds — a fixed square cell, a fixed spacing — rather than
-/// anything read back from iced's own layout, for the same reason
-/// `RowLayout` does this: this crate builds a fresh `UserInterface` every
-/// frame and throws it away (see `hyprforge_popup::popup::Popup::draw`),
-/// so there is no live layout tree to ask "what's under the cursor" —
-/// this module has to already agree with `view.rs` on where everything
-/// is, from the same theme-derived numbers, rather than reconstruct it.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct GridLayout {
-    /// Padding around the whole popup's content, all four sides — the
-    /// same role `RowLayout::padding` plays.
-    pub padding: f64,
-    /// Height of the header (the search field) plus the gap under it,
-    /// before the grid's first row starts — computed the same way
-    /// `RowLayout::header_height` is, from the theme's font size alone,
-    /// so the header is exactly as tall in this popup as it is in the
-    /// clipboard one at the same font size.
-    pub header_height: f64,
-    /// Side length of one (square) grid cell.
-    pub cell_size: f64,
-    /// Gap between two cells, horizontally and vertically alike.
-    pub spacing: f64,
+use crate::model::{GridGeometry, Line, Tab, TONE_CELLS};
+use hyprforge_popup::kit::{Rect, Tabs};
+use hyprforge_popup::Stack;
+
+/// The popup's width, fixed: the design's 360.
+pub const POPUP_WIDTH: f64 = 360.0;
+
+/// The design's figures at the 13px body size it was drawn at. The
+/// layout grows past them when the theme's font would not fit, and never
+/// shrinks below them.
+mod design {
+    pub const PADDING: f64 = 10.0;
+    pub const SEARCH: f64 = 30.0;
+    pub const TONE_BUTTON: f64 = 44.0;
+    pub const GAP: f64 = 8.0;
+    pub const TABS: f64 = 26.0;
+    pub const HEADER: f64 = 26.0;
+    pub const CELL: f64 = 34.0;
+    pub const CELL_GAP: f64 = 2.0;
+    pub const PILL: f64 = 38.0;
+    pub const PILL_GAP: f64 = 6.0;
+    pub const GRID: f64 = 236.0;
+    pub const FOOTER: f64 = 48.0;
+    pub const PICKER_PADDING: f64 = 5.0;
 }
 
-impl GridLayout {
-    pub const PADDING: f64 = 10.0;
-    pub const HEADER_GAP: f64 = 6.0;
-    pub const ROW_PADDING: f64 = 6.0;
-    pub const SPACING: f64 = 4.0;
+/// See the module doc.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Layout {
+    pub width: f64,
+    pub padding: f64,
+    pub search: Rect,
+    /// The ✋ button that sets the default tone.
+    pub tone_button: Rect,
+    pub tabs: Tabs,
+    /// The scrolling grid's rectangle.
+    pub grid: Rect,
+    /// A section label's line.
+    pub header_height: f64,
+    /// An emoji or symbol cell's side.
+    pub cell: f64,
+    /// A kaomoji pill's height.
+    pub pill: f64,
+    pub footer_top: f64,
+    pub footer_height: f64,
+    pub height: f64,
+}
 
-    /// Derives the layout from the theme's font size — the one variable
-    /// this module and `view.rs` already agree on, the same way
-    /// `RowLayout::for_font_size` does for the clipboard popup.
-    ///
-    /// A cell needs to be comfortably bigger than a line of text: an
-    /// emoji glyph reads smaller at a given font size than a Latin
-    /// letter does (most renderers scale a color/COLR glyph to roughly
-    /// the font's em-box, but the visual mark inside it is usually
-    /// smaller than a letter's own ascender-to-descender height), and
-    /// this is also the pointer's click target, which wants to stay
-    /// comfortably tappable even at a small theme font size — hence the
-    /// `28.0` floor, not just a multiple of the font size.
-    pub fn for_font_size(font_size: f32) -> GridLayout {
-        let font_size = font_size as f64;
-        let line = font_size * 1.2;
-        GridLayout {
-            padding: Self::PADDING,
-            header_height: line + Self::ROW_PADDING * 2.0 + Self::HEADER_GAP,
-            // A floor of 40 rather than 28: an emoji is the content, not
-            // a decoration beside text, so the cell is sized for the
-            // glyph rather than for the theme's line height. At a small
-            // UI font the old floor made a grid of postage stamps.
-            cell_size: (font_size * 2.8).max(40.0),
-            spacing: Self::SPACING,
+impl Layout {
+    /// The one place the picker's geometry is derived — from the theme's
+    /// font size alone.
+    pub fn for_font_size(font_size: f32) -> Layout {
+        let fs = font_size as f64;
+        let line = |size: f64| size * 1.2;
+        let width = POPUP_WIDTH;
+        let padding = design::PADDING;
+
+        let search_height = design::SEARCH.max(line(fs) + 12.0);
+        let tone_button = Rect {
+            x: width - padding - design::TONE_BUTTON,
+            y: padding,
+            width: design::TONE_BUTTON,
+            height: search_height,
+        };
+        let search = Rect { x: padding, y: padding, width: tone_button.x - design::GAP - padding, height: search_height };
+        let tabs = Tabs {
+            x: padding,
+            y: search.bottom() + design::GAP,
+            width: width - padding * 2.0,
+            height: design::TABS.max(line(fs * 0.96) + 10.0),
+            count: Tab::ALL.len(),
+        };
+        let cell = design::CELL.max(fs * 2.3).round();
+        let grow = cell / design::CELL;
+        let grid = Rect {
+            x: padding,
+            y: tabs.y + tabs.height + design::GAP,
+            width: width - padding * 2.0,
+            height: (design::GRID * grow).round(),
+        };
+        let footer_top = grid.bottom() + 1.0;
+        let footer_height = design::FOOTER.max(line(fs) + line(fs * 0.85) + 18.0);
+        Layout {
+            width,
+            padding,
+            search,
+            tone_button,
+            tabs,
+            grid,
+            header_height: design::HEADER.max(line(fs * 0.81) + 13.0),
+            cell,
+            pill: design::PILL.max(line(fs * 1.08) + 18.0),
+            footer_top,
+            footer_height,
+            height: footer_top + footer_height,
         }
     }
 
-    /// How many columns fit a popup `width` logical pixels wide.
-    ///
-    /// The `+ self.spacing` before dividing is the same "the last cell
-    /// needs no trailing gap" adjustment `RowLayout::rows_that_fit` makes
-    /// for rows: `n` cells need `n` cell widths and only `n - 1` gaps
-    /// between them, so adding one spacing's worth of slack up front
-    /// before dividing by a full stride is what makes the arithmetic
-    /// come out to `n`, not `n - 1`, for a width that fits `n` exactly.
-    pub fn columns(&self, width: f64) -> usize {
-        let available = width - self.padding * 2.0 + self.spacing;
-        let stride = self.cell_size + self.spacing;
-        if available <= 0.0 || stride <= 0.0 {
-            return 1;
+    /// How many columns `tab` lays out: as many cells as fit for emoji
+    /// and symbols, two pills for kaomoji — they are words, not glyphs.
+    pub fn columns(&self, tab: Tab) -> usize {
+        match tab {
+            Tab::Kaomoji => 2,
+            Tab::Emoji | Tab::Symbols => (((self.grid.width + design::CELL_GAP) / (self.cell + design::CELL_GAP)).floor() as usize).max(1),
         }
-        ((available / stride).floor() as usize).max(1)
     }
 
-    /// How many rows fit a popup `height` logical pixels tall, below the
-    /// header — the grid's exact analogue of `RowLayout::rows_that_fit`,
-    /// and it exists for the identical reason: rows built and rows
-    /// hit-tested have to be the same rows, so both this module and
-    /// `crate::model::Model`'s own visible window read this one function
-    /// rather than each guessing a count.
-    pub fn rows_that_fit(&self, height: f64) -> usize {
-        let available = height - self.padding * 2.0 - self.header_height + self.spacing;
-        let stride = self.cell_size + self.spacing;
-        if available <= 0.0 || stride <= 0.0 {
-            return 0;
+    /// A cell's width for `tab`.
+    pub fn cell_width(&self, tab: Tab) -> f64 {
+        match tab {
+            Tab::Kaomoji => (self.grid.width - design::PILL_GAP) / 2.0,
+            Tab::Emoji | Tab::Symbols => self.cell,
         }
-        ((available / stride).floor() as usize).max(1)
     }
 
-    /// One grid row's own stride — a cell's side length plus the spacing
-    /// after it. The pixel unit [`crate::model::Model::set_grid`] scrolls
-    /// in, and what `crate::popup_app::EmojiApp::pointer_scroll` moves
-    /// the view by per wheel notch.
-    pub fn row_stride(&self) -> f64 {
-        self.cell_size + self.spacing
+    pub fn cell_height(&self, tab: Tab) -> f64 {
+        match tab {
+            Tab::Kaomoji => self.pill,
+            Tab::Emoji | Tab::Symbols => self.cell,
+        }
     }
 
-    /// How tall the popup's own scrollable content area is below the
-    /// header — the same "available" figure [`Self::rows_that_fit`]
-    /// floors to a whole row count, kept raw here because continuous
-    /// scrolling wants the pixel figure: a partially visible row at the
-    /// top or bottom is expected now, not floored away.
-    pub fn viewport_height(&self, popup_height: f64) -> f64 {
-        (popup_height - self.padding * 2.0 - self.header_height).max(0.0)
+    /// The gap between two rows (and between a label and its first row).
+    pub fn row_gap(&self, tab: Tab) -> f64 {
+        match tab {
+            Tab::Kaomoji => design::PILL_GAP,
+            Tab::Emoji | Tab::Symbols => design::CELL_GAP,
+        }
     }
 
-    /// The total height of `row_count` rows stacked with their own
-    /// spacing between them (but none trailing the last one) — the
-    /// "content height" half of the scrollbar/offset arithmetic.
-    pub fn content_height(&self, row_count: usize) -> f64 {
-        if row_count == 0 {
+    /// The gap between two cells in a row: whatever is left once the
+    /// columns are placed, spread evenly between them, so the grid spans
+    /// the full width edge to edge — the design's `space-between`.
+    pub fn column_gap(&self, tab: Tab) -> f64 {
+        let columns = self.columns(tab);
+        if columns < 2 {
             return 0.0;
         }
-        row_count as f64 * self.row_stride() - self.spacing
+        ((self.grid.width - columns as f64 * self.cell_width(tab)) / (columns - 1) as f64).max(0.0)
     }
 
-    /// The scrollbar's own track geometry for a popup `popup_width` wide
-    /// showing a viewport `viewport_height` tall — the **one** place
-    /// this crate computes it, read by both `popup_app.rs` (hit-testing
-    /// a press or a drag against the thumb) and `view.rs` (drawing the
-    /// track and thumb). See `hyprforge-clipmenu::geometry::RowLayout::scrollbar`'s
-    /// identical doc for why this is a single function rather than two
-    /// independently-written copies of "where the scrollbar is".
-    pub fn scrollbar(&self, popup_width: f64, viewport_height: f64) -> hyprforge_popup::Scrollbar {
-        let track_x = popup_width - self.padding - hyprforge_popup::Scrollbar::WIDTH;
-        let track_top = self.padding + self.header_height;
-        hyprforge_popup::Scrollbar::new(track_x, track_top, viewport_height)
+    /// `tab`'s shape, for `Model::set_geometry`.
+    pub fn grid_geometry(&self, tab: Tab) -> GridGeometry {
+        GridGeometry {
+            columns: self.columns(tab),
+            header_height: self.header_height,
+            cell_height: self.cell_height(tab),
+            spacing: self.row_gap(tab),
+            viewport_height: self.grid.height,
+        }
     }
 
-    /// Where the first column starts, horizontally.
-    ///
-    /// Whole cells rarely divide a popup's width exactly, and the
-    /// remainder used to sit entirely on the right — a grid pushed
-    /// against its left edge with a ragged gap down the other side.
-    /// Splitting it centres the grid.
-    ///
-    /// **Both the drawing and the hit-test read this.** That is the
-    /// whole reason it is a function rather than an `align_x` on a
-    /// container: centring the grid visually while `cell_at` still
-    /// measured from the padding would put every click half a gap to
-    /// the left of the cell under the pointer — the same class of
-    /// silent disagreement between what is drawn and what is measured
-    /// that this module exists to prevent.
-    pub fn left_margin(&self, width: f64, columns: usize) -> f64 {
-        let stride = self.cell_size + self.spacing;
-        // The last column needs no spacing after it.
-        let grid_width = columns as f64 * stride - self.spacing;
-        let slack = width - self.padding * 2.0 - grid_width;
-        self.padding + (slack.max(0.0) / 2.0)
+    /// Where item `index` is drawn right now, or `None` if it is in no
+    /// line. What the tone picker anchors to.
+    pub fn cell_rect(&self, tab: Tab, lines: &[Line], stack: &Stack, offset: f64, index: usize) -> Option<Rect> {
+        let line = lines.iter().position(|l| matches!(*l, Line::Cells { start, end, .. } if (start..end).contains(&index)))?;
+        let Line::Cells { start, .. } = lines[line] else { return None };
+        let column = (index - start) as f64;
+        Some(Rect {
+            x: self.grid.x + column * (self.cell_width(tab) + self.column_gap(tab)),
+            y: self.grid.y + stack.top(line) - offset,
+            width: self.cell_width(tab),
+            height: stack.height(line),
+        })
     }
 
-    /// The cell index (row-major: `row * columns + col`) under
-    /// `position`, among `visible_cells` currently built — the same
-    /// "which of the cells actually on screen" scoping
-    /// `RowLayout::row_at` applies with its own `visible_count`.
-    ///
-    /// `None` covers every way a position is not over a cell: above the
-    /// first row (still in the header), in a gap between cells, past the
-    /// last column, or past the last cell actually built — all of them
-    /// "do nothing", the same as an unrecognised key.
-    ///
-    /// `scroll_remainder` is how many pixels of the first *built* row
-    /// (`Model::scroll_remainder`) sit above the header — added to
-    /// `position`'s own `y` before anything else, the same shift
-    /// `view.rs` draws the rendered rows with (see that module's own
-    /// comment), so this and the drawing can never disagree about where
-    /// row 0 of the built window actually is. Passing `0.0` reproduces
-    /// this method's pre-scrolling behaviour exactly.
-    pub fn cell_at(
-        &self,
-        position: (f64, f64),
-        width: f64,
-        columns: usize,
-        visible_cells: usize,
-        scroll_remainder: f64,
-    ) -> Option<usize> {
-        if columns == 0 || visible_cells == 0 {
+    /// What `position` lands on. `sticky` is whether a section label is
+    /// pinned over the top of the grid right now — a point on it is on
+    /// the label, not on the cells scrolling underneath.
+    pub fn hit(&self, position: (f64, f64), tab: Tab, lines: &[Line], stack: &Stack, offset: f64, sticky: bool) -> Option<Hit> {
+        if let Some(index) = self.tabs.tab_at(position) {
+            return Some(Hit::Tab(index));
+        }
+        if self.tone_button.contains(position) {
+            return Some(Hit::ToneButton);
+        }
+        if !self.grid.contains(position) {
             return None;
         }
-        let x = position.0 - self.left_margin(width, columns);
-        let y = position.1 - self.padding - self.header_height + scroll_remainder;
-        if x < 0.0 || y < 0.0 {
+        let y = position.1 - self.grid.y;
+        if sticky && y < self.header_height {
             return None;
         }
-        let stride = self.cell_size + self.spacing;
-        if stride <= 0.0 {
+        let Line::Cells { start, end, .. } = *lines.get(stack.line_at(y + offset)?)? else { return None };
+        let x = position.0 - self.grid.x;
+        let stride = self.cell_width(tab) + self.column_gap(tab);
+        let column = (x / stride).floor();
+        if column < 0.0 || x - column * stride > self.cell_width(tab) {
             return None;
         }
+        let index = start + column as usize;
+        (index < end).then_some(Hit::Cell(index))
+    }
 
-        let col = (x / stride) as usize;
-        if col >= columns {
-            return None;
-        }
-        // Reject a hit in the gap after this column's own cell width —
-        // the same dead-zone rule `RowLayout::row_at` applies vertically.
-        if x - (col as f64 * stride) > self.cell_size {
-            return None;
-        }
+    /// The tone picker, anchored to `anchor`: above it if there is room
+    /// inside the grid, below it otherwise, and never past the popup's
+    /// sides. From the ✋ button (`below_button`), it opens under the
+    /// button, right-aligned to it.
+    pub fn picker(&self, anchor: Rect, below_button: bool) -> Picker {
+        let cell = self.cell;
+        let gap = design::CELL_GAP;
+        let pad = design::PICKER_PADDING;
+        let width = TONE_CELLS as f64 * cell + (TONE_CELLS - 1) as f64 * gap + pad * 2.0;
+        let height = cell + pad * 2.0;
+        let (x, y) = if below_button {
+            (anchor.right() - width, anchor.bottom() + 4.0)
+        } else {
+            let above = anchor.y - height - 4.0;
+            let y = if above >= self.grid.y { above } else { anchor.bottom() + 4.0 };
+            (anchor.x - pad, y)
+        };
+        let x = x.clamp(self.padding, self.width - self.padding - width);
+        Picker { rect: Rect { x, y, width, height }, cell, gap, padding: pad }
+    }
 
-        let row = (y / stride) as usize;
-        if y - (row as f64 * stride) > self.cell_size {
-            return None;
-        }
-
-        let index = row * columns + col;
-        if index >= visible_cells {
-            return None;
-        }
-        Some(index)
+    /// The grid's scrollbar — the one place its track is computed, read
+    /// by both the drawing and the thumb drag. It sits in the popup's
+    /// right padding, clear of the last column.
+    pub fn scrollbar(&self) -> hyprforge_popup::Scrollbar {
+        let track_x = self.width - (self.padding + hyprforge_popup::Scrollbar::WIDTH) / 2.0;
+        hyprforge_popup::Scrollbar::new(track_x, self.grid.y, self.grid.height)
     }
 }
 
-/// The tone-variant strip a long press (or its keyboard equivalent, Tab
-/// — see `crate::popup_app`) opens: five cells, one per
-/// [`hyprforge_emoji::Tone`] in [`hyprforge_emoji::TONES`] order.
-///
-/// Deliberately **not** positioned relative to whichever grid cell
-/// opened it — see this module's own doc for why the invariant this
-/// crate cares about is "drawn, hit-tested and fit agree", and anchoring
-/// the strip to a cell whose position depends on scroll state would make
-/// this layout a function of the model's own scroll offset, not just the
-/// theme. Instead it is a fixed bar directly under the header, at the
-/// same place regardless of which cell opened it — this popup already
-/// makes an out-of-flow overlay work as a `Stack` layer over the grid
-/// (see `view::view`), so nothing about the grid's own geometry moves or
-/// needs to know the strip exists.
+/// What a pointer position resolved to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hit {
+    Tab(usize),
+    ToneButton,
+    /// An item, by index into `Model::items`.
+    Cell(usize),
+}
+
+/// The six-cell tone picker's rectangle and cells.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ToneStrip {
-    pub top: f64,
-    pub left: f64,
-    pub cell_size: f64,
-    pub spacing: f64,
+pub struct Picker {
+    pub rect: Rect,
+    pub cell: f64,
+    pub gap: f64,
+    pub padding: f64,
 }
 
-impl ToneStrip {
-    /// Slightly smaller than a grid cell: this bar sits *over* the
-    /// grid's own first row rather than pushing it down (see this
-    /// struct's own doc), and a little breathing room around it reads
-    /// more like a popover than a second, identical row of the grid
-    /// underneath.
-    ///
-    /// Takes `font_size` (unused today, beyond what `grid` already
-    /// derived from it) so the signature has somewhere to grow if a
-    /// future tweak ever needs the font size directly, without every
-    /// call site changing again.
-    pub fn for_font_size(_font_size: f32, grid: &GridLayout) -> ToneStrip {
-        ToneStrip {
-            top: grid.padding,
-            left: grid.padding,
-            cell_size: grid.cell_size * 0.9,
-            spacing: grid.spacing,
-        }
-    }
-
-    /// Total width of the five-cell strip, including the gaps between
-    /// them but not a trailing one — mirrors `GridLayout::columns`'s own
-    /// "no trailing gap" accounting.
-    pub fn width(&self) -> f64 {
-        5.0 * self.cell_size + 4.0 * self.spacing
-    }
-
-    pub fn height(&self) -> f64 {
-        self.cell_size
-    }
-
-    /// Which of the five tone cells (0 = [`hyprforge_emoji::Tone::Light`]
-    /// .. 4 = [`hyprforge_emoji::Tone::Dark`]) a position lands on, or
-    /// `None` if it is outside the strip's own rectangle (including the
-    /// gaps between cells) — the caller decides what "outside" means
-    /// (closing the strip without picking anything, in
-    /// `crate::popup_app`).
-    pub fn tone_at(&self, position: (f64, f64)) -> Option<usize> {
-        let x = position.0 - self.left;
-        let y = position.1 - self.top;
-        if x < 0.0 || y < 0.0 || y > self.height() {
+impl Picker {
+    /// The picker cell under `position` (0 is neutral), or `None` outside
+    /// the picker or in a gap.
+    pub fn cell_at(&self, position: (f64, f64)) -> Option<usize> {
+        let x = position.0 - self.rect.x - self.padding;
+        let y = position.1 - self.rect.y - self.padding;
+        if x < 0.0 || y < 0.0 || y > self.cell {
             return None;
         }
-        let stride = self.cell_size + self.spacing;
+        let stride = self.cell + self.gap;
         let index = (x / stride) as usize;
-        if index >= 5 {
-            return None;
-        }
-        if x - (index as f64 * stride) > self.cell_size {
-            return None;
-        }
-        Some(index)
+        (index < TONE_CELLS && x - index as f64 * stride <= self.cell).then_some(index)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Model;
 
-    /// A popup width the tests measure against. The grid is centred in
-    /// it, so "where the first column starts" is `left_margin`, not
-    /// `padding` — these tests used to assume the two were the same and
-    /// caught the change the moment centring landed, which is what they
-    /// are for.
-    const TEST_WIDTH: f64 = 360.0;
-
-    fn left(layout: &GridLayout) -> f64 {
-        layout.left_margin(TEST_WIDTH, 4)
-    }
-
-    // --- GridLayout::columns / rows_that_fit: the "how many fit" half of
-    // the drawn/hit-tested/fit invariant.
-
-    #[test]
-    fn a_wider_popup_fits_more_columns() {
-        let layout = GridLayout::for_font_size(15.0);
-        assert!(layout.columns(600.0) > layout.columns(300.0));
+    fn layout() -> Layout {
+        Layout::for_font_size(13.0)
     }
 
     #[test]
-    fn a_popup_with_no_room_still_reports_at_least_one_column_or_row() {
-        let layout = GridLayout::for_font_size(15.0);
-        assert_eq!(layout.columns(0.0), 1, "never zero columns, or nothing can ever be drawn");
-        assert_eq!(layout.rows_that_fit(0.0), 0, "but zero rows is a legitimate 'nothing fits yet'");
+    fn at_the_designs_own_font_size_the_layout_is_the_designs() {
+        let l = layout();
+        assert_eq!(l.search.height, 30.0);
+        assert_eq!(l.tabs.height, 26.0);
+        assert_eq!(l.cell, 34.0);
+        assert_eq!(l.columns(Tab::Emoji), 9);
+        assert_eq!(l.grid.height, 236.0);
+        assert_eq!(l.header_height, 26.0);
+        assert_eq!(l.grid.y, 82.0, "10 + 30 + 8 + 26 + 8");
     }
 
     #[test]
-    fn columns_and_rows_describe_a_grid_that_actually_fits_inside_the_popup() {
-        let layout = GridLayout::for_font_size(15.0);
-        let width = 320.0;
-        let height = 420.0;
-        let columns = layout.columns(width);
-        let rows = layout.rows_that_fit(height);
-
-        let stride = layout.cell_size + layout.spacing;
-        let grid_width = columns as f64 * stride - layout.spacing;
-        assert!(
-            grid_width <= width - layout.padding * 2.0 + 0.001,
-            "{columns} columns ({grid_width}px) must fit inside {width}px"
-        );
-        let grid_height = rows as f64 * stride - layout.spacing;
-        assert!(
-            grid_height <= height - layout.padding * 2.0 - layout.header_height + 0.001,
-            "{rows} rows ({grid_height}px) must fit under the header"
-        );
-
-        // And one more of either would not have fit — otherwise this is
-        // leaving room on the table, the same "one more would still fit"
-        // check `hyprforge-clipmenu`'s own `fit_tests` module runs for
-        // `RowLayout::rows_that_fit`.
-        let one_more_column_width = (columns + 1) as f64 * stride - layout.spacing;
-        assert!(one_more_column_width > width - layout.padding * 2.0);
-        let one_more_row_height = (rows + 1) as f64 * stride - layout.spacing;
-        assert!(one_more_row_height > height - layout.padding * 2.0 - layout.header_height);
-    }
-
-    // --- GridLayout::cell_at: the "which cell" half.
-
-    /// The grid is centred, so the space left over from whole columns
-    /// is split rather than pooled on the right — and the hit-test has
-    /// to measure from the same edge the drawing starts at, or every
-    /// click lands half a gap out.
-    #[test]
-    fn the_leftover_width_is_split_evenly_and_the_hit_test_agrees() {
-        let layout = GridLayout::for_font_size(15.0);
-        let columns = layout.columns(TEST_WIDTH);
-        let stride = layout.cell_size + layout.spacing;
-        let grid_width = columns as f64 * stride - layout.spacing;
-
-        // Measured from the popup's own edges, both sides: the gap to
-        // the left of the first column and the gap to the right of the
-        // last. Padding is part of both, which is the whole point —
-        // what the eye sees is the total gap, not the slack on top of
-        // the padding.
-        let left_edge = layout.left_margin(TEST_WIDTH, columns);
-        let right_gap = TEST_WIDTH - (left_edge + grid_width);
-        assert!(
-            (left_edge - right_gap).abs() < 0.001,
-            "gap left of the grid is {left_edge}, right is {right_gap}"
-        );
-        assert!(left_edge >= layout.padding, "the grid must never sit inside the padding");
-
-        // Just inside the first cell hits it; just outside does not.
-        let top = layout.padding + layout.header_height;
-        assert_eq!(layout.cell_at((left_edge + 0.01, top), TEST_WIDTH, columns, 20, 0.0), Some(0));
-        assert_eq!(layout.cell_at((left_edge - 0.01, top), TEST_WIDTH, columns, 20, 0.0), None);
+    fn the_columns_span_the_grid_edge_to_edge() {
+        for tab in Tab::ALL {
+            let l = layout();
+            let n = l.columns(tab) as f64;
+            let span = n * l.cell_width(tab) + (n - 1.0) * l.column_gap(tab);
+            assert!((span - l.grid.width).abs() < 1e-9, "{tab:?} spans {span} of {}", l.grid.width);
+        }
     }
 
     #[test]
-    fn a_pointer_over_the_header_hits_no_cell() {
-        let layout = GridLayout::for_font_size(15.0);
-        assert_eq!(layout.cell_at((left(&layout), 0.0), TEST_WIDTH, 4, 20, 0.0), None);
+    fn a_bigger_font_gets_bigger_cells_and_never_overflows_the_popup() {
+        for fs in [9.0, 13.0, 15.0, 22.0, 30.0] {
+            let l = Layout::for_font_size(fs);
+            assert!(l.cell >= fs as f64 * 2.0);
+            assert!(l.columns(Tab::Emoji) as f64 * l.cell <= l.grid.width);
+            assert!(l.search.right() < l.tone_button.x);
+            assert!(l.grid.y >= l.tabs.y + l.tabs.height);
+            assert!(l.footer_top > l.grid.bottom());
+        }
     }
 
+    /// Every cell of the first rows is hit in its middle, unscrolled and
+    /// scrolled — the drawn/hit-tested contract, through the model's own
+    /// lines and stack.
     #[test]
-    fn the_first_cell_starts_right_after_the_header() {
-        let layout = GridLayout::for_font_size(15.0);
-        let top = layout.padding + layout.header_height;
-        assert_eq!(layout.cell_at((left(&layout), top), TEST_WIDTH, 4, 20, 0.0), Some(0));
-        assert_eq!(
-            layout.cell_at((left(&layout) + layout.cell_size - 0.01, top + layout.cell_size - 0.01), TEST_WIDTH, 4, 20, 0.0),
-            Some(0),
-            "must still be cell 0 right up to its own far edge"
-        );
-    }
-
-    #[test]
-    fn cells_are_found_in_row_major_order() {
-        let layout = GridLayout::for_font_size(15.0);
-        let top = layout.padding + layout.header_height;
-        let stride = layout.cell_size + layout.spacing;
-        let columns = 4;
-        for row in 0..3usize {
-            for col in 0..columns {
-                let x = left(&layout) + col as f64 * stride + layout.cell_size / 2.0;
-                let y = top + row as f64 * stride + layout.cell_size / 2.0;
-                assert_eq!(layout.cell_at((x, y), TEST_WIDTH, columns, 12, 0.0), Some(row * columns + col));
+    fn every_visible_cell_is_hit_where_it_is_drawn() {
+        let l = layout();
+        for tab in Tab::ALL {
+            let mut model = Model::new(None, &[]);
+            model.set_tab(tab);
+            model.set_geometry(tab, l.grid_geometry(tab));
+            for offset in [0.0, 17.0] {
+                model.scroll_by(offset - model.scroll_offset());
+                let (lines, stack) = (model.lines(), model.stack());
+                let sticky = model.scroll_offset() > 0.0;
+                for index in 0..6.min(model.items().len()) {
+                    let r = l.cell_rect(tab, &lines, &stack, model.scroll_offset(), index).unwrap();
+                    let middle = (r.x + r.width / 2.0, r.y + r.height / 2.0);
+                    if !l.grid.contains(middle) || (sticky && middle.1 - l.grid.y < l.header_height) {
+                        continue;
+                    }
+                    assert_eq!(l.hit(middle, tab, &lines, &stack, model.scroll_offset(), sticky), Some(Hit::Cell(index)), "{tab:?} at {offset}");
+                }
             }
         }
     }
 
     #[test]
-    fn a_pointer_in_the_gap_between_two_columns_hits_nothing() {
-        let layout = GridLayout::for_font_size(15.0);
-        let top = layout.padding + layout.header_height;
-        let gap_x = left(&layout) + layout.cell_size + layout.spacing / 2.0;
-        assert_eq!(layout.cell_at((gap_x, top + layout.cell_size / 2.0), TEST_WIDTH, 4, 20, 0.0), None);
+    fn a_gap_a_label_and_the_sticky_band_hit_no_cell() {
+        let l = layout();
+        let mut model = Model::new(None, &[]);
+        model.set_geometry(Tab::Emoji, l.grid_geometry(Tab::Emoji));
+        let (lines, stack) = (model.lines(), model.stack());
+        let label = (l.grid.x + 20.0, l.grid.y + l.header_height / 2.0);
+        assert_eq!(l.hit(label, Tab::Emoji, &lines, &stack, 0.0, false), None, "a section label is not a cell");
+        let first = l.cell_rect(Tab::Emoji, &lines, &stack, 0.0, 0).unwrap();
+        let gap = (first.right() + l.column_gap(Tab::Emoji) / 2.0, first.y + first.height / 2.0);
+        assert_eq!(l.hit(gap, Tab::Emoji, &lines, &stack, 0.0, false), None);
+        let band = (l.grid.x + 5.0, l.grid.y + 3.0);
+        assert_eq!(l.hit(band, Tab::Emoji, &lines, &stack, 60.0, true), None, "the pinned label covers what scrolls under it");
     }
 
     #[test]
-    fn a_pointer_past_the_last_column_hits_nothing() {
-        let layout = GridLayout::for_font_size(15.0);
-        let top = layout.padding + layout.header_height;
-        let stride = layout.cell_size + layout.spacing;
-        let past_last_column = left(&layout) + 4.0 * stride + 1.0;
-        assert_eq!(layout.cell_at((past_last_column, top), TEST_WIDTH, 4, 20, 0.0), None);
+    fn the_tabs_and_the_tone_button_are_hit() {
+        let l = layout();
+        let stack = Stack::new([], 0.0);
+        let middle = |r: Rect| (r.x + r.width / 2.0, r.y + r.height / 2.0);
+        assert_eq!(l.hit(middle(l.tone_button), Tab::Emoji, &[], &stack, 0.0, false), Some(Hit::ToneButton));
+        assert_eq!(l.hit((l.tabs.x + 30.0, l.tabs.y + 10.0), Tab::Emoji, &[], &stack, 0.0, false), Some(Hit::Tab(0)));
     }
 
     #[test]
-    fn a_pointer_past_the_last_built_cell_hits_nothing_even_inside_a_column_that_exists() {
-        let layout = GridLayout::for_font_size(15.0);
-        let top = layout.padding + layout.header_height;
-        // Row 2, column 0 would be index 8 with 4 columns — but only 8
-        // cells (indices 0..8) are actually built, so this must be `None`
-        // rather than resolving to a cell nothing drew.
-        let stride = layout.cell_size + layout.spacing;
-        let y = top + 2.0 * stride + layout.cell_size / 2.0;
-        assert_eq!(layout.cell_at((left(&layout), y), TEST_WIDTH, 4, 8, 0.0), None);
+    fn the_picker_opens_above_a_cell_when_there_is_room_and_below_when_not() {
+        let l = layout();
+        let high = Rect { x: 100.0, y: l.grid.y + 2.0, width: l.cell, height: l.cell };
+        let low = Rect { y: l.grid.y + 150.0, ..high };
+        assert!(l.picker(high, false).rect.y > high.bottom(), "no room above the top row");
+        assert!(l.picker(low, false).rect.bottom() < low.y);
     }
 
     #[test]
-    fn zero_columns_or_zero_visible_cells_hits_nothing_rather_than_dividing_by_zero() {
-        let layout = GridLayout::for_font_size(15.0);
-        let top = layout.padding + layout.header_height;
-        assert_eq!(layout.cell_at((left(&layout), top), TEST_WIDTH, 0, 20, 0.0), None);
-        assert_eq!(layout.cell_at((left(&layout), top), TEST_WIDTH, 4, 0, 0.0), None);
-    }
-
-    // --- `cell_at` under a scroll remainder — the same cells shifted up
-    // by whatever pixel amount `view.rs` shifted the rendered rows by, so
-    // a hit-test and a drawing that agree on the offset must still agree
-    // on which cell is where.
-
-    #[test]
-    fn a_positive_scroll_remainder_shifts_which_row_a_position_hits() {
-        let layout = GridLayout::for_font_size(15.0);
-        let stride = layout.row_stride();
-        let top = layout.padding + layout.header_height;
-        // With no scroll, this point is inside row 0 (cell 0).
-        assert_eq!(layout.cell_at((left(&layout), top + 2.0), TEST_WIDTH, 4, 20, 0.0), Some(0));
-        // Scrolled by a whole stride, the same screen position now reads
-        // as one row further into the (scrolled) window.
-        assert_eq!(layout.cell_at((left(&layout), top + 2.0), TEST_WIDTH, 4, 20, stride), Some(4));
-    }
-
-    // --- `content_height`/`viewport_height`: the scrollbar/offset
-    // arithmetic's "how tall" half.
-
-    #[test]
-    fn content_height_matches_the_pixels_view_rs_actually_stacks() {
-        let layout = GridLayout::for_font_size(15.0);
-        let stride = layout.row_stride();
-        assert_eq!(layout.content_height(3), 3.0 * stride - layout.spacing);
-        assert_eq!(layout.content_height(0), 0.0, "no rows is no content, not a negative spacing");
-    }
-
-    #[test]
-    fn viewport_height_is_the_same_available_figure_rows_that_fit_floors() {
-        let layout = GridLayout::for_font_size(15.0);
-        let height = 420.0;
-        let viewport = layout.viewport_height(height);
-        let rows = layout.rows_that_fit(height);
-        assert!(
-            layout.content_height(rows) <= viewport + 0.001,
-            "the rows rows_that_fit claims fit must actually fit inside the raw viewport height"
-        );
-    }
-
-    // --- ToneStrip: the five-cell overlay a long press opens.
-
-    #[test]
-    fn the_five_tone_cells_are_found_in_order() {
-        let grid = GridLayout::for_font_size(15.0);
-        let strip = ToneStrip::for_font_size(15.0, &grid);
-        let stride = strip.cell_size + strip.spacing;
-        for index in 0..5usize {
-            let x = strip.left + index as f64 * stride + strip.cell_size / 2.0;
-            let y = strip.top + strip.cell_size / 2.0;
-            assert_eq!(strip.tone_at((x, y)), Some(index));
+    fn the_picker_never_leaves_the_popup_sideways() {
+        let l = layout();
+        for x in [-50.0, 0.0, 300.0, 500.0] {
+            let p = l.picker(Rect { x, y: l.grid.y + 100.0, width: l.cell, height: l.cell }, false);
+            assert!(p.rect.x >= l.padding && p.rect.right() <= l.width - l.padding + 1e-9);
         }
+        let from_button = l.picker(l.tone_button, true);
+        assert!(from_button.rect.y > l.tone_button.bottom());
     }
 
     #[test]
-    fn a_point_in_the_gap_between_tone_cells_hits_nothing() {
-        let grid = GridLayout::for_font_size(15.0);
-        let strip = ToneStrip::for_font_size(15.0, &grid);
-        let gap_x = strip.left + strip.cell_size + strip.spacing / 2.0;
-        assert_eq!(strip.tone_at((gap_x, strip.top + strip.cell_size / 2.0)), None);
+    fn every_picker_cell_is_hit_in_its_middle_and_its_gaps_are_not() {
+        let l = layout();
+        let p = l.picker(Rect { x: 100.0, y: l.grid.y + 100.0, width: l.cell, height: l.cell }, false);
+        for i in 0..TONE_CELLS {
+            let x = p.rect.x + p.padding + i as f64 * (p.cell + p.gap) + p.cell / 2.0;
+            assert_eq!(p.cell_at((x, p.rect.y + p.padding + p.cell / 2.0)), Some(i));
+        }
+        let gap = p.rect.x + p.padding + p.cell + p.gap / 2.0;
+        assert_eq!(p.cell_at((gap, p.rect.y + p.padding + 5.0)), None);
+        assert_eq!(p.cell_at((p.rect.x - 1.0, p.rect.y + 10.0)), None);
     }
 
     #[test]
-    fn a_point_outside_the_strips_own_rectangle_hits_nothing() {
-        let grid = GridLayout::for_font_size(15.0);
-        let strip = ToneStrip::for_font_size(15.0, &grid);
-        assert_eq!(strip.tone_at((strip.left - 1.0, strip.top)), None);
-        assert_eq!(strip.tone_at((strip.left, strip.top - 1.0)), None);
-        assert_eq!(strip.tone_at((strip.left, strip.top + strip.height() + 1.0)), None);
-        assert_eq!(strip.tone_at((strip.left + strip.width() + 1.0, strip.top)), None);
+    fn the_scrollbar_sits_in_the_right_padding() {
+        let l = layout();
+        let bar = l.scrollbar();
+        assert!(bar.track_x >= l.grid.right());
+        assert!(bar.track_x + bar.width <= l.width);
     }
 }

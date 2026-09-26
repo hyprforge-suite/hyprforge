@@ -1,359 +1,380 @@
-//! The popup's widget tree, built fresh each frame from a [`Model`] — the
-//! grid counterpart to `hyprforge-clipmenu::view`.
+//! The picker's widget tree, built fresh each frame from a [`Model`].
 //!
-//! Every colour comes from [`hyprforge_look::Theme`] — CLAUDE.md is
-//! explicit that no app may define its own colour constant. Like
-//! `hyprforge-clipmenu`'s own `view`, this never routes through iced's
-//! widget-level click handling at all (every `Element` here is
-//! `Infallible`-messaged): `hyprforge-popup::popup::Popup` draws with
-//! `mouse::Cursor::Unavailable` and this crate's own
-//! `crate::geometry::GridLayout`/`ToneStrip` resolve every click and
-//! hover directly from raw pointer coordinates (see `crate::popup_app`).
-//! What this module draws and what those hit-test against are required
-//! to describe the same pixels — the numbers below (`grid.cell_size`,
-//! `grid.spacing`, `ToneStrip::top`/`left`) are exactly the ones that
-//! module reads, never a second, independently-chosen set.
+//! Every region is sized from [`Layout`] — the numbers
+//! `geometry::Layout::hit` measures with — and the grid's lines from the
+//! model's [`hyprforge_popup::Stack`]. Nothing here picks a height of its
+//! own; see `geometry.rs`'s module doc for why that is the whole
+//! contract. Every colour comes from the theme through
+//! [`hyprforge_popup::kit::Look`]; CLAUDE.md is explicit that no app may
+//! define its own colour constant.
+//!
+//! Nothing routes through iced's own click handling (every `Element` is
+//! `Infallible`-messaged): `popup_app.rs` resolves clicks from raw
+//! pointer coordinates against `geometry.rs`.
 
-use crate::geometry::{GridLayout, ToneStrip};
-use crate::model::Model;
-use hyprforge_emoji::Emoji;
+use crate::geometry::Layout;
+use crate::model::{self, Item, Line, Model, Tab, ToneMode};
 use hyprforge_look::Theme;
+use hyprforge_popup::kit::{self, Look};
 use iced_runtime::core::alignment::{Horizontal, Vertical};
-use iced_runtime::core::text::Wrapping;
-use iced_runtime::core::text::LineHeight;
-use iced_runtime::core::{Element, Font, Length, Padding};
-use iced_widget::{column, container, row, text, Space, Stack};
+use iced_runtime::core::text::{LineHeight, Wrapping};
+use iced_runtime::core::{Border, Color, Element, Font, Length, Padding};
+use iced_widget::{column, container, row, text, Column, Row, Space, Stack};
 
-fn to_iced(c: hyprforge_look::Color) -> iced_runtime::core::Color {
-    iced_runtime::core::Color::from_rgba8(c.r, c.g, c.b, c.a as f32 / 255.0)
-}
+type El<'a, Message, Renderer> = Element<'a, Message, iced_widget::Theme, Renderer>;
 
-
-/// The font emoji cells are drawn in, named explicitly rather than left
-/// to the theme's UI font.
+/// The font emoji are drawn in, named explicitly rather than left to the
+/// theme's UI font.
 ///
-/// Without this, roughly half the grid renders as monochrome glyphs
-/// instead of emoji — and it is not a data problem: the table carries
-/// `U+FE0F` on all 365 entries that need it, and the 60 bare
-/// single-codepoint entries are `Emoji_Presentation=Yes` characters
-/// that do not. The cause is font selection. Plenty of ordinary UI
-/// fonts contain their own black-and-white glyphs for ✔ ☺ ⚙ and the
-/// like, so a renderer asked for the theme's font finds a glyph there,
-/// is satisfied, and never falls back to the colour emoji font sitting
-/// right beside it.
-///
+/// Without this, roughly half the grid renders as monochrome glyphs. It
+/// is not a data problem — the table carries `U+FE0F` wherever it is
+/// needed — but font selection: plenty of ordinary UI fonts carry their
+/// own black-and-white ✔ ☺ ⚙, so a renderer asked for the theme's font
+/// finds a glyph there and never falls back to the colour font beside it.
 /// `noto-fonts-emoji` is a hard dependency of this package for exactly
-/// this reason — see `packaging/arch/PKGBUILD`. If it is missing, cells
-/// render as tofu, which is the honest failure rather than a silent
-/// half-monochrome grid.
+/// this reason (see `packaging/arch/PKGBUILD`); without it cells render as
+/// tofu, which is the honest failure rather than a half-monochrome grid.
 const EMOJI_FONT: Font = Font::with_name("Noto Color Emoji");
 
-/// How much of a cell the glyph fills.
-///
-/// Was 0.55, which left an emoji looking lost in its own cell. Emoji are
-/// square and have no descenders to leave room for, so they can take far
-/// more of the box than a line of text would.
-const GLYPH_FILL: f64 = 0.78;
+/// How much of a cell an emoji fills — the design's 20px glyph in a 34px
+/// cell. Emoji are square with no descenders, so they sit centred in the
+/// box without leaving room for a line's leading.
+const GLYPH_FILL: f64 = 0.6;
 
-pub fn view<'a, Message, Renderer>(
-    model: &'a Model,
-    theme: &'a Theme,
-    popup_width: f64,
-) -> Element<'a, Message, iced_widget::Theme, Renderer>
+pub fn view<'a, Message, Renderer>(model: &'a Model, theme: &'a Theme) -> El<'a, Message, Renderer>
 where
     Message: 'a,
-    Renderer: iced_runtime::core::text::Renderer<Font = iced_runtime::core::Font> + 'a,
+    Renderer: iced_runtime::core::text::Renderer<Font = Font> + 'a,
 {
-    let grid = GridLayout::for_font_size(theme.font_size);
-    let text_color = to_iced(theme.surfaces.text);
-    let dim_color = to_iced(theme.surfaces.text_dim);
-    let header_text_height = grid.header_height - GridLayout::HEADER_GAP;
+    let layout = Layout::for_font_size(theme.font_size);
+    let look = Look::new(theme);
 
-    let root_background = theme.surfaces.root;
-    let popup_border = theme.accent;
-    let popup_radius = theme.corner_radius();
-
-    let header_inner: Element<'a, Message, iced_widget::Theme, Renderer> = if model.filter_text().is_empty() {
-        let placeholder = match model.paste_target() {
-            Some(target) => format!("Type to filter — pasting into {target}"),
-            None => "Type to filter".to_string(),
-        };
-        text(placeholder).size(theme.font_size).wrapping(Wrapping::None).color(dim_color).into()
-    } else {
-        text(model.filter_text().to_string()).size(theme.font_size).wrapping(Wrapping::None).color(text_color).into()
-    };
-    let field_background = theme.surfaces.card;
-    let field_border = theme.accent;
-    let field_radius = theme.corner_radius().min((header_text_height / 2.0) as f32);
-    let header: Element<'a, Message, iced_widget::Theme, Renderer> = container(header_inner)
-        .width(Length::Fill)
-        .height(Length::Fixed(header_text_height as f32))
-        .padding(Padding { top: 0.0, right: 8.0, bottom: 0.0, left: 8.0 })
-        .align_y(Vertical::Center)
-        .style(move |_: &iced_widget::Theme| container::Style {
-            background: Some(to_iced(field_background).into()),
-            border: iced_runtime::core::Border { radius: field_radius.into(), width: 1.0, color: to_iced(field_border) },
-            ..Default::default()
-        })
-        .into();
-
-    let filtered = model.filtered();
-    let selected = model.selected_index();
-    let columns = model.columns().max(1);
-
-    let body: Element<'a, Message, iced_widget::Theme, Renderer> = if filtered.is_empty() {
-        message(
-            if model.filter_text().is_empty() { "No emoji to show" } else { "No matches" },
-            dim_color,
-            theme,
-        )
-    } else {
-        let range = model.visible_range();
-        let window = &filtered[range.clone()];
-
-        let mut rows_vec: Vec<Element<'a, Message, iced_widget::Theme, Renderer>> = Vec::new();
-        let mut current_row: Vec<Element<'a, Message, iced_widget::Theme, Renderer>> = Vec::new();
-        for (offset, entry) in window.iter().enumerate() {
-            let index = range.start + offset;
-            current_row.push(grid_cell(model, entry, index == selected, theme, &grid));
-            if current_row.len() == columns {
-                rows_vec.push(row(std::mem::take(&mut current_row)).spacing(grid.spacing as f32).into());
-            }
-        }
-        if !current_row.is_empty() {
-            rows_vec.push(row(current_row).spacing(grid.spacing as f32).into());
-        }
-        // Shifted right by whatever `left_margin` says, so the grid sits
-        // centred rather than pushed against the left edge with the
-        // leftover width pooled on the right. The outer container
-        // already applies `PADDING`, so only the extra slack is added
-        // here — and it is the *same* number `GridLayout::cell_at`
-        // measures from, which is what keeps a click landing on the cell
-        // under the pointer. The top padding is negative by
-        // `scroll_remainder` — the same shift `GridLayout::cell_at` adds
-        // to a pointer's own `y` before hit-testing (see that method's
-        // own doc) — so whatever this container draws at is exactly what
-        // a click or a hover resolves against. Clipped to a fixed
-        // `viewport_height` is what makes a partially visible row at the
-        // top or bottom look clipped instead of spilling into the header
-        // or past the popup's own edge.
-        let indent = (grid.left_margin(popup_width, columns) - GridLayout::PADDING).max(0.0);
-        container(column(rows_vec).spacing(grid.spacing as f32))
-            .padding(Padding { top: -(model.scroll_remainder() as f32), right: 0.0, bottom: 0.0, left: indent as f32 })
-            .width(Length::Fill)
-            .height(Length::Fixed(model.viewport_height() as f32))
-            .clip(true)
-            .into()
-    };
-
-    let content: Element<'a, Message, iced_widget::Theme, Renderer> = container(
-        column![header, Space::new().height(GridLayout::HEADER_GAP as f32), body]
-            .spacing(0)
-            .width(Length::Fill),
-    )
+    let labels: Vec<&str> = Tab::ALL.iter().map(|t| t.label()).collect();
+    let header = container(column![
+        row![
+            kit::search_field(model.filter_text(), model.tab().placeholder(), layout.search.height, &look),
+            Space::new().width((layout.tone_button.x - layout.search.right()) as f32),
+            tone_button(model, &layout, &look),
+        ],
+        Space::new().height((layout.tabs.y - layout.search.bottom()) as f32),
+        kit::tabs(&labels, model.tab().index(), layout.tabs.height, &look),
+    ])
     .width(Length::Fill)
-    .height(Length::Fill)
-    .padding(Padding::from(GridLayout::PADDING as f32))
-    .style(move |_: &iced_widget::Theme| container::Style {
-        background: Some(to_iced(root_background).into()),
-        border: iced_runtime::core::Border { radius: popup_radius.into(), width: 1.0, color: to_iced(popup_border) },
-        ..Default::default()
-    })
-    .into();
+    .height(Length::Fixed(layout.grid.y as f32))
+    .padding(Padding { top: layout.padding as f32, right: layout.padding as f32, bottom: 0.0, left: layout.padding as f32 });
 
-    // The scrollbar: drawn only when there is more content than the
-    // viewport shows — a scrollbar that cannot scroll is noise.
-    // `grid.scrollbar` is the *one* place this crate computes the
-    // track's geometry (see that method's own doc); reading it here
-    // rather than recomputing the track's rectangle a second way is what
-    // keeps a drawn thumb and a dragged thumb from disagreeing about
-    // where it is.
-    let rows_total = if columns == 0 { 0 } else { filtered.len().div_ceil(columns) };
-    let bar = grid.scrollbar(popup_width, model.viewport_height());
-    let content_height = grid.content_height(rows_total);
-    let mut layers: Vec<Element<'a, Message, iced_widget::Theme, Renderer>> = vec![content];
-    if bar.is_needed(content_height) {
-        let thumb_top = bar.thumb_top(content_height, model.scroll_offset());
-        let thumb_height = bar.thumb_height(content_height);
-        let thumb_color = to_iced(theme.accent);
-        let bar_width = bar.width;
+    let content = column![
+        header,
+        container(grid(model, &layout, &look)).width(Length::Fill).height(Length::Fixed(layout.grid.height as f32)).padding(Padding {
+            top: 0.0,
+            right: layout.padding as f32,
+            bottom: 0.0,
+            left: layout.padding as f32
+        }),
+        kit::divider(true, &look),
+        footer(model, &layout, &look),
+    ];
+
+    let mut layers: Vec<El<'a, Message, Renderer>> = vec![kit::frame(content, &look)];
+
+    // The label of the section scrolling past, pinned over the top of the
+    // grid — drawn opaque so the rows passing under it do not show
+    // through. `Layout::hit` treats the same band as the label's.
+    if let Some(section) = model.sticky_section().and_then(|s| model.sections().get(s)) {
         layers.push(
-            container(
-                container(Space::new())
-                    .width(Length::Fixed(bar_width as f32))
-                    .height(Length::Fixed(thumb_height as f32))
-                    .style(move |_: &iced_widget::Theme| container::Style {
-                        background: Some(thumb_color.into()),
-                        border: iced_runtime::core::Border {
-                            radius: (bar_width as f32 / 2.0).into(),
-                            width: 0.0,
-                            color: thumb_color,
-                        },
-                        ..Default::default()
-                    }),
-            )
-            .padding(Padding { top: thumb_top as f32, left: bar.track_x as f32, right: 0.0, bottom: 0.0 })
-            .into(),
+            container(kit::section_label(&section.title, section_note(model, section).as_deref(), layout.header_height, true, &look))
+                .padding(Padding { top: layout.grid.y as f32, left: layout.padding as f32, right: layout.padding as f32, bottom: 0.0 })
+                .width(Length::Fill)
+                .into(),
         );
     }
-
-    if let Some(cursor) = model.tone_overlay() {
-        let strip = ToneStrip::for_font_size(theme.font_size, &grid);
-        layers.push(tone_overlay(model, cursor, theme, &strip));
+    if let Some(bar) = kit::scrollbar_layer(&layout.scrollbar(), model.stack().content_height(), model.scroll_offset(), &look) {
+        layers.push(bar);
     }
-
-    if layers.len() > 1 {
-        Stack::with_children(layers).width(Length::Fill).height(Length::Fill).into()
-    } else {
-        layers.into_iter().next().unwrap()
+    if let Some(picker) = tone_picker(model, &layout, &look) {
+        layers.push(picker);
     }
+    Stack::with_children(layers).width(Length::Fill).height(Length::Fill).into()
 }
 
-/// One grid cell: a fixed-size square, the same fixed-size discipline
-/// `hyprforge-clipmenu::view::entry_row`'s doc explains — a size the
-/// renderer measured out could disagree with what
-/// `crate::geometry::GridLayout::cell_at` was told to expect, so nothing
-/// here is left to shrink or grow around its own glyph.
-fn grid_cell<'a, Message, Renderer>(
-    model: &Model,
-    entry: &Emoji,
-    selected: bool,
-    theme: &Theme,
-    grid: &GridLayout,
-) -> Element<'a, Message, iced_widget::Theme, Renderer>
+/// A section label's right-hand note: the search's "best match first",
+/// or — on People & Body, where nearly every emoji has tones — which tone
+/// they are all being shown in.
+fn section_note(model: &Model, section: &model::Section) -> Option<String> {
+    if let Some(note) = &section.note {
+        return Some(note.clone());
+    }
+    (section.title == "People & Body" && model.default_tone().is_some())
+        .then(|| format!("default tone: {}", crate::config::tone_label(model.default_tone())))
+}
+
+/// The ✋ button: a raised hand in the default tone, and a ▾ saying it
+/// opens something.
+fn tone_button<'a, Message: 'a, Renderer>(model: &Model, layout: &Layout, look: &Look) -> El<'a, Message, Renderer>
 where
-    Message: 'a,
-    Renderer: iced_runtime::core::text::Renderer<Font = iced_runtime::core::Font> + 'a,
+    Renderer: iced_runtime::core::text::Renderer<Font = Font> + 'a,
 {
-    let glyph = model.display_char(entry).to_string();
-    let glyph_size = (grid.cell_size * GLYPH_FILL) as f32;
-    // `LineHeight::Absolute` so the text box is exactly the glyph and
-    // not a line box with leading above and below it: the container
-    // centres whatever it is given, and centring a box that is taller
-    // than its own glyph puts the glyph high in the cell rather than in
-    // the middle of it.
-    let label = text(glyph)
+    let look = *look;
+    let fill = Color { a: 0.45, ..look.chip };
+    let radius = look.radius_for(layout.tone_button.height, 8.0);
+    let glyph_size = (layout.tone_button.height * 0.6) as f32;
+    container(
+        row![
+            glyph(model.default_tone_glyph(), glyph_size),
+            text("\u{25be}").size(look.label()).color(look.dim),
+        ]
+        .spacing(4)
+        .align_y(Vertical::Center),
+    )
+    .width(Length::Fixed(layout.tone_button.width as f32))
+    .height(Length::Fixed(layout.tone_button.height as f32))
+    .align_x(Horizontal::Center)
+    .align_y(Vertical::Center)
+    .style(move |_: &iced_widget::Theme| container::Style {
+        background: Some(fill.into()),
+        border: Border { radius: radius.into(), ..Default::default() },
+        ..Default::default()
+    })
+    .into()
+}
+
+/// An emoji glyph at `size`, in the emoji font. `LineHeight::Absolute`
+/// makes the text box exactly the glyph rather than a line box with
+/// leading above and below, which a centring container would otherwise
+/// centre high.
+fn glyph<'a, Message: 'a, Renderer>(value: &str, size: f32) -> El<'a, Message, Renderer>
+where
+    Renderer: iced_runtime::core::text::Renderer<Font = Font> + 'a,
+{
+    text(value.to_string())
         .font(EMOJI_FONT)
-        .size(glyph_size)
-        .line_height(LineHeight::Absolute(glyph_size.into()))
+        .size(size)
+        .line_height(LineHeight::Absolute(size.into()))
         .align_x(Horizontal::Center)
         .align_y(Vertical::Center)
-        .wrapping(Wrapping::None);
+        .wrapping(Wrapping::None)
+        .into()
+}
 
-    let border_color = to_iced(theme.accent);
-    let cell_background = to_iced(if selected { theme.surfaces.row } else { theme.surfaces.card });
-    let border_width = if selected { 1.5 } else { 0.0 };
-    let radius = theme.corner_radius().min(grid.cell_size as f32 / 2.0);
+/// The scrolling grid: the visible lines, at exactly the positions the
+/// model's stack gives them.
+fn grid<'a, Message, Renderer>(model: &'a Model, layout: &Layout, look: &Look) -> El<'a, Message, Renderer>
+where
+    Message: 'a,
+    Renderer: iced_runtime::core::text::Renderer<Font = Font> + 'a,
+{
+    if model.items().is_empty() {
+        return container(text("No matches").size(look.font_size).color(look.dim)).padding(12).into();
+    }
+    let tab = model.tab();
+    let lines = model.lines();
+    let stack = model.stack();
+    let offset = model.scroll_offset();
+    let visible = stack.visible(offset, layout.grid.height);
+    let selected = model.selected_index();
+    let drawn: Vec<El<'a, Message, Renderer>> = visible
+        .clone()
+        .map(|i| match lines[i] {
+            Line::Header(s) => {
+                let section = &model.sections()[s];
+                kit::section_label(&section.title, section_note(model, section).as_deref(), stack.height(i), false, look)
+            }
+            Line::Cells { start, end, .. } => Row::with_children(
+                (start..end).map(|index| cell(model, model.items()[index], index == selected, tab, layout, look)),
+            )
+            .spacing(layout.column_gap(tab) as f32)
+            .into(),
+        })
+        .collect();
+    // Shifted up by however far the first drawn line sits above the
+    // grid's top — the same offset `Layout::hit` adds back — and clipped,
+    // so a half-scrolled row reads as half-scrolled.
+    let shift = offset - stack.top(visible.start);
+    container(Column::with_children(drawn).spacing(stack.spacing() as f32))
+        .padding(Padding { top: -(shift as f32), right: 0.0, bottom: 0.0, left: 0.0 })
+        .width(Length::Fill)
+        .height(Length::Fixed(layout.grid.height as f32))
+        .clip(true)
+        .into()
+}
 
-    container(label)
-        .width(Length::Fixed(grid.cell_size as f32))
-        .height(Length::Fixed(grid.cell_size as f32))
+/// One cell, at exactly `Layout`'s cell size for the tab — never left to
+/// shrink or grow around its glyph, because the hit-test assumes that
+/// size.
+fn cell<'a, Message: 'a, Renderer>(model: &Model, item: Item, selected: bool, tab: Tab, layout: &Layout, look: &Look) -> El<'a, Message, Renderer>
+where
+    Renderer: iced_runtime::core::text::Renderer<Font = Font> + 'a,
+{
+    let look = *look;
+    let (width, height) = (layout.cell_width(tab), layout.cell_height(tab));
+    let value = model.display(item);
+    let (content, rest, radius): (El<'a, Message, Renderer>, Option<Color>, f32) = match (item, tab) {
+        (Item::Extra(_), Tab::Kaomoji) => (
+            text(value.to_string()).size(look.font_size * 1.08).color(look.text).wrapping(Wrapping::None).into(),
+            Some(Color { a: 0.3, ..look.chip }),
+            8.0,
+        ),
+        (Item::Extra(_), _) => (
+            text(value.to_string())
+                .size((height * 0.55) as f32)
+                .line_height(LineHeight::Absolute(((height * 0.7) as f32).into()))
+                .color(look.text)
+                .wrapping(Wrapping::None)
+                .into(),
+            None,
+            7.0,
+        ),
+        (Item::Emoji(_), _) => (glyph(value, (height * GLYPH_FILL) as f32), None, 7.0),
+    };
+    let fill = if selected { Some(look.selected) } else { rest };
+    let radius = look.radius_for(height.min(width), radius);
+    container(content)
+        .width(Length::Fixed(width as f32))
+        .height(Length::Fixed(height as f32))
         .align_x(Horizontal::Center)
         .align_y(Vertical::Center)
         .clip(true)
         .style(move |_: &iced_widget::Theme| container::Style {
-            background: Some(cell_background.into()),
-            border: iced_runtime::core::Border { radius: radius.into(), width: border_width, color: border_color },
+            background: fill.map(Into::into),
+            border: Border { radius: radius.into(), ..Default::default() },
             ..Default::default()
         })
         .into()
 }
 
-/// The five-cell skin-tone strip a long press (or Tab) opens, laid out
-/// as an out-of-flow overlay via `Stack` — see this module's own doc for
-/// why positioning it is purely a matter of matching
-/// `crate::geometry::ToneStrip`'s numbers, not iced's own layout
-/// deciding where it goes.
-fn tone_overlay<'a, Message, Renderer>(
-    model: &Model,
-    cursor: usize,
-    theme: &Theme,
-    strip: &ToneStrip,
-) -> Element<'a, Message, iced_widget::Theme, Renderer>
+/// The six-cell tone picker, floating at the rectangle
+/// `popup_app::picker_rect` gives it — the one the hit-test uses.
+fn tone_picker<'a, Message: 'a, Renderer>(model: &Model, layout: &Layout, look: &Look) -> Option<El<'a, Message, Renderer>>
 where
-    Message: 'a,
-    Renderer: iced_runtime::core::text::Renderer<Font = iced_runtime::core::Font> + 'a,
+    Renderer: iced_runtime::core::text::Renderer<Font = Font> + 'a,
 {
-    // The overlay only ever opens for the currently selected entry (see
-    // `Model::open_tone_overlay`), and the selection never moves while it
-    // is up (`crate::popup_app::dispatch_key` ignores Up/Down and
-    // typing, and a click closes the overlay before it would ever touch
-    // the grid's own selection) — so this is always the same entry the
-    // strip opened on.
-    let Some(entry) = model.selected_entry() else {
-        return Space::new().into();
-    };
-    let Some(variants) = entry.tone_variants() else {
-        return Space::new().into();
-    };
-
-    let glyph_size = (strip.cell_size * 0.55) as f32;
-    let border_color = to_iced(theme.accent);
-    let radius = theme.corner_radius().min(strip.cell_size as f32 / 2.0);
-
-    let cells = variants.into_iter().enumerate().map(|(index, (_, glyph))| {
-        let highlighted = index == cursor;
-        let background = to_iced(if highlighted { theme.surfaces.row } else { theme.surfaces.card });
-        let border_width = if highlighted { 1.5 } else { 0.0 };
-        let cell: Element<'a, Message, iced_widget::Theme, Renderer> = container(
-            text(glyph)
-                .font(EMOJI_FONT)
-                .size(glyph_size)
-                .line_height(LineHeight::Absolute(glyph_size.into()))
-                .align_x(Horizontal::Center)
-                .align_y(Vertical::Center)
-                .wrapping(Wrapping::None),
-        )
-            .width(Length::Fixed(strip.cell_size as f32))
-            .height(Length::Fixed(strip.cell_size as f32))
+    let state = model.tone_picker()?;
+    let glyphs = model.tone_glyphs()?;
+    let picker = crate::popup_app::picker_rect(model, layout, state.mode);
+    let look = *look;
+    let cells = glyphs.into_iter().enumerate().map(|(i, g)| {
+        let on = i == state.cursor;
+        let radius = look.radius_for(picker.cell, 7.0);
+        container(glyph(g, (picker.cell * GLYPH_FILL) as f32))
+            .width(Length::Fixed(picker.cell as f32))
+            .height(Length::Fixed(picker.cell as f32))
             .align_x(Horizontal::Center)
             .align_y(Vertical::Center)
             .style(move |_: &iced_widget::Theme| container::Style {
-                background: Some(background.into()),
-                border: iced_runtime::core::Border { radius: radius.into(), width: border_width, color: border_color },
+                background: on.then_some(look.selected.into()),
+                border: Border { radius: radius.into(), ..Default::default() },
                 ..Default::default()
             })
-            .into();
-        cell
+            .into()
     });
-
-    let strip_background = theme.surfaces.card;
-    let strip_border = theme.accent;
-    let strip_radius = theme.corner_radius();
-    // `width` set explicitly to `strip.width()` rather than left to
-    // shrink around the five cells' own measured size — the same
-    // discipline `grid_cell` follows for an individual cell, so this
-    // container's drawn rectangle can never drift from the width
-    // `ToneStrip::tone_at` hit-tests against.
-    let bar: Element<'a, Message, iced_widget::Theme, Renderer> = container(row(cells).spacing(strip.spacing as f32))
-        .width(Length::Fixed(strip.width() as f32))
-        .padding(Padding::from(4.0))
+    let outline = Color { a: 0.35, ..look.accent };
+    let radius = look.radius_for(picker.rect.height, 11.0);
+    let bar = container(Row::with_children(cells).spacing(picker.gap as f32))
+        .width(Length::Fixed(picker.rect.width as f32))
+        .height(Length::Fixed(picker.rect.height as f32))
+        .padding(picker.padding as f32)
         .style(move |_: &iced_widget::Theme| container::Style {
-            background: Some(to_iced(strip_background).into()),
-            border: iced_runtime::core::Border { radius: strip_radius.into(), width: 1.0, color: to_iced(strip_border) },
+            background: Some(look.raised.into()),
+            border: Border { radius: radius.into(), width: 1.0, color: outline },
             ..Default::default()
-        })
-        .into();
-
-    container(bar)
-        .padding(Padding { top: strip.top as f32, left: strip.left as f32, right: 0.0, bottom: 0.0 })
-        .into()
+        });
+    Some(container(bar).padding(Padding { top: picker.rect.y as f32, left: picker.rect.x as f32, right: 0.0, bottom: 0.0 }).into())
 }
 
-
-fn message<'a, Message, Renderer>(
-    text_value: &str,
-    color: iced_runtime::core::Color,
-    theme: &Theme,
-) -> Element<'a, Message, iced_widget::Theme, Renderer>
+/// The strip along the bottom: what is selected, larger, with its name —
+/// and what the keys do right now.
+fn footer<'a, Message: 'a, Renderer>(model: &Model, layout: &Layout, look: &Look) -> El<'a, Message, Renderer>
 where
-    Message: 'a,
-    Renderer: iced_runtime::core::text::Renderer<Font = iced_runtime::core::Font> + 'a,
+    Renderer: iced_runtime::core::text::Renderer<Font = Font> + 'a,
 {
-    container(text(text_value.to_string()).size(theme.font_size).color(color))
-        .width(Length::Fill)
-        .padding(Padding::from(12))
-        .into()
+    let look_copy = *look;
+    let picker = model.tone_picker();
+    let subject: Option<(&'static str, String, String)> = match (picker, model.selected_item()) {
+        (Some(state), _) => model.tone_glyphs().zip(model.tone_subject()).map(|(glyphs, emoji)| {
+            let shown = glyphs[state.cursor];
+            (shown, model.describe(Item::Emoji(emoji), model::cell_tone(state.cursor)), codepoints(shown))
+        }),
+        (None, Some(item)) => {
+            let shown = model.display(item);
+            let tone = match item {
+                Item::Emoji(_) => model.default_tone(),
+                Item::Extra(_) => None,
+            };
+            let sub = match (item, model.tab()) {
+                (Item::Emoji(_), _) => codepoints(shown),
+                (Item::Extra(x), Tab::Kaomoji) => format!("kaomoji · {} chars", x.text.chars().count()),
+                (Item::Extra(_), _) => format!("symbol · {}", codepoints(shown)),
+            };
+            Some((shown, model.describe(item, tone), sub))
+        }
+        (None, None) => None,
+    };
+
+    let big: El<'a, Message, Renderer> = match (&subject, model.selected_item(), picker) {
+        (Some((shown, ..)), Some(Item::Extra(_)), None) => {
+            text(shown.to_string()).size(look.font_size * 1.15).font(kit::strong()).color(look.text).wrapping(Wrapping::None).into()
+        }
+        (Some((shown, ..)), _, _) => glyph(shown, look.font_size * 1.85),
+        (None, ..) => Space::new().into(),
+    };
+    let words: El<'a, Message, Renderer> = match subject {
+        Some((_, name, sub)) => column![
+            text(name).size(look.font_size).font(Font { weight: iced_runtime::core::font::Weight::Medium, ..Font::DEFAULT }).color(look.text).wrapping(Wrapping::None),
+            text(sub).size(look.label() * 1.05).font(look.mono).color(look.dim).wrapping(Wrapping::None),
+        ]
+        .spacing(2)
+        .into(),
+        None => Space::new().into(),
+    };
+
+    let paste = match model.paste_target() {
+        Some(target) => format!("paste into {target}"),
+        None => "paste".to_string(),
+    };
+    let hints: Vec<(&str, String)> = match picker.map(|p| p.mode) {
+        Some(ToneMode::Paste) => vec![("Enter", "paste this tone".into()), ("Shift Enter", "make default".into())],
+        Some(ToneMode::Default) => vec![("Enter", "make default".into()), ("Esc", "cancel".into())],
+        None => {
+            let mut hints = vec![("Enter", paste)];
+            match model.selected_item() {
+                Some(Item::Emoji(e)) if e.supports_tones() => hints.push(("hold", "skin tones".into())),
+                _ if !model.filter_text().is_empty() => hints.push(("\u{2190} \u{2192}", "move".into())),
+                _ => {}
+            }
+            hints
+        }
+    };
+    let hints = Column::with_children(hints.iter().map(|(key, action)| kit::key_hint(key, action, look))).spacing(5).align_x(Horizontal::Right);
+
+    // The name gives way to the hints rather than running under them: it
+    // is clipped in a box that fills only what they leave.
+    container(
+        row![big, container(words).width(Length::Fill).clip(true), hints].spacing(10).align_y(Vertical::Center),
+    )
+    .width(Length::Fill)
+    .height(Length::Fixed(layout.footer_height as f32))
+    .padding(Padding { top: 0.0, right: 12.0, bottom: 0.0, left: 12.0 })
+    .align_y(Vertical::Center)
+    .style(move |_: &iced_widget::Theme| container::Style {
+        background: Some(look_copy.footer.into()),
+        ..Default::default()
+    })
+    .into()
+}
+
+/// A glyph's code points — `U+1F44D U+1F3FD` — the footer's second line
+/// for an emoji. The design shows a `:shortcode:` there, but the emoji
+/// data this picker is built from has no shortcodes, and inventing them
+/// would be a claim about names that no other program shares. The code
+/// points are true and useful. Variation selectors are left out (they say
+/// how to draw it, not what it is), and a long ZWJ sequence is cut short.
+fn codepoints(value: &str) -> String {
+    let points: Vec<String> = value.chars().filter(|&c| c != '\u{fe0f}').map(|c| format!("U+{:04X}", c as u32)).collect();
+    if points.len() > 4 {
+        format!("{} \u{2026}", points[..4].join(" "))
+    } else {
+        points.join(" ")
+    }
 }
 
 #[cfg(test)]
@@ -361,16 +382,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_corner_radius_comes_from_the_theme_rather_than_a_constant() {
-        let theme = Theme { rounding: 12, ..Theme::default() };
-        assert_eq!(theme.corner_radius(), 12.0);
+    fn code_points_leave_out_the_presentation_selector_and_cut_a_long_sequence() {
+        assert_eq!(codepoints("❤️"), "U+2764");
+        assert_eq!(codepoints("👍🏽"), "U+1F44D U+1F3FD");
+        assert_eq!(codepoints("👨‍👩‍👧‍👦"), "U+1F468 U+200D U+1F469 U+200D \u{2026}");
+        assert_eq!(codepoints("→"), "U+2192");
     }
 
     #[test]
-    fn an_absurd_rounding_is_bounded_rather_than_handed_to_the_renderer() {
-        let theme = Theme { rounding: u32::MAX, ..Theme::default() };
-        let radius = theme.corner_radius();
-        assert!(radius.is_finite());
-        assert!(radius <= 64.0, "got {radius}");
+    fn the_corner_radius_follows_the_theme() {
+        let square = Theme { rounding: 0, ..Theme::default() };
+        assert_eq!(Look::new(&square).radius_for(34.0, 7.0), 0.0);
+        let absurd = Theme { rounding: u32::MAX, ..Theme::default() };
+        assert!(Look::new(&absurd).radius_for(34.0, 7.0) <= 17.0);
     }
 }
