@@ -17,6 +17,14 @@ hyprforge-image.workspace = true
 # must say so rather than relying on a dependency's dependency happening
 # to be in the tree.
 image.workspace = true
+# 3D models — STL, 3MF, OBJ — loaded into a mesh, with fstl's camera:
+# the model half of view3d, which this viewer took over. The renderer is
+# here (`src/model/`), not there, because its wgpu has to be iced's.
+hyprforge-mesh.workspace = true
+# The renderer's matrices and vertex bytes, at the versions hyprforge-mesh
+# already uses, so the mesh's `Vertex` and `Mat4` are the renderer's own.
+glam = "0.25"
+bytemuck = { version = "1", features = ["derive"] }
 # The listing, so "the next picture" means the next one the file manager
 # was showing. Not `hyprforge-files-core`: a viewer has no use for a
 # browser widget, and this is the leaf under both.

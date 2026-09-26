@@ -24,7 +24,32 @@ fn row(label: &'static str, value: impl Into<String>) -> Row {
     Row { label, value: value.into() }
 }
 
-/// A titled group of rows — `FILE`, `CAMERA`, `LOCATION`.
+/// What a loaded 3D model is, for the inspector and the status bar —
+/// taken from the mesh once it has loaded, the way `Measured` is taken
+/// from a picture's header.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelFacts {
+    pub format: hyprforge_mesh::Format,
+    pub triangles: usize,
+    pub vertices: usize,
+    /// The bounding box's extent on each axis, in the file's units.
+    pub size: [f32; 3],
+    pub has_colors: bool,
+}
+
+impl ModelFacts {
+    pub fn of(format: hyprforge_mesh::Format, mesh: &hyprforge_mesh::Mesh) -> ModelFacts {
+        ModelFacts {
+            format,
+            triangles: mesh.tri_count(),
+            vertices: mesh.verts.len(),
+            size: mesh.bounds.size().to_array(),
+            has_colors: mesh.has_colors,
+        }
+    }
+}
+
+/// A titled group of rows — `FILE`, `CAMERA`, `LOCATION`, `MODEL`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Section {
     pub title: &'static str,
@@ -48,6 +73,7 @@ pub fn sections(
     item: &Item,
     measured: Option<&Measured>,
     camera: Option<&Camera>,
+    model: Option<&ModelFacts>,
     turns: Turns,
     size_on_disk: Option<u64>,
 ) -> Vec<Section> {
@@ -75,9 +101,18 @@ pub fn sections(
             // and what Enter will do is simply honest about its scope.
             file.push(row("Kind", "Video — press Enter to play it"));
         }
+        Media::Model => {
+            if let Some(format) = hyprforge_mesh::detect(&item.path) {
+                file.push(row("Format", format!("{} model", format.name())));
+            }
+        }
     }
 
     let mut out = vec![Section { title: "File", rows: file }];
+
+    if let Some(m) = model.filter(|_| item.media == Media::Model) {
+        out.push(Section { title: "Model", rows: model_rows(m) });
+    }
 
     if let Some(camera) = camera {
         let mut rows = Vec::new();
@@ -100,6 +135,51 @@ pub fn sections(
     }
 
     out.retain(|s| !s.rows.is_empty());
+    out
+}
+
+/// A model's rows: how much geometry, how big, and whether it brought
+/// its own colours — the three things worth knowing before printing it.
+///
+/// Size is in millimetres for a 3MF, whose loader converts from the
+/// file's declared unit, and in bare file units otherwise: STL and OBJ
+/// declare no unit at all, and most STLs are millimetres by convention
+/// only, which is not a claim to print.
+fn model_rows(m: &ModelFacts) -> Vec<Row> {
+    let [x, y, z] = m.size;
+    let unit = if m.format == hyprforge_mesh::Format::ThreeMf { " mm" } else { "" };
+    vec![
+        row("Triangles", thousands(m.triangles)),
+        row("Vertices", thousands(m.vertices)),
+        row("Size", format!("{} × {} × {}{unit}", trim(x as f64), trim(y as f64), trim(z as f64))),
+        row("Colours", if m.has_colors { "From the file" } else { "None" }),
+    ]
+}
+
+/// The status bar's line for a model: "bracket.stl · 12,480 triangles ·
+/// 609.4 KB".
+pub fn model_status_line(item: &Item, model: Option<&ModelFacts>, size_on_disk: Option<u64>) -> String {
+    let mut parts = vec![item.name.clone()];
+    if let Some(m) = model {
+        parts.push(format!("{} triangles", thousands(m.triangles)));
+    }
+    if let Some(bytes) = size_on_disk.or(item.bytes) {
+        parts.push(human_size(bytes));
+    }
+    parts.join(" · ")
+}
+
+/// `12480` as `12,480`: triangle counts run to millions, and seven
+/// unbroken digits is a number nobody reads at a glance.
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
     out
 }
 
@@ -220,7 +300,7 @@ mod tests {
     #[test]
     fn a_sideways_jpeg_reports_the_size_you_can_see() {
         let m = measured(4032, 3024, Orientation::Rotate90);
-        let s = sections(&still("phone.jpg"), Some(&m), None, Turns::none(), None);
+        let s = sections(&still("phone.jpg"), Some(&m), None, None, Turns::none(), None);
         assert_eq!(value_of(&s, "Pixels"), Some("3024 × 4032"));
         assert_eq!(status_line(&still("phone.jpg"), Some(&m), Some(2048)), "phone.jpg · 3024×4032 · 2.0 KB");
     }
@@ -228,14 +308,14 @@ mod tests {
     #[test]
     fn an_upright_untouched_picture_says_nothing_about_rotation() {
         let m = measured(800, 600, Orientation::Upright);
-        let s = sections(&still("a.jpg"), Some(&m), None, Turns::none(), None);
+        let s = sections(&still("a.jpg"), Some(&m), None, None, Turns::none(), None);
         assert_eq!(value_of(&s, "Rotation"), None);
     }
 
     #[test]
     fn a_turn_the_user_made_is_described_as_theirs() {
         let m = measured(800, 600, Orientation::Upright);
-        let s = sections(&still("a.jpg"), Some(&m), None, Turns::none().right(), None);
+        let s = sections(&still("a.jpg"), Some(&m), None, None, Turns::none().right(), None);
         assert_eq!(value_of(&s, "Rotation"), Some("Turned 90° by you"));
     }
 
@@ -243,7 +323,7 @@ mod tests {
     /// happen if you press Enter.
     #[test]
     fn a_clip_says_what_it_is_rather_than_showing_nothing() {
-        let s = sections(&clip("holiday.mp4"), None, None, Turns::none(), None);
+        let s = sections(&clip("holiday.mp4"), None, None, None, Turns::none(), None);
         assert!(value_of(&s, "Kind").unwrap().contains("Enter"));
         assert_eq!(value_of(&s, "Pixels"), None);
     }
@@ -252,7 +332,7 @@ mod tests {
     /// than an empty panel that flashes.
     #[test]
     fn a_picture_that_has_not_decoded_yet_still_has_rows() {
-        let s = sections(&still("a.jpg"), None, None, Turns::none(), Some(2048));
+        let s = sections(&still("a.jpg"), None, None, None, Turns::none(), Some(2048));
         assert_eq!(value_of(&s, "Size"), Some("2.0 KB"));
     }
 
@@ -261,7 +341,7 @@ mod tests {
     #[test]
     fn a_picture_with_no_camera_has_no_camera_section() {
         let m = measured(800, 600, Orientation::Upright);
-        let s = sections(&still("shot.png"), Some(&m), Some(&Camera::default()), Turns::none(), Some(1));
+        let s = sections(&still("shot.png"), Some(&m), Some(&Camera::default()), None, Turns::none(), Some(1));
         assert_eq!(titles(&s), ["File"]);
     }
 
@@ -279,7 +359,7 @@ mod tests {
             location: Some(Location { latitude: 38.7139, longitude: -9.1334 }),
         };
         let m = measured(6000, 4000, Orientation::Upright);
-        let s = sections(&still("IMG_2052.jpg"), Some(&m), Some(&camera), Turns::none(), Some(8_808_038));
+        let s = sections(&still("IMG_2052.jpg"), Some(&m), Some(&camera), None, Turns::none(), Some(8_808_038));
         assert_eq!(titles(&s), ["File", "Camera", "Location"]);
         assert_eq!(value_of(&s, "Body"), Some("Fujifilm X-T5"));
         assert_eq!(value_of(&s, "Exposure"), Some("1/500 · f/2 · ISO 160"));
@@ -299,6 +379,52 @@ mod tests {
         assert_eq!(when(Some(&camera), Some(copied), &utc).as_deref(), Some("Sat 12 Sep 2026 · 18:42"));
         assert_eq!(when(None, Some(copied), &utc).as_deref(), Some("Thu 1 Jan 1970 · 00:00"));
         assert_eq!(when(None, None, &utc), None);
+    }
+
+    fn model(format: hyprforge_mesh::Format) -> ModelFacts {
+        ModelFacts { format, triangles: 1_234_567, vertices: 617_000, size: [80.0, 60.25, 57.0], has_colors: false }
+    }
+
+    fn part(name: &str) -> Item {
+        Item { media: Media::Model, ..still(name) }
+    }
+
+    #[test]
+    fn a_model_says_how_much_geometry_and_how_big() {
+        let facts = model(hyprforge_mesh::Format::Stl);
+        let s = sections(&part("bracket.stl"), None, None, Some(&facts), Turns::none(), Some(2048));
+        assert_eq!(titles(&s), ["File", "Model"]);
+        assert_eq!(value_of(&s, "Format"), Some("STL model"));
+        assert_eq!(value_of(&s, "Triangles"), Some("1,234,567"));
+        assert_eq!(value_of(&s, "Colours"), Some("None"));
+        assert_eq!(model_status_line(&part("bracket.stl"), Some(&facts), Some(2048)), "bracket.stl · 1,234,567 triangles · 2.0 KB");
+    }
+
+    /// Only a 3MF declares its unit, so only a 3MF's size says
+    /// millimetres; an STL's is a number in whatever the file meant.
+    #[test]
+    fn only_a_model_that_declares_its_unit_is_given_one() {
+        let stl = sections(&part("a.stl"), None, None, Some(&model(hyprforge_mesh::Format::Stl)), Turns::none(), None);
+        assert_eq!(value_of(&stl, "Size"), Some("80 × 60.2 × 57"));
+        let threemf = sections(&part("a.3mf"), None, None, Some(&model(hyprforge_mesh::Format::ThreeMf)), Turns::none(), None);
+        assert_eq!(value_of(&threemf, "Size"), Some("80 × 60.2 × 57 mm"));
+    }
+
+    /// Before the mesh has loaded there is no Model section — not an
+    /// empty one — and the File section already says what it is.
+    #[test]
+    fn a_model_that_has_not_loaded_yet_says_what_it_is() {
+        let s = sections(&part("case.3mf"), None, None, None, Turns::none(), Some(10));
+        assert_eq!(titles(&s), ["File"]);
+        assert_eq!(value_of(&s, "Format"), Some("3MF model"));
+    }
+
+    #[test]
+    fn big_counts_are_grouped_in_thousands() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1000), "1,000");
+        assert_eq!(thousands(2_000_000), "2,000,000");
     }
 
     #[test]

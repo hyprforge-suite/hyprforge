@@ -68,6 +68,25 @@ pub enum Action {
     Forward,
     /// Fullscreen, one picture after another — mockup `1e`.
     Slideshow,
+    /// A 3D model seen from below, the front, the back, the left or the
+    /// right — view3d's keys 2 to 6. The top and iso views are `1` and
+    /// `0`, which a model reads as `ZoomActual` and `ZoomFit`: see
+    /// `Action::default_keys`.
+    ViewBottom,
+    ViewFront,
+    ViewBack,
+    ViewLeft,
+    ViewRight,
+    /// The model back in the middle at its fitted size, keeping the angle.
+    ViewCenter,
+    /// Shaded, wireframe, surface angle, mesh light, material colour.
+    CycleDrawMode,
+    /// Perspective or orthographic.
+    ToggleProjection,
+    /// The model's X/Y/Z axes and the little axis flower in the corner.
+    ToggleAxes,
+    /// Read the model from disk again, keeping the view.
+    Reload,
     /// Hand this file to whatever the desktop opens it with — how a clip
     /// gets played, since nothing here decodes video.
     OpenExternally,
@@ -112,6 +131,16 @@ impl Action {
             Action::Back,
             Action::Forward,
             Action::Slideshow,
+            Action::ViewBottom,
+            Action::ViewFront,
+            Action::ViewBack,
+            Action::ViewLeft,
+            Action::ViewRight,
+            Action::ViewCenter,
+            Action::CycleDrawMode,
+            Action::ToggleProjection,
+            Action::ToggleAxes,
+            Action::Reload,
             Action::OpenExternally,
             Action::ShowInFiles,
             Action::Copy,
@@ -149,6 +178,16 @@ impl Action {
             Action::Back => "back",
             Action::Forward => "forward",
             Action::Slideshow => "slideshow",
+            Action::ViewBottom => "view-bottom",
+            Action::ViewFront => "view-front",
+            Action::ViewBack => "view-back",
+            Action::ViewLeft => "view-left",
+            Action::ViewRight => "view-right",
+            Action::ViewCenter => "view-center",
+            Action::CycleDrawMode => "draw-mode",
+            Action::ToggleProjection => "projection",
+            Action::ToggleAxes => "axes",
+            Action::Reload => "reload",
             Action::OpenExternally => "open-externally",
             Action::ShowInFiles => "show-in-files",
             Action::Copy => "copy",
@@ -185,6 +224,16 @@ impl Action {
             Action::Back => "Back",
             Action::Forward => "Forward",
             Action::Slideshow => "Slideshow",
+            Action::ViewBottom => "Bottom View",
+            Action::ViewFront => "Front View",
+            Action::ViewBack => "Back View",
+            Action::ViewLeft => "Left View",
+            Action::ViewRight => "Right View",
+            Action::ViewCenter => "Recentre",
+            Action::CycleDrawMode => "Next Draw Mode",
+            Action::ToggleProjection => "Perspective / Orthographic",
+            Action::ToggleAxes => "Axes",
+            Action::Reload => "Reload",
             Action::OpenExternally => "Open With…",
             Action::ShowInFiles => "Show in Files",
             Action::Copy => "Copy",
@@ -236,6 +285,21 @@ impl Action {
             Action::Back => &["Alt+Left"],
             Action::Forward => &["Alt+Right"],
             Action::Slideshow => &["F5"],
+            // view3d's (and fstl's) viewpoint keys, so the hands that
+            // learned them there keep them. `0` (iso) and `1` (top) are
+            // already Fit and Actual Size; on a model those two mean iso
+            // and top, and "fit" is what iso does anyway — it recentres.
+            Action::ViewBottom => &["2"],
+            Action::ViewFront => &["3"],
+            Action::ViewBack => &["4"],
+            Action::ViewLeft => &["5"],
+            Action::ViewRight => &["6"],
+            Action::ViewCenter => &["9"],
+            Action::CycleDrawMode => &["M"],
+            Action::ToggleProjection => &["O"],
+            Action::ToggleAxes => &["X"],
+            // view3d reloaded on F5, which is the slideshow here.
+            Action::Reload => &["Ctrl+R"],
             Action::OpenExternally => &["Shift+Enter"],
             Action::ShowInFiles => &["Ctrl+O"],
             Action::Copy => &["Ctrl+C"],

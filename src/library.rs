@@ -34,6 +34,9 @@ pub struct Summary {
     /// Pictures and clips directly inside — not in subfolders, which
     /// would need the whole tree walked to count.
     pub photos: usize,
+    /// 3D models directly inside, counted apart so a folder of prints is
+    /// not described as photos.
+    pub models: usize,
     /// The first still in the file manager's order: the picture people
     /// will recognise the folder by, because it is the one they see first
     /// when they open it.
@@ -59,7 +62,8 @@ pub fn summarise(name: String, path: PathBuf, entries: Vec<Entry>, order: &Order
     Summary {
         name,
         path,
-        photos: items.len(),
+        photos: items.iter().filter(|i| i.media != Media::Model).count(),
+        models: items.iter().filter(|i| i.media == Media::Model).count(),
         cover: items.iter().find(|i| i.media == Media::Still).map(|i| i.path.clone()),
         first: times.clone().min(),
         last: times.max(),
@@ -88,14 +92,22 @@ pub fn span<Tz: TimeZone>(first: Option<SystemTime>, last: Option<SystemTime>, t
 
 /// The line under a card's name: "48 photos · 14–18 Apr".
 pub fn card_line<Tz: TimeZone>(summary: &Summary, tz: &Tz, today: NaiveDate) -> String {
-    let count = match summary.photos {
-        0 => return "No photos".to_string(),
-        n => crate::grid::count(n),
-    };
+    if summary.photos + summary.models == 0 {
+        return "No photos".to_string();
+    }
+    let count = describe_counts(summary.photos, summary.models);
     match span(summary.first, summary.last, tz, today) {
         Some(span) => format!("{count} · {span}"),
         None => count,
     }
+}
+
+/// [`crate::grid::describe`] for counts rather than items: "48 photos",
+/// "3 models", "4 items".
+pub fn describe_counts(photos: usize, models: usize) -> String {
+    crate::grid::describe(
+        std::iter::repeat_n(Media::Still, photos).chain(std::iter::repeat_n(Media::Model, models)),
+    )
 }
 
 #[cfg(test)]
@@ -157,6 +169,7 @@ mod tests {
         ];
         let s = summarise("Lisbon".into(), "/lib/Lisbon".into(), entries, &Order::default());
         assert_eq!(s.photos, 3);
+        assert_eq!(s.models, 0);
         // `a.mp4` sorts first but is a clip; the cover is a picture.
         assert_eq!(s.cover, Some(PathBuf::from("/lib/b.jpg")));
         assert_eq!(s.first, at(SAT_12_SEP_2026 - 3 * DAY));
@@ -178,6 +191,17 @@ mod tests {
         assert_eq!(span(at(last_year), at(last_year), &utc(), today()).as_deref(), Some("12 Sep 2025"));
     }
 
+    /// A folder of prints says models, and its cover stays a picture
+    /// when it has one — a model has no thumbnail to be a cover.
+    #[test]
+    fn a_folder_of_models_is_not_described_as_photos() {
+        let entries = vec![entry("a.stl", SAT_12_SEP_2026), entry("b.3mf", SAT_12_SEP_2026)];
+        let s = summarise("Prints".into(), "/lib/Prints".into(), entries, &Order::default());
+        assert_eq!((s.photos, s.models), (0, 2));
+        assert_eq!(s.cover, None);
+        assert_eq!(card_line(&s, &utc(), today()), "2 models · 12 Sep");
+    }
+
     #[test]
     fn an_empty_folder_says_so_rather_than_zero_photos() {
         let s = summarise("Empty".into(), "/lib/Empty".into(), Vec::new(), &Order::default());
@@ -191,6 +215,7 @@ mod tests {
             name: "Lisbon".into(),
             path: "/lib/Lisbon".into(),
             photos: 48,
+            models: 0,
             cover: None,
             first: at(SAT_12_SEP_2026),
             last: at(SAT_12_SEP_2026 + 4 * DAY),

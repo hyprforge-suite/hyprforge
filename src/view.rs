@@ -174,7 +174,7 @@ impl App {
 
         let position = match self.mode {
             Mode::Photo => self.folder.position().map(|(at, of)| format!("{at} / {of}")),
-            Mode::Grid => (!self.loading_folder).then(|| grid::count(self.folder.len())),
+            Mode::Grid => (!self.loading_folder).then(|| grid::describe(self.folder.items().iter().map(|i| i.media))),
             Mode::Library => {
                 let n = self.library_summaries().len();
                 Some(if n == 1 { "1 folder".to_string() } else { format!("{n} folders") })
@@ -230,7 +230,7 @@ impl App {
                     for s in siblings {
                         group = group.push(sidebar_row(
                             s.name.clone(),
-                            Some(s.photos.to_string()),
+                            Some((s.photos + s.models).to_string()),
                             Tint::Accent,
                             current == Some(s.path.as_path()),
                             s.path.clone(),
@@ -294,6 +294,9 @@ impl App {
         let content: Element<'_, Message> = if self.loading_folder {
             centred("Loading…".to_string())
         } else if let Some(item) = self.folder.current() {
+            if item.media == Media::Model {
+                return self.model_canvas(true);
+            }
             if item.media == Media::Clip {
                 centred(format!("{} is a video. Press Enter to open it in a video player.", item.name))
             } else if let Some(e) = self.failed.get(&item.path) {
@@ -354,6 +357,115 @@ impl App {
         stack![picture, arrows, pill].width(Length::Fixed(viewport.width)).height(Length::Fixed(viewport.height)).into()
     }
 
+    /// A 3D model in the pane: view3d's renderer in a `shader` widget, with
+    /// drag to turn, right-drag to pan and scroll to zoom about the
+    /// pointer. `controls` adds the overlay arrows and the style pill —
+    /// the slideshow draws the model bare.
+    fn model_canvas(&self, controls: bool) -> Element<'_, Message> {
+        let scale = self.font_scale;
+        let viewport = self.viewport();
+        let centred = |said: String| -> Element<'_, Message> {
+            container(meta_text(said, BASE_TEXT_SIZE, scale))
+                .center(Length::Fill)
+                .style(|_t: &Theme| plane(surface::root()))
+                .into()
+        };
+        let Some(item) = self.folder.current() else { return centred(String::new()) };
+        let body: Element<'_, Message> = match &self.model {
+            Some(model) if model.path == item.path => {
+                let program = super::model::ModelProgram {
+                    mesh: model.mesh.clone(),
+                    generation: model.generation,
+                    camera: model.camera,
+                    style: super::model::Style {
+                        draw_mode: self.prefs.model_draw_mode(),
+                        axes: self.prefs.model_axes,
+                        backdrop: surface::root(),
+                    },
+                };
+                let scene = mouse_area(
+                    iced::widget::shader(program)
+                        .width(Length::Fixed(viewport.width))
+                        .height(Length::Fixed(viewport.height)),
+                )
+                .on_press(Message::ModelPress(super::ModelDrag::Turn))
+                .on_release(Message::ModelRelease)
+                .on_right_press(Message::ModelPress(super::ModelDrag::Pan))
+                .on_right_release(Message::ModelRelease)
+                .on_move(Message::ModelPointer)
+                .on_scroll(Message::ModelScrolled)
+                .interaction(if self.model_drag.is_some() {
+                    iced::mouse::Interaction::Grabbing
+                } else {
+                    iced::mouse::Interaction::Grab
+                });
+                // Behind the scene, and covered by its backdrop whenever
+                // wgpu is drawing — see `model`'s module doc.
+                let fallback = container(meta_text(
+                    "3D models need GPU rendering, and this window is drawing without it.",
+                    BASE_TEXT_SIZE,
+                    scale,
+                ))
+                .center(Length::Fill)
+                .style(|_t: &Theme| plane(surface::root()));
+                stack![fallback, scene].into()
+            }
+            _ => match self.failed.get(&item.path) {
+                Some(e) => centred(e.clone()),
+                None => centred(format!("Loading {}…", item.name)),
+            },
+        };
+        if !controls || self.model.as_ref().is_none_or(|m| m.path != item.path) {
+            return container(body).width(Length::Fixed(viewport.width)).height(Length::Fixed(viewport.height)).into();
+        }
+        let arrows = container(
+            row![
+                overlay_arrow("‹", Message::Perform(Action::Previous), scale),
+                Space::new().width(Length::Fill),
+                overlay_arrow("›", Message::Perform(Action::Next), scale),
+            ]
+            .align_y(iced::Alignment::Center),
+        )
+        .center_y(Length::Fill)
+        .width(Length::Fill)
+        .padding([0, 14]);
+        let pill = container(self.model_pill()).align_right(Length::Fill).align_bottom(Length::Fill).padding([12, 14]);
+        stack![body, arrows, pill].width(Length::Fixed(viewport.width)).height(Length::Fixed(viewport.height)).into()
+    }
+
+    /// The model's counterpart of the zoom pill: the five draw modes, then
+    /// perspective/orthographic and the axes — everything view3d's View
+    /// menu held, one click away and each with its key in the menu.
+    fn model_pill(&self) -> Element<'_, Message> {
+        let scale = self.font_scale;
+        let current = self.prefs.model_draw_mode();
+        let segment = |label: &'static str, message: Message, lit: bool| -> Element<'_, Message> {
+            button(text(label).font(theme::mono_font()).size(scale.apply(density::META_TEXT_BASE * 0.85)))
+                .padding([3.0, 8.0])
+                .on_press(message)
+                .style(segment_style(SegmentLook::Quiet, lit))
+                .into()
+        };
+        let mut modes = row![].spacing(3);
+        for mode in hyprforge_mesh::style::DrawMode::ALL {
+            modes = modes.push(segment(mode.short_label(), Message::SetDrawMode(mode), mode == current));
+        }
+        let ortho = self.prefs.model_projection() == hyprforge_mesh::style::Projection::Orthographic;
+        container(
+            row![
+                modes,
+                container(Space::new()).width(Length::Fixed(1.0)).height(Length::Fixed(16.0)).style(|_t: &Theme| plane(surface::card_border())),
+                segment(if ortho { "Ortho" } else { "Persp" }, Message::Perform(Action::ToggleProjection), false),
+                segment("Axes", Message::Perform(Action::ToggleAxes), self.prefs.model_axes),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center),
+        )
+        .padding(3)
+        .style(|_t: &Theme| floating())
+        .into()
+    }
+
     /// Fit · 100% · − · +, with whichever of the first two is true now
     /// lit — the same "filled means on" idiom as the header's buttons.
     fn zoom_pill(&self) -> Element<'_, Message> {
@@ -400,7 +512,7 @@ impl App {
                     // eye finds where it is before reading anything.
                     .opacity(if current { 1.0_f32 } else { 0.72_f32 })
                     .into(),
-                Some(None) if item.media == Media::Clip => container(meta_text("▶", 14.0, scale))
+                Some(None) if item.media != Media::Still => container(meta_text(badge(item.media), 14.0, scale))
                     .center_x(Length::Fixed(w))
                     .center_y(Length::Fixed(h))
                     .style(|_t: &Theme| rounded(surface::row(), 5.0))
@@ -451,7 +563,7 @@ impl App {
                         container(
                             row![
                                 scaled_text(grid::heading(g.day, today), 13.0, scale).font(semibold()),
-                                text(grid::count(g.indices.len()))
+                                text(grid::describe(g.indices.iter().filter_map(|&i| items.get(i)).map(|i| i.media)))
                                     .font(theme::mono_font())
                                     .size(scale.apply(11.0))
                                     .color(theme::text_dim()),
@@ -475,7 +587,7 @@ impl App {
                     let mut line = row![].spacing(super::TILE_GAP);
                     for index in indices {
                         let Some(item) = items.get(index) else { continue };
-                        line = line.push(self.tile(index, &item.name, Some(&item.path), item.media == Media::Clip, None, index == self.folder.cursor(), tiles));
+                        line = line.push(self.tile(index, &item.name, Some(&item.path), (item.media != Media::Still).then(|| badge(item.media)), None, index == self.folder.cursor(), tiles));
                     }
                     body = body.push(line);
                 }
@@ -506,7 +618,7 @@ impl App {
             _ => return centred("Loading…".to_string()),
         };
 
-        let total: usize = cards.iter().map(|c| c.photos).sum();
+        let total = library::describe_counts(cards.iter().map(|c| c.photos).sum(), cards.iter().map(|c| c.models).sum());
         let folders = if cards.len() == 1 { "1 folder".to_string() } else { format!("{} folders", cards.len()) };
         let up: Element<'_, Message> = match dir.parent() {
             Some(parent) => button(meta_text(format!("{} ›", super::display_name(parent)), 13.0, scale))
@@ -520,7 +632,7 @@ impl App {
             row![
                 up,
                 scaled_text(super::display_name(dir), 13.0, scale).font(semibold()),
-                text(format!("{folders} · {}", grid::count(total)))
+                text(format!("{folders} · {total}"))
                     .font(theme::mono_font())
                     .size(scale.apply(11.0))
                     .color(theme::text_dim()),
@@ -544,7 +656,7 @@ impl App {
             for (c, card) in chunk.iter().enumerate() {
                 let index = r * tiles.metrics.columns + c;
                 let second = library::card_line(card, &chrono::Local, today);
-                line = line.push(self.tile(index, &card.name, card.cover.as_deref(), false, Some(second), index == self.library_cursor, tiles));
+                line = line.push(self.tile(index, &card.name, card.cover.as_deref(), None, Some(second), index == self.library_cursor, tiles));
             }
             body = body.push(line);
         }
@@ -571,7 +683,7 @@ impl App {
         index: usize,
         name: &str,
         picture: Option<&Path>,
-        clip: bool,
+        badge: Option<&'static str>,
         second: Option<String>,
         selected: bool,
         tiles: Tiles,
@@ -585,7 +697,7 @@ impl App {
                 .content_fit(iced::ContentFit::Cover)
                 .border_radius(6.0)
                 .into(),
-            _ => container(if clip { meta_text("▶", 20.0, scale) } else { meta_text("", 12.0, scale) })
+            _ => container(meta_text(badge.unwrap_or(""), 20.0, scale))
                 .center_x(Length::Fixed(inner))
                 .center_y(Length::Fixed(tiles.picture))
                 .style(|_t: &Theme| rounded(surface::row(), 6.0))
@@ -658,7 +770,8 @@ impl App {
                 .spacing(2)]
                 .spacing(spacing::MD);
 
-                for section in info::sections(item, measured, camera, turns, self.current_bytes) {
+                let model = self.model.as_ref().filter(|m| m.path == item.path).map(|m| &m.facts);
+                for section in info::sections(item, measured, camera, model, turns, self.current_bytes) {
                     let mut rows = column![container(section_label(section.title, scale)).padding([0, 0])].spacing(6);
                     for r in section.rows {
                         rows = rows.push(
@@ -705,7 +818,13 @@ impl App {
         } else {
             match self.mode {
                 Mode::Photo => {
-                    if let Some(item) = self.folder.current() {
+                    if let Some(item) = self.folder.current().filter(|i| i.media == Media::Model) {
+                        let model = self.model.as_ref().filter(|m| m.path == item.path);
+                        left = left.push(meta_text(info::model_status_line(item, model.map(|m| &m.facts), self.current_bytes), size, scale));
+                        if let Some(warning) = model.and_then(|m| m.warning.clone()) {
+                            left = left.push(scaled_text(warning, size, scale));
+                        }
+                    } else if let Some(item) = self.folder.current() {
                         let measured = self.shown.as_ref().filter(|s| s.path == item.path).map(|s| &s.decoded.measured);
                         let details = self.details.as_ref().filter(|d| d.path == item.path);
                         let measured = measured.or(details.and_then(|d| d.measured.as_ref()));
@@ -716,7 +835,7 @@ impl App {
                     }
                 }
                 Mode::Grid => {
-                    let mut parts = vec![grid::count(self.folder.len())];
+                    let mut parts = vec![grid::describe(self.folder.items().iter().map(|i| i.media))];
                     if let Some(item) = self.folder.current() {
                         parts.push("1 selected".to_string());
                         if let Some(bytes) = item.bytes {
@@ -727,14 +846,17 @@ impl App {
                 }
                 Mode::Library => {
                     let cards = self.library_summaries();
-                    let total: usize = cards.iter().map(|c| c.photos).sum();
+                    let total = library::describe_counts(cards.iter().map(|c| c.photos).sum(), cards.iter().map(|c| c.models).sum());
                     let folders = if cards.len() == 1 { "1 folder".to_string() } else { format!("{} folders", cards.len()) };
-                    left = left.push(meta_text(format!("{folders} · {}", grid::count(total)), size, scale));
+                    left = left.push(meta_text(format!("{folders} · {total}"), size, scale));
                 }
             }
         }
 
         let hints: Vec<String> = match self.mode {
+            Mode::Photo if self.model_on_screen() => {
+                vec![Some("drag turn · right-drag pan".to_string()), hint(Action::CycleDrawMode, "style"), hint(Action::ToggleInfo, "info")]
+            }
             Mode::Photo if self.prefs.info_panel => {
                 vec![hint(Action::ToggleInfo, "close info"), hint(Action::ToggleSidebar, "sidebar")]
             }
@@ -836,6 +958,7 @@ impl App {
                 .into()
             }
             _ => match self.folder.current() {
+                Some(item) if item.media == Media::Model => self.model_canvas(false),
                 Some(item) if item.media == Media::Clip => {
                     container(meta_text(format!("{} is a video.", item.name), BASE_TEXT_SIZE, scale)).center(Length::Fill).into()
                 }
@@ -924,6 +1047,15 @@ fn crumbs_of(dir: &Path) -> Vec<(String, Option<PathBuf>)> {
     }
     out.extend(folders);
     out
+}
+
+/// The mark a tile without a thumbnail carries: what kind of thing it is.
+fn badge(media: Media) -> &'static str {
+    match media {
+        Media::Still => "",
+        Media::Clip => "▶",
+        Media::Model => "3D",
+    }
 }
 
 fn home() -> Option<PathBuf> {

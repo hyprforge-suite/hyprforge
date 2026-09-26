@@ -34,6 +34,9 @@ pub enum Media {
     /// A video. Shown as a poster frame when one is already cached, and
     /// handed to the user's player when asked — never decoded here.
     Clip,
+    /// A 3D model — STL, 3MF or OBJ — loaded by `hyprforge-mesh` and
+    /// drawn by the viewer's own renderer (what view3d did on its own).
+    Model,
 }
 
 /// One thing in the folder.
@@ -62,10 +65,14 @@ pub struct Folder {
 /// Stills are decided by [`hyprforge_image::format::looks_decodable`] —
 /// the build's real decoder list rather than a second one kept here —
 /// and clips by the listing's own classification, since nothing decodes
-/// them and their extension is all anyone needs.
+/// them and their extension is all anyone needs. Models by
+/// `hyprforge-mesh`'s own format list, for the same reason as stills.
 fn media_of(entry: &Entry) -> Option<Media> {
     if entry.is_dir {
         return None;
+    }
+    if hyprforge_mesh::detect(&entry.path).is_some() {
+        return Some(Media::Model);
     }
     if hyprforge_image::format::looks_decodable(&entry.path) {
         return Some(Media::Still);
@@ -271,6 +278,17 @@ mod tests {
         assert_eq!(f.current().unwrap().media, Media::Still);
         assert_eq!(f.next().unwrap().media, Media::Clip);
         assert_eq!(f.next().unwrap().name, "c.jpg");
+    }
+
+    /// A folder of prints: the models page with the pictures, in the
+    /// same order, rather than being skipped as files a viewer cannot
+    /// show.
+    #[test]
+    fn a_model_is_an_item_you_can_page_to() {
+        let mut f = folder(&["a.jpg", "bracket.stl", "case.3mf", "notes.txt", "teapot.obj"]);
+        let kinds: Vec<Media> = f.items().iter().map(|i| i.media).collect();
+        assert_eq!(kinds, [Media::Still, Media::Model, Media::Model, Media::Model]);
+        assert_eq!(f.next().unwrap().name, "bracket.stl");
     }
 
     #[test]

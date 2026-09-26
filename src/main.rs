@@ -37,6 +37,7 @@
 //! at [`MAX_THUMBS`]. A folder of four thousand photographs costs what a
 //! screenful of tiles costs.
 
+mod model;
 mod view;
 
 use hyprforge_image::{decode_to_fit, Budget, Camera, Decoded, Measured, ViewportPixels};
@@ -48,6 +49,8 @@ use hyprforge_photos::history::History;
 use hyprforge_photos::keys::{Action, Resolved};
 use hyprforge_photos::library::Summary;
 use hyprforge_photos::rotation::{rotate_rgba, Turns};
+use hyprforge_mesh::camera::{Camera as ModelCamera, ViewPoint};
+use hyprforge_mesh::style::DrawMode;
 use hyprforge_photos::slideshow::{Interval, Show};
 use hyprforge_photos::transform::{ImageSize, LogicalPoint, Transform, Viewport};
 use hyprforge_photos::{config, filmstrip, grid, launch, library, order, prefs};
@@ -99,6 +102,13 @@ const MAX_THUMBS: usize = 240;
 const RESIZE_SETTLE_MS: u64 = 400;
 /// Wheel pixels per zoom step, for a touchpad's smooth scrolling.
 const PIXELS_PER_ZOOM_STEP: f32 = 60.0;
+/// How often a model on screen is checked for a newer file on disk. A
+/// `stat` a second of one path costs nothing and needs no watcher — the
+/// file manager polls the files it opened out of archives the same way.
+const MODEL_CHECK_EVERY: Duration = Duration::from_secs(1);
+/// Scroll units per wheel notch for the model camera, which counts in
+/// view3d's (egui's) points; iced's `Lines` are notches.
+const MODEL_UNITS_PER_LINE: f32 = 50.0;
 /// How long a slideshow's controls stay up after the pointer stops —
 /// mockup `1e`'s "controls fade after 2 s".
 const SLIDESHOW_CONTROLS_FOR: Duration = Duration::from_secs(2);
@@ -192,6 +202,10 @@ fn main() -> iced::Result {
         library_scroll: (0.0, size.height),
         menu_open: false,
         show: None,
+        model: None,
+        model_loading: None,
+        model_generation: 0,
+        model_drag: None,
         notice: problems.first().cloned(),
         undo: None,
         clipboard: Arc::new(hyprforge_clipboard::WaylandWriter::new()),
@@ -294,6 +308,48 @@ enum Listing {
     Failed(String),
 }
 
+/// The 3D model on screen: the mesh, what the inspector says about it,
+/// and the camera looking at it. Only the current item's model is ever
+/// held — moving to anything else drops it, mesh and GPU copy both.
+struct ModelView {
+    path: PathBuf,
+    mesh: Arc<hyprforge_mesh::Mesh>,
+    facts: hyprforge_photos::info::ModelFacts,
+    generation: u64,
+    camera: ModelCamera,
+    /// A file that loaded but not entirely — an OBJ whose materials could
+    /// not be read, drawn uncoloured.
+    warning: Option<String>,
+    /// The file's time when it was read, for autoreload.
+    modified: Option<std::time::SystemTime>,
+}
+
+/// Which way a drag on a model moves the camera.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelDrag {
+    Turn,
+    Pan,
+}
+
+/// A loaded mesh on its way from the blocking pool to the window. By hand
+/// rather than derived, so a `Debug` of the message is a line and not every
+/// vertex of the model.
+#[derive(Clone)]
+struct LoadedModel {
+    mesh: Arc<hyprforge_mesh::Mesh>,
+    warning: Option<String>,
+    modified: Option<std::time::SystemTime>,
+    /// Read with `modified`, so a reload's size is the new file's and not
+    /// the listing's from before it changed.
+    bytes: Option<u64>,
+}
+
+impl std::fmt::Debug for LoadedModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "LoadedModel({} triangles)", self.mesh.tri_count())
+    }
+}
+
 /// A slideshow in progress.
 struct Slideshow {
     show: Show,
@@ -365,6 +421,13 @@ struct App {
     /// The header's ⋯ menu.
     menu_open: bool,
     show: Option<Slideshow>,
+    model: Option<ModelView>,
+    /// The model being read now, so a second request for it waits rather
+    /// than reading the file twice.
+    model_loading: Option<PathBuf>,
+    model_generation: u64,
+    /// The drag in progress on a model, and where the pointer last was.
+    model_drag: Option<(ModelDrag, Point)>,
     /// One line in the status bar: a problem to report, or what just
     /// happened. Replaced by the next one; closed by the user.
     notice: Option<String>,
@@ -406,6 +469,15 @@ enum Message {
     ToggleMenu,
     MenuAction(Action),
     Tick(Instant),
+    /// A model read from disk; `true` when it replaces the one on screen
+    /// after its file changed, keeping the view.
+    ModelLoaded(PathBuf, bool, Result<LoadedModel, String>),
+    ModelPress(ModelDrag),
+    ModelRelease,
+    ModelPointer(Point),
+    ModelScrolled(mouse::ScrollDelta),
+    CheckModelFile,
+    SetDrawMode(DrawMode),
     SlideshowPause,
     SlideshowShuffle,
     SlideshowLoop,
@@ -438,10 +510,16 @@ impl App {
             Some(_) => iced::time::every(Duration::from_millis(250)).map(Message::Tick),
             None => Subscription::none(),
         };
+        // Only while a model is on screen and the user wants it followed.
+        let watch = match (&self.model, self.prefs.model_autoreload) {
+            (Some(_), true) => iced::time::every(MODEL_CHECK_EVERY).map(|_| Message::CheckModelFile),
+            _ => Subscription::none(),
+        };
         Subscription::batch([
             keyboard::listen().filter_map(|event| hyprforge_ui::keys::key_press(&event).map(Message::Key)),
             window::resize_events().map(|(_, size)| Message::Resized(size)),
             tick,
+            watch,
         ])
     }
 
@@ -741,6 +819,105 @@ impl App {
                 self.perform(action)
             }
             Message::Tick(now) => self.slideshow_tick(now),
+            Message::ModelLoaded(path, reload, result) => {
+                if self.model_loading.as_deref() == Some(path.as_path()) {
+                    self.model_loading = None;
+                }
+                // A model the user has since moved past is dropped here
+                // rather than held: only the current item's mesh is kept.
+                if self.current_path().as_deref() != Some(path.as_path()) {
+                    return Task::none();
+                }
+                match result {
+                    Ok(loaded) => {
+                        let format = hyprforge_mesh::detect(&path).unwrap_or(hyprforge_mesh::Format::Stl);
+                        let mut camera = match (&self.model, reload) {
+                            (Some(old), true) if old.path == path => old.camera,
+                            _ => ModelCamera::default(),
+                        };
+                        camera.perspective = self.prefs.model_projection().value();
+                        let b = loaded.mesh.bounds;
+                        camera.fit(b.min, b.max, reload, true);
+                        self.model_generation += 1;
+                        self.failed.remove(&path);
+                        if loaded.bytes.is_some() {
+                            self.current_bytes = loaded.bytes;
+                        }
+                        self.model = Some(ModelView {
+                            facts: hyprforge_photos::info::ModelFacts::of(format, &loaded.mesh),
+                            path,
+                            mesh: loaded.mesh,
+                            generation: self.model_generation,
+                            camera,
+                            warning: loaded.warning,
+                            modified: loaded.modified,
+                        });
+                    }
+                    Err(e) => {
+                        // A reload that fails mid-save keeps the last good
+                        // model up: a slicer writing the file in pieces
+                        // must not blank the preview between them.
+                        if !reload {
+                            self.model = None;
+                            self.failed.insert(path, e);
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::ModelPress(drag) => {
+                self.menu_open = false;
+                self.model_drag = self.cursor.map(|at| (drag, at));
+                Task::none()
+            }
+            Message::ModelRelease => {
+                self.model_drag = None;
+                Task::none()
+            }
+            Message::ModelPointer(point) => {
+                let viewport = self.viewport();
+                if let (Some((drag, last)), Some(model)) = (self.model_drag, self.model.as_mut()) {
+                    let (w, h) = (viewport.width, viewport.height);
+                    match drag {
+                        ModelDrag::Turn => model.camera.rotate([last.x, last.y], [point.x, point.y], w, h),
+                        ModelDrag::Pan => model.camera.pan([point.x - last.x, point.y - last.y], w, h),
+                    }
+                    self.model_drag = Some((drag, point));
+                }
+                self.cursor = Some(point);
+                if let Some(show) = &mut self.show {
+                    show.pointer_moved = Instant::now();
+                }
+                Task::none()
+            }
+            Message::ModelScrolled(delta) => {
+                let viewport = self.viewport();
+                let units = match delta {
+                    mouse::ScrollDelta::Lines { y, .. } => y * MODEL_UNITS_PER_LINE,
+                    mouse::ScrollDelta::Pixels { y, .. } => y,
+                };
+                if let Some(model) = self.model.as_mut() {
+                    let at = self.cursor.map_or([viewport.width / 2.0, viewport.height / 2.0], |p| [p.x, p.y]);
+                    model.camera.zoom_at(at, units, false, viewport.width, viewport.height);
+                }
+                Task::none()
+            }
+            Message::CheckModelFile => {
+                let Some(model) = &self.model else { return Task::none() };
+                if self.model_loading.is_some() {
+                    return Task::none();
+                }
+                let now = std::fs::metadata(&model.path).and_then(|m| m.modified()).ok();
+                if now.is_some() && now != model.modified {
+                    let path = model.path.clone();
+                    return self.load_model(path, true);
+                }
+                Task::none()
+            }
+            Message::SetDrawMode(mode) => {
+                self.set_draw_mode(mode);
+                Task::none()
+            }
             Message::SlideshowPause => {
                 if let Some(show) = &mut self.show {
                     show.show.paused = !show.show.paused;
@@ -954,7 +1131,7 @@ impl App {
         let Some(card) = self.library_summaries().get(self.library_cursor).cloned() else {
             return Task::none();
         };
-        if card.photos == 0 {
+        if card.photos + card.models == 0 {
             self.library_dir = Some(card.path.clone());
             self.library_cursor = 0;
             return Task::batch([self.ensure_summaries(card.path), self.request_thumbs()]);
@@ -1017,6 +1194,20 @@ impl App {
         };
         self.current_bytes = item.bytes;
 
+        // A model is drawn by the model view, not decoded: hold its mesh,
+        // and let go of any other — one model's geometry at a time.
+        if item.media == Media::Model {
+            self.shown = None;
+            let mut tasks = vec![self.request_details(), self.request_thumbs()];
+            if self.model.as_ref().is_none_or(|m| m.path != item.path) {
+                self.model = None;
+                tasks.push(self.load_model(item.path.clone(), false));
+            }
+            return Task::batch(tasks);
+        }
+        self.model = None;
+        self.model_drag = None;
+
         let mut tasks = Vec::new();
         match self.cache.get(&item.path) {
             Some(decoded) => self.present(item.path.clone(), decoded),
@@ -1038,6 +1229,107 @@ impl App {
         tasks.push(self.request_details());
         tasks.push(self.request_thumbs());
         Task::batch(tasks)
+    }
+
+    /// Reads a model off the UI thread. `reload` keeps the view when the
+    /// same file is read again.
+    fn load_model(&mut self, path: PathBuf, reload: bool) -> Task<Message> {
+        if self.model_loading.as_deref() == Some(path.as_path()) || (!reload && self.failed.contains_key(&path)) {
+            return Task::none();
+        }
+        self.model_loading = Some(path.clone());
+        Task::perform(
+            async move {
+                let for_task = path.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let meta = std::fs::metadata(&for_task).ok();
+                    let modified = meta.as_ref().and_then(|m| m.modified().ok());
+                    let bytes = meta.map(|m| m.len());
+                    hyprforge_mesh::load(&for_task, true)
+                        .map(|(mesh, warning)| LoadedModel { mesh: Arc::new(mesh), warning, modified, bytes })
+                        .map_err(|e| format!("Couldn't read this model: {e:#}"))
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("The model loader stopped unexpectedly: {e}")));
+                (path, reload, result)
+            },
+            |(path, reload, result)| Message::ModelLoaded(path, reload, result),
+        )
+    }
+
+    /// Whether the item on screen is a model — the question every model
+    /// key asks before meaning what it means on a model.
+    fn model_on_screen(&self) -> bool {
+        self.mode == Mode::Photo && self.folder.current().is_some_and(|i| i.media == Media::Model)
+    }
+
+    fn set_draw_mode(&mut self, mode: DrawMode) {
+        self.prefs.model_draw_mode = mode.id().to_string();
+        save_pref(|p| p.model_draw_mode = mode.id().to_string());
+    }
+
+    /// The model keys: viewpoints, zoom, style. `None` when the action is
+    /// not one a model answers, so the caller carries on as for a picture.
+    fn perform_on_model(&mut self, action: Action) -> Option<Task<Message>> {
+        let viewport = self.viewport();
+        let model = self.model.as_mut();
+        let view = |model: Option<&mut ModelView>, v: ViewPoint| {
+            if let Some(m) = model {
+                m.camera.set_viewpoint(v);
+            }
+        };
+        match action {
+            // `0`/`F`: iso and back in the middle — "fit" for a model.
+            Action::ZoomFit => {
+                if let Some(m) = model {
+                    m.camera.set_viewpoint(ViewPoint::Iso);
+                    m.camera.set_viewpoint(ViewPoint::Center);
+                }
+            }
+            // `1`: straight down — "actual size" has no meaning without
+            // pixels, and top is the view that shows a model flat.
+            Action::ZoomActual => view(model, ViewPoint::Top),
+            Action::ViewBottom => view(model, ViewPoint::Bottom),
+            Action::ViewFront => view(model, ViewPoint::Front),
+            Action::ViewBack => view(model, ViewPoint::Back),
+            Action::ViewLeft => view(model, ViewPoint::Left),
+            Action::ViewRight => view(model, ViewPoint::Right),
+            Action::ViewCenter => view(model, ViewPoint::Center),
+            Action::ZoomIn | Action::ZoomOut => {
+                if let Some(m) = model {
+                    let units = if action == Action::ZoomIn { MODEL_UNITS_PER_LINE } else { -MODEL_UNITS_PER_LINE };
+                    let centre = [viewport.width / 2.0, viewport.height / 2.0];
+                    m.camera.zoom_at(centre, units, false, viewport.width, viewport.height);
+                }
+            }
+            Action::CycleDrawMode => {
+                let next = self.prefs.model_draw_mode().next();
+                self.set_draw_mode(next);
+            }
+            Action::ToggleProjection => {
+                let next = self.prefs.model_projection().toggled();
+                self.prefs.model_projection = next.id().to_string();
+                save_pref(|p| p.model_projection = next.id().to_string());
+                if let Some(m) = self.model.as_mut() {
+                    m.camera.perspective = next.value();
+                }
+            }
+            Action::ToggleAxes => {
+                self.prefs.model_axes = !self.prefs.model_axes;
+                let on = self.prefs.model_axes;
+                save_pref(|p| p.model_axes = on);
+            }
+            Action::Reload => {
+                let path = self.current_path()?;
+                self.failed.remove(&path);
+                return Some(self.load_model(path, true));
+            }
+            // Turning a model is the drag's job; the picture's quarter
+            // turns do not apply.
+            Action::RotateLeft | Action::RotateRight => {}
+            _ => return None,
+        }
+        Some(Task::none())
     }
 
     fn neighbours(&self) -> Vec<PathBuf> {
@@ -1191,7 +1483,9 @@ impl App {
             .folder
             .items()
             .iter()
-            .filter(|i| i.media == Media::Clip)
+            // Nothing here makes a thumbnail of a clip or a model: both
+            // get a badge on a plain tile instead.
+            .filter(|i| i.media != Media::Still)
             .map(|i| i.path.as_path())
             .collect();
         let mut tasks = Vec::new();
@@ -1228,6 +1522,11 @@ impl App {
     fn perform(&mut self, action: Action) -> Task<Message> {
         if self.show.is_some() {
             return self.perform_in_slideshow(action);
+        }
+        if self.model_on_screen() {
+            if let Some(task) = self.perform_on_model(action) {
+                return task;
+            }
         }
         let viewport = self.viewport();
         match action {
@@ -1305,6 +1604,17 @@ impl App {
                 }
             }
             Action::Slideshow => return self.start_slideshow(),
+            // Model keys pressed with no model on screen: nothing to do.
+            Action::ViewBottom
+            | Action::ViewFront
+            | Action::ViewBack
+            | Action::ViewLeft
+            | Action::ViewRight
+            | Action::ViewCenter
+            | Action::CycleDrawMode
+            | Action::ToggleProjection
+            | Action::ToggleAxes
+            | Action::Reload => {}
             Action::OpenExternally => return self.open_externally(),
             Action::ShowInFiles => {
                 if let Some(path) = self.current_path() {
@@ -1440,7 +1750,9 @@ impl App {
         }
         // The next picture only once this one is actually on screen: a
         // slow decode must not be skipped past before anyone saw it.
-        let on_screen = self.shown.as_ref().map(|s| &s.path) == self.folder.current().map(|i| &i.path)
+        let current = self.folder.current().map(|i| &i.path);
+        let on_screen = self.shown.as_ref().map(|s| &s.path) == current
+            || self.model.as_ref().map(|m| &m.path) == current
             || self.folder.current().is_some_and(|i| i.media == Media::Clip || self.failed.contains_key(&i.path));
         if !on_screen {
             return Task::none();
