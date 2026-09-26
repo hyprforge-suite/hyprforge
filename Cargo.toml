@@ -30,6 +30,7 @@ members = [
     "crates/hyprforge-power",
     "crates/hyprforge-settings",
     "crates/hyprforge-mime",
+    "crates/hyprforge-icons",
     "crates/hyprforge-fileops",
     "crates/hyprforge-listing",
     "crates/hyprforge-image",
@@ -104,6 +105,10 @@ hyprforge-files-core = { path = "crates/hyprforge-files-core" }
 # hyprforge-mime beside it — nothing GUI and nothing Hyprland-shaped.
 hyprforge-archive = { path = "crates/hyprforge-archive" }
 hyprforge-mime = { path = "crates/hyprforge-mime" }
+# Which file is the icon called `image-png`, through the configured icon
+# theme and what it inherits. A leaf beside hyprforge-mime, which knows
+# which *name* a type's icon has.
+hyprforge-icons = { path = "crates/hyprforge-icons" }
 hyprforge-files = { path = "crates/hyprforge-files" }
 
 # Only hyprforge-lua-import depends on this — evaluating a user's own
@@ -254,3 +259,4 @@ hyprforge-files-core = { path = "crates/hyprforge-files-core" }
 hyprforge-popup = { path = "crates/hyprforge-popup" }
 hyprforge-process = { path = "crates/hyprforge-process" }
 hyprforge-image = { path = "crates/hyprforge-image" }
+hyprforge-icons = { path = "crates/hyprforge-icons" }

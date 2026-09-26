@@ -27,7 +27,7 @@ use crate::density;
 use crate::filter::{is_hidden, matches_query};
 use crate::format::{format_kind, format_modified_at, format_origin, format_owner, format_packed, format_permissions, format_size};
 use crate::glyph;
-use crate::icon::{self, entry_icon};
+use crate::icon::{self, entry_icon, ThemeIcon};
 use crate::action::{self, Action, ActionContext, Scope};
 use crate::config::Config;
 use crate::menu::{self as menus, MenuItem, MenuKind};
@@ -463,6 +463,9 @@ pub enum Outcome {
     /// Decode this picture for the preview pane and hand it back as
     /// [`Message::PreviewLoaded`].
     LoadPreview(PathBuf),
+    /// Find the icon theme's icon for each of these keys and hand them
+    /// back as [`Message::IconsLoaded`] — see [`crate::icon::icon_key`].
+    LoadIcons(Vec<String>),
     /// Open a context menu at the pointer. The browser does not know
     /// where the pointer is — the window does, and fills it in, the same
     /// way it fills in modifier keys on a click.
@@ -509,6 +512,10 @@ pub enum Message {
     ThumbnailLoaded(PathBuf, ImageHandle),
     /// The preview pane's picture, or `None` when it would not decode.
     PreviewLoaded(PathBuf, Option<ImageHandle>),
+    /// Theme icons the host looked up, by key — `None` for a key the
+    /// theme has nothing for, which keeps the badge and is not asked
+    /// about again. See [`Outcome::LoadIcons`].
+    IconsLoaded(Vec<(String, Option<ThemeIcon>)>),
     GoBack,
     GoForward,
     GoUp,
@@ -613,6 +620,8 @@ struct ViewModel<'a> {
     can_go_forward: bool,
     /// Grid thumbnails the host has decoded, by path.
     thumbnails: &'a HashMap<PathBuf, ImageHandle>,
+    /// Theme icons by key — see [`Browser`]'s field of the same name.
+    icons: &'a HashMap<String, Option<ThemeIcon>>,
     /// What the preview pane shows, when it is on *and* the window has
     /// room for it. The setting alone is `prefs.preview_pane`; the two
     /// differ exactly when the status bar has to say why nothing shows.
@@ -627,6 +636,8 @@ struct PreviewModel<'a> {
     picture: Option<&'a ImageHandle>,
     /// How wide the pane is drawn — see [`density::preview_width`].
     width: f32,
+    /// For the selection's icon, while there is no picture to show.
+    icons: &'a HashMap<String, Option<ThemeIcon>>,
 }
 
 /// Browsing state for one directory tree view. Owns no filesystem
@@ -666,6 +677,12 @@ pub struct Browser {
     /// heading at all for an empty list, exactly like a fresh install.
     pinned: Vec<PinnedItem>,
     media: Media,
+    /// Theme icons by [`crate::icon::icon_key`], for the life of the
+    /// window rather than one folder: `.png` is the same icon everywhere,
+    /// and a key the host answered `None` for stays answered.
+    icons: HashMap<String, Option<ThemeIcon>>,
+    /// Keys asked for and not yet answered, so none is asked twice.
+    icons_asked: HashSet<String>,
     /// Whether the column picker under the list header is open.
     ///
     /// Not in `Prefs`: a panel is a thing you are doing, not a thing you
@@ -724,6 +741,8 @@ impl Browser {
             sidebar,
             pinned: Vec::new(),
             media: Media::default(),
+            icons: HashMap::new(),
+            icons_asked: HashSet::new(),
             // `Id::unique()` — not a per-widget-tree literal — is what
             // makes this stable across `view()` calls: iced can only
             // preserve a `scrollable`'s offset across frames if the same
@@ -855,6 +874,10 @@ impl Browser {
                 if self.media.preview_for.as_ref() == Some(&path) {
                     self.media.preview = handle;
                 }
+                Outcome::None
+            }
+            Message::IconsLoaded(icons) => {
+                self.icons.extend(icons);
                 Outcome::None
             }
             Message::Navigate(path) => self.go_to(path),
@@ -1163,6 +1186,24 @@ impl Browser {
             if !wanted.is_empty() {
                 self.media.requested.extend(wanted.iter().cloned());
                 asks.push(Outcome::LoadThumbnails(wanted));
+            }
+        }
+
+        // Every row's icon key, not only the ones on screen: the keys in
+        // a folder are a handful however many rows there are, and asking
+        // for all of them at once means scrolling never shows a badge
+        // turning into an icon.
+        if matches!(self.load_state, LoadState::Loaded) {
+            let mut keys: Vec<String> = Vec::new();
+            for entry in self.rows() {
+                let key = crate::icon::icon_key(entry);
+                if !self.icons.contains_key(key) && !self.icons_asked.contains(key) && !keys.iter().any(|k| k == key) {
+                    keys.push(key.to_string());
+                }
+            }
+            if !keys.is_empty() {
+                self.icons_asked.extend(keys.iter().cloned());
+                asks.push(Outcome::LoadIcons(keys));
             }
         }
 
@@ -1790,10 +1831,12 @@ impl Browser {
             can_go_back: !self.back_stack.is_empty(),
             can_go_forward: !self.forward_stack.is_empty(),
             thumbnails: &self.media.thumbnails,
+            icons: &self.icons,
             preview: preview_width.filter(|_| self.prefs.preview_pane).map(|width| PreviewModel {
                 selected: self.rows().into_iter().filter(|e| self.selection.is_selected(&e.path)).collect(),
                 picture: self.media.preview.as_ref(),
                 width,
+                icons: &self.icons,
             }),
         }
     }
@@ -1944,7 +1987,7 @@ fn preview_pane<'a>(preview: &PreviewModel<'a>, scale: FontScale) -> Element<'a,
                     .height(Length::Fixed(inner))
                     .content_fit(iced::ContentFit::Contain)
                     .into(),
-                None => container(entry_icon(entry.kind, inner / 2.5, scale))
+                None => container(entry_icon(entry.kind, themed(preview.icons, entry), inner / 2.5, scale))
                     .center_x(Length::Fixed(inner))
                     .into(),
             };
@@ -2894,6 +2937,12 @@ struct RowContext<'a> {
     /// per row was both wasted work and a way for the top and bottom of a
     /// long list to disagree about what "Today" means.
     now: chrono::DateTime<chrono::Local>,
+    icons: &'a HashMap<String, Option<ThemeIcon>>,
+}
+
+/// The theme icon the host found for `entry`, if it has answered with one.
+fn themed<'a>(icons: &'a HashMap<String, Option<ThemeIcon>>, entry: &Entry) -> Option<&'a ThemeIcon> {
+    icons.get(icon::icon_key(entry)).and_then(Option::as_ref)
 }
 
 fn entry_row<'a>(
@@ -2902,7 +2951,7 @@ fn entry_row<'a>(
     selected: bool,
     ctx: &RowContext<'a>,
 ) -> Element<'a, Message> {
-    let RowContext { columns, renaming, home, scale, now } = ctx;
+    let RowContext { columns, renaming, home, scale, now, icons } = ctx;
     let (renaming, scale, now) = (*renaming, *scale, *now);
     // The icon, then the name, then whichever optional columns are
     // switched on — in `Column::ALL` order, which is the same order
@@ -2920,7 +2969,7 @@ fn entry_row<'a>(
     // what marks the row instead.
     let selected = selected && editing.is_none();
     let mut row_content = row![
-        entry_icon(entry.kind, 20.0, scale),
+        entry_icon(entry.kind, themed(icons, entry), 20.0, scale),
         // `&entry.name`, not a clone: `scaled_text` borrows for `'a`,
         // and this row is rebuilt for every visible entry on every
         // redraw — a hover anywhere in the window allocated one `String`
@@ -3320,6 +3369,7 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         home: home_dir(),
         scale,
         now: chrono::Local::now(),
+        icons: vm.icons,
     };
     for (index, entry) in vm.rows.iter().copied().enumerate() {
         // One rule, where the directories end and the files begin.
@@ -3398,6 +3448,7 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         .map(|(index, entry)| (index, entry, vm.selection.is_selected(&entry.path)))
         .collect();
     let thumbnails = vm.thumbnails;
+    let icons = vm.icons;
 
     // `responsive` and not a fixed column count. Five fixed columns meant
     // the cells never got wider *or* more numerous as the window grew —
@@ -3420,7 +3471,7 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
                 grid = grid.push(current);
                 current = row![].spacing(gap);
             }
-            current = current.push(grid_cell(index, entry, selected, renaming, thumbnails.get(&entry.path), scale));
+            current = current.push(grid_cell(index, entry, selected, renaming, thumbnails.get(&entry.path), themed(icons, entry), scale));
         }
         // The last row is padded out with empty space to a full set of
         // columns, so its cells keep the width the rows above gave them
@@ -3514,6 +3565,7 @@ fn grid_cell<'a>(
     selected: bool,
     renaming: Option<&'a Renaming>,
     thumbnail: Option<&ImageHandle>,
+    icon: Option<&ThemeIcon>,
     scale: FontScale,
 ) -> Element<'a, Message> {
     let editing = renaming.filter(|r| r.path == entry.path);
@@ -3532,7 +3584,7 @@ fn grid_cell<'a>(
             .height(Length::Fixed(size))
             .content_fit(iced::ContentFit::Contain)
             .into(),
-        None => entry_icon(entry.kind, size, scale),
+        None => entry_icon(entry.kind, icon, size, scale),
     };
     let content = column![
         picture,
@@ -3607,6 +3659,49 @@ mod tests {
             .rows()
             .get(index)
             .is_some_and(|e| browser.selection().is_selected(&e.path))
+    }
+
+    /// `outcome` without the icon request a loaded listing always adds —
+    /// for the tests about what *else* a listing asks for.
+    fn without_icons(outcome: Outcome) -> Outcome {
+        match outcome {
+            Outcome::LoadIcons(_) => Outcome::None,
+            Outcome::Many(parts) => {
+                let mut rest: Vec<Outcome> =
+                    parts.into_iter().filter(|p| !matches!(p, Outcome::LoadIcons(_))).collect();
+                match rest.len() {
+                    0 => Outcome::None,
+                    1 => rest.remove(0),
+                    _ => Outcome::Many(rest),
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// A loaded listing asks its host for every icon key it holds, once.
+    #[test]
+    fn a_loaded_listing_asks_for_each_icon_key_once() {
+        let (mut browser, _) = Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
+        let entries = vec![entry("a.png", false), entry("b.png", false), entry("notes.txt", false)];
+        let asked = |outcome: &Outcome| -> Vec<String> {
+            match outcome {
+                Outcome::LoadIcons(keys) => keys.clone(),
+                Outcome::Many(parts) => parts
+                    .iter()
+                    .filter_map(|p| if let Outcome::LoadIcons(k) = p { Some(k.clone()) } else { None })
+                    .flatten()
+                    .collect(),
+                _ => Vec::new(),
+            }
+        };
+        let outcome = browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(entries.clone())));
+        let mut keys = asked(&outcome);
+        keys.sort();
+        assert_eq!(keys, [".png", ".txt"], "two keys for three files");
+
+        let again = browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(entries)));
+        assert!(asked(&again).is_empty(), "nothing is asked twice, answered or not");
     }
 
     fn entry(name: &str, is_dir: bool) -> Entry {
@@ -4513,7 +4608,7 @@ mod tests {
             Ok(vec![entry("visible", false), entry(".secret", false)]),
         ));
         assert_eq!(browser.rows().len(), 1);
-        match browser.perform(Action::ToggleHidden) {
+        match without_icons(browser.perform(Action::ToggleHidden)) {
             Outcome::PrefsChanged(prefs) => assert!(prefs.show_hidden),
             other => panic!("expected PrefsChanged, got {other:?}"),
         }
@@ -4568,7 +4663,7 @@ mod tests {
         let entries = vec![entry("sub", true), entry("a.txt", false), entry("other", true)];
         let outcome =
             browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(entries)));
-        match outcome {
+        match without_icons(outcome) {
             Outcome::CountFolders(folders) => {
                 assert_eq!(folders.len(), 2, "both directories, and neither file");
                 assert!(folders.iter().all(|p| p.to_string_lossy().contains("sub")
@@ -4586,7 +4681,7 @@ mod tests {
             Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
         let entries = vec![entry("a.txt", false), entry("b.txt", false)];
         let outcome = browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(entries)));
-        assert!(matches!(outcome, Outcome::None));
+        assert!(matches!(without_icons(outcome), Outcome::None));
     }
 
     /// A count lands on the folder it was asked about.
@@ -4882,6 +4977,7 @@ mod tests {
             // leaking one empty map is simpler than threading it through
             // every caller.
             thumbnails: Box::leak(Box::default()),
+            icons: Box::leak(Box::default()),
             preview: None,
         }
     }

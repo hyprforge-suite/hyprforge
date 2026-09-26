@@ -10,6 +10,7 @@
 //! | What is this file, with no name to go on? | `mime/magic` | [`magic`] |
 //! | Which of those two wins? | — | [`lookup`] |
 //! | What is a `model/3mf` a kind of? | `mime/subclasses`, `mime/aliases` | [`types`] |
+//! | Which icon does a `model/3mf` have? | `mime/icons`, `mime/generic-icons` | [`icons`] |
 //! | What can open a `model/3mf`? | `applications/mimeinfo.cache` | [`apps`] |
 //! | Which one does, normally? | `mimeapps.list` | [`defaults`] |
 //!
@@ -48,6 +49,7 @@ pub mod apps;
 pub mod cli;
 pub mod defaults;
 pub mod globs;
+pub mod icons;
 pub mod lookup;
 pub mod magic;
 pub mod types;
@@ -84,6 +86,8 @@ pub struct MimeDb {
     added: std::collections::BTreeMap<String, Vec<String>>,
     /// Applications a person does not want offered for a type.
     removed: std::collections::BTreeMap<String, Vec<String>>,
+    /// Which icon names each type has — see [`icons`].
+    icons: icons::Icons,
 }
 
 impl MimeDb {
@@ -101,7 +105,11 @@ impl MimeDb {
     /// and what lets a caller point this at a fixture instead of the
     /// machine it is running on.
     pub fn load_from(data_dirs: &[PathBuf], mimeapps: &[PathBuf]) -> MimeDb {
-        let mut db = MimeDb { lookup: Lookup::load_from(data_dirs), ..MimeDb::default() };
+        let mut db = MimeDb {
+            lookup: Lookup::load_from(data_dirs),
+            icons: icons::Icons::load_from(data_dirs),
+            ..MimeDb::default()
+        };
         for dir in data_dirs {
             let applications = dir.join("applications");
             if let Ok(text) = std::fs::read_to_string(applications.join("mimeinfo.cache")) {
@@ -187,6 +195,14 @@ impl MimeDb {
     /// open a `mime`.
     pub fn is_subclass_of(&self, mime: &str, parent: &str) -> bool {
         self.lookup.is_subclass_of(mime, parent)
+    }
+
+    /// Every icon name worth asking an icon theme for, for `mime`, best
+    /// first — see [`icons`]. Names only; which file each one is, is the
+    /// icon theme's question.
+    pub fn icon_names(&self, mime: &str) -> Vec<String> {
+        let mime = self.canonical(mime);
+        self.icons.names_for(mime, &self.lookup.types.ancestors(mime))
     }
 
     /// The name the database uses for a type, resolving an alias.
