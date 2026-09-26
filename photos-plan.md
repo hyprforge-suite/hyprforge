@@ -35,8 +35,21 @@ as a uniform and linearised for an sRGB target — the centre-pixel check
 reads (25, 26, 33) in the model view and the photo view alike. Porting
 the camera turned up a sign error in view3d's zoom-about-the-pointer
 that made the point under the cursor slide away; a property test pins
-the fix. Not carried: thumbnails of models, `--screenshot`, and 3D under
-iced's software renderer, where the pane says it needs the GPU.
+the fix. Not carried: `--screenshot`, and 3D under iced's software
+renderer, where the pane says it needs the GPU.
+
+**2026-09-26: videos, the compact viewer, real thumbnails.** A picture
+opened on its own opens compact — no sidebar, no inspector — floating on
+Hyprland and sized to the picture (`float.rs`); Grid or Library brings
+the shell back. Videos play in the pane through libmpv via the new
+`hyprforge-video` (the Video Viewer row of the vision doc, folded in
+here rather than built as a second app). The first try drew a fresh
+`image::Handle` per frame and showed nothing while playing: iced uploads
+any image of 2MB or more on a worker thread and draws nothing until it
+lands, so a frame replaced every 33ms was never drawn. `film.rs` writes
+each frame into one texture instead. Tiles now show a video's first
+real frame and a model's drawing, through the shared cache at the
+`large` size, which `hyprforge-thumbnails` gained for this.
 
 `hyprforge-photos`, the "Photo Viewer" row the inventory in
 `hyprforge-vision.md` has carried as *not started*. This is the plan for

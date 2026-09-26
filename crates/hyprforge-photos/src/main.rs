@@ -37,6 +37,7 @@
 //! at [`MAX_THUMBS`]. A folder of four thousand photographs costs what a
 //! screenful of tiles costs.
 
+mod film;
 mod model;
 mod view;
 
@@ -163,6 +164,15 @@ fn main() -> iced::Result {
         Args::Nothing => (places.first().map(|p| p.path.clone()), None, Mode::Grid),
     };
 
+    // A picture opened on its own is a glance: the viewer starts compact —
+    // no sidebar, no inspector — and floats itself on Hyprland. A folder,
+    // or nothing, is a session in the library and gets the whole shell.
+    let compact = matches!(&args, Args::Picture(path) if !path.is_dir()).then_some(Compact { sidebar: false, info: false });
+    let float_picture = match &args {
+        Args::Picture(path) if !path.is_dir() => Some(path.clone()),
+        _ => None,
+    };
+
     let mut app = App {
         keymap: config.keymap,
         order: ordering.order,
@@ -206,6 +216,13 @@ fn main() -> iced::Result {
         model_loading: None,
         model_generation: 0,
         model_drag: None,
+        compact,
+        float_picture,
+        floated: false,
+        video: None,
+        video_generation: 0,
+        seeking: None,
+        thumb_cache: hyprforge_thumbnails::Cache::standard().map(Arc::new),
         notice: problems.first().cloned(),
         undo: None,
         clipboard: Arc::new(hyprforge_clipboard::WaylandWriter::new()),
@@ -324,6 +341,31 @@ struct ModelView {
     modified: Option<std::time::SystemTime>,
 }
 
+/// A video in the pane.
+struct VideoView {
+    path: PathBuf,
+    generation: u64,
+    /// `None` when it could not start — `error` says why.
+    player: Option<hyprforge_video::Player>,
+    /// The latest frame and its serial, drawn by `film::FilmProgram`.
+    frame: Option<(Arc<hyprforge_video::Frame>, u64)>,
+    playback: hyprforge_video::Playback,
+    error: Option<String>,
+}
+
+/// Thumbnails that cost a process or a mesh load are made a few at a time,
+/// so opening a folder of videos does not start forty ffmpegs, nor a
+/// folder of models load forty meshes into memory at once.
+static EXPENSIVE_THUMBS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+/// The compact viewer's panels: off until asked for, and not saved — a
+/// panel opened in a glance is not a preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Compact {
+    sidebar: bool,
+    info: bool,
+}
+
 /// Which way a drag on a model moves the camera.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModelDrag {
@@ -428,6 +470,24 @@ struct App {
     model_generation: u64,
     /// The drag in progress on a model, and where the pointer last was.
     model_drag: Option<(ModelDrag, Point)>,
+    /// `Some` while the window is the compact viewer a picture opened on
+    /// its own gets: which of the two panels the user has asked for since.
+    /// Showing Grid or Library ends it — that is when the panels are
+    /// needed — and the window returns to the shell and its usual size.
+    compact: Option<Compact>,
+    /// The picture to size the floating window to, until it has been.
+    float_picture: Option<PathBuf>,
+    /// Whether this window floated itself, so ending compact grows it back.
+    floated: bool,
+    /// The video on screen and its player. Only the current item's — any
+    /// other item drops it, which stops the sound.
+    video: Option<VideoView>,
+    /// Bumped per player, so updates from one already dropped are ignored.
+    video_generation: u64,
+    /// Where the seek bar is being dragged to, until it is let go.
+    seeking: Option<f64>,
+    /// The shared freedesktop cache, for video frames and model drawings.
+    thumb_cache: Option<Arc<hyprforge_thumbnails::Cache>>,
     /// One line in the status bar: a problem to report, or what just
     /// happened. Replaced by the next one; closed by the user.
     notice: Option<String>,
@@ -478,6 +538,13 @@ enum Message {
     ModelScrolled(mouse::ScrollDelta),
     CheckModelFile,
     SetDrawMode(DrawMode),
+    /// The window floated (or did not) — logged, never shown.
+    Floated(Result<(), String>),
+    /// Something from the player numbered `u64`.
+    Video(u64, hyprforge_video::Update),
+    /// The seek bar dragged to a point, and let go.
+    SeekTo(f64),
+    SeekRelease,
     SlideshowPause,
     SlideshowShuffle,
     SlideshowLoop,
@@ -526,11 +593,67 @@ impl App {
     // --- geometry ------------------------------------------------------
 
     fn sidebar_shown(&self) -> bool {
-        self.prefs.sidebar && !self.fullscreen
+        !self.fullscreen && self.compact.map_or(self.prefs.sidebar, |c| c.sidebar)
     }
 
     fn inspector_shown(&self) -> bool {
-        self.prefs.info_panel && !self.fullscreen
+        !self.fullscreen && self.compact.map_or(self.prefs.info_panel, |c| c.info)
+    }
+
+    /// Whether the inspector is on — what the header's `i` shows lit.
+    fn info_on(&self) -> bool {
+        self.compact.map_or(self.prefs.info_panel, |c| c.info)
+    }
+
+    /// Whether the sidebar is on — what the header's toggle shows filled.
+    fn sidebar_on(&self) -> bool {
+        self.compact.map_or(self.prefs.sidebar, |c| c.sidebar)
+    }
+
+    /// Floats this window and sizes it to the picture it opened on. Once,
+    /// off the UI thread, and only on Hyprland — see `float.rs`.
+    fn float_to_picture(&mut self) -> Task<Message> {
+        let Some(path) = self.float_picture.take() else { return Task::none() };
+        if !hyprforge_photos::float::on_hyprland() {
+            return Task::none();
+        }
+        // The chrome around the picture in compact: header, status bar and
+        // filmstrip, each with its 1px edge.
+        let scale = self.font_scale;
+        let mut chrome_h = hyprforge_ui::density::bar_height(scale) + 1.0 + scale.apply(STATUS_HEIGHT) + 1.0;
+        if self.prefs.filmstrip {
+            chrome_h += FILMSTRIP_HEIGHT + 1.0;
+        }
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let picture = hyprforge_image::measure(&path).ok().map(|m| m.display_size());
+                    let usable = hyprforge_photos::float::focused_monitor()?;
+                    let size = hyprforge_photos::float::floating_size(picture, usable, (0.0, chrome_h));
+                    hyprforge_photos::float::float_self(size)
+                })
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()))
+            },
+            Message::Floated,
+        )
+    }
+
+    /// Leaves the compact viewer for the whole shell, growing a floating
+    /// window to the size the shell was last left at.
+    fn expand(&mut self) -> Task<Message> {
+        if self.compact.take().is_none() || !self.floated {
+            return Task::none();
+        }
+        let size = (self.prefs.window_width, self.prefs.window_height);
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || hyprforge_photos::float::resize_self(size))
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()))
+            },
+            Message::Floated,
+        )
     }
 
     fn filmstrip_shown(&self) -> bool {
@@ -611,10 +734,53 @@ impl App {
         match message {
             Message::WindowFound(id) => {
                 self.window = id;
+                let float = self.float_to_picture();
                 match id {
-                    Some(id) => window::scale_factor(id).map(Message::ScaleFactor),
-                    None => Task::none(),
+                    Some(id) => Task::batch([window::scale_factor(id).map(Message::ScaleFactor), float]),
+                    None => float,
                 }
+            }
+            Message::Video(generation, update) => {
+                let Some(video) = self.video.as_mut().filter(|v| v.generation == generation) else {
+                    return Task::none();
+                };
+                match update {
+                    hyprforge_video::Update::Frame(frame) => {
+                        let serial = video.frame.as_ref().map_or(0, |(_, s)| s + 1);
+                        video.frame = Some((frame, serial));
+                    }
+                    hyprforge_video::Update::Playback(playback) => {
+                        // Width and height arrive as separate properties,
+                        // so "known" means both — (1280, 0) is not a shape.
+                        let shaped = |p: &hyprforge_video::Playback| p.video_size.is_some_and(|(w, h)| w > 0 && h > 0);
+                        let first_size = !shaped(&video.playback) && shaped(&playback);
+                        video.playback = playback;
+                        // Now the shape is known, frames can be drawn at it
+                        // and mpv adds no bars of its own.
+                        if first_size {
+                            self.size_video();
+                        }
+                    }
+                    hyprforge_video::Update::Failed(e) => video.error = Some(e),
+                }
+                Task::none()
+            }
+            Message::SeekTo(seconds) => {
+                self.seeking = Some(seconds);
+                Task::none()
+            }
+            Message::SeekRelease => {
+                if let (Some(seconds), Some(player)) = (self.seeking.take(), self.video.as_ref().and_then(|v| v.player.as_ref())) {
+                    player.send(hyprforge_video::Command::Seek { seconds, relative: false });
+                }
+                Task::none()
+            }
+            Message::Floated(result) => {
+                match result {
+                    Ok(()) => self.floated = true,
+                    Err(e) => tracing::warn!(error = %e, "the viewer could not float itself"),
+                }
+                Task::none()
             }
             Message::ScaleFactor(scale) => {
                 if (scale - self.scale_factor).abs() > f32::EPSILON {
@@ -789,6 +955,7 @@ impl App {
             }
             Message::Resized(size) => {
                 self.window_size = size;
+                self.size_video();
                 if let Some(shown) = &self.shown {
                     self.transform.clamp_pan(shown.size, self.viewport());
                 }
@@ -803,11 +970,16 @@ impl App {
                 if generation != self.resize_generation || self.fullscreen {
                     return Task::none();
                 }
-                let (width, height) = (self.window_size.width as u32, self.window_size.height as u32);
-                save_pref(|p| {
-                    p.window_width = width;
-                    p.window_height = height;
-                });
+                // The compact viewer's size is the picture's, not a choice
+                // about the shell — saving it would open the next library
+                // session at the shape of the last photograph.
+                if self.compact.is_none() {
+                    let (width, height) = (self.window_size.width as u32, self.window_size.height as u32);
+                    save_pref(|p| {
+                        p.window_width = width;
+                        p.window_height = height;
+                    });
+                }
                 Task::batch([self.sharpen_if_needed(), self.request_thumbs()])
             }
             Message::ToggleMenu => {
@@ -1093,6 +1265,18 @@ impl App {
     fn set_mode(&mut self, mode: Mode) -> Task<Message> {
         self.menu_open = false;
         self.mode = mode;
+        // Grid and Library are where the sidebar is needed.
+        let grow = if mode == Mode::Photo { Task::none() } else { self.expand() };
+        let shown = self.set_mode_inner(mode);
+        Task::batch([grow, shown])
+    }
+
+    fn set_mode_inner(&mut self, mode: Mode) -> Task<Message> {
+        // Nothing plays behind the grid or the library.
+        if mode != Mode::Photo {
+            self.video = None;
+            self.seeking = None;
+        }
         match mode {
             Mode::Photo => self.show_current(),
             Mode::Grid => {
@@ -1194,6 +1378,20 @@ impl App {
         };
         self.current_bytes = item.bytes;
 
+        // A video plays in the pane; anything else lets go of the player,
+        // which stops its sound.
+        if item.media == Media::Clip {
+            self.shown = None;
+            self.model = None;
+            let mut tasks = vec![self.request_details(), self.request_thumbs()];
+            if self.video.as_ref().is_none_or(|v| v.path != item.path) {
+                tasks.push(self.open_video(item.path.clone()));
+            }
+            return Task::batch(tasks);
+        }
+        self.video = None;
+        self.seeking = None;
+
         // A model is drawn by the model view, not decoded: hold its mesh,
         // and let go of any other — one model's geometry at a time.
         if item.media == Media::Model {
@@ -1229,6 +1427,101 @@ impl App {
         tasks.push(self.request_details());
         tasks.push(self.request_thumbs());
         Task::batch(tasks)
+    }
+
+    /// Starts playing `path` in the pane. A machine without libmpv gets a
+    /// sentence where the video would be, and everything else still works.
+    fn open_video(&mut self, path: PathBuf) -> Task<Message> {
+        self.video_generation += 1;
+        let generation = self.video_generation;
+        let root = hyprforge_ui::theme::surface::root();
+        let to_byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let options = hyprforge_video::Options {
+            background: [to_byte(root.r), to_byte(root.g), to_byte(root.b)],
+            size: self.video_pixels(),
+            // A slideshow plays each video through; a video opened by
+            // paging to it plays too — it is what paging to a video means.
+            paused: false,
+            muted: false,
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        match hyprforge_video::Player::open(&path, options, move |update| {
+            let _ = tx.send(update);
+        }) {
+            Ok(player) => {
+                self.video = Some(VideoView {
+                    path,
+                    generation,
+                    player: Some(player),
+                    frame: None,
+                    playback: hyprforge_video::Playback::default(),
+                    error: None,
+                });
+                // Until the player is dropped and its thread lets go of
+                // the sender, which ends the stream.
+                let stream = iced::futures::stream::poll_fn(move |cx| rx.poll_recv(cx));
+                Task::run(stream, move |update| Message::Video(generation, update))
+            }
+            Err(e) => {
+                let said = match e {
+                    hyprforge_video::MpvError::Missing => {
+                        "Videos play through mpv, which isn't installed here. Shift+Enter opens this one in another player."
+                            .to_string()
+                    }
+                    other => other.to_string(),
+                };
+                self.video = Some(VideoView {
+                    path,
+                    generation,
+                    player: None,
+                    frame: None,
+                    playback: hyprforge_video::Playback::default(),
+                    error: Some(said),
+                });
+                Task::none()
+            }
+        }
+    }
+
+    /// The pane's size in physical pixels — what the player draws frames at.
+    fn video_pixels(&self) -> (u32, u32) {
+        let v = self.viewport();
+        ((v.width * self.scale_factor).round() as u32, (v.height * self.scale_factor).round() as u32)
+    }
+
+    /// Tells the player the pane changed size: frames drawn at the video's
+    /// own shape fitted inside the pane, once the shape is known, so mpv
+    /// letterboxes nothing (its bars are black whatever it is told) and
+    /// the themed pane shows around the picture instead.
+    fn size_video(&self) {
+        let Some(video) = &self.video else { return };
+        let Some(player) = &video.player else { return };
+        let (pw, ph) = self.video_pixels();
+        let (w, h) = match video.playback.video_size.filter(|(w, h)| *w > 0 && *h > 0) {
+            Some((vw, vh)) => {
+                let k = (pw as f32 / vw as f32).min(ph as f32 / vh as f32);
+                ((vw as f32 * k).round() as u32, (vh as f32 * k).round() as u32)
+            }
+            None => (pw, ph),
+        };
+        player.send(hyprforge_video::Command::Size(w.max(16), h.max(1)));
+    }
+
+    fn video_on_screen(&self) -> bool {
+        self.mode == Mode::Photo && self.folder.current().is_some_and(|i| i.media == Media::Clip)
+    }
+
+    /// Space on a video: pause, play, or from the start again at the end.
+    fn play_pause(&mut self) {
+        if let Some(video) = &self.video {
+            if let Some(player) = &video.player {
+                player.send(if video.playback.ended {
+                    hyprforge_video::Command::Restart
+                } else {
+                    hyprforge_video::Command::TogglePause
+                });
+            }
+        }
     }
 
     /// Reads a model off the UI thread. `reload` keeps the view when the
@@ -1479,25 +1772,35 @@ impl App {
             self.thumbs.retain(|path, _| keep.contains(path));
         }
         let edge = (THUMB_EDGE * self.scale_factor).ceil() as u32;
-        let clips: HashSet<&Path> = self
-            .folder
-            .items()
-            .iter()
-            // Nothing here makes a thumbnail of a clip or a model: both
-            // get a badge on a plain tile instead.
-            .filter(|i| i.media != Media::Still)
-            .map(|i| i.path.as_path())
-            .collect();
+        // Clips and models are thumbnailed through the shared cache
+        // (`thumbs.rs`); stills are decoded straight to size, below.
+        let kinds: HashMap<&Path, Media> =
+            self.folder.items().iter().filter(|i| i.media != Media::Still).map(|i| (i.path.as_path(), i.media)).collect();
         let mut tasks = Vec::new();
         for path in wanted {
             if self.thumbs.contains_key(&path) || self.thumbs_wanted.contains(&path) {
                 continue;
             }
-            if clips.contains(path.as_path()) {
-                self.thumbs.insert(path, None);
+            self.thumbs_wanted.insert(path.clone());
+            if let Some(&media) = kinds.get(path.as_path()) {
+                let cache = self.thumb_cache.clone();
+                tasks.push(Task::perform(
+                    async move {
+                        let _slot = EXPENSIVE_THUMBS.acquire().await;
+                        let for_task = path.clone();
+                        let handle = tokio::task::spawn_blocking(move || {
+                            hyprforge_photos::thumbs::of(cache.as_deref(), &for_task, media)
+                                .map(|t| image::Handle::from_rgba(t.width, t.height, t.pixels))
+                        })
+                        .await
+                        .ok()
+                        .flatten();
+                        (path, handle)
+                    },
+                    |(path, handle)| Message::Thumb(path, handle),
+                ));
                 continue;
             }
-            self.thumbs_wanted.insert(path.clone());
             tasks.push(Task::perform(
                 async move {
                     let for_task = path.clone();
@@ -1528,6 +1831,31 @@ impl App {
                 return task;
             }
         }
+        if self.video_on_screen() {
+            let player = self.video.as_ref().and_then(|v| v.player.as_ref());
+            match action {
+                Action::PlayPause | Action::Activate => {
+                    self.play_pause();
+                    return Task::none();
+                }
+                Action::SeekForward | Action::SeekBack => {
+                    if let Some(player) = player {
+                        let seconds = if action == Action::SeekForward { 5.0 } else { -5.0 };
+                        player.send(hyprforge_video::Command::Seek { seconds, relative: true });
+                    }
+                    return Task::none();
+                }
+                Action::ToggleMute => {
+                    if let Some(video) = &self.video {
+                        if let Some(player) = &video.player {
+                            player.send(hyprforge_video::Command::Mute(!video.playback.muted));
+                        }
+                    }
+                    return Task::none();
+                }
+                _ => {}
+            }
+        }
         let viewport = self.viewport();
         match action {
             Action::Next | Action::Previous | Action::Below | Action::Above | Action::First | Action::Last => {
@@ -1553,21 +1881,34 @@ impl App {
                 return self.set_window_mode();
             }
             Action::ToggleInfo => {
-                self.prefs.info_panel = !self.prefs.info_panel;
-                let on = self.prefs.info_panel;
-                save_pref(|p| p.info_panel = on);
+                match &mut self.compact {
+                    Some(c) => c.info = !c.info,
+                    None => {
+                        self.prefs.info_panel = !self.prefs.info_panel;
+                        let on = self.prefs.info_panel;
+                        save_pref(|p| p.info_panel = on);
+                    }
+                }
+                self.size_video();
                 return Task::batch([self.request_details(), self.request_thumbs()]);
             }
             Action::ToggleFilmstrip => {
                 self.prefs.filmstrip = !self.prefs.filmstrip;
                 let on = self.prefs.filmstrip;
                 save_pref(|p| p.filmstrip = on);
+                self.size_video();
                 return self.request_thumbs();
             }
             Action::ToggleSidebar => {
-                self.prefs.sidebar = !self.prefs.sidebar;
-                let on = self.prefs.sidebar;
-                save_pref(|p| p.sidebar = on);
+                match &mut self.compact {
+                    Some(c) => c.sidebar = !c.sidebar,
+                    None => {
+                        self.prefs.sidebar = !self.prefs.sidebar;
+                        let on = self.prefs.sidebar;
+                        save_pref(|p| p.sidebar = on);
+                    }
+                }
+                self.size_video();
                 return self.request_thumbs();
             }
             Action::ShowPhoto => return self.set_mode(Mode::Photo),
@@ -1604,6 +1945,10 @@ impl App {
                 }
             }
             Action::Slideshow => return self.start_slideshow(),
+            // On a picture or a model, Space is what it always was here:
+            // the next one.
+            Action::PlayPause => return self.move_selection(Action::Next),
+            Action::SeekForward | Action::SeekBack | Action::ToggleMute => {}
             // Model keys pressed with no model on screen: nothing to do.
             Action::ViewBottom
             | Action::ViewFront
@@ -1690,6 +2035,7 @@ impl App {
 
     fn set_window_mode(&mut self) -> Task<Message> {
         self.transform.fit();
+        self.size_video();
         let redecode = self.sharpen_if_needed();
         let mode = match self.window {
             Some(id) => window::set_mode(
@@ -1733,6 +2079,13 @@ impl App {
             Action::Next | Action::Below => show.show.advance(),
             Action::Previous | Action::Above => show.show.back(),
             Action::Close | Action::Slideshow => return self.stop_slideshow(),
+            // Space pauses the show; on a video it pauses the video too.
+            Action::PlayPause => {
+                show.show.paused = !show.show.paused;
+                show.since = Instant::now();
+                self.play_pause();
+                return Task::none();
+            }
             _ => return Task::none(),
         };
         show.since = Instant::now();
@@ -1746,6 +2099,11 @@ impl App {
     fn slideshow_tick(&mut self, now: Instant) -> Task<Message> {
         let Some(show) = &mut self.show else { return Task::none() };
         if show.show.paused || now.duration_since(show.since) < Duration::from_secs(show.interval.seconds()) {
+            return Task::none();
+        }
+        // A video plays through before the show moves on; one that could
+        // not play is passed like a picture.
+        if self.video.as_ref().is_some_and(|v| v.player.is_some() && v.error.is_none() && !v.playback.ended) {
             return Task::none();
         }
         // The next picture only once this one is actually on screen: a

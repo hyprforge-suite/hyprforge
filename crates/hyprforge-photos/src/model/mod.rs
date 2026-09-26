@@ -167,3 +167,14 @@ fn scene_params(camera: &Camera, w: f32, h: f32, mesh: &Mesh, style: Style) -> S
         backdrop: style.backdrop,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// Both of the model view's shaders compile — checked here, because
+    /// wgpu refusing one at run time takes the whole window with it.
+    #[test]
+    fn the_model_shaders_compile() {
+        crate::film::assert_valid_wgsl("scene.wgsl", include_str!("scene.wgsl"));
+        crate::film::assert_valid_wgsl("lines.wgsl", include_str!("lines.wgsl"));
+    }
+}

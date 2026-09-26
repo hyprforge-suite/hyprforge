@@ -21,6 +21,12 @@ image.workspace = true
 # the model half of view3d, which this viewer took over. The renderer is
 # here (`src/model/`), not there, because its wgpu has to be iced's.
 hyprforge-mesh.workspace = true
+# Videos: played through libmpv (opened at run time, so a machine without
+# mpv still runs the viewer), and thumbnailed by their first real frame.
+hyprforge-video.workspace = true
+# The shared freedesktop thumbnail cache, for video frames and model
+# drawings — made once, and shared with the file manager.
+hyprforge-thumbnails.workspace = true
 # The renderer's matrices and vertex bytes, at the versions hyprforge-mesh
 # already uses, so the mesh's `Vertex` and `Mat4` are the renderer's own.
 glam = "0.25"
@@ -69,6 +75,11 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "ti
 # spans and the inspector's "Sat 12 Sep 2026 · 18:42". The same crate and
 # features the file manager formats its Modified column with.
 chrono.workspace = true
+# A picture opened on its own floats itself on Hyprland (`float.rs`):
+# three `hyprctl` calls, each bounded by hyprforge-process's timeout, and
+# `hyprctl -j`'s JSON read back to find the monitor and the window.
+hyprforge-process.workspace = true
+serde_json.workspace = true
 serde.workspace = true
 toml.workspace = true
 thiserror.workspace = true
@@ -76,6 +87,10 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+# Every WGSL shader this window compiles is parsed and validated in
+# tier 1 by the compiler wgpu itself uses — at the version wgpu 27 pins —
+# because a shader wgpu refuses at run time takes the whole window down.
+naga = { version = "27", features = ["wgsl-in"] }
 tempfile = "3"
 # `MockBackend`, so the folder model — what the next picture is, what
 # happens at the ends, what a folder of mixed stills and clips does — is

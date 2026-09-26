@@ -70,6 +70,13 @@ Shared by every app in the suite
                             size; and what the camera wrote — body, lens,
                             exposure, date, GPS. No iced, no Wayland, no
                             Hyprland.
+  hyprforge-video/         videos: playing one into memory through libmpv
+                            (opened at run time, so nothing needs mpv to
+                            start), and a video's first real frame — past
+                            the black most open on — for the thumbnail
+                            cache, through ffmpeg. No iced, no async
+                            runtime; the only unsafe code in the suite's
+                            viewer is in its libmpv binding.
   hyprforge-mesh/          3D models — STL, 3MF and OBJ — loaded into a
                             welded, indexed mesh, with fstl's camera and
                             draw modes: the model half of view3d, brought in
@@ -207,19 +214,21 @@ Apps
                             shared browsing view, plus what a dialog
                             deliberately does not have — launching what
                             you double-click, and file operations.
-  hyprforge-photos/        the image viewer, in the file manager's shell:
-                            a Places sidebar, and Photo, Grid and Library
-                            as modes of one window. Photo pages through the
-                            folder in the order Files shows it, with zoom,
-                            pan, rotation and a filmstrip; Grid groups the
-                            folder by day; Library is the folder tree as
-                            cards. 3D models (STL, 3MF, OBJ) page with the
-                            pictures and are drawn by view3d's renderer in
-                            an iced shader widget: drag to turn, five draw
-                            modes, viewpoints, autoreload. An inspector with
-                            the camera's EXIF or the model's geometry, a
-                            slideshow, and trash with undo, copy, Open
-                            With, Show in Files and Set as Wallpaper.
+  hyprforge-photos/        the photo, video and 3D model viewer, in the
+                            file manager's shell: a Places sidebar, and
+                            Photo, Grid and Library as modes of one window.
+                            A picture opened on its own gets a compact,
+                            floating viewer instead. Photo pages through
+                            the folder in the order Files shows it, with
+                            zoom, pan, rotation and a filmstrip; Grid groups
+                            it by day; Library is the folder tree as cards.
+                            Videos play in the pane through libmpv, with a
+                            seek bar; 3D models (STL, 3MF, OBJ) are drawn by
+                            view3d's renderer in an iced shader widget. An
+                            inspector with the camera's EXIF, a video's
+                            length or a model's geometry, a slideshow, and
+                            trash with undo, copy, Open With, Show in Files
+                            and Set as Wallpaper.
   hyprforge-settings/      the iced GUI, hosting the settings modules
   hyprforge-authui/        the authentication conversation model, shared by
                             the lock screen and the greeter

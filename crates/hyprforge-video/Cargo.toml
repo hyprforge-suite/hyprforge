@@ -1,0 +1,24 @@
+[package]
+name = "hyprforge-video"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Plays a video into memory through libmpv (loaded at run time), and finds a video's first real frame for its thumbnail."
+
+# Videos for the photo viewer, and thumbnails for it and the file manager.
+# A leaf: no iced, no async runtime, no Hyprforge crate but the bounded
+# subprocess wait.
+[dependencies]
+# libmpv is opened with dlopen, never linked: the viewer must start, and
+# show every picture, on a machine without mpv. Already in the tree.
+libloading = "0.8"
+# ffmpeg for the first-real-frame thumbnail, bounded like every other
+# external program here.
+hyprforge-process.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+# Reads back the thumbnail in the one test that runs the real ffmpeg.
+png = "0.18"

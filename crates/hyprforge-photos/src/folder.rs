@@ -39,6 +39,14 @@ pub enum Media {
     Model,
 }
 
+/// The videos this viewer claims in its desktop entry: the shared MIME
+/// database's canonical types for the five extensions the listing calls
+/// video (`mp4 mkv webm avi mov` — `EntryKind::classify`), as that
+/// database names them on this machine (`/usr/share/mime/video/`). A
+/// type claimed here and not classified there would be a video Files
+/// hands over and this window does not page to.
+pub const VIDEO_MIME_TYPES: [&str; 5] = ["video/mp4", "video/matroska", "video/webm", "video/vnd.avi", "video/quicktime"];
+
 /// One thing in the folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {

@@ -87,6 +87,14 @@ pub enum Action {
     ToggleAxes,
     /// Read the model from disk again, keeping the view.
     Reload,
+    /// Play or pause a video — and on anything else, the next picture,
+    /// which is what Space has always done here.
+    PlayPause,
+    /// Five seconds on, or back, in a video.
+    SeekForward,
+    SeekBack,
+    /// A video's sound off, or on.
+    ToggleMute,
     /// Hand this file to whatever the desktop opens it with — how a clip
     /// gets played, since nothing here decodes video.
     OpenExternally,
@@ -141,6 +149,10 @@ impl Action {
             Action::ToggleProjection,
             Action::ToggleAxes,
             Action::Reload,
+            Action::PlayPause,
+            Action::SeekForward,
+            Action::SeekBack,
+            Action::ToggleMute,
             Action::OpenExternally,
             Action::ShowInFiles,
             Action::Copy,
@@ -188,6 +200,10 @@ impl Action {
             Action::ToggleProjection => "projection",
             Action::ToggleAxes => "axes",
             Action::Reload => "reload",
+            Action::PlayPause => "play-pause",
+            Action::SeekForward => "seek-forward",
+            Action::SeekBack => "seek-back",
+            Action::ToggleMute => "mute",
             Action::OpenExternally => "open-externally",
             Action::ShowInFiles => "show-in-files",
             Action::Copy => "copy",
@@ -234,6 +250,10 @@ impl Action {
             Action::ToggleProjection => "Perspective / Orthographic",
             Action::ToggleAxes => "Axes",
             Action::Reload => "Reload",
+            Action::PlayPause => "Play / Pause",
+            Action::SeekForward => "Forward 5 Seconds",
+            Action::SeekBack => "Back 5 Seconds",
+            Action::ToggleMute => "Mute",
             Action::OpenExternally => "Open With…",
             Action::ShowInFiles => "Show in Files",
             Action::Copy => "Copy",
@@ -254,7 +274,10 @@ impl Action {
             // `Space` alongside the arrows: it is how people page
             // through a folder of photographs, and this app has no text
             // field for it to type into.
-            Action::Next => &["Right", "Space", "N", "PageDown"],
+            // Space moved to `PlayPause`, which on a picture still means
+            // next — so paging with Space is unchanged, and on a video it
+            // pauses, as every player has taught.
+            Action::Next => &["Right", "N", "PageDown"],
             Action::Previous => &["Left", "P", "PageUp"],
             // Down and Up were Next and Previous before the grid had
             // rows; in Photo mode they still are — see `Action::Below`.
@@ -300,6 +323,11 @@ impl Action {
             Action::ToggleAxes => &["X"],
             // view3d reloaded on F5, which is the slideshow here.
             Action::Reload => &["Ctrl+R"],
+            Action::PlayPause => &["Space"],
+            Action::SeekForward => &["Shift+Right"],
+            Action::SeekBack => &["Shift+Left"],
+            // `M` is the model's draw mode; a video's mute is beside it.
+            Action::ToggleMute => &["Shift+M"],
             Action::OpenExternally => &["Shift+Enter"],
             Action::ShowInFiles => &["Ctrl+O"],
             Action::Copy => &["Ctrl+C"],
@@ -424,7 +452,7 @@ mod tests {
         let keys = defaults();
         assert_eq!(keys.resolve(&press("N")), Some(Resolved::Action(Action::Next)));
         assert_eq!(keys.resolve(&press("P")), Some(Resolved::Action(Action::Previous)));
-        assert_eq!(keys.resolve(&press("Space")), Some(Resolved::Action(Action::Next)));
+        assert_eq!(keys.resolve(&press("Space")), Some(Resolved::Action(Action::PlayPause)));
         assert_eq!(keys.resolve(&press("I")), Some(Resolved::Action(Action::ToggleInfo)));
     }
 
