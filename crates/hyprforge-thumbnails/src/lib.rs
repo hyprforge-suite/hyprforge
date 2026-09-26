@@ -16,7 +16,11 @@
 //!
 //! # As small as it can be
 //!
-//! - Only the `normal` size, 128 pixels, which is what the listing draws.
+//! - The `normal` size, 128 pixels, which is what the file manager's
+//!   listing draws — and `large`, 256, for the photo viewer's grid, whose
+//!   tiles are twice that wide on a scaled screen. Nothing bigger: the
+//!   specification's `x-large` and `xx-large` are for sizes no window here
+//!   draws.
 //! - Encoded with the PNG encoder's strongest compression and adaptive
 //!   filtering, and without an alpha channel when every pixel is opaque —
 //!   which a photograph, a video frame and a PDF page all are, and which
@@ -47,6 +51,32 @@ use md5::{Digest, Md5};
 
 /// The `normal` size's edge, by specification.
 pub const NORMAL: u32 = 128;
+/// The `large` size's edge, by specification.
+pub const LARGE: u32 = 256;
+
+/// Which of the specification's sizes a thumbnail is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Size {
+    Normal,
+    Large,
+}
+
+impl Size {
+    /// The edge a thumbnail of this size fits inside.
+    pub fn edge(self) -> u32 {
+        match self {
+            Size::Normal => NORMAL,
+            Size::Large => LARGE,
+        }
+    }
+
+    fn dir(self) -> &'static str {
+        match self {
+            Size::Normal => "normal",
+            Size::Large => "large",
+        }
+    }
+}
 
 /// The directory `fail/` entries go under — the specification's
 /// `<program>-<version>`, so a newer build retries what an older one
@@ -120,8 +150,14 @@ impl Cache {
     ///
     /// `source` must be absolute, as the URI it is named by is.
     pub fn get(&self, source: &Path, stamp: Stamp) -> Lookup {
+        self.get_sized(Size::Normal, source, stamp)
+    }
+
+    /// [`Cache::get`] at a given size. A failure is recorded once for
+    /// every size — the file could not be read, whatever size was asked.
+    pub fn get_sized(&self, size: Size, source: &Path, stamp: Stamp) -> Lookup {
         let name = thumbnail_name(source);
-        if let Some(rgba) = read_if_current(&self.root.join("normal").join(&name), source, stamp) {
+        if let Some(rgba) = read_if_current(&self.root.join(size.dir()).join(&name), source, stamp) {
             return Lookup::Current(rgba);
         }
         if read_if_current(&self.root.join("fail").join(FAIL_DIR).join(&name), source, stamp).is_some() {
@@ -137,7 +173,12 @@ impl Cache {
     /// the specification asks, since a thumbnail shows what the file
     /// holds.
     pub fn put(&self, source: &Path, stamp: Stamp, thumbnail: &Rgba) -> io::Result<()> {
-        self.write(&self.root.join("normal"), source, stamp, thumbnail)
+        self.put_sized(Size::Normal, source, stamp, thumbnail)
+    }
+
+    /// [`Cache::put`] at a given size.
+    pub fn put_sized(&self, size: Size, source: &Path, stamp: Stamp, thumbnail: &Rgba) -> io::Result<()> {
+        self.write(&self.root.join(size.dir()), source, stamp, thumbnail)
     }
 
     /// Records that `source`, as it is now, could not be thumbnailed.
@@ -367,6 +408,33 @@ mod tests {
         fs::write(&path, b"contents").unwrap();
         let stamp = Stamp::of(&path).unwrap();
         (path, stamp)
+    }
+
+    /// The two sizes live side by side under the specification's own
+    /// directories: a `large` thumbnail is not a `normal` one, and a
+    /// program reading `normal/` must not find the viewer's 256-pixel
+    /// tile there.
+    #[test]
+    fn each_size_is_stored_in_its_own_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::at(dir.path().join("thumbnails"));
+        let (path, stamp) = source(dir.path(), "clip.mp4");
+        cache.put_sized(Size::Large, &path, stamp, &picture(true)).unwrap();
+        assert!(dir.path().join("thumbnails/large").join(thumbnail_name(&path)).exists());
+        assert!(matches!(cache.get_sized(Size::Large, &path, stamp), Lookup::Current(_)));
+        assert_eq!(cache.get(&path, stamp), Lookup::Missing, "a large thumbnail answered for normal");
+        assert_eq!((Size::Normal.edge(), Size::Large.edge()), (128, 256));
+    }
+
+    /// A file that could not be read fails at every size.
+    #[test]
+    fn a_failure_holds_for_every_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::at(dir.path().join("thumbnails"));
+        let (path, stamp) = source(dir.path(), "broken.mp4");
+        cache.put_failed(&path, stamp).unwrap();
+        assert_eq!(cache.get_sized(Size::Large, &path, stamp), Lookup::Failed);
+        assert_eq!(cache.get(&path, stamp), Lookup::Failed);
     }
 
     /// Each of these is what `gio info` printed for the same name on this
