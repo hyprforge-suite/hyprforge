@@ -181,7 +181,7 @@ impl<C: Chooser + 'static> hyprforge_popup::PopupApp for EmojiApp<C> {
         self.model.scroll_by(rows as f64 * stride);
     }
 
-    fn key(&mut self, keysym: Keysym, utf8: Option<String>) -> Option<ChoiceOutcome> {
+    fn key(&mut self, keysym: Keysym, utf8: Option<String>, _modifiers: hyprforge_popup::Modifiers) -> Option<ChoiceOutcome> {
         dispatch_key(&mut self.model, &self.chooser, keysym, utf8)
     }
 

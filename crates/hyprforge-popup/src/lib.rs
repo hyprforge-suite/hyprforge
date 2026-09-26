@@ -17,7 +17,9 @@
 //! ([`geometry`], [`placement`]), the single-instance lock
 //! ([`singleton`]), the pure scroll-wheel arithmetic ([`scroll`]), and
 //! the pixel-offset scrollbar both popups draw and drag
-//! ([`scrollbar`]).
+//! ([`scrollbar`]), the stack of section headers and rows both scroll
+//! through ([`stack`]), and the look both share — one search field, one
+//! set of tabs, one key-hint chip, every colour from the Theme ([`kit`]).
 //!
 //! Not in: what a popup's content *means* — a clipboard entry, a pin, an
 //! emoji, a search filter's own keybinds. That is `PopupApp`'s job, one
@@ -57,15 +59,18 @@ pub mod geometry;
 pub mod placement;
 pub mod popup;
 pub mod scroll;
+pub mod kit;
 pub mod scrollbar;
 pub mod singleton;
+pub mod stack;
 
 pub use placement::{cursor_position, monitors, place, place_below_bar};
 pub use popup::{Dismissal, Outcome, Placement, Popup, PopupApp, PopupError, FOCUS_RELEASE_TIMEOUT};
 pub use scroll::scroll_rows;
 pub use scrollbar::{clamp_offset, scroll_into_view, Scrollbar};
+pub use stack::Stack;
 /// Re-exported so a `PopupApp` implementation never needs its own direct
-/// `smithay-client-toolkit` dependency just to name the type
+/// `smithay-client-toolkit` dependency just to name the types
 /// [`PopupApp::key`] hands it.
-pub use smithay_client_toolkit::seat::keyboard::Keysym;
+pub use smithay_client_toolkit::seat::keyboard::{Keysym, Modifiers};
 pub use wayland_client::Connection;
