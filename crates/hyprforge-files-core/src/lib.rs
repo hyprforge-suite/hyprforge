@@ -36,6 +36,7 @@ pub mod keymap;
 pub mod menu;
 pub mod naming;
 pub mod prefs;
+pub mod preview;
 pub mod sidebar;
 pub mod trash;
 pub mod undo;

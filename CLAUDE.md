@@ -673,8 +673,12 @@ hyprforge-process   a bounded subprocess wait (Command::output that gives up);
 hyprforge-look      Color + the runtime Theme; no iced, because the lock screen
                     and greeter paint into a raw Wayland buffer
 hyprforge-mime      the freedesktop shared MIME database: what a file is,
-                    what opens it, what the default is. A leaf; depends only
-                    on hyprforge-paths
+                    what opens it, what the default is, which icon name it
+                    has. A leaf; depends only on hyprforge-paths and
+                    hyprforge-process
+hyprforge-icons     the freedesktop icon theme lookup: which file an icon
+                    name is, through the configured theme and everything it
+                    inherits. A leaf; depends only on hyprforge-process
 hyprforge-archive   zip, tar and 7z: what is inside one as a directory tree,
                     extracting from it, and rewriting it. A leaf with no
                     Hyprforge dependency at all — paths arrive from the

@@ -133,6 +133,11 @@ Hyprland-facing
                             content sniffing, which calls an STL a stream
                             of bytes and opens 3D models in a browser.
                             A leaf, like hyprforge-look.
+  hyprforge-icons/         which file is the icon called image-png: the
+                            freedesktop icon theme lookup, through the
+                            configured theme's Inherits= chain to hicolor.
+                            hyprforge-mime says which name a type's icon
+                            has; this finds the file. A leaf.
   hyprforge-archive/       zip, tar and 7z: what is inside one as a
                             directory tree, extracting from it, making
                             one, and rewriting it. Pure Rust, so a

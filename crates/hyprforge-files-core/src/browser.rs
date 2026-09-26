@@ -28,6 +28,7 @@ use crate::filter::{is_hidden, matches_query};
 use crate::format::{format_kind, format_modified_at, format_origin, format_owner, format_packed, format_permissions, format_size};
 use crate::glyph;
 use crate::icon::{self, entry_icon};
+use crate::preview::{Picture, Preview};
 use crate::action::{self, Action, ActionContext, Scope};
 use crate::config::Config;
 use crate::menu::{self as menus, MenuItem, MenuKind};
@@ -46,11 +47,10 @@ use hyprforge_ui::widgets::{
 };
 use iced::widget::{column, container, row, scrollable, text_input, Id};
 use iced::{Element, Length};
-use iced::widget::image::Handle as ImageHandle;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-/// How many grid thumbnails one folder may hold.
+/// How many thumbnails one folder may hold, grid and list together.
 ///
 /// Each is decoded at twice the grid icon's logical size (for a 2x
 /// display) — 112 pixels square, about 50KB — so the cap bounds a folder
@@ -59,13 +59,10 @@ use std::path::{Path, PathBuf};
 /// scrolls through by eye.
 const MAX_THUMBNAILS: usize = 600;
 
-/// The preview pane's width, logical pixels.
-pub const PREVIEW_WIDTH: f32 = 280.0;
-
-/// Below this window width the pane stays hidden whatever the setting
-/// says — the listing needs the room more, and a pane squeezing the
-/// names into two letters is not a preview anyone asked for.
-const PREVIEW_MIN_WINDOW: f32 = 820.0;
+/// The preview pane's widest, logical pixels — what the host decodes the
+/// pane's picture for. How wide it is actually drawn depends on the
+/// window: see [`density::preview_width`].
+pub const PREVIEW_WIDTH: f32 = density::PREVIEW_MAX_WIDTH;
 
 /// Pictures the host has decoded for this browser: grid thumbnails, and
 /// the one picture the preview pane shows.
@@ -78,7 +75,7 @@ const PREVIEW_MIN_WINDOW: f32 = 820.0;
 #[derive(Debug, Clone, Default)]
 struct Media {
     dir: PathBuf,
-    thumbnails: HashMap<PathBuf, ImageHandle>,
+    thumbnails: HashMap<PathBuf, Picture>,
     /// Asked for, whether or not an answer has come — so nothing is
     /// asked for twice, including a file that could not be decoded.
     requested: HashSet<PathBuf>,
@@ -86,7 +83,7 @@ struct Media {
     preview_for: Option<PathBuf>,
     /// Its picture, once decoded. `None` while waiting, and for a file
     /// that turned out not to decode.
-    preview: Option<ImageHandle>,
+    preview: Option<Preview>,
 }
 
 /// Which host is rendering this [`Browser`], and — for a dialog — what
@@ -466,6 +463,9 @@ pub enum Outcome {
     /// Decode this picture for the preview pane and hand it back as
     /// [`Message::PreviewLoaded`].
     LoadPreview(PathBuf),
+    /// Find the icon theme's icon for each of these keys and hand them
+    /// back as [`Message::IconsLoaded`] — see [`crate::icon::icon_key`].
+    LoadIcons(Vec<String>),
     /// Open a context menu at the pointer. The browser does not know
     /// where the pointer is — the window does, and fills it in, the same
     /// way it fills in modifier keys on a click.
@@ -509,9 +509,13 @@ pub enum Message {
     /// empty.
     CountsLoaded(Vec<(PathBuf, Option<usize>)>),
     /// A grid thumbnail the host decoded — see [`Outcome::LoadThumbnails`].
-    ThumbnailLoaded(PathBuf, ImageHandle),
+    ThumbnailLoaded(PathBuf, Picture),
     /// The preview pane's picture, or `None` when it would not decode.
-    PreviewLoaded(PathBuf, Option<ImageHandle>),
+    PreviewLoaded(PathBuf, Option<Preview>),
+    /// Theme icons the host looked up, by key — `None` for a key the
+    /// theme has nothing for, which keeps the badge and is not asked
+    /// about again. See [`Outcome::LoadIcons`].
+    IconsLoaded(Vec<(String, Option<Picture>)>),
     GoBack,
     GoForward,
     GoUp,
@@ -615,8 +619,12 @@ struct ViewModel<'a> {
     can_go_back: bool,
     can_go_forward: bool,
     /// Grid thumbnails the host has decoded, by path.
-    thumbnails: &'a HashMap<PathBuf, ImageHandle>,
-    /// What the preview pane shows, when it is on.
+    thumbnails: &'a HashMap<PathBuf, Picture>,
+    /// Theme icons by key — see [`Browser`]'s field of the same name.
+    icons: &'a HashMap<String, Option<Picture>>,
+    /// What the preview pane shows, when it is on *and* the window has
+    /// room for it. The setting alone is `prefs.preview_pane`; the two
+    /// differ exactly when the status bar has to say why nothing shows.
     preview: Option<PreviewModel<'a>>,
 }
 
@@ -625,7 +633,12 @@ struct ViewModel<'a> {
 #[derive(Debug, Clone, PartialEq)]
 struct PreviewModel<'a> {
     selected: Vec<&'a Entry>,
-    picture: Option<&'a ImageHandle>,
+    /// What the host found out about it, once it has.
+    found: Option<&'a Preview>,
+    /// How wide the pane is drawn — see [`density::preview_width`].
+    width: f32,
+    /// For the selection's icon, while there is no picture to show.
+    icons: &'a HashMap<String, Option<Picture>>,
 }
 
 /// Browsing state for one directory tree view. Owns no filesystem
@@ -665,6 +678,12 @@ pub struct Browser {
     /// heading at all for an empty list, exactly like a fresh install.
     pinned: Vec<PinnedItem>,
     media: Media,
+    /// Theme icons by [`crate::icon::icon_key`], for the life of the
+    /// window rather than one folder: `.png` is the same icon everywhere,
+    /// and a key the host answered `None` for stays answered.
+    icons: HashMap<String, Option<Picture>>,
+    /// Keys asked for and not yet answered, so none is asked twice.
+    icons_asked: HashSet<String>,
     /// Whether the column picker under the list header is open.
     ///
     /// Not in `Prefs`: a panel is a thing you are doing, not a thing you
@@ -723,6 +742,8 @@ impl Browser {
             sidebar,
             pinned: Vec::new(),
             media: Media::default(),
+            icons: HashMap::new(),
+            icons_asked: HashSet::new(),
             // `Id::unique()` — not a per-widget-tree literal — is what
             // makes this stable across `view()` calls: iced can only
             // preserve a `scrollable`'s offset across frames if the same
@@ -854,6 +875,10 @@ impl Browser {
                 if self.media.preview_for.as_ref() == Some(&path) {
                     self.media.preview = handle;
                 }
+                Outcome::None
+            }
+            Message::IconsLoaded(icons) => {
+                self.icons.extend(icons);
                 Outcome::None
             }
             Message::Navigate(path) => self.go_to(path),
@@ -1148,13 +1173,18 @@ impl Browser {
             }
         }
 
-        let grid = self.prefs.view_mode == ViewMode::Grid && matches!(self.load_state, LoadState::Loaded);
-        if grid && self.archive.is_none() {
+        // Both views now: the grid for everything worth a picture, the
+        // list for what is cheap enough at row size — see
+        // `preview::wants_thumbnail`. One map for both, so switching view
+        // asks only for what the other view did not already want.
+        let grid = self.prefs.view_mode == ViewMode::Grid;
+        let loaded = matches!(self.load_state, LoadState::Loaded);
+        if loaded && self.archive.is_none() {
             let room = MAX_THUMBNAILS.saturating_sub(self.media.requested.len());
             let wanted: Vec<PathBuf> = self
                 .rows()
                 .into_iter()
-                .filter(|e| !e.is_dir && hyprforge_image::format::looks_decodable(&e.path))
+                .filter(|e| !e.is_dir && crate::preview::wants_thumbnail(&e.path, grid))
                 .filter(|e| !self.media.requested.contains(&e.path))
                 .take(room)
                 .map(|e| e.path.clone())
@@ -1162,6 +1192,24 @@ impl Browser {
             if !wanted.is_empty() {
                 self.media.requested.extend(wanted.iter().cloned());
                 asks.push(Outcome::LoadThumbnails(wanted));
+            }
+        }
+
+        // Every row's icon key, not only the ones on screen: the keys in
+        // a folder are a handful however many rows there are, and asking
+        // for all of them at once means scrolling never shows a badge
+        // turning into an icon.
+        if matches!(self.load_state, LoadState::Loaded) {
+            let mut keys: Vec<String> = Vec::new();
+            for entry in self.rows() {
+                let key = crate::icon::icon_key(entry);
+                if !self.icons.contains_key(key) && !self.icons_asked.contains(key) && !keys.iter().any(|k| k == key) {
+                    keys.push(key.to_string());
+                }
+            }
+            if !keys.is_empty() {
+                self.icons_asked.extend(keys.iter().cloned());
+                asks.push(Outcome::LoadIcons(keys));
             }
         }
 
@@ -1183,18 +1231,19 @@ impl Browser {
         }
     }
 
-    /// The one picture the preview pane should show, if any: the pane is
-    /// on, exactly one thing is selected, and it is a file this build can
-    /// decode. Not inside an archive — a member there has no path the
-    /// decoder can open.
+    /// The one entry the preview pane should describe, if any: the pane
+    /// is on and exactly one thing is selected. Any kind — what the host
+    /// can say about it (a picture, the first lines, what is inside) is
+    /// the host's to decide, and a kind it has nothing for comes back as
+    /// nothing. Not inside an archive: a member there has no path another
+    /// program can open.
     fn preview_target(&self) -> Option<PathBuf> {
         if !self.prefs.preview_pane || self.archive.is_some() {
             return None;
         }
         let selected = self.selected_shown();
         let [only] = selected.as_slice() else { return None };
-        let entry = self.entries.iter().find(|e| &e.path == only)?;
-        (!entry.is_dir && hyprforge_image::format::looks_decodable(&entry.path)).then(|| only.clone())
+        self.entries.iter().any(|e| &e.path == only).then(|| only.clone())
     }
 
     fn perform_action(&mut self, action: Action) -> Outcome {
@@ -1764,16 +1813,15 @@ impl Browser {
     }
 
     fn view_model(&self, viewport_width: f32) -> ViewModel<'_> {
+        let sidebar_collapsed = self.prefs.sidebar.collapsed(viewport_width, self.config.sidebar.collapse_below);
+        let preview_width = density::preview_width(viewport_width, sidebar_collapsed);
         ViewModel {
             current_dir: &self.current_dir,
             in_trash: self.in_trash(),
             archive: self.archive.as_deref(),
             renaming: self.renaming.as_ref(),
             column_picker_open: self.column_picker_open,
-            sidebar_collapsed: self
-                .prefs
-                .sidebar
-                .collapsed(viewport_width, self.config.sidebar.collapse_below),
+            sidebar_collapsed,
             viewport_width,
             hidden_count: self.hidden_count(),
             dotfiles: self.dotfiles,
@@ -1790,9 +1838,12 @@ impl Browser {
             can_go_back: !self.back_stack.is_empty(),
             can_go_forward: !self.forward_stack.is_empty(),
             thumbnails: &self.media.thumbnails,
-            preview: self.prefs.preview_pane.then(|| PreviewModel {
+            icons: &self.icons,
+            preview: preview_width.filter(|_| self.prefs.preview_pane).map(|width| PreviewModel {
                 selected: self.rows().into_iter().filter(|e| self.selection.is_selected(&e.path)).collect(),
-                picture: self.media.preview.as_ref(),
+                found: self.media.preview.as_ref(),
+                width,
+                icons: &self.icons,
             }),
         }
     }
@@ -1900,7 +1951,7 @@ fn render<'a>(vm: ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         sidebar_view(&vm, scale)
     };
     let mut middle = row![side, file_area(&vm, scale)].height(Length::Fill);
-    if let Some(preview) = vm.preview.as_ref().filter(|_| vm.viewport_width >= PREVIEW_MIN_WINDOW) {
+    if let Some(preview) = vm.preview.as_ref() {
         middle = middle.push(preview_pane(preview, scale));
     }
 
@@ -1932,31 +1983,45 @@ fn preview_pane<'a>(preview: &PreviewModel<'a>, scale: FontScale) -> Element<'a,
         .spacing(2)
         .into()
     };
-    let inner = PREVIEW_WIDTH - 2.0 * spacing::MD;
+    let inner = preview.width - 2.0 * spacing::MD;
 
     let body: Element<'a, Message> = match preview.selected.as_slice() {
         [] => meta_text("Select a file to see it here.", BASE_TEXT_SIZE, scale).into(),
         [entry] => {
-            let picture: Element<'a, Message> = match preview.picture {
-                Some(handle) => iced::widget::image(handle.clone())
-                    .width(Length::Fixed(inner))
-                    .height(Length::Fixed(inner))
-                    .content_fit(iced::ContentFit::Contain)
-                    .into(),
-                None => container(entry_icon(entry.kind, inner / 2.5, scale))
+            let found = preview.found;
+            let picture: Element<'a, Message> = match found.and_then(|f| f.picture.as_ref()) {
+                Some(picture) => picture.view_width(inner),
+                None => container(entry_icon(entry.kind, themed(preview.icons, entry), inner / 2.5, scale))
                     .center_x(Length::Fixed(inner))
                     .into(),
             };
             let now = chrono::Local::now();
-            column![
+            let mut body = column![
                 picture,
                 scaled_text(entry.name.clone(), 16.0, scale).wrapping(iced::widget::text::Wrapping::WordOrGlyph),
-                detail("Kind", format_kind(entry)),
-                detail("Size", format_size(entry.size)),
-                detail("Modified", format_modified_at(entry.modified, now)),
             ]
-            .spacing(spacing::MD)
-            .into()
+            .spacing(spacing::MD);
+            if let Some(excerpt) = found.and_then(|f| f.text.as_ref()) {
+                body = body.push(excerpt_block(excerpt, inner, scale));
+            }
+            if let Some(listing) = found.and_then(|f| f.listing.as_ref()) {
+                body = body.push(listing_block(listing, scale));
+            }
+            body = body
+                .push(detail("Kind", format_kind(entry)))
+                .push(detail("Size", format_size(entry.size)))
+                .push(detail("Modified", format_modified_at(entry.modified, now)));
+            for (label, value) in found.map(|f| f.details.as_slice()).unwrap_or_default() {
+                body = body.push(
+                    column![
+                        meta_text(label.clone(), density::META_TEXT_BASE, scale),
+                        scaled_text(value.clone(), BASE_TEXT_SIZE, scale)
+                            .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                    ]
+                    .spacing(2),
+                );
+            }
+            body.into()
         }
         many => {
             let bytes: u64 = many
@@ -1976,9 +2041,56 @@ fn preview_pane<'a>(preview: &PreviewModel<'a>, scale: FontScale) -> Element<'a,
     };
 
     container(scrollable(container(body).padding(spacing::MD)).height(Length::Fill))
-        .width(Length::Fixed(PREVIEW_WIDTH))
+        .width(Length::Fixed(preview.width))
         .height(Length::Fill)
         .into()
+}
+
+/// A text file's first lines, as written: monospace, on the recessed
+/// card colour so it reads as the file's content rather than the pane's.
+/// Not wrapped — code wrapped at 250 pixels is harder to read than code
+/// cut off, and the whole file is a double-click away.
+fn excerpt_block<'a>(excerpt: &'a crate::preview::Excerpt, width: f32, scale: FontScale) -> Element<'a, Message> {
+    let mut lines = column![
+        scaled_text(&excerpt.text, density::META_TEXT_BASE, scale)
+            .font(hyprforge_ui::theme::mono_font())
+            .wrapping(iced::widget::text::Wrapping::None),
+    ];
+    if excerpt.truncated {
+        lines = lines.push(meta_text("…", density::META_TEXT_BASE, scale));
+    }
+    container(lines)
+        .width(Length::Fixed(width))
+        .clip(true)
+        .padding(spacing::SM)
+        .style(|_t: &iced::Theme| container::Style {
+            background: Some(iced::Background::Color(hyprforge_ui::theme::surface::card())),
+            border: iced::Border { radius: density::nested_radius().into(), ..iced::Border::default() },
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// What is inside a folder or archive: its first names, folders marked
+/// with a trailing slash the way a path would be, and how many more.
+fn listing_block<'a>(listing: &'a crate::preview::Listing, scale: FontScale) -> Element<'a, Message> {
+    let heading = match listing.total {
+        0 => "Empty".to_string(),
+        1 => "1 item".to_string(),
+        n => format!("{n} items"),
+    };
+    let mut names = column![meta_text(heading, density::META_TEXT_BASE, scale)].spacing(2);
+    for (name, is_dir) in &listing.names {
+        let shown = if *is_dir { format!("{name}/") } else { name.clone() };
+        names = names.push(
+            scaled_text(shown, BASE_TEXT_SIZE, scale).wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+        );
+    }
+    let rest = listing.total.saturating_sub(listing.names.len());
+    if rest > 0 {
+        names = names.push(meta_text(format!("and {rest} more"), density::META_TEXT_BASE, scale));
+    }
+    names.into()
 }
 
 /// The listing and its column headers — everything right of the sidebar
@@ -2037,6 +2149,40 @@ fn sidebar_toggle<'a>(collapsed: bool, scale: FontScale) -> Element<'a, Message>
     .into()
 }
 
+/// The preview pane's show/hide control, at the far right of the header
+/// where the pane itself begins — [`sidebar_toggle`]'s mirror, drawn with
+/// the mirrored mark, filled on the same "this is on" rule.
+///
+/// Filled by the *setting*, not by whether the pane fits: on a window too
+/// narrow for it the button still says the pane is wanted, and the status
+/// bar says why it is not drawn. Pressing it then turns the setting off,
+/// which is what someone pressing a lit button expects.
+fn preview_toggle<'a>(on: bool, scale: FontScale) -> Element<'a, Message> {
+    let side = density::glyph_button(scale);
+    iced::widget::button(
+        container(glyph::side_panel(side, hyprforge_ui::theme::text()))
+            .center_x(Length::Fill)
+            .center_y(Length::Fill),
+    )
+    .width(Length::Fixed(side))
+    .height(Length::Fixed(side))
+    .padding(0)
+    .on_press(Message::Perform(Action::TogglePreview))
+    .style(move |_t: &iced::Theme, status| {
+        let hovered = matches!(status, iced::widget::button::Status::Hovered);
+        iced::widget::button::Style {
+            background: (on || hovered).then(|| iced::Background::Color(hyprforge_ui::theme::surface::row())),
+            text_color: hyprforge_ui::theme::text(),
+            border: iced::Border {
+                radius: density::nested_radius().into(),
+                ..iced::Border::default()
+            },
+            ..iced::widget::button::Style::default()
+        }
+    })
+    .into()
+}
+
 /// The 44px bar across the top.
 ///
 /// Three depth levels, used consistently everywhere in this window: the
@@ -2065,6 +2211,7 @@ fn header_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> 
             path_bar(vm.current_dir, scale),
             search_field(vm.search_query, vm.current_dir, scale),
             view_mode_toggle(vm.prefs, scale),
+            preview_toggle(vm.prefs.preview_pane, scale),
         ]
         .spacing(spacing::SM)
         .align_y(iced::Alignment::Center),
@@ -2304,17 +2451,24 @@ fn status_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> 
     };
 
     // The preview pane's switch, beside the dotfiles one and for the same
-    // reason: a key nobody finds by looking.
-    let preview_switch: Element<'a, Message> =
+    // reason: a key nobody finds by looking. It names what is on screen,
+    // not the setting — the two part company on a narrow window, and a
+    // switch offering to hide a pane nobody can see reads as broken. That
+    // case says why instead, and is not a button: pressing it would only
+    // turn off a setting the user cannot see the effect of either way.
+    let preview_switch: Element<'a, Message> = if vm.prefs.preview_pane && vm.preview.is_none() {
+        meta_text("Preview needs a wider window", density::META_TEXT_BASE, scale).into()
+    } else {
         iced::widget::button(scaled_text(
-            if vm.prefs.preview_pane { "Hide preview" } else { "Show preview" },
+            if vm.preview.is_some() { "Hide preview" } else { "Show preview" },
             density::META_TEXT_BASE,
             scale,
         ))
         .padding([0, spacing::XS as u16])
         .on_press(Message::Perform(Action::TogglePreview))
         .style(quiet_link_style)
-        .into();
+        .into()
+    };
 
     plane(
         row![
@@ -2851,6 +3005,13 @@ struct RowContext<'a> {
     /// per row was both wasted work and a way for the top and bottom of a
     /// long list to disagree about what "Today" means.
     now: chrono::DateTime<chrono::Local>,
+    icons: &'a HashMap<String, Option<Picture>>,
+    thumbnails: &'a HashMap<PathBuf, Picture>,
+}
+
+/// The theme icon the host found for `entry`, if it has answered with one.
+fn themed<'a>(icons: &'a HashMap<String, Option<Picture>>, entry: &Entry) -> Option<&'a Picture> {
+    icons.get(icon::icon_key(entry)).and_then(Option::as_ref)
 }
 
 fn entry_row<'a>(
@@ -2859,7 +3020,7 @@ fn entry_row<'a>(
     selected: bool,
     ctx: &RowContext<'a>,
 ) -> Element<'a, Message> {
-    let RowContext { columns, renaming, home, scale, now } = ctx;
+    let RowContext { columns, renaming, home, scale, now, icons, thumbnails } = ctx;
     let (renaming, scale, now) = (*renaming, *scale, *now);
     // The icon, then the name, then whichever optional columns are
     // switched on — in `Column::ALL` order, which is the same order
@@ -2877,7 +3038,11 @@ fn entry_row<'a>(
     // what marks the row instead.
     let selected = selected && editing.is_none();
     let mut row_content = row![
-        entry_icon(entry.kind, 20.0, scale),
+        // The picture itself when the host has one, in the icon's square.
+        match thumbnails.get(&entry.path) {
+            Some(picture) => picture.view(scale.apply(20.0)),
+            None => entry_icon(entry.kind, themed(icons, entry), 20.0, scale),
+        },
         // `&entry.name`, not a clone: `scaled_text` borrows for `'a`,
         // and this row is rebuilt for every visible entry on every
         // redraw — a hover anywhere in the window allocated one `String`
@@ -3277,6 +3442,8 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         home: home_dir(),
         scale,
         now: chrono::Local::now(),
+        icons: vm.icons,
+        thumbnails: vm.thumbnails,
     };
     for (index, entry) in vm.rows.iter().copied().enumerate() {
         // One rule, where the directories end and the files begin.
@@ -3322,7 +3489,10 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // width the list is drawn at its own minimum and the pane scrolls
     // sideways to reach the rest of it, which is what a table does
     // everywhere else and is the reason the columns are worth having.
-    let pane = density::list_pane_width(vm.viewport_width, vm.sidebar_collapsed);
+    // Less whatever the preview pane takes beside it: the columns share
+    // what is left, not the width the pane used to leave them.
+    let pane = density::list_pane_width(vm.viewport_width, vm.sidebar_collapsed)
+        - vm.preview.as_ref().map_or(0.0, |p| p.width);
     let min_width =
         density::list_min_width(listing_columns(vm.prefs, vm.in_trash, vm.archive.is_some()).len(), scale);
     if pane >= min_width {
@@ -3352,6 +3522,7 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         .map(|(index, entry)| (index, entry, vm.selection.is_selected(&entry.path)))
         .collect();
     let thumbnails = vm.thumbnails;
+    let icons = vm.icons;
 
     // `responsive` and not a fixed column count. Five fixed columns meant
     // the cells never got wider *or* more numerous as the window grew —
@@ -3374,7 +3545,7 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
                 grid = grid.push(current);
                 current = row![].spacing(gap);
             }
-            current = current.push(grid_cell(index, entry, selected, renaming, thumbnails.get(&entry.path), scale));
+            current = current.push(grid_cell(index, entry, selected, renaming, thumbnails.get(&entry.path), themed(icons, entry), scale));
         }
         // The last row is padded out with empty space to a full set of
         // columns, so its cells keep the width the rows above gave them
@@ -3467,7 +3638,8 @@ fn grid_cell<'a>(
     entry: &'a Entry,
     selected: bool,
     renaming: Option<&'a Renaming>,
-    thumbnail: Option<&ImageHandle>,
+    thumbnail: Option<&Picture>,
+    icon: Option<&Picture>,
     scale: FontScale,
 ) -> Element<'a, Message> {
     let editing = renaming.filter(|r| r.path == entry.path);
@@ -3481,12 +3653,8 @@ fn grid_cell<'a>(
     // the icon would take, so a row of thumbnails and icons lines up.
     let size = density::grid_icon_size(scale);
     let picture: Element<'a, Message> = match thumbnail {
-        Some(handle) => iced::widget::image(handle.clone())
-            .width(Length::Fixed(size))
-            .height(Length::Fixed(size))
-            .content_fit(iced::ContentFit::Contain)
-            .into(),
-        None => entry_icon(entry.kind, size, scale),
+        Some(picture) => picture.view(size),
+        None => entry_icon(entry.kind, icon, size, scale),
     };
     let content = column![
         picture,
@@ -3516,6 +3684,11 @@ mod tests_support {
 
     /// A listing of `(name, is_dir)` at `/dir`, already loaded.
     pub fn loaded(rows: &[(&str, bool)]) -> Browser {
+        loaded_asking(rows).0
+    }
+
+    /// [`loaded`], and what the load asked its host for.
+    pub fn loaded_asking(rows: &[(&str, bool)]) -> (Browser, Outcome) {
         let (mut browser, _) =
             Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
         let entries: Vec<Entry> = rows
@@ -3537,8 +3710,8 @@ mod tests_support {
                 packed: None,
             })
             .collect();
-        browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(entries)));
-        browser
+        let outcome = browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(entries)));
+        (browser, outcome)
     }
 }
 
@@ -3561,6 +3734,49 @@ mod tests {
             .rows()
             .get(index)
             .is_some_and(|e| browser.selection().is_selected(&e.path))
+    }
+
+    /// `outcome` without the icon request a loaded listing always adds —
+    /// for the tests about what *else* a listing asks for.
+    fn without_icons(outcome: Outcome) -> Outcome {
+        match outcome {
+            Outcome::LoadIcons(_) => Outcome::None,
+            Outcome::Many(parts) => {
+                let mut rest: Vec<Outcome> =
+                    parts.into_iter().filter(|p| !matches!(p, Outcome::LoadIcons(_))).collect();
+                match rest.len() {
+                    0 => Outcome::None,
+                    1 => rest.remove(0),
+                    _ => Outcome::Many(rest),
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// A loaded listing asks its host for every icon key it holds, once.
+    #[test]
+    fn a_loaded_listing_asks_for_each_icon_key_once() {
+        let (mut browser, _) = Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
+        let entries = vec![entry("a.png", false), entry("b.png", false), entry("notes.txt", false)];
+        let asked = |outcome: &Outcome| -> Vec<String> {
+            match outcome {
+                Outcome::LoadIcons(keys) => keys.clone(),
+                Outcome::Many(parts) => parts
+                    .iter()
+                    .filter_map(|p| if let Outcome::LoadIcons(k) = p { Some(k.clone()) } else { None })
+                    .flatten()
+                    .collect(),
+                _ => Vec::new(),
+            }
+        };
+        let outcome = browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(entries.clone())));
+        let mut keys = asked(&outcome);
+        keys.sort();
+        assert_eq!(keys, [".png", ".txt"], "two keys for three files");
+
+        let again = browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(entries)));
+        assert!(asked(&again).is_empty(), "nothing is asked twice, answered or not");
     }
 
     fn entry(name: &str, is_dir: bool) -> Entry {
@@ -4467,7 +4683,7 @@ mod tests {
             Ok(vec![entry("visible", false), entry(".secret", false)]),
         ));
         assert_eq!(browser.rows().len(), 1);
-        match browser.perform(Action::ToggleHidden) {
+        match without_icons(browser.perform(Action::ToggleHidden)) {
             Outcome::PrefsChanged(prefs) => assert!(prefs.show_hidden),
             other => panic!("expected PrefsChanged, got {other:?}"),
         }
@@ -4522,7 +4738,7 @@ mod tests {
         let entries = vec![entry("sub", true), entry("a.txt", false), entry("other", true)];
         let outcome =
             browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(entries)));
-        match outcome {
+        match without_icons(outcome) {
             Outcome::CountFolders(folders) => {
                 assert_eq!(folders.len(), 2, "both directories, and neither file");
                 assert!(folders.iter().all(|p| p.to_string_lossy().contains("sub")
@@ -4540,7 +4756,7 @@ mod tests {
             Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
         let entries = vec![entry("a.txt", false), entry("b.txt", false)];
         let outcome = browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(entries)));
-        assert!(matches!(outcome, Outcome::None));
+        assert!(matches!(without_icons(outcome), Outcome::None));
     }
 
     /// A count lands on the folder it was asked about.
@@ -4836,6 +5052,7 @@ mod tests {
             // leaking one empty map is simpler than threading it through
             // every caller.
             thumbnails: Box::leak(Box::default()),
+            icons: Box::leak(Box::default()),
             preview: None,
         }
     }
@@ -5132,7 +5349,8 @@ mod archive_tests {
 /// grid's — and what it does with the answers.
 #[cfg(test)]
 mod media_tests {
-    use super::tests_support::loaded;
+    use super::tests_support::{loaded, loaded_asking};
+    use iced::widget::image::Handle as ImageHandle;
     use super::*;
 
     fn index_of(browser: &Browser, name: &str) -> usize {
@@ -5164,6 +5382,10 @@ mod media_tests {
         ImageHandle::from_rgba(1, 1, vec![0, 0, 0, 255])
     }
 
+    fn a_preview() -> Preview {
+        Preview { picture: Some(Picture::Raster(a_handle())), ..Preview::default() }
+    }
+
     #[test]
     fn selecting_one_picture_asks_the_host_for_its_preview() {
         let mut browser = loaded(&[("a.png", false), ("notes.txt", false)]);
@@ -5171,12 +5393,14 @@ mod media_tests {
         assert_eq!(asks_preview_of(&outcome), Some(PathBuf::from("/dir/a.png")));
     }
 
-    /// A text file gets the pane's details and its icon, and nothing is
-    /// decoded for it.
+    /// Every kind is asked about, not only pictures: what can be said
+    /// about a text file or a folder — its first lines, what is inside —
+    /// is the host's to decide. This used to ask for pictures alone.
     #[test]
-    fn selecting_something_that_is_not_a_picture_asks_for_nothing() {
-        let mut browser = loaded(&[("a.png", false), ("notes.txt", false)]);
-        assert_eq!(asks_preview_of(&click(&mut browser, "notes.txt")), None);
+    fn selecting_anything_asks_the_host_what_it_can_show() {
+        let mut browser = loaded(&[("a.png", false), ("notes.txt", false), ("sub", true)]);
+        assert_eq!(asks_preview_of(&click(&mut browser, "notes.txt")), Some(PathBuf::from("/dir/notes.txt")));
+        assert_eq!(asks_preview_of(&click(&mut browser, "sub")), Some(PathBuf::from("/dir/sub")));
     }
 
     #[test]
@@ -5196,12 +5420,13 @@ mod media_tests {
         }
     }
 
-    /// The grid asks for pictures only, in the order they are shown, so
-    /// the ones on screen first arrive first.
+    /// A listing asks for its pictures' thumbnails as it loads — in the
+    /// order they are shown, so the ones on screen first arrive first,
+    /// and nothing for a folder or a text file.
     #[test]
-    fn the_grid_asks_for_thumbnails_of_the_pictures_in_display_order() {
-        let mut browser = loaded(&[("b.jpg", false), ("folder", true), ("a.png", false), ("readme.md", false)]);
-        let outcome = browser.update(Message::SetViewMode(ViewMode::Grid));
+    fn a_listing_asks_for_thumbnails_of_its_pictures_in_display_order() {
+        let (browser, outcome) =
+            loaded_asking(&[("b.jpg", false), ("folder", true), ("a.png", false), ("readme.md", false)]);
         let expected: Vec<PathBuf> = browser
             .rows()
             .iter()
@@ -5214,18 +5439,26 @@ mod media_tests {
 
     #[test]
     fn a_thumbnail_is_never_asked_for_twice() {
-        let mut browser = loaded(&[("a.png", false)]);
-        let first = browser.update(Message::SetViewMode(ViewMode::Grid));
+        let (mut browser, first) = loaded_asking(&[("a.png", false)]);
         assert_eq!(asks_thumbnails(&first).len(), 1);
         let again = browser.update(Message::SetViewMode(ViewMode::Grid));
         assert!(asks_thumbnails(&again).is_empty(), "{again:?}");
     }
 
+    /// The list view shows pictures at row size, and leaves the costly
+    /// kinds — a PDF's page, a video's frame — to the grid.
     #[test]
-    fn the_list_view_asks_for_no_thumbnails() {
-        let mut browser = loaded(&[("a.png", false)]);
-        let outcome = browser.update(Message::SetViewMode(ViewMode::List));
-        assert!(asks_thumbnails(&outcome).is_empty());
+    fn the_list_view_asks_for_pictures_and_leaves_videos_to_the_grid() {
+        let mut browser = loaded(&[("a.png", false), ("clip.mp4", false)]);
+        let listed = browser.update(Message::SetViewMode(ViewMode::List));
+        let gridded = browser.update(Message::SetViewMode(ViewMode::Grid));
+        let listed = asks_thumbnails(&listed);
+        let gridded = asks_thumbnails(&gridded);
+        // The first listing already asked for the PNG, so the list's own
+        // switch may ask for nothing new; what matters is that it never
+        // asks for the video, and the grid then asks for that alone.
+        assert!(!listed.iter().any(|p| p.ends_with("clip.mp4")));
+        assert_eq!(gridded, [PathBuf::from("/dir/clip.mp4")]);
     }
 
     /// A thumbnail arriving for something this browser did not ask for —
@@ -5233,11 +5466,11 @@ mod media_tests {
     #[test]
     fn a_thumbnail_nobody_asked_for_is_dropped() {
         let mut browser = loaded(&[("a.png", false)]);
-        browser.update(Message::ThumbnailLoaded(PathBuf::from("/elsewhere/x.png"), a_handle()));
+        browser.update(Message::ThumbnailLoaded(PathBuf::from("/elsewhere/x.png"), Picture::Raster(a_handle())));
         assert!(browser.media.thumbnails.is_empty());
 
         browser.update(Message::SetViewMode(ViewMode::Grid));
-        browser.update(Message::ThumbnailLoaded(PathBuf::from("/dir/a.png"), a_handle()));
+        browser.update(Message::ThumbnailLoaded(PathBuf::from("/dir/a.png"), Picture::Raster(a_handle())));
         assert!(browser.media.thumbnails.contains_key(Path::new("/dir/a.png")));
     }
 
@@ -5248,9 +5481,9 @@ mod media_tests {
         let mut browser = loaded(&[("a.png", false), ("b.png", false)]);
         click(&mut browser, "a.png");
         click(&mut browser, "b.png");
-        browser.update(Message::PreviewLoaded(PathBuf::from("/dir/a.png"), Some(a_handle())));
+        browser.update(Message::PreviewLoaded(PathBuf::from("/dir/a.png"), Some(a_preview())));
         assert!(browser.media.preview.is_none());
-        browser.update(Message::PreviewLoaded(PathBuf::from("/dir/b.png"), Some(a_handle())));
+        browser.update(Message::PreviewLoaded(PathBuf::from("/dir/b.png"), Some(a_preview())));
         assert!(browser.media.preview.is_some());
     }
 

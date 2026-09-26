@@ -1,45 +1,75 @@
 //! What an entry's row draws for its icon.
 //!
-//! The brief for this crate asks for theme icon first, our own drawn
-//! badge as fallback. Only the fallback half is built here:
-//! [`theme_icon_name`] always returns `None`. A real lookup needs the
-//! `freedesktop-icons` crate — resolving a MIME type to an icon name,
-//! then walking an icon theme's own inheritance chain (`Inherits=`) to
-//! find a file that actually exists — and CLAUDE.md already has a
-//! measured fact about why that chain matters here: this machine's
-//! configured theme, Dracula, declares eight parent themes of which six
-//! are not installed and ships no `mimetypes/` of its own, so almost
-//! every lookup falls through several levels before landing on
-//! breeze-dark or hicolor. That is exactly the kind of resolution this
-//! crate should not half-build — a lookup that skips the inheritance
-//! walk would silently miss icons on this very machine and look "done"
-//! on a tidier one. Rather than add the dependency without being able to
-//! verify that walk end to end in this pass, [`theme_icon_name`] is left
-//! as a named seam a later pass can fill in behind, and every caller
-//! already goes through [`entry_icon`]'s fallback path — a working
-//! fallback beats a half-done lookup.
+//! The installed icon theme's icon for the file's type, when the host has
+//! found one, and our own drawn badge otherwise.
 //!
-//! The fallback is a small coloured badge: a glyph for the [`EntryKind`],
-//! a colour read from [`hyprforge_look::Theme`] — never a hardcoded
-//! colour, which CLAUDE.md forbids for any app in this suite. Eight
-//! kinds share the five colours the theme actually exposes for this
-//! purpose (accent, success, warning, error, and the dim text colour),
-//! so no two *adjacent-in-meaning* kinds share both a glyph and a
-//! colour, but the glyph is what actually carries the distinction —
-//! the colour only adds a second cue.
+//! # Who finds the icon
+//!
+//! Not this crate. Which file is `image-png` in the configured theme is
+//! a walk through that theme's `Inherits=` chain and a stat per
+//! candidate directory, and the browser does no I/O — see its module doc.
+//! So an entry's icon is named by an [`icon_key`], the browser asks its
+//! host for the keys it has not seen (`Outcome::LoadIcons`), and the host
+//! answers with a [`Picture`] per key. `hyprforge-mime` says which icon
+//! *names* a type has, `hyprforge-icons` which *file* each name is.
+//!
+//! The key is the part of the name a type is decided by — the extension
+//! — rather than the path, so a folder of ten thousand PNGs asks once.
+//!
+//! # The badge
+//!
+//! A small coloured shape: a folder or a page, in a colour read from
+//! [`hyprforge_look::Theme`] — never a hardcoded colour, which CLAUDE.md
+//! forbids for any app in this suite. It is what shows before the host
+//! answers, on a machine with no icon theme at all, and for a type no
+//! theme has anything for; eight kinds share the five colours the theme
+//! exposes for this, so the shape carries the distinction and the colour
+//! only adds a second cue.
 
-use crate::types::EntryKind;
+use crate::types::{Entry, EntryKind};
 use hyprforge_look::Color;
 use hyprforge_ui::theme::{self, FontScale};
 use iced::widget::container;
 use iced::{Background, Border, Element, Length, Theme as IcedTheme};
+use crate::preview::Picture;
 
-/// Looks up a themed icon name for an entry, via the installed icon
-/// theme. **Always `None`** — see this module's doc for why the real
-/// lookup isn't built yet, and what it would take to fill this in.
-pub fn theme_icon_name(_kind: EntryKind, _mime: Option<&str>) -> Option<&'static str> {
-    None
+/// Which theme icon an entry takes, named by what decides its type:
+/// `".png"`, `".tar.gz"`, a whole name with no extension (`"Makefile"`),
+/// or [`FOLDER_KEY`].
+///
+/// A slice of the entry's own name rather than a new string, because it
+/// is looked up for every visible row on every redraw — the same reason
+/// the row borrows its name rather than cloning it.
+///
+/// From the first dot that is not the leading one: `.tar.gz` has to stay
+/// whole, since the type is decided by both parts, and a dotfile's dot is
+/// part of its name rather than an extension. (`.bashrc` and a file
+/// ending in `.bashrc` share a key; a by-name type lookup gives both the
+/// same answer, so that costs nothing.)
+pub fn icon_key(entry: &Entry) -> &str {
+    if entry.is_dir {
+        return FOLDER_KEY;
+    }
+    let name = entry.name.as_str();
+    match name.get(1..).and_then(|rest| rest.find('.')) {
+        Some(dot) => &name[dot + 1..],
+        None => name,
+    }
 }
+
+/// A folder's key. A slash cannot appear in a file name, so it cannot
+/// collide with one.
+pub const FOLDER_KEY: &str = "/";
+
+/// A file name a by-name MIME lookup can be asked about, for `key`.
+pub fn sample_name(key: &str) -> String {
+    if key.starts_with('.') {
+        format!("x{key}")
+    } else {
+        key.to_string()
+    }
+}
+
 
 /// The badge colour for `kind`, read from the active [`hyprforge_look::Theme`]
 /// rather than hardcoded — see this module's doc.
@@ -61,10 +91,18 @@ pub fn badge_color(kind: EntryKind) -> Color {
     }
 }
 
-/// A small square badge for `kind`: [`theme_icon_name`]'s fallback,
-/// always used for now. `size` is the badge's side length in logical
-/// pixels before `scale` is applied.
-pub fn entry_icon<'a, Message: 'a>(kind: EntryKind, size: f32, scale: FontScale) -> Element<'a, Message> {
+/// An entry's icon: the theme's, when the host found one, and the badge
+/// for `kind` otherwise. `size` is the side length in logical pixels
+/// before `scale` is applied.
+pub fn entry_icon<'a, Message: 'a>(
+    kind: EntryKind,
+    themed: Option<&Picture>,
+    size: f32,
+    scale: FontScale,
+) -> Element<'a, Message> {
+    if let Some(icon) = themed {
+        return icon.view(scale.apply(size));
+    }
     let color = hyprforge_ui::color::to_iced(badge_color(kind));
     if kind == EntryKind::Folder {
         folder_mark(color, size, scale)
@@ -139,10 +177,46 @@ const OUTLINE_WIDTH: f32 = 1.5;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
+    /// Only the name and whether it is a folder matter to a key.
+    fn entry(name: &str, is_dir: bool) -> Entry {
+        Entry {
+            name: name.to_string(),
+            path: std::path::PathBuf::from("/dir").join(name),
+            is_dir,
+            size: crate::types::EntrySize::Bytes(0),
+            modified: None,
+            is_symlink: false,
+            link_broken: false,
+            hidden: name.starts_with('.'),
+            kind: EntryKind::classify(is_dir, name),
+            mode: 0o644,
+            uid: 1000,
+            owner: None,
+            origin: None,
+            packed: None,
+        }
+    }
+
+    /// A folder of ten thousand photographs asks for one icon, not ten
+    /// thousand: the key is what decides the type, not the path.
     #[test]
-    fn theme_icon_lookup_is_not_implemented_and_says_so_by_always_returning_none() {
-        assert_eq!(theme_icon_name(EntryKind::Folder, Some("inode/directory")), None);
+    fn files_that_share_an_extension_share_an_icon() {
+        assert_eq!(icon_key(&entry("a.png", false)), icon_key(&entry("b.png", false)));
+        assert_ne!(icon_key(&entry("a.png", false)), icon_key(&entry("a.jpg", false)));
+        assert_eq!(icon_key(&entry("photos.2024", true)), FOLDER_KEY, "a folder is a folder whatever its name");
+    }
+
+    /// A compound extension stays whole — `.tar.gz` is a tarball, `.gz`
+    /// alone is not — and a dotfile's dot is its name, not an extension.
+    #[test]
+    fn a_compound_extension_stays_whole_and_a_dotfile_stands_for_itself() {
+        assert_eq!(icon_key(&entry("backup.tar.gz", false)), ".tar.gz");
+        assert_eq!(icon_key(&entry(".bashrc", false)), ".bashrc");
+        assert_eq!(icon_key(&entry("Makefile", false)), "Makefile");
+        assert_eq!(sample_name(".tar.gz"), "x.tar.gz");
+        assert_eq!(sample_name("Makefile"), "Makefile");
     }
 
     #[test]
@@ -178,33 +252,14 @@ mod tests {
     /// They used to be emoji, and a colour emoji renders in the emoji
     /// font with *its* colours — so the badge's carefully theme-derived
     /// colour was computed and then thrown away. Every folder came out
-    /// the font's yellow whatever the theme said, which breaks this
-    /// suite's one real styling rule in spirit while never writing a hex
-    /// code anywhere a grep would find it. It also meant a machine with
-    /// no emoji font drew an identical empty box on every row.
-    ///
-    /// The property that keeps it fixed is structural rather than
-    /// textual: this module exposes **no function returning a string for
-    /// an icon**. An earlier version of this test scanned the source for
-    /// the emoji themselves and kept matching its own assertion text —
-    /// the check has to live somewhere the thing it forbids cannot also
-    /// appear. If a `badge_glyph`-shaped function comes back, it will
-    /// have to be called from `entry_icon`, and the only way to feed a
-    /// string to a container is a `text` widget: the compiler is the
-    /// check, and this test is the note saying why nobody should add one.
+    /// the font's yellow whatever the theme said. The property that keeps
+    /// it fixed is structural: nothing in this module's public API
+    /// returns a string to draw as an icon. What an entry draws is a
+    /// [`Picture`] — a file the icon theme chose — or the badge.
     #[test]
     fn an_icon_carries_no_text_so_no_font_can_override_the_theme() {
-        // `entry_icon` builds an `Element` with no text fragment
-        // anywhere in it. What can be asserted here without a renderer
-        // is that the colour it draws with is the theme's, which the
-        // test below does, and that nothing in this module's public API
-        // offers a glyph to draw. Both `badge_color` and `entry_icon`
-        // are the entire surface:
         let _: fn(EntryKind) -> Color = badge_color;
-        let _: fn(EntryKind, Option<&str>) -> Option<&'static str> = theme_icon_name;
-        // `theme_icon_name` returns an icon *name* for a future
-        // freedesktop lookup, not a glyph to render — see its own doc.
-        assert_eq!(theme_icon_name(EntryKind::Folder, None), None);
+        let _: fn(&Path) -> Picture = Picture::from_path;
     }
 
     #[test]

@@ -260,6 +260,11 @@ pub fn format_kind(entry: &Entry) -> String {
         "jpg" | "jpeg" => Some("JPEG image"),
         "gif" => Some("GIF image"),
         "webp" => Some("WebP image"),
+        // The three the decoder gained with the preview pane: a kind it
+        // can now show deserves a name rather than a bare "Image".
+        "bmp" => Some("BMP image"),
+        "tif" | "tiff" => Some("TIFF image"),
+        "ico" => Some("Icon"),
         "zip" => Some("ZIP archive"),
         "tar" => Some("TAR archive"),
         "gz" | "bz2" | "xz" | "zst" => Some("Compressed archive"),

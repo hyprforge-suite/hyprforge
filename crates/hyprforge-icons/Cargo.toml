@@ -1,0 +1,19 @@
+[package]
+name = "hyprforge-icons"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Finds an icon by name the way the freedesktop icon theme specification says to: the configured theme, what it inherits, then hicolor."
+repository = "https://github.com/adamrpostjr/hyprforge"
+
+# A leaf, like hyprforge-mime beside it: no GUI toolkit and nothing
+# Hyprland-shaped. It answers "which file is the icon called this" and
+# hands back a path; drawing it is the caller's business, because the
+# caller is the one that knows whether it can draw an SVG.
+[dependencies]
+# Only to ask gsettings which theme is configured — and nothing may wait
+# on another process without a bound (CLAUDE.md).
+hyprforge-process = { path = "../hyprforge-process" }
+
+[dev-dependencies]
+tempfile = "3"

@@ -24,8 +24,9 @@ hyprforge-image.workspace = true
 # also get it, and a feature that only works because a sibling happens to
 # be in the same build is a trap.
 # `image` for the grid's thumbnails and the preview pane: pixels the
-# host decoded, drawn as `Handle::from_rgba`.
-iced = { workspace = true, features = ["canvas", "image"] }
+# host decoded, drawn as `Handle::from_rgba`. `svg` for the icon theme's
+# file-type icons, nearly all of which are SVG — see `icon.rs`.
+iced = { workspace = true, features = ["canvas", "image", "svg"] }
 # The suite's keyboard grammar. `keymap.rs` is now the binding of it to
 # this app's `Action` — the parser, the merge policy and the rules about
 # which keys may be bound are shared with every other app that has a

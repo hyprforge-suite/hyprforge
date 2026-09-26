@@ -105,6 +105,33 @@ pub fn list_pane_width(viewport_width: f32, sidebar_collapsed: bool) -> f32 {
     (viewport_width - sidebar - padding).max(0.0)
 }
 
+/// The preview pane at its widest, and the width its picture is decoded
+/// for.
+pub const PREVIEW_MAX_WIDTH: f32 = 280.0;
+
+/// Narrower than this the pane's picture is a stamp and its details wrap
+/// a word to a line — at that point the room is worth more to the
+/// listing, and the pane steps aside.
+pub const PREVIEW_MIN_WIDTH: f32 = 200.0;
+
+/// What the listing keeps for itself before the pane may take anything.
+/// The pane is the extra; the listing is the reason the window is open.
+pub const LISTING_MIN_BESIDE_PREVIEW: f32 = 320.0;
+
+/// How wide the preview pane is drawn, or `None` when there is no room
+/// for it at all.
+///
+/// Shrinks rather than vanishing. It used to be all or nothing at an
+/// 820-pixel window, which on a half-screen tile meant a status bar
+/// offering to "Hide preview" beside no preview — the setting was on and
+/// the window simply never showed it, with nothing saying why. Now the
+/// pane gives way gradually, from [`PREVIEW_MAX_WIDTH`] down to
+/// [`PREVIEW_MIN_WIDTH`], and only below that does it step aside.
+pub fn preview_width(viewport_width: f32, sidebar_collapsed: bool) -> Option<f32> {
+    let spare = list_pane_width(viewport_width, sidebar_collapsed) - LISTING_MIN_BESIDE_PREVIEW;
+    (spare >= PREVIEW_MIN_WIDTH).then(|| spare.min(PREVIEW_MAX_WIDTH))
+}
+
 /// The narrowest a list row can be drawn before its columns stop being
 /// readable and start being a puzzle.
 ///
@@ -287,6 +314,28 @@ mod grid_tests {
     #[test]
     fn a_window_narrower_than_its_chrome_reports_no_pane_rather_than_a_negative_one() {
         assert_eq!(list_pane_width(50.0, false), 0.0);
+    }
+
+    /// A half-screen window still gets its preview — this is the case
+    /// that used to offer "Hide preview" beside nothing at all: a
+    /// 771-pixel window with the sidebar showing.
+    #[test]
+    fn a_half_screen_window_still_shows_a_narrower_preview() {
+        let width = preview_width(771.0, false).expect("room for a preview");
+        assert!((PREVIEW_MIN_WIDTH..PREVIEW_MAX_WIDTH).contains(&width), "narrower, not gone: {width}");
+        assert_eq!(preview_width(1600.0, false), Some(PREVIEW_MAX_WIDTH), "a wide window gets the full pane");
+    }
+
+    /// The pane steps aside rather than squeezing the listing below what
+    /// it needs.
+    #[test]
+    fn the_preview_never_takes_the_listing_below_its_minimum() {
+        assert_eq!(preview_width(600.0, false), None);
+        for viewport in (400..2000).step_by(7).map(|w| w as f32) {
+            if let Some(width) = preview_width(viewport, false) {
+                assert!(list_pane_width(viewport, false) - width >= LISTING_MIN_BESIDE_PREVIEW);
+            }
+        }
     }
 
     /// More columns need more room before they stop sharing and start

@@ -30,6 +30,7 @@ members = [
     "crates/hyprforge-power",
     "crates/hyprforge-settings",
     "crates/hyprforge-mime",
+    "crates/hyprforge-icons",
     "crates/hyprforge-fileops",
     "crates/hyprforge-listing",
     "crates/hyprforge-image",
@@ -104,6 +105,10 @@ hyprforge-files-core = { path = "crates/hyprforge-files-core" }
 # hyprforge-mime beside it — nothing GUI and nothing Hyprland-shaped.
 hyprforge-archive = { path = "crates/hyprforge-archive" }
 hyprforge-mime = { path = "crates/hyprforge-mime" }
+# Which file is the icon called `image-png`, through the configured icon
+# theme and what it inherits. A leaf beside hyprforge-mime, which knows
+# which *name* a type's icon has.
+hyprforge-icons = { path = "crates/hyprforge-icons" }
 hyprforge-files = { path = "crates/hyprforge-files" }
 
 # Only hyprforge-lua-import depends on this — evaluating a user's own
@@ -155,12 +160,19 @@ iced_tiny_skia = { version = "0.14", default-features = false }
 # the greeter, clipmenu, Settings and Files too, so every format added
 # here is a decoder linked into every app that draws an image.
 #
-# Pure-Rust decoders that are deliberately *not* on: tiff, bmp, ico, tga,
-# qoi, pnm, hdr, exr, ff — each is a small cost, but none is something a
-# person here has asked to open, and `hyprforge-image` answers "can I
-# open this" from what is enabled, so switching one on is also a claim in
-# the viewer's desktop entry. Add one deliberately, when someone has a
-# file in that format.
+# bmp, tiff and ico were switched on when Files' preview pane was asked
+# to show more kinds of picture (2026-09-25); the viewer's desktop entry
+# claims them in the same change, and `hyprforge-photos`'s
+# `the_desktop_entry_claims_exactly_what_this_build_decodes` keeps the two
+# in step from now on.
+#
+# Not on in this list: tga, qoi, pnm, hdr, exr, ff. But not off either,
+# in any app that draws an image — iced's `image` feature switches on
+# `image`'s *default* codecs, which is all of these, so the viewer and
+# Files decode them regardless of this line (measured 2026-09-25 with
+# `cargo tree -e features -i image`). This list is the floor, not the
+# set; the viewer's desktop entry is checked against what its build
+# actually decodes, not against this.
 #
 # Two that must stay off, and both would be easy to add by mistake:
 #
@@ -175,7 +187,7 @@ iced_tiny_skia = { version = "0.14", default-features = false }
 #   unconditionally: there is no DDS decoder to switch on.
 #
 # HEIC is not on the list because `image` cannot do it under any feature.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff", "ico"] }
 # The EXIF reader iced_graphics already pulls in for its own orientation
 # handling, named here so `hyprforge-image::camera` reads the same crate
 # at the same version rather than a second copy.
@@ -258,3 +270,4 @@ hyprforge-files-core = { path = "crates/hyprforge-files-core" }
 hyprforge-popup = { path = "crates/hyprforge-popup" }
 hyprforge-process = { path = "crates/hyprforge-process" }
 hyprforge-image = { path = "crates/hyprforge-image" }
+hyprforge-icons = { path = "crates/hyprforge-icons" }
