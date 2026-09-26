@@ -27,7 +27,8 @@ use crate::density;
 use crate::filter::{is_hidden, matches_query};
 use crate::format::{format_kind, format_modified_at, format_origin, format_owner, format_packed, format_permissions, format_size};
 use crate::glyph;
-use crate::icon::{self, entry_icon, ThemeIcon};
+use crate::icon::{self, entry_icon};
+use crate::preview::{Picture, Preview};
 use crate::action::{self, Action, ActionContext, Scope};
 use crate::config::Config;
 use crate::menu::{self as menus, MenuItem, MenuKind};
@@ -83,7 +84,7 @@ struct Media {
     preview_for: Option<PathBuf>,
     /// Its picture, once decoded. `None` while waiting, and for a file
     /// that turned out not to decode.
-    preview: Option<ImageHandle>,
+    preview: Option<Preview>,
 }
 
 /// Which host is rendering this [`Browser`], and — for a dialog — what
@@ -511,11 +512,11 @@ pub enum Message {
     /// A grid thumbnail the host decoded — see [`Outcome::LoadThumbnails`].
     ThumbnailLoaded(PathBuf, ImageHandle),
     /// The preview pane's picture, or `None` when it would not decode.
-    PreviewLoaded(PathBuf, Option<ImageHandle>),
+    PreviewLoaded(PathBuf, Option<Preview>),
     /// Theme icons the host looked up, by key — `None` for a key the
     /// theme has nothing for, which keeps the badge and is not asked
     /// about again. See [`Outcome::LoadIcons`].
-    IconsLoaded(Vec<(String, Option<ThemeIcon>)>),
+    IconsLoaded(Vec<(String, Option<Picture>)>),
     GoBack,
     GoForward,
     GoUp,
@@ -621,7 +622,7 @@ struct ViewModel<'a> {
     /// Grid thumbnails the host has decoded, by path.
     thumbnails: &'a HashMap<PathBuf, ImageHandle>,
     /// Theme icons by key — see [`Browser`]'s field of the same name.
-    icons: &'a HashMap<String, Option<ThemeIcon>>,
+    icons: &'a HashMap<String, Option<Picture>>,
     /// What the preview pane shows, when it is on *and* the window has
     /// room for it. The setting alone is `prefs.preview_pane`; the two
     /// differ exactly when the status bar has to say why nothing shows.
@@ -633,11 +634,12 @@ struct ViewModel<'a> {
 #[derive(Debug, Clone, PartialEq)]
 struct PreviewModel<'a> {
     selected: Vec<&'a Entry>,
-    picture: Option<&'a ImageHandle>,
+    /// What the host found out about it, once it has.
+    found: Option<&'a Preview>,
     /// How wide the pane is drawn — see [`density::preview_width`].
     width: f32,
     /// For the selection's icon, while there is no picture to show.
-    icons: &'a HashMap<String, Option<ThemeIcon>>,
+    icons: &'a HashMap<String, Option<Picture>>,
 }
 
 /// Browsing state for one directory tree view. Owns no filesystem
@@ -680,7 +682,7 @@ pub struct Browser {
     /// Theme icons by [`crate::icon::icon_key`], for the life of the
     /// window rather than one folder: `.png` is the same icon everywhere,
     /// and a key the host answered `None` for stays answered.
-    icons: HashMap<String, Option<ThemeIcon>>,
+    icons: HashMap<String, Option<Picture>>,
     /// Keys asked for and not yet answered, so none is asked twice.
     icons_asked: HashSet<String>,
     /// Whether the column picker under the list header is open.
@@ -1225,18 +1227,19 @@ impl Browser {
         }
     }
 
-    /// The one picture the preview pane should show, if any: the pane is
-    /// on, exactly one thing is selected, and it is a file this build can
-    /// decode. Not inside an archive — a member there has no path the
-    /// decoder can open.
+    /// The one entry the preview pane should describe, if any: the pane
+    /// is on and exactly one thing is selected. Any kind — what the host
+    /// can say about it (a picture, the first lines, what is inside) is
+    /// the host's to decide, and a kind it has nothing for comes back as
+    /// nothing. Not inside an archive: a member there has no path another
+    /// program can open.
     fn preview_target(&self) -> Option<PathBuf> {
         if !self.prefs.preview_pane || self.archive.is_some() {
             return None;
         }
         let selected = self.selected_shown();
         let [only] = selected.as_slice() else { return None };
-        let entry = self.entries.iter().find(|e| &e.path == only)?;
-        (!entry.is_dir && hyprforge_image::format::looks_decodable(&entry.path)).then(|| only.clone())
+        self.entries.iter().any(|e| &e.path == only).then(|| only.clone())
     }
 
     fn perform_action(&mut self, action: Action) -> Outcome {
@@ -1834,7 +1837,7 @@ impl Browser {
             icons: &self.icons,
             preview: preview_width.filter(|_| self.prefs.preview_pane).map(|width| PreviewModel {
                 selected: self.rows().into_iter().filter(|e| self.selection.is_selected(&e.path)).collect(),
-                picture: self.media.preview.as_ref(),
+                found: self.media.preview.as_ref(),
                 width,
                 icons: &self.icons,
             }),
@@ -1981,26 +1984,40 @@ fn preview_pane<'a>(preview: &PreviewModel<'a>, scale: FontScale) -> Element<'a,
     let body: Element<'a, Message> = match preview.selected.as_slice() {
         [] => meta_text("Select a file to see it here.", BASE_TEXT_SIZE, scale).into(),
         [entry] => {
-            let picture: Element<'a, Message> = match preview.picture {
-                Some(handle) => iced::widget::image(handle.clone())
-                    .width(Length::Fixed(inner))
-                    .height(Length::Fixed(inner))
-                    .content_fit(iced::ContentFit::Contain)
-                    .into(),
+            let found = preview.found;
+            let picture: Element<'a, Message> = match found.and_then(|f| f.picture.as_ref()) {
+                Some(picture) => picture.view_width(inner),
                 None => container(entry_icon(entry.kind, themed(preview.icons, entry), inner / 2.5, scale))
                     .center_x(Length::Fixed(inner))
                     .into(),
             };
             let now = chrono::Local::now();
-            column![
+            let mut body = column![
                 picture,
                 scaled_text(entry.name.clone(), 16.0, scale).wrapping(iced::widget::text::Wrapping::WordOrGlyph),
-                detail("Kind", format_kind(entry)),
-                detail("Size", format_size(entry.size)),
-                detail("Modified", format_modified_at(entry.modified, now)),
             ]
-            .spacing(spacing::MD)
-            .into()
+            .spacing(spacing::MD);
+            if let Some(excerpt) = found.and_then(|f| f.text.as_ref()) {
+                body = body.push(excerpt_block(excerpt, inner, scale));
+            }
+            if let Some(listing) = found.and_then(|f| f.listing.as_ref()) {
+                body = body.push(listing_block(listing, scale));
+            }
+            body = body
+                .push(detail("Kind", format_kind(entry)))
+                .push(detail("Size", format_size(entry.size)))
+                .push(detail("Modified", format_modified_at(entry.modified, now)));
+            for (label, value) in found.map(|f| f.details.as_slice()).unwrap_or_default() {
+                body = body.push(
+                    column![
+                        meta_text(label.clone(), density::META_TEXT_BASE, scale),
+                        scaled_text(value.clone(), BASE_TEXT_SIZE, scale)
+                            .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                    ]
+                    .spacing(2),
+                );
+            }
+            body.into()
         }
         many => {
             let bytes: u64 = many
@@ -2023,6 +2040,53 @@ fn preview_pane<'a>(preview: &PreviewModel<'a>, scale: FontScale) -> Element<'a,
         .width(Length::Fixed(preview.width))
         .height(Length::Fill)
         .into()
+}
+
+/// A text file's first lines, as written: monospace, on the recessed
+/// card colour so it reads as the file's content rather than the pane's.
+/// Not wrapped — code wrapped at 250 pixels is harder to read than code
+/// cut off, and the whole file is a double-click away.
+fn excerpt_block<'a>(excerpt: &'a crate::preview::Excerpt, width: f32, scale: FontScale) -> Element<'a, Message> {
+    let mut lines = column![
+        scaled_text(&excerpt.text, density::META_TEXT_BASE, scale)
+            .font(hyprforge_ui::theme::mono_font())
+            .wrapping(iced::widget::text::Wrapping::None),
+    ];
+    if excerpt.truncated {
+        lines = lines.push(meta_text("…", density::META_TEXT_BASE, scale));
+    }
+    container(lines)
+        .width(Length::Fixed(width))
+        .clip(true)
+        .padding(spacing::SM)
+        .style(|_t: &iced::Theme| container::Style {
+            background: Some(iced::Background::Color(hyprforge_ui::theme::surface::card())),
+            border: iced::Border { radius: density::nested_radius().into(), ..iced::Border::default() },
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// What is inside a folder or archive: its first names, folders marked
+/// with a trailing slash the way a path would be, and how many more.
+fn listing_block<'a>(listing: &'a crate::preview::Listing, scale: FontScale) -> Element<'a, Message> {
+    let heading = match listing.total {
+        0 => "Empty".to_string(),
+        1 => "1 item".to_string(),
+        n => format!("{n} items"),
+    };
+    let mut names = column![meta_text(heading, density::META_TEXT_BASE, scale)].spacing(2);
+    for (name, is_dir) in &listing.names {
+        let shown = if *is_dir { format!("{name}/") } else { name.clone() };
+        names = names.push(
+            scaled_text(shown, BASE_TEXT_SIZE, scale).wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+        );
+    }
+    let rest = listing.total.saturating_sub(listing.names.len());
+    if rest > 0 {
+        names = names.push(meta_text(format!("and {rest} more"), density::META_TEXT_BASE, scale));
+    }
+    names.into()
 }
 
 /// The listing and its column headers — everything right of the sidebar
@@ -2937,11 +3001,11 @@ struct RowContext<'a> {
     /// per row was both wasted work and a way for the top and bottom of a
     /// long list to disagree about what "Today" means.
     now: chrono::DateTime<chrono::Local>,
-    icons: &'a HashMap<String, Option<ThemeIcon>>,
+    icons: &'a HashMap<String, Option<Picture>>,
 }
 
 /// The theme icon the host found for `entry`, if it has answered with one.
-fn themed<'a>(icons: &'a HashMap<String, Option<ThemeIcon>>, entry: &Entry) -> Option<&'a ThemeIcon> {
+fn themed<'a>(icons: &'a HashMap<String, Option<Picture>>, entry: &Entry) -> Option<&'a Picture> {
     icons.get(icon::icon_key(entry)).and_then(Option::as_ref)
 }
 
@@ -3565,7 +3629,7 @@ fn grid_cell<'a>(
     selected: bool,
     renaming: Option<&'a Renaming>,
     thumbnail: Option<&ImageHandle>,
-    icon: Option<&ThemeIcon>,
+    icon: Option<&Picture>,
     scale: FontScale,
 ) -> Element<'a, Message> {
     let editing = renaming.filter(|r| r.path == entry.path);
@@ -5306,6 +5370,10 @@ mod media_tests {
         ImageHandle::from_rgba(1, 1, vec![0, 0, 0, 255])
     }
 
+    fn a_preview() -> Preview {
+        Preview { picture: Some(Picture::Raster(a_handle())), ..Preview::default() }
+    }
+
     #[test]
     fn selecting_one_picture_asks_the_host_for_its_preview() {
         let mut browser = loaded(&[("a.png", false), ("notes.txt", false)]);
@@ -5313,12 +5381,14 @@ mod media_tests {
         assert_eq!(asks_preview_of(&outcome), Some(PathBuf::from("/dir/a.png")));
     }
 
-    /// A text file gets the pane's details and its icon, and nothing is
-    /// decoded for it.
+    /// Every kind is asked about, not only pictures: what can be said
+    /// about a text file or a folder — its first lines, what is inside —
+    /// is the host's to decide. This used to ask for pictures alone.
     #[test]
-    fn selecting_something_that_is_not_a_picture_asks_for_nothing() {
-        let mut browser = loaded(&[("a.png", false), ("notes.txt", false)]);
-        assert_eq!(asks_preview_of(&click(&mut browser, "notes.txt")), None);
+    fn selecting_anything_asks_the_host_what_it_can_show() {
+        let mut browser = loaded(&[("a.png", false), ("notes.txt", false), ("sub", true)]);
+        assert_eq!(asks_preview_of(&click(&mut browser, "notes.txt")), Some(PathBuf::from("/dir/notes.txt")));
+        assert_eq!(asks_preview_of(&click(&mut browser, "sub")), Some(PathBuf::from("/dir/sub")));
     }
 
     #[test]
@@ -5390,9 +5460,9 @@ mod media_tests {
         let mut browser = loaded(&[("a.png", false), ("b.png", false)]);
         click(&mut browser, "a.png");
         click(&mut browser, "b.png");
-        browser.update(Message::PreviewLoaded(PathBuf::from("/dir/a.png"), Some(a_handle())));
+        browser.update(Message::PreviewLoaded(PathBuf::from("/dir/a.png"), Some(a_preview())));
         assert!(browser.media.preview.is_none());
-        browser.update(Message::PreviewLoaded(PathBuf::from("/dir/b.png"), Some(a_handle())));
+        browser.update(Message::PreviewLoaded(PathBuf::from("/dir/b.png"), Some(a_preview())));
         assert!(browser.media.preview.is_some());
     }
 

@@ -10,7 +10,7 @@
 //! candidate directory, and the browser does no I/O — see its module doc.
 //! So an entry's icon is named by an [`icon_key`], the browser asks its
 //! host for the keys it has not seen (`Outcome::LoadIcons`), and the host
-//! answers with a [`ThemeIcon`] per key. `hyprforge-mime` says which icon
+//! answers with a [`Picture`] per key. `hyprforge-mime` says which icon
 //! *names* a type has, `hyprforge-icons` which *file* each name is.
 //!
 //! The key is the part of the name a type is decided by — the extension
@@ -31,7 +31,7 @@ use hyprforge_look::Color;
 use hyprforge_ui::theme::{self, FontScale};
 use iced::widget::container;
 use iced::{Background, Border, Element, Length, Theme as IcedTheme};
-use std::path::Path;
+use crate::preview::Picture;
 
 /// Which theme icon an entry takes, named by what decides its type:
 /// `".png"`, `".tar.gz"`, a whole name with no extension (`"Makefile"`),
@@ -70,43 +70,6 @@ pub fn sample_name(key: &str) -> String {
     }
 }
 
-/// A theme icon the host found, ready to draw.
-///
-/// Built from a path and handed to iced, which reads the file itself the
-/// first time it draws it and keeps it after — so constructing one costs
-/// nothing, and the host can build them on any thread.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ThemeIcon {
-    Svg(iced::widget::svg::Handle),
-    Raster(iced::widget::image::Handle),
-}
-
-impl ThemeIcon {
-    /// By extension: `hyprforge-icons` only ever answers with a `.png` or
-    /// an `.svg`.
-    pub fn from_path(path: &Path) -> ThemeIcon {
-        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
-            ThemeIcon::Svg(iced::widget::svg::Handle::from_path(path))
-        } else {
-            ThemeIcon::Raster(iced::widget::image::Handle::from_path(path))
-        }
-    }
-
-    /// Drawn in a `side`-pixel square, logical, already scaled.
-    pub fn view<'a, Message: 'a>(&self, side: f32) -> Element<'a, Message> {
-        match self {
-            ThemeIcon::Svg(handle) => iced::widget::svg(handle.clone())
-                .width(Length::Fixed(side))
-                .height(Length::Fixed(side))
-                .into(),
-            ThemeIcon::Raster(handle) => iced::widget::image(handle.clone())
-                .width(Length::Fixed(side))
-                .height(Length::Fixed(side))
-                .content_fit(iced::ContentFit::Contain)
-                .into(),
-        }
-    }
-}
 
 /// The badge colour for `kind`, read from the active [`hyprforge_look::Theme`]
 /// rather than hardcoded — see this module's doc.
@@ -133,7 +96,7 @@ pub fn badge_color(kind: EntryKind) -> Color {
 /// before `scale` is applied.
 pub fn entry_icon<'a, Message: 'a>(
     kind: EntryKind,
-    themed: Option<&ThemeIcon>,
+    themed: Option<&Picture>,
     size: f32,
     scale: FontScale,
 ) -> Element<'a, Message> {
@@ -214,6 +177,7 @@ const OUTLINE_WIDTH: f32 = 1.5;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     /// Only the name and whether it is a folder matter to a key.
     fn entry(name: &str, is_dir: bool) -> Entry {
@@ -291,11 +255,11 @@ mod tests {
     /// the font's yellow whatever the theme said. The property that keeps
     /// it fixed is structural: nothing in this module's public API
     /// returns a string to draw as an icon. What an entry draws is a
-    /// [`ThemeIcon`] — a file the icon theme chose — or the badge.
+    /// [`Picture`] — a file the icon theme chose — or the badge.
     #[test]
     fn an_icon_carries_no_text_so_no_font_can_override_the_theme() {
         let _: fn(EntryKind) -> Color = badge_color;
-        let _: fn(&Path) -> ThemeIcon = ThemeIcon::from_path;
+        let _: fn(&Path) -> Picture = Picture::from_path;
     }
 
     #[test]

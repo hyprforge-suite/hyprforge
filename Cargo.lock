@@ -1956,6 +1956,7 @@ dependencies = [
  "hyprforge-look",
  "hyprforge-mime",
  "hyprforge-paths",
+ "hyprforge-process",
  "hyprforge-ui",
  "iced",
  "serde",
