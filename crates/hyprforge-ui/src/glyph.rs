@@ -587,6 +587,77 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for SignalGlyph {
     }
 }
 
+/// A battery on its side, filled to `fraction` in `fill` — the mark that
+/// leads a power page. The outline takes `outline`.
+///
+/// `side` is the height; the battery is drawn twice as wide, the shape
+/// people read as a battery before they read the number beside it.
+pub fn battery<'a, Message: 'a>(
+    fraction: f32,
+    side: f32,
+    outline: iced::Color,
+    fill: iced::Color,
+) -> Element<'a, Message> {
+    canvas(BatteryGlyph { fraction: fraction.clamp(0.0, 1.0), outline, fill })
+        .width(Length::Fixed(side * 2.0))
+        .height(Length::Fixed(side))
+        .into()
+}
+
+struct BatteryGlyph {
+    fraction: f32,
+    outline: iced::Color,
+    fill: iced::Color,
+}
+
+impl<Message> canvas::Program<Message, Theme, Renderer> for BatteryGlyph {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let h = bounds.height;
+        let stroke = (h * 0.08).max(1.5);
+        let nub = h * 0.12;
+        let body_w = bounds.width - nub - stroke;
+        let body = canvas::Path::rounded_rectangle(
+            Point::new(stroke / 2.0, stroke / 2.0),
+            iced::Size::new(body_w, h - stroke),
+            (h * 0.18).into(),
+        );
+        frame.stroke(
+            &body,
+            canvas::Stroke::default().with_width(stroke).with_color(self.outline),
+        );
+        // The terminal, centred on the right end.
+        frame.fill_rectangle(
+            Point::new(body_w + stroke / 2.0, h * 0.32),
+            iced::Size::new(nub, h * 0.36),
+            canvas::Fill::from(self.outline),
+        );
+        // The charge, inset from the outline so it reads as contents.
+        let inset = stroke * 2.0;
+        let full = body_w - inset * 2.0 + stroke;
+        if self.fraction > 0.0 {
+            frame.fill(
+                &canvas::Path::rounded_rectangle(
+                    Point::new(inset, inset),
+                    iced::Size::new(full * self.fraction, h - inset * 2.0),
+                    (h * 0.08).into(),
+                ),
+                self.fill,
+            );
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
 // Only `signal_bars` is tested below, because it is a decision rather
 // than a shape. For the rest there are no tests, deliberately.
 //
