@@ -37,6 +37,11 @@ use std::path::{Path, PathBuf};
 
 /// How many folder crumbs the path bar shows before eliding the middle.
 const MAX_CRUMBS: usize = 4;
+/// Below this window width the path bar shows only the folder you are in:
+/// the mode switch and the tools take a fixed 360px or so, and a whole
+/// path in what is left runs into the position at the field's end.
+const NARROW_HEADER: f32 = 900.0;
+const NARROWEST_HEADER: f32 = 720.0;
 
 impl App {
     pub(super) fn view(&self) -> Element<'_, Message> {
@@ -84,7 +89,7 @@ impl App {
     fn header(&self) -> Element<'_, Message> {
         let scale = self.font_scale;
         let nav = row![
-            sidebar_toggle(self.prefs.sidebar, scale),
+            sidebar_toggle(self.sidebar_on(), scale),
             nav_button(glyph::Nav::Back, self.history.can_go_back().then_some(Message::Perform(Action::Back)), true, scale),
             nav_button(glyph::Nav::Forward, self.history.can_go_forward().then_some(Message::Perform(Action::Forward)), false, scale),
         ]
@@ -114,7 +119,7 @@ impl App {
             // file manager shows its Columns view — a control that is
             // visibly waiting is a smaller surprise than one that appears.
             glyph_button("✎", None, false, scale),
-            glyph_button("i", Some(Message::Perform(Action::ToggleInfo)), self.prefs.info_panel, scale),
+            glyph_button("i", Some(Message::Perform(Action::ToggleInfo)), self.info_on(), scale),
             glyph_button("⋯", Some(Message::ToggleMenu), self.menu_open, scale),
         ]
         .spacing(spacing::XS)
@@ -144,7 +149,18 @@ impl App {
         let mut crumbs = row![].spacing(0).align_y(iced::Alignment::Center);
 
         if let Some(dir) = &self.folder_path {
-            let segments = crumbs_of(dir);
+            let mut segments = crumbs_of(dir);
+            // A narrow window — the compact viewer sized to a small
+            // picture — has room for where you are, not how you got
+            // there: the folder alone, still clickable, and the file.
+            if self.window_size.width < NARROW_HEADER {
+                segments = segments.split_off(segments.len().saturating_sub(1));
+            }
+            // At the window's minimum even that crowds the name out, and
+            // in Photo mode the name is the thing to keep.
+            if self.window_size.width < NARROWEST_HEADER && self.mode == Mode::Photo {
+                segments.clear();
+            }
             let last = segments.len().saturating_sub(1);
             for (i, (label, path)) in segments.into_iter().enumerate() {
                 let is_home = i == 0 && label == "~";
@@ -857,7 +873,7 @@ impl App {
             Mode::Photo if self.model_on_screen() => {
                 vec![Some("drag turn · right-drag pan".to_string()), hint(Action::CycleDrawMode, "style"), hint(Action::ToggleInfo, "info")]
             }
-            Mode::Photo if self.prefs.info_panel => {
+            Mode::Photo if self.info_on() => {
                 vec![hint(Action::ToggleInfo, "close info"), hint(Action::ToggleSidebar, "sidebar")]
             }
             Mode::Photo => {
@@ -913,7 +929,7 @@ impl App {
             .into()
         };
         let filmstrip = if self.prefs.filmstrip { "Hide Filmstrip" } else { "Show Filmstrip" };
-        let sidebar = if self.prefs.sidebar { "Hide Sidebar" } else { "Show Sidebar" };
+        let sidebar = if self.sidebar_on() { "Hide Sidebar" } else { "Show Sidebar" };
         let menu = column![
             entry(Action::Slideshow.label().to_string(), Action::Slideshow, !self.folder.is_empty()),
             entry(Action::SetWallpaper.label().to_string(), Action::SetWallpaper, has),
