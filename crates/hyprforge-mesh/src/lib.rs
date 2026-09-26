@@ -38,6 +38,7 @@ pub mod camera;
 pub mod loader;
 pub mod mesh;
 pub mod style;
+pub mod thumbnail;
 
 pub use loader::{detect, load, Format};
 pub use mesh::Mesh;

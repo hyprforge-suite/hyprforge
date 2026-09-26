@@ -34,3 +34,5 @@ tracing.workspace = true
 
 [dev-dependencies]
 zip = { version = "8", default-features = false, features = ["deflate"] }
+# The `thumbnail` example writes its drawing out as a PNG.
+png = "0.18"
