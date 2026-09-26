@@ -107,10 +107,13 @@ mod tests {
             .collect();
         // Farbfeld has no MIME type at all — `image` answers
         // octet-stream — so there is nothing an entry could claim for it.
+        // Pictures the image decoder opens, and the 3D models the mesh
+        // loader opens — the viewer claims both, and nothing else.
         let mut decodable: Vec<&str> = hyprforge_image::format::decodable_mime_types()
             .into_iter()
             .filter(|k| *k != "application/octet-stream")
             .map(canonical)
+            .chain(hyprforge_mesh::Format::ALL.map(hyprforge_mesh::Format::mime_type))
             .collect();
         claimed.sort_unstable();
         decodable.sort_unstable();

@@ -70,6 +70,13 @@ Shared by every app in the suite
                             size; and what the camera wrote — body, lens,
                             exposure, date, GPS. No iced, no Wayland, no
                             Hyprland.
+  hyprforge-mesh/          3D models — STL, 3MF and OBJ — loaded into a
+                            welded, indexed mesh, with fstl's camera and
+                            draw modes: the model half of view3d, brought in
+                            so the image viewer opens a model the way it
+                            opens a picture. Memory-mapped, parallel
+                            parsing. No iced, no wgpu; carries its own MIT
+                            LICENSE with fstl's copyright line.
 
 Hyprland-facing
   hyprforge-core/          the config machinery: hlconfig (the generic
@@ -199,7 +206,11 @@ Apps
                             folder in the order Files shows it, with zoom,
                             pan, rotation and a filmstrip; Grid groups the
                             folder by day; Library is the folder tree as
-                            cards. An inspector with the camera's EXIF, a
+                            cards. 3D models (STL, 3MF, OBJ) page with the
+                            pictures and are drawn by view3d's renderer in
+                            an iced shader widget: drag to turn, five draw
+                            modes, viewpoints, autoreload. An inspector with
+                            the camera's EXIF or the model's geometry, a
                             slideshow, and trash with undo, copy, Open
                             With, Show in Files and Set as Wallpaper.
   hyprforge-settings/      the iced GUI, hosting the settings modules

@@ -18,6 +18,7 @@
 //! `#[serde(default)]` per field, so a file written before a setting
 //! existed still loads and gains that setting's default.
 
+use hyprforge_mesh::style::{DrawMode, Projection};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -39,6 +40,18 @@ pub struct Prefs {
     pub slideshow_seconds: u64,
     /// Whether a slideshow starts again after the last picture.
     pub slideshow_loop: bool,
+    /// How a 3D model is drawn — a `hyprforge_mesh::style::DrawMode` id.
+    /// A string rather than the enum, so a hand-edited value this version
+    /// does not know reads as the default instead of failing the whole
+    /// file; `model_draw_mode()` does that reading.
+    pub model_draw_mode: String,
+    /// `perspective` or `orthographic`.
+    pub model_projection: String,
+    /// Whether a model's axes and the axis flower are drawn.
+    pub model_axes: bool,
+    /// Whether a model on screen is reloaded when its file changes — what
+    /// makes the viewer a live preview beside a CAD tool or a slicer.
+    pub model_autoreload: bool,
     pub window_width: u32,
     pub window_height: u32,
 }
@@ -56,9 +69,27 @@ impl Default for Prefs {
             sidebar: true,
             slideshow_seconds: 5,
             slideshow_loop: false,
+            model_draw_mode: DrawMode::default().id().to_string(),
+            model_projection: Projection::default().id().to_string(),
+            model_axes: false,
+            // On, as in view3d: a model open beside the program writing
+            // it is the case this was built for.
+            model_autoreload: true,
             window_width: 1180,
             window_height: 760,
         }
+    }
+}
+
+impl Prefs {
+    /// The remembered draw mode, or the default for one this version does
+    /// not know.
+    pub fn model_draw_mode(&self) -> DrawMode {
+        DrawMode::from_id(&self.model_draw_mode).unwrap_or_default()
+    }
+
+    pub fn model_projection(&self) -> Projection {
+        Projection::from_id(&self.model_projection).unwrap_or_default()
     }
 }
 
@@ -154,6 +185,10 @@ mod tests {
             sidebar: false,
             slideshow_seconds: 10,
             slideshow_loop: true,
+            model_draw_mode: "wireframe".to_string(),
+            model_projection: "orthographic".to_string(),
+            model_axes: true,
+            model_autoreload: false,
             window_width: 640,
             window_height: 480,
         };
@@ -186,6 +221,18 @@ mod tests {
         let prefs = load_from(&path).unwrap();
         assert_eq!(prefs.window_width, 800);
         assert_eq!(prefs.info_panel, Prefs::default().info_panel);
+    }
+
+    /// A draw mode from a newer version, or a typo, is not a reason to
+    /// lose every other setting in the file.
+    #[test]
+    fn an_unknown_draw_mode_reads_as_the_default_and_keeps_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("photos.toml");
+        std::fs::write(&path, "model_draw_mode = \"holographic\"\nwindow_width = 900\n").unwrap();
+        let prefs = load_from(&path).unwrap();
+        assert_eq!(prefs.model_draw_mode(), DrawMode::Shaded);
+        assert_eq!(prefs.window_width, 900);
     }
 
     /// Read-modify-write, not save-what-I-loaded: a change made by

@@ -71,6 +71,28 @@ pub fn count(n: usize) -> String {
     }
 }
 
+/// How many things, named for what they are: "14 photos" for pictures
+/// (clips included — a camera folder is photos to the person looking at
+/// it), "3 models" for a folder of prints, and "4 items" when the two are
+/// mixed, because calling a model a photo is the one wrong answer.
+pub fn describe(media: impl IntoIterator<Item = crate::folder::Media>) -> String {
+    use crate::folder::Media;
+    let (mut pictures, mut models) = (0usize, 0usize);
+    for m in media {
+        match m {
+            Media::Still | Media::Clip => pictures += 1,
+            Media::Model => models += 1,
+        }
+    }
+    let n = pictures + models;
+    let noun = match (pictures, models) {
+        (_, 0) => ("photo", "photos"),
+        (0, _) => ("model", "models"),
+        _ => ("item", "items"),
+    };
+    format!("{n} {}", if n == 1 { noun.0 } else { noun.1 })
+}
+
 /// Every index in the order the grid draws them.
 pub fn display_order(groups: &[Group]) -> Vec<usize> {
     groups.iter().flat_map(|g| g.indices.iter().copied()).collect()
@@ -301,6 +323,16 @@ mod tests {
         let today = NaiveDate::from_ymd_opt(2026, 9, 25).unwrap();
         assert_eq!(heading(NaiveDate::from_ymd_opt(2026, 9, 12), today), "Sat 12 Sep");
         assert_eq!(heading(NaiveDate::from_ymd_opt(2025, 9, 12), today), "Fri 12 Sep 2025");
+    }
+
+    #[test]
+    fn a_model_is_never_counted_as_a_photo() {
+        use Media::{Clip, Model, Still};
+        assert_eq!(describe([Still, Clip]), "2 photos");
+        assert_eq!(describe([Model]), "1 model");
+        assert_eq!(describe([Model, Model]), "2 models");
+        assert_eq!(describe([Still, Model, Model, Model]), "4 items");
+        assert_eq!(describe([]), "0 photos");
     }
 
     #[test]
