@@ -6,17 +6,31 @@
 //! a glance is the wrong weight. So the viewer asks the compositor to
 //! float it, sizes itself to the picture and centres itself.
 //!
-//! # Asked of Hyprland, after the window exists
+//! # Floating from the first frame
 //!
 //! Wayland gives a client no way to ask to float: `xdg_toplevel` has no
-//! such request, and "floating" is the compositor's own idea. So this is
-//! three `hyprctl dispatch` calls against the window's own pid, made once
-//! the window has mapped — `window.float`, `window.resize`, `window.center`,
-//! each checked live against Hyprland 0.56 (`action = "set"` floats; the
-//! window floats first at the size of the screen, which is why the resize
-//! follows). Off Hyprland, or with `hyprctl` missing, none of it runs and
-//! the window is simply tiled: a failure here is a logged line, never a
-//! message, because a viewer that shows the picture has done its job.
+//! such request, and "floating" is the compositor's own idea. The first
+//! version floated the window *after* it mapped, with `hyprctl dispatch`
+//! — so it appeared tiled, reflowed every other window, and then jumped
+//! to floating: the layout shift a user saw on every picture opened from
+//! Files.
+//!
+//! So the size is worked out *before* the window exists ([`planned_size`]:
+//! a header read and one bounded `hyprctl monitors`), and the window maps
+//! at that size with its minimum equal to its maximum. Hyprland floats a
+//! window of fixed size at map time — it reads as a dialog — and centres
+//! it, so the first frame is already where it stays. Once it has mapped,
+//! [`settle`] checks that it really is floating, dispatching `window.float`
+//! only if not (another compositor rule may have tiled it), and the
+//! window takes back its ordinary minimum and no maximum, so it can be
+//! resized. Off Hyprland, or with `hyprctl` missing, none of this runs and
+//! the window opens tiled at its usual size: a failure here is a logged
+//! line, never a message, because a viewer that shows the picture has done
+//! its job.
+//!
+//! The dispatches are checked live against Hyprland 0.56 (`action =
+//! "set"` floats; a window floated after mapping starts screen-sized,
+//! which is why [`float_self`] resizes and centres too).
 //!
 //! Every call is bounded by `hyprforge_process::TIMEOUT`, because
 //! `hyprctl` can stop answering like any other program.
@@ -106,6 +120,32 @@ fn usable_of(monitor: &serde_json::Value) -> Usable {
         .unwrap_or_default();
     let r = |i: usize| reserved.get(i).copied().unwrap_or(0.0);
     Usable { width: (w / scale - r(0) - r(2)).max(1.0), height: (h / scale - r(1) - r(3)).max(1.0) }
+}
+
+/// The size to map a floating viewer at for `picture`, with `chrome_h`
+/// logical pixels of header, filmstrip and status bar around it. Before
+/// the window exists — see the module doc.
+pub fn planned_size(picture: &std::path::Path, chrome_h: f32) -> Result<(u32, u32), String> {
+    let measured = hyprforge_image::measure(picture).ok().map(|m| m.display_size());
+    let usable = focused_monitor()?;
+    Ok(floating_size(measured, usable, (0.0, chrome_h)))
+}
+
+/// After a window mapped at a planned size: `Ok` once it is floating —
+/// already, as a fixed-size window is, or by dispatching it there.
+pub fn settle(size: (u32, u32)) -> Result<(), String> {
+    wait_for_own_window(Duration::from_secs(3))?;
+    if own_window_floating()? {
+        return Ok(());
+    }
+    float_self(size)
+}
+
+fn own_window_floating() -> Result<bool, String> {
+    let pid = std::process::id() as u64;
+    let out = hyprctl(&["-j", "clients"])?;
+    let clients: Vec<serde_json::Value> = serde_json::from_slice(&out).map_err(|e| format!("hyprctl clients: {e}"))?;
+    Ok(clients.iter().any(|c| c["pid"].as_u64() == Some(pid) && c["floating"].as_bool() == Some(true)))
 }
 
 /// Floats this process's window, gives it `size` and centres it.

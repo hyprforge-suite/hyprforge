@@ -172,6 +172,19 @@ fn main() -> iced::Result {
         Args::Picture(path) if !path.is_dir() => Some(path.clone()),
         _ => None,
     };
+    // The floating size, worked out before the window exists so it can map
+    // floating instead of tiling first — see `float.rs`.
+    let planned_float = float_picture.as_deref().filter(|_| hyprforge_photos::float::on_hyprland()).and_then(|picture| {
+        let scale = FontScale(hyprforge_ui::theme::active().font_scale);
+        let mut chrome_h = hyprforge_ui::density::bar_height(scale) + 1.0 + scale.apply(STATUS_HEIGHT) + 1.0;
+        if prefs.filmstrip {
+            chrome_h += FILMSTRIP_HEIGHT + 1.0;
+        }
+        hyprforge_photos::float::planned_size(picture, chrome_h)
+            .inspect_err(|e| tracing::warn!(error = %e, "no floating size; opening tiled"))
+            .ok()
+    });
+    let window_size = planned_float.map_or(size, |(w, h)| Size::new(w as f32, h as f32));
 
     let mut app = App {
         keymap: config.keymap,
@@ -219,6 +232,7 @@ fn main() -> iced::Result {
         compact,
         float_picture,
         floated: false,
+        planned_float,
         video: None,
         video_generation: 0,
         seeking: None,
@@ -244,8 +258,12 @@ fn main() -> iced::Result {
     .theme(App::theme)
     .subscription(App::subscription)
     .window(window::Settings {
-        size,
-        min_size: Some(Size::new(640.0, 420.0)),
+        size: window_size,
+        // Fixed-size while it maps, so Hyprland floats it at once; the
+        // ordinary limits come back once it has (`Message::Floated`).
+        min_size: Some(if planned_float.is_some() { window_size } else { Size::new(640.0, 420.0) }),
+        max_size: planned_float.map(|_| window_size),
+        resizable: planned_float.is_none(),
         platform_specific: window::settings::PlatformSpecific {
             application_id: APP_ID.to_string(),
             ..window::settings::PlatformSpecific::default()
@@ -340,6 +358,23 @@ struct ModelView {
     /// The file's time when it was read, for autoreload.
     modified: Option<std::time::SystemTime>,
 }
+
+/// Where the seek bar is being held, or was let go.
+///
+/// Held after release too, until mpv reports a position near it: the
+/// player's last report is from before the seek, and showing it would
+/// snap the handle back for a moment before it jumped forward again.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Seeking {
+    target: f64,
+    dragging: bool,
+    since: Instant,
+}
+
+/// How close mpv's reported position must come to where the bar was let
+/// go before the bar follows mpv again, and how long it waits at most.
+const SEEK_SETTLE_SECONDS: f64 = 0.75;
+const SEEK_SETTLE_WAIT: Duration = Duration::from_millis(1500);
 
 /// A video in the pane.
 struct VideoView {
@@ -479,13 +514,16 @@ struct App {
     float_picture: Option<PathBuf>,
     /// Whether this window floated itself, so ending compact grows it back.
     floated: bool,
+    /// The size the window mapped at to float from its first frame, until
+    /// it has settled and taken back an ordinary minimum and maximum.
+    planned_float: Option<(u32, u32)>,
     /// The video on screen and its player. Only the current item's — any
     /// other item drops it, which stops the sound.
     video: Option<VideoView>,
     /// Bumped per player, so updates from one already dropped are ignored.
     video_generation: u64,
     /// Where the seek bar is being dragged to, until it is let go.
-    seeking: Option<f64>,
+    seeking: Option<Seeking>,
     /// The shared freedesktop cache, for video frames and model drawings.
     thumb_cache: Option<Arc<hyprforge_thumbnails::Cache>>,
     /// One line in the status bar: a problem to report, or what just
@@ -616,6 +654,19 @@ impl App {
         let Some(path) = self.float_picture.take() else { return Task::none() };
         if !hyprforge_photos::float::on_hyprland() {
             return Task::none();
+        }
+        // Mapped at its planned size, fixed: it should already be floating,
+        // and this only confirms it — dispatching only if some rule tiled
+        // it anyway.
+        if let Some(size) = self.planned_float {
+            return Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || hyprforge_photos::float::settle(size))
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()))
+                },
+                Message::Floated,
+            );
         }
         // The chrome around the picture in compact: header, status bar and
         // filmstrip, each with its 1px edge.
@@ -754,6 +805,13 @@ impl App {
                         // so "known" means both — (1280, 0) is not a shape.
                         let shaped = |p: &hyprforge_video::Playback| p.video_size.is_some_and(|(w, h)| w > 0 && h > 0);
                         let first_size = !shaped(&video.playback) && shaped(&playback);
+                        if let Some(seek) = self.seeking.filter(|s| !s.dragging) {
+                            if (playback.position - seek.target).abs() < SEEK_SETTLE_SECONDS
+                                || seek.since.elapsed() > SEEK_SETTLE_WAIT
+                            {
+                                self.seeking = None;
+                            }
+                        }
                         video.playback = playback;
                         // Now the shape is known, frames can be drawn at it
                         // and mpv adds no bars of its own.
@@ -765,13 +823,22 @@ impl App {
                 }
                 Task::none()
             }
+            // Scrubbing: the picture follows the bar while it is dragged,
+            // by fast keyframe seeks — the player collapses a run of them
+            // into the last — and lands exactly where it is let go.
             Message::SeekTo(seconds) => {
-                self.seeking = Some(seconds);
+                self.seeking = Some(Seeking { target: seconds, dragging: true, since: Instant::now() });
+                if let Some(player) = self.video.as_ref().and_then(|v| v.player.as_ref()) {
+                    player.send(hyprforge_video::Command::Seek { seconds, relative: false, exact: false });
+                }
                 Task::none()
             }
             Message::SeekRelease => {
-                if let (Some(seconds), Some(player)) = (self.seeking.take(), self.video.as_ref().and_then(|v| v.player.as_ref())) {
-                    player.send(hyprforge_video::Command::Seek { seconds, relative: false });
+                if let Some(seek) = self.seeking {
+                    if let Some(player) = self.video.as_ref().and_then(|v| v.player.as_ref()) {
+                        player.send(hyprforge_video::Command::Seek { seconds: seek.target, relative: false, exact: true });
+                    }
+                    self.seeking = Some(Seeking { dragging: false, since: Instant::now(), ..seek });
                 }
                 Task::none()
             }
@@ -780,7 +847,16 @@ impl App {
                     Ok(()) => self.floated = true,
                     Err(e) => tracing::warn!(error = %e, "the viewer could not float itself"),
                 }
-                Task::none()
+                // Floating now, or never going to be: either way the
+                // window takes back its ordinary limits and can be resized.
+                match (self.planned_float.take(), self.window) {
+                    (Some(_), Some(id)) => Task::batch([
+                        window::set_resizable(id, true),
+                        window::set_max_size(id, None),
+                        window::set_min_size(id, Some(Size::new(640.0, 420.0))),
+                    ]),
+                    _ => Task::none(),
+                }
             }
             Message::ScaleFactor(scale) => {
                 if (scale - self.scale_factor).abs() > f32::EPSILON {
@@ -1841,15 +1917,16 @@ impl App {
                 Action::SeekForward | Action::SeekBack => {
                     if let Some(player) = player {
                         let seconds = if action == Action::SeekForward { 5.0 } else { -5.0 };
-                        player.send(hyprforge_video::Command::Seek { seconds, relative: true });
+                        player.send(hyprforge_video::Command::Seek { seconds, relative: true, exact: true });
                     }
                     return Task::none();
                 }
                 Action::ToggleMute => {
-                    if let Some(video) = &self.video {
-                        if let Some(player) = &video.player {
-                            player.send(hyprforge_video::Command::Mute(!video.playback.muted));
-                        }
+                    // mpv's own toggle, not "the opposite of what it last
+                    // said": a press before its report of the one before
+                    // used to send the same state twice, and do nothing.
+                    if let Some(player) = player {
+                        player.send(hyprforge_video::Command::ToggleMute);
                     }
                     return Task::none();
                 }
