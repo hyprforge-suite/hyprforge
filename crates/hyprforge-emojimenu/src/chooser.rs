@@ -18,9 +18,9 @@
 //! own `Wired`, because the ordering hazard it guards against
 //! (`hyprforge-popup::finish_after_teardown`) is exactly the same one.
 //!
-//! `hyprforge-clipmenu` is a binary-only crate (no library target), so
-//! its `chooser`/`target` modules are private to that crate and cannot
-//! be imported here — this is a deliberate, small, hand-copied adaptation
+//! `hyprforge-clipmenu` is a binary target of `hyprforge-clipboard`, not
+//! part of its library, so its `chooser`/`target` modules are private to
+//! that binary and cannot be imported here — this is a deliberate, small, hand-copied adaptation
 //! of that crate's own logic, not a dependency on it.
 
 use hyprforge_clipboard::ipc::ClientError;

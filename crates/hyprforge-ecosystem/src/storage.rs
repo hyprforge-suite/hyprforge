@@ -1,6 +1,6 @@
 //! The canonical TOML behind each ecosystem daemon's settings.
 //!
-//! One generic pair rather than three near-identical copies: every module
+//! One generic pair rather than four near-identical copies: every module
 //! in this crate stores a single serialisable struct, and the rules that
 //! matter — a missing file is first-run, an unreadable one is an error,
 //! writes are atomic — are the same for all of them.

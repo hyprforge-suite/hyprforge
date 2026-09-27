@@ -90,12 +90,11 @@ package_hyprforge-files() {
   pkgdesc="File manager for Hyprland"
   depends=(wayland libxkbcommon)
   optdepends=(
-    # Not a hard dependency, deliberately. The file manager installs and
-    # runs without it; what it cannot do is mount an SMB share, and it
-    # says so in the window naming this package rather than failing in a
-    # way the user has to go and diagnose.
-    'gvfs-smb: connecting to Windows/SMB network shares'
+    # Each of these degrades to a sentence in the preview pane naming the
+    # program to install, never a file manager that fails to start.
     'xdg-utils: opening a file with the application you have chosen for it'
+    'poppler: previews and thumbnails of PDFs (pdftoppm)'
+    'ffmpeg: previews and thumbnails of videos'
   )
   cd "$startdir/../.."
   _bin hyprforge-files

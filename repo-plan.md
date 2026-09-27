@@ -12,14 +12,15 @@ Two things have to be true at once, and they are not the same thing:
   `web-colors` bug was a single `default-features = false` rather than
   the same edit in five apps.
 - **Install one part** — already solved, and not by repository layout.
-  `packaging/arch/PKGBUILD` builds one source tree into seven packages;
+  `packaging/arch/PKGBUILD` builds one source tree into ten packages
+  (nine components and the `hyprforge` metapackage);
   `pacman -S hyprforge-clipboard` installs two binaries and no other
   Hyprforge package. Packaging granularity and repository granularity are
   different questions.
 
 What repositories add on top of that is **identity**: a project someone
-can star, file an issue against, and clone without the other twenty-two
-crates. That is a real thing to want, and it is what this plan is for.
+can star, file an issue against, and clone without the other
+thirty-nine crates. That is a real thing to want, and it is what this plan is for.
 
 ## The mechanism
 
@@ -58,8 +59,9 @@ made under uncertainty, and the cheap-to-undo version is the right one.
 
 ## The blocker, and why it is nearly gone
 
-A standalone `hyprforge-clipboard` repository still needs
-`hyprforge-paths` and `hyprforge-secret`. Those have to come from
+A standalone `hyprforge-clipboard` repository needed
+`hyprforge-paths` and `hyprforge-secret` when this was written (six
+Hyprforge crates now, since its popup moved in beside the daemon). Those have to come from
 somewhere, or the repository is not standalone at all — it is a directory
 that only builds inside the monorepo.
 
@@ -75,11 +77,14 @@ is now about *convenience* rather than *possibility*.
 The one-manifest problem is solved and worth knowing: the clipboard's
 `Cargo.toml` names the git URL, and the root `Cargo.toml` has a
 `[patch."https://github.com/adamrpostjr/hyprforge"]` section redirecting those
-two dependencies back to `crates/`. One file, both contexts, no
+dependencies back to `crates/` (every git-named sibling now, which
+`check.sh`'s "Siblings build from this checkout" step enforces). One file, both contexts, no
 divergence for `git subtree push` to conflict on forever, and no network
 access when building here.
 
-The good news is still how small the foundation is:
+The good news is still how small the foundation is (measured
+2026-09-12; `paths`, `look` and `secret` have grown since, to roughly
+2,000 lines between the four):
 
 | crate | public items | lines |
 |---|---|---|
@@ -99,13 +104,15 @@ depended on 4,450 lines of Hyprland config machinery to get a
 Computed from the dependency graph, no cycles:
 
 ```
-layer 0   lua-import, paths, power, process, secret
-layer 1   bluetooth, clipboard, look, network
-layer 2   core, ui
-layer 3   appearance, authui, displayd, ecosystem, input,
+layer 0   emoji, image, keys, listing, lua-import, mesh, paths,
+          power, process, secret, thumbnails
+layer 1   archive, bluetooth, fileops, icons, look, mime, network,
+          video
+layer 2   core, popup, ui
+layer 3   appearance, authui, displayd, ecosystem, files-core, input,
           session, shortcuts, system, windowrules
-layer 4   clipmenu, greet, lock, tray
-layer 5   settings
+layer 4   clipboard, greet, lock, tray
+layer 5   emojimenu, files, photos, settings
 ```
 
 A crate can only be published after everything it depends on. The same
@@ -119,11 +126,11 @@ needs is reachable from outside.
 Nothing here changes behaviour; it is metadata and discipline.
 
 - Add `description`, `repository`, `documentation`, `keywords`,
-  `categories` to each foundation crate. **All five are currently
-  missing from every crate in the workspace** — crates.io rejects a
-  publish without at least a description and a license.
+  `categories` to each foundation crate. **All five were missing from
+  every crate in the workspace** when this was written — crates.io
+  rejects a publish without at least a description and a license.
 - Give the publishable crates their own `version` rather than
-  `version.workspace = true`. All 23 crates are currently locked to
+  `version.workspace = true`. All 23 crates were then locked to
   0.1.0 in step; a published crate needs to move at its own pace. This
   is one line each and buys independent cadence the day it is needed.
 - Decide the public API is what you want to support. `Secret<T>`'s
@@ -170,7 +177,10 @@ entire point of splitting, and a repository with no front page has none.
 which needs `hyprforge-appearance` for `look::resolve()`. So the popup
 stays here for now and the split repository is the clipboard engine plus
 its daemon. Worth being honest that this is a smaller thing than
-"the clipboard has its own repository" sounds.
+"the clipboard has its own repository" sounds. (Since reversed: it
+published a daemon with no way to see its history — see "The shape a
+package has to have" below — and `hyprforge-clipmenu` is now a second
+`[[bin]]` in the clipboard crate.)
 
 Then decide whether the master repo keeps it as a subtree or a
 crates.io dependency. The subtree keeps atomic commits; the dependency
@@ -239,8 +249,9 @@ quietly builds two versions of the same dependency. That is "one place to
 fix a shared thing" failing without a symptom, so `check.sh` now compares
 every standalone-ready manifest against the workspace table in tier 1.
 
-*Reversibility, which the plan asserts and nobody had checked* — nothing
-has left this machine; there is still no remote. Undoing it is deleting
+*Reversibility, which the plan asserts and nobody had checked* — at the
+time, nothing had left this machine; there was still no remote. (All
+eight components have been pushed since.) Undoing it is deleting
 the branches and reverting the rejoin commits. Nothing is irreversible
 until something is pushed and somebody clones it.
 
@@ -354,14 +365,14 @@ step discovers its list) it computes, without pushing anything, the tree
 published repository's `main`. `./sync.sh --push` re-splits and pushes
 only the components that have actually drifted, after refusing on a dirty
 tree or a failing `./check.sh --quick` — publishing code that hasn't
-passed tier 1 to five repositories is worse than not publishing. It never
+passed tier 1 to eight repositories is worse than not publishing. It never
 force-pushes: a component whose published history is not an ancestor of
 the new split has diverged (an outside contributor, a direct push) and is
 left for a human with `git subtree pull`, not resolved automatically.
 
 It checks the monorepo first, and pushes that before any component. Every
 standalone manifest names this repository's URL for every sibling it
-needs — `hyprforge-settings` alone pulls fifteen crates that way — so a
+needs — `hyprforge-settings` alone pulls seventeen crates that way — so a
 component published while this repository is behind gets built by its own
 CI against siblings from whenever it was last pushed, and the failure
 names the component rather than the stale dependency it resolved. That

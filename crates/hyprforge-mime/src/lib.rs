@@ -1,8 +1,8 @@
 //! What type a file is, which applications can open it, and which one
 //! does by default.
 //!
-//! Three questions, three data files, all of them freedesktop's and all
-//! of them plain text:
+//! Nearly every question has a data file of its own, all of them
+//! freedesktop's and all of them plain text:
 //!
 //! | Question | File | Module |
 //! |---|---|---|
@@ -39,11 +39,12 @@
 //!
 //! # Layering
 //!
-//! A leaf, like `hyprforge-look`: no iced, nothing Hyprland-shaped, one
-//! dependency (`hyprforge-paths`, for the config directory and the
-//! atomic write). The file manager needs it today; the Settings app
-//! wants it for a Default Applications page, and any future viewer needs
-//! the same three answers.
+//! A leaf, like `hyprforge-look`: no iced, nothing Hyprland-shaped, two
+//! dependencies (`hyprforge-paths`, for the config directory and the
+//! atomic write; `hyprforge-process`, for the bounded wait
+//! `hyprforge-mimeopen` puts on `gio launch`). The file manager
+//! and the Settings app's Default apps page read it today, and any
+//! future viewer needs the same answers.
 
 pub mod apps;
 pub mod cli;

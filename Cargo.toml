@@ -248,7 +248,7 @@ hyprforge-power = { path = "crates/hyprforge-power" }
 hyprforge-ecosystem = { path = "crates/hyprforge-ecosystem" }
 # The rest of these exist for hyprforge-settings alone: it is the hub
 # of the suite (repo-plan.md's layer 5, split last), and names all
-# fifteen of its Hyprforge dependencies as git dependencies in its own
+# seventeen of its Hyprforge dependencies as git dependencies in its own
 # Cargo.toml so that manifest works unchanged both here and as the root
 # of its own standalone repository.
 hyprforge-core = { path = "crates/hyprforge-core" }

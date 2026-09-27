@@ -1,9 +1,9 @@
 //! Converting the shared colour type into iced's.
 //!
 //! A free function rather than a `From` impl: `hyprforge-look` must not
-//! know that iced exists — the lock screen and the greeter paint into a
-//! raw Wayland buffer and would otherwise carry a GUI toolkit for
-//! nothing — and the orphan rule puts the conversion on this side
+//! know that iced exists — `hyprforge-core` and `hyprforge-appearance`
+//! use it with no window at all and would otherwise carry a GUI toolkit
+//! for nothing — and the orphan rule puts the conversion on this side
 //! anyway.
 
 /// `hyprforge-look`'s colour as iced wants it.

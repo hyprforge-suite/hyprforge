@@ -1,6 +1,6 @@
 //! Writing a generated config and getting the daemon to notice.
 //!
-//! The write half is identical for all three: render, make sure the
+//! The write half is identical for all four: render, make sure the
 //! user's own config sources it, write atomically. The *notice* half is
 //! not, and pretending otherwise would be the "reports a save that did
 //! nothing" failure this project keeps meeting:
@@ -10,6 +10,7 @@
 //! | hyprpaper | `hyprctl hyprpaper wallpaper` — immediate |
 //! | hyprsunset | `hyprctl hyprsunset temperature` — immediate |
 //! | hypridle | no IPC at all; must be restarted |
+//! | xdg-desktop-portal-hyprland | read at startup; restarted only on request |
 //!
 //! So [`Applied`] reports what actually happened rather than returning
 //! `()`, and the caller shows the difference.

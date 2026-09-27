@@ -7,7 +7,7 @@
 //! talking to a compositor. Every test below this line runs on a
 //! machine with no display and no pictures on it.
 //!
-//! # What is here, and what is still to come
+//! # What is here
 //!
 //! Every module below is the *decision* half of the viewer, and none of
 //! it draws:
@@ -27,10 +27,13 @@
 //! | What comes next in a slideshow? | [`slideshow`] |
 //! | What did argv ask for? | [`args`] |
 //! | Which program does "Open With…" use? | [`launch`] |
+//! | How big is a picture opened on its own, floating? | [`float`] |
+//! | What is a video's or a model's tile thumbnail? | [`thumbs`] |
 //!
 //! The window itself — the `iced` application that renders all of this —
 //! is `src/main.rs` (state and the slow work) and `src/view.rs` (the
-//! widgets), and is deliberately thin: it turns these decisions into
+//! widgets), with `src/film.rs` drawing a playing video's frames and
+//! `src/model/` a 3D model on the GPU, and is deliberately thin: it turns these decisions into
 //! widgets and runs the slow work (decoding, reading EXIF, listing
 //! folders, trashing, the clipboard, the wallpaper) off the thread that
 //! paints.

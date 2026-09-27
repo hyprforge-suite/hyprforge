@@ -1,5 +1,5 @@
 //! The Hypr ecosystem daemons' settings: wallpaper, colour temperature,
-//! and idle behaviour.
+//! idle behaviour, and screen sharing.
 //!
 //! These are not Hyprland itself. Each is a separate daemon with its own
 //! hyprlang config file, so none of them goes through `hl.config` or
@@ -14,6 +14,8 @@
 //! - **hyprsunset** takes `hyprctl hyprsunset temperature` live.
 //! - **hypridle** has no IPC at all (`hyprctl hypridle` → "unknown
 //!   request") and has to be restarted for a change to take effect.
+//! - **xdg-desktop-portal-hyprland** reads `xdph.conf` only at startup,
+//!   and is restarted only on request — see [`portal`].
 
 pub mod apply;
 pub mod import;

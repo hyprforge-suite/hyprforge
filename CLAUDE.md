@@ -184,8 +184,8 @@ resolves fine.** Cargo clones the whole repository, so the workspace root
 comes along with it. Only the crate being *extracted* needs a self-contained
 manifest — this was assumed to be otherwise, and the assumption made the
 remaining splits look far more expensive than they turned out to be.
-`hyprforge-settings` pulls in fifteen Hyprforge crates and none of them
-needed a single change.
+`hyprforge-settings` pulled in fifteen Hyprforge crates when it was split,
+and none of them needed a single change.
 
 **A standalone crate's hand-copied dependency versions drift with no
 symptom.** A crate that is its own repository root cannot inherit
@@ -313,7 +313,7 @@ inheritance to reach hicolor while its sibling is drawn directly.
 
 **Publishing the components without publishing the monorepo tests them
 against code nobody has.** Every standalone manifest names the monorepo's
-URL for every sibling it needs — `hyprforge-settings` alone pulls fifteen
+URL for every sibling it needs — `hyprforge-settings` alone pulls seventeen
 crates that way — so a component pushed while the monorepo is behind gets
 built by its own CI against whatever was published days ago. The failure
 names the component, not the stale dependency: `cannot find function
@@ -478,7 +478,7 @@ daemon whose right-click spawns a program the repository does not
 contain, and a clipboard daemon with no way to see the history. What
 made it invisible is that it degrades well: the daemon logs a warning
 and carries on, exactly as the rule about an absent sibling says it
-should. What made it *confusing* is that `hyprforge-settings` has five
+should. What made it *confusing* is that `hyprforge-settings` has seventeen
 crates outside its repository and is fine — because those are libraries
 its manifest pulls by URL, and Cargo fetches them. Nothing fetches a
 second executable into someone's `$PATH`. A package that installs two
@@ -584,8 +584,10 @@ instead of running a second copy to find out.
 ## The shape a D-Bus-backed module takes
 
 Four of these now exist — Network over NetworkManager, Bluetooth over
-BlueZ, and the tray's item and menu over StatusNotifierItem and
-dbusmenu — and they were each better for being built in this order. It is
+BlueZ, power over systemd-logind, UPower and power-profiles-daemon, and
+the tray's item over StatusNotifierItem (its menu was served over
+dbusmenu until the tray began drawing its own) — and they were each
+better for being built in this order. It is
 written down so a fifth does not re-derive it.
 
 **The backend trait and its mock come before the D-Bus client.** Not
@@ -615,7 +617,7 @@ second, and that is the smallest observable form of "a host accepted it".
 **Ask what only the real service can answer, and assert that.** Not that
 a call returned. `Strength` is a percentage; `NM_DEVICE_TYPE_WIFI` is
 still 2; the watcher *lists* the item rather than merely accepting the
-registration; `GetLayout`'s reply deserializes as `(u(ia{sv}av))`.
+registration; the item declares no `Menu` property at all.
 Every one of those is a claim this code makes about somebody else's, and
 the compiler cannot see any of them.
 
@@ -722,8 +724,17 @@ hyprforge-paths     no dependencies at all
 hyprforge-process   a bounded subprocess wait (Command::output that gives up);
                     no dependencies at all — a client of NetworkManager, BlueZ
                     or systemd-logind needs this and nothing Hyprland-shaped
-hyprforge-look      Color + the runtime Theme; no iced, because the lock screen
-                    and greeter paint into a raw Wayland buffer
+hyprforge-secret    Secret<T>, whose Debug renders a length and nothing else;
+                    no dependencies at all
+hyprforge-emoji     CLDR-ordered emoji data and a pure search; no dependencies
+                    at all
+hyprforge-look      Color + the runtime Theme; no iced, because hyprforge-core
+                    and hyprforge-appearance use it without ever opening a
+                    window
+hyprforge-popup     the layer-shell popup shell the clipboard, emoji and tray
+                    menus share, drawn through iced_tiny_skia; of this suite
+                    it depends only on hyprforge-look and hyprforge-process —
+                    no async runtime, no D-Bus
 hyprforge-mime      the freedesktop shared MIME database: what a file is,
                     what opens it, what the default is, which icon name it
                     has. A leaf; depends only on hyprforge-paths and
@@ -735,9 +746,10 @@ hyprforge-thumbnails the freedesktop thumbnail cache, shared with every other
                     program: pixels in, pixels out. A leaf with no Hyprforge
                     dependency
 hyprforge-archive   zip, tar and 7z: what is inside one as a directory tree,
-                    extracting from it, and rewriting it. A leaf with no
-                    Hyprforge dependency at all — paths arrive from the
-                    caller, it never goes looking for one
+                    extracting from it, and rewriting it. A leaf; its one
+                    Hyprforge dependency is hyprforge-secret, for archive
+                    passwords — paths arrive from the caller, it never goes
+                    looking for one
 hyprforge-keys      the keyboard grammar every app binds keys through; no iced
 hyprforge-listing   a directory listing and its order, under both Files and
                     the image viewer so they agree which picture is next

@@ -6,9 +6,14 @@
 //! different text colours — two products from one project, which is the
 //! exact failure this suite exists to avoid.
 //!
-//! Deliberately free of any GUI toolkit. The lock screen and the greeter
-//! paint into a raw Wayland buffer, so anything they cannot use is not
-//! actually shared. The iced side converts at its own boundary.
+//! Deliberately free of any GUI toolkit. Some of its users have no window
+//! at all — `hyprforge-core` reads colours out of a Hyprland config and
+//! `hyprforge-appearance` resolves and publishes the theme — and a toolkit
+//! here would be carried by each of them for nothing. The rule began with
+//! the lock screen painting into a raw Wayland buffer with no toolkit;
+//! the lock screen and greeter both draw through iced's software renderer
+//! now, and like every other iced host they convert at their own boundary
+//! (`hyprforge_ui::color`).
 
 pub mod color;
 pub mod theme;

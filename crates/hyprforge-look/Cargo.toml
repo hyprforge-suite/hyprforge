@@ -9,10 +9,11 @@ documentation = "https://docs.rs/hyprforge-look"
 keywords = ["theme", "color", "hyprland", "wayland", "config"]
 categories = ["graphics", "config"]
 
-# No iced. The lock screen and the greeter draw into a raw Wayland
-# buffer and must be able to use everything here; a GUI toolkit
-# dependency would put the shared look out of their reach, which is the
-# precise way the look forked in the first place.
+# No iced. hyprforge-core and hyprforge-appearance read and publish the
+# theme without ever opening a window, and a GUI toolkit here would ride
+# along into both. Every iced host — the lock screen and greeter
+# included, which draw through iced's software renderer — converts at
+# its own boundary instead.
 [dependencies]
 hyprforge-paths.workspace = true
 serde.workspace = true

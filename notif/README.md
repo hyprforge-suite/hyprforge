@@ -64,6 +64,13 @@ translators in and pure projections out.
 
 ## Installing
 
+This copy of notif lives inside the
+[Hyprforge](https://github.com/adamrpostjr/hyprforge) repository and takes
+two of its crates (`hyprforge-look`, `hyprforge-paths`) by path, so it builds
+from a Hyprforge checkout — see "Building from source". The standalone
+`notif` repository and the `notif-git` package below build it from there, and
+that repository predates the merge: it has no shared theme.
+
 ### Arch Linux (AUR)
 
 ```sh
@@ -83,7 +90,8 @@ This installs `notifd`, `notifctl`, and a systemd user unit
 
 ### Building from source
 
-Requires a recent stable Rust toolchain.
+Requires a recent stable Rust toolchain. From the `notif/` directory of a
+Hyprforge checkout:
 
 ```sh
 cargo build --release --workspace

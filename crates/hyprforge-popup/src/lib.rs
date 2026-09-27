@@ -5,11 +5,10 @@
 //!
 //! Extracted from `hyprforge-clipmenu`, which built and tested every
 //! piece of this against a real clipboard-history popup first — see
-//! `crates/hyprforge-clipmenu/src/surface.rs`'s own doc for where this
-//! diverged from `hyprforge-lock`'s layer-shell code, and `popup`'s
-//! module doc for the design of [`popup::PopupApp`], the seam a
-//! grid-based picker is meant to implement against instead of copying
-//! ~1800 lines the way a second popup otherwise would have to.
+//! `popup`'s module doc for where this diverged from `hyprforge-lock`'s
+//! layer-shell code, and for the design of [`popup::PopupApp`], the seam
+//! the emoji picker and the tray menu implement against instead of
+//! copying ~1800 lines the way a second popup otherwise would have to.
 //!
 //! # What is, and is not, in here
 //!
@@ -51,7 +50,7 @@
 //! cursor, and which monitor is it over" is knowledge every layer-shell
 //! popup this crate serves needs to answer identically — it is not a
 //! clipboard concept, it is a popup-placement concept. Keeping it here
-//! (see [`placement`]) means a future picker asks this crate where to
+//! (see [`placement`]) means every popup asks this crate where to
 //! open, rather than re-deriving the same `hyprctl monitors -j` /
 //! `cursorpos -j` parsing a second time.
 

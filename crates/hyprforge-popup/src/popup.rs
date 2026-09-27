@@ -15,7 +15,7 @@
 //! # The seam: [`PopupApp`]
 //!
 //! Everything that is specific to *what* a popup shows — a clipboard
-//! history's rows, or a future grid of emoji — is behind [`PopupApp`].
+//! history's rows, the emoji picker's grid, a tray menu — is behind [`PopupApp`].
 //! [`Popup`] itself never names a `Model`, a `Layout`, or any other
 //! consumer type; it only calls the trait.
 //!
@@ -149,8 +149,8 @@ pub const FOCUS_RELEASE_TIMEOUT: std::time::Duration = std::time::Duration::from
 /// app at all (an output unplugged, the shell deciding to close it, the
 /// Wayland connection dying); [`Outcome::App`] is however the consumer's
 /// own [`PopupApp`] decided to end it — "chosen" or "cancelled" for
-/// `hyprforge-clipmenu`, whatever a future grid picker calls its own
-/// outcomes.
+/// `hyprforge-clipmenu`, whatever the emoji picker or the tray menu
+/// calls its own outcomes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome<T> {
     /// The app itself ended the popup — see [`PopupApp::key`] and

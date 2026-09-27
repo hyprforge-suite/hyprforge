@@ -12,11 +12,12 @@
 //! [`conversation::Backend`]. Neither knows the other exists, and there
 //! is no "matching them up" to do, because there is only one of them.
 //!
-//! The other half of feeling like one system is the [`theme`] — and that
+//! The other half of feeling like one system is the [`Theme`] — and that
 //! has a hard constraint behind it. A greeter runs as its own user, and a
 //! home directory is `drwx------`, so it cannot read your wallpaper or
 //! your settings *at all*. Continuity therefore isn't a styling exercise;
-//! it's an export. See [`theme::Theme::export`].
+//! it's an export. See [`Theme::export`], and `hyprforge_look::theme`,
+//! where it lives.
 
 pub mod conversation;
 pub mod scene;

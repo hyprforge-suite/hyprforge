@@ -20,9 +20,9 @@ checking after any dependency change that
 tests separately, because `cargo test --workspace` up there cannot reach
 them and would not say so.
 
-`notif` — a notification daemon + (future) notification center for Wayland, built from scratch in Rust. Optimized for Hyprland, portable to any wlr-layer-shell compositor via strict adherence to the org.freedesktop.Notifications D-Bus spec. Zero-bloat: no UI frameworks, smol-family async only (no tokio, no calloop — their absence from Cargo.lock is a hard invariant).
+`notif` — a notification daemon + notification center for Wayland, built from scratch in Rust. Optimized for Hyprland, portable to any wlr-layer-shell compositor via strict adherence to the org.freedesktop.Notifications D-Bus spec. Zero-bloat: no UI frameworks, smol-family async only (no tokio, no calloop — their absence from Cargo.lock is a hard invariant).
 
-**PLAN.md is the architecture contract.** Module responsibilities, message types, crate choices, review criteria, and spec gotchas live there — read it before structural changes. Phase 2 (notif-ipc socket, notifctl, history/control-center panel) is designed but unbuilt; the seams for it already exist (`IpcCmd`, core's history ring).
+**PLAN.md is the architecture contract.** Module responsibilities, message types, crate choices, review criteria, and spec gotchas live there — read it before structural changes. Phase 2 (the notif-ipc socket, notifctl, DND and the notification-center panel) is built too; its section of PLAN.md is the contract for it.
 
 ## Commands
 
@@ -43,6 +43,7 @@ Manual smoke scripts (all run on an ISOLATED bus via `dbus-run-session` — neve
 bash crates/notif-dbus/tests/manual/dbus_smoke.sh        # D-Bus interface conformance
 bash crates/notif-core/tests/manual/core_smoke.sh        # headless dbus+core, expiry via notify-send
 bash bin/notifd/tests/manual/shutdown_smoke.sh           # SIGINT/SIGTERM exit <2s
+bash bin/notifctl/tests/manual/ctl_smoke.sh              # notifctl round-trips over the IPC socket
 bash bin/notifd/tests/manual/e2e_smoke.sh                # full daemon rendering on the live compositor
 ```
 

@@ -3,7 +3,7 @@ name = "hyprforge-mime"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-description = "Reads the freedesktop shared MIME database: what type a file is by name, which applications handle a type, and which one is the default."
+description = "Reads the freedesktop shared MIME database: what type a file is by name or by its contents, which applications handle a type, which one is the default, and which icon a type has."
 repository = "https://github.com/adamrpostjr/hyprforge"
 
 # Only `hyprforge-paths`, for the XDG directories and the atomic write

@@ -29,9 +29,9 @@
 //! function that is already there.
 //!
 //! Parameterised by lock *name* rather than one hardcoded file, since
-//! this is shared across every popup this crate serves — `hyprforge-clipmenu`
-//! and a future grid-based picker each need their own lock, not one
-//! shared between the two (opening the emoji picker must not be refused
+//! this is shared across every popup this crate serves — `hyprforge-clipmenu`,
+//! `hyprforge-emojimenu` and `hyprforge-traymenu` each take their own lock,
+//! not one shared between them (opening the emoji picker must not be refused
 //! because the clipboard popup happens to be open, or vice versa).
 
 use std::fs::{File, OpenOptions};

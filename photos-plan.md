@@ -49,10 +49,38 @@ any image of 2MB or more on a worker thread and draws nothing until it
 lands, so a frame replaced every 33ms was never drawn. `film.rs` writes
 each frame into one texture instead. Tiles now show a video's first
 real frame and a model's drawing, through the shared cache at the
-`large` size, which `hyprforge-thumbnails` gained for this.
+`large` size, which `hyprforge-thumbnails` gained for this. A second
+pass fixed what playing turned up: the player thread took one message
+per frame drawn while mpv signalled faster than that, so closing hung
+for seconds, scrubbing lagged and mute was unreliable; each turn now
+drains the channel and collapses a run of seeks into one
+(`hyprforge-video`'s `player::batch`). Video, like 3D, needs the GPU:
+under iced's software renderer the pane says so.
+
+**2026-09-27: where the plan below turned out different.** Read the
+rest of this file as the plan it was; these are the places the code
+went another way.
+
+- The next/previous order does not come from
+  `hyprforge_files_core::sort`: the listing and its order moved into
+  `hyprforge-listing`, a leaf both Files and this crate depend on, so
+  photos never took the dependency on `files-core` that "What the viewer
+  is" argues for (`src/order.rs`).
+- There are more than two crates. Besides `hyprforge-image` the viewer
+  sits on `hyprforge-keys`, `hyprforge-listing`, `hyprforge-mesh`,
+  `hyprforge-video` and `hyprforge-thumbnails`; `hyprforge-image` itself
+  also depends on `exif`, for the inspector's camera facts.
+- The formats went further than open question 1 recommended: the
+  workspace root enables PNG, JPEG, WebP, GIF, BMP, TIFF and ICO in one
+  table. AVIF stays off; HEIC `image` cannot do at all.
+- Zooming past the decoded size still upsamples. What exists is a
+  sharper re-decode when the *window* grows (`sharpen_if_needed`), not
+  the crop-at-native-resolution the budget section plans.
+- No golden-image test renders the viewer headlessly; the centre-pixel
+  comparison was done by hand (see the 3D entry above).
 
 `hyprforge-photos`, the "Photo Viewer" row the inventory in
-`hyprforge-vision.md` has carried as *not started*. This is the plan for
+`hyprforge-vision.md` carried as *not started* when this was written. This is the plan for
 it, written the way `repo-plan.md` is: the decisions, what each one costs,
 and the things that were checked rather than assumed.
 
@@ -239,12 +267,17 @@ tolerant of an absent sibling. Rotation that writes back to the file is a
 separate, later decision: it is a destructive edit of someone's original
 and needs to say so.
 
-**Phase 4 — pay the shared-component debt.** Wire
+**Phase 4 — pay the shared-component debt.** *Built, except the
+spacebar Quick Look overlay: the preview pane and the grid thumbnails
+decode through `hyprforge-image`.* Wire
 `hyprforge-files-core`'s `preview_pane` and a spacebar Quick Look onto
 `hyprforge-image`, which closes vision pillar 8 and retires a `bool` that
 currently promises something the file manager does not do.
 
 ## Lifting the keymap
+
+*Done: the grammar is `hyprforge-keys`, generic over the action type, and
+both `hyprforge-files-core` and this crate depend on it.*
 
 `hyprforge-files-core::keymap` is already the right code — `Combo::parse`,
 `Modifiers`, `KeyPress`, the "a binding wins over typing, and Ctrl-held
@@ -287,7 +320,10 @@ test that returns early and prints `ok` is a test that lied.
 
 ## Open questions
 
-Three decisions that are yours, and that change what gets built:
+Three decisions that are yours, and that change what gets built. All
+three were answered — see the status at the top: PNG, JPEG, WebP and GIF
+(then BMP, TIFF and ICO as well), Set as Wallpaper in scope, and the
+keymap lifted into `hyprforge-keys`.
 
 1. **Which formats in phase 1.** PNG + JPEG costs nothing (already on).
    Adding webp/gif/tiff/bmp/avif is a workspace-root change affecting

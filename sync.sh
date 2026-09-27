@@ -174,7 +174,7 @@ fi
 # The monorepo comes first, and it is not optional.
 #
 # Every standalone manifest names https://github.com/<owner>/hyprforge for
-# every sibling crate it needs — hyprforge-settings alone pulls fifteen of
+# every sibling crate it needs — hyprforge-settings alone pulls seventeen of
 # them that way. So a component pushed while this repository is behind
 # gets built by its own CI against whatever siblings were published days
 # ago, and the failure names the *component* (`cannot find function

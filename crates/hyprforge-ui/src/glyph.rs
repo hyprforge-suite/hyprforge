@@ -1,5 +1,6 @@
 //! The marks every Hyprforge app draws — navigation, view modes, the
-//! sidebar toggle and the settings pages — drawn rather than typed.
+//! sidebar toggle, the settings pages, signal strength and a battery —
+//! drawn rather than typed.
 //!
 //! These began in Files and moved here when Settings adopted the same
 //! design, because the reasoning below is about fonts, not about files.

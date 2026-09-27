@@ -2,12 +2,12 @@
 //! is read, sorted and filtered, and what gets remembered between
 //! launches.
 //!
-//! Phase 2 adds the browser view itself: [`browser::Browser`], the
+//! And the browser view itself: [`browser::Browser`], the
 //! `update`/`view` state both the app window and the portal's open/save
 //! dialog render — see that module's doc for the `Mode` seam that makes
-//! sharing it possible. Everything below it (`sort`, `filter`, `prefs`,
-//! `backend`) stays exactly what phase 1 built: pure model code, testable
-//! without a window.
+//! sharing it possible. Everything below it stays pure model code,
+//! testable without a window: `prefs` here, and `sort`, `filter` and
+//! `backend`, which now live in `hyprforge-listing` (see below).
 
 // `backend`, `filter`, `sort`, `types` and `users` moved down into
 // `hyprforge-listing` when the image viewer needed them: paging through a

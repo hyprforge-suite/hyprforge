@@ -7,12 +7,10 @@ license.workspace = true
 # What a picture is before anything draws it: how big, which way up, and
 # what it is safe to decode.
 #
-# A leaf, and deliberately not part of the viewer. The file manager's
-# `Prefs` has shipped a `preview_pane: bool` — defaulted on — with nothing
-# behind it since it was written, and the vision doc names a shared
-# spacebar preview as cross-cutting between the two apps. The second
-# consumer is already half-specified in a struct people's `files.toml`
-# already carries.
+# A leaf, and deliberately not part of the viewer, because the viewer
+# was never going to be its only consumer: the file manager's grid
+# thumbnails and preview pane decode through it too, and the vision doc
+# names a shared spacebar preview as cross-cutting between the two apps.
 #
 # No iced. The viewer hands the renderer decoded pixels, and a crate that
 # needed a GUI toolkit to answer "how big is this file" could not be used

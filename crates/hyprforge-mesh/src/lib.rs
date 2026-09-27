@@ -14,8 +14,8 @@
 //! into pixels lives with the window that draws it (`hyprforge-photos`),
 //! because its wgpu must be the exact one iced was built with. What is
 //! here — parsing, welding, the camera's matrices, which draw modes exist
-//! — is pure enough to test without a GPU, and is what a thumbnailer or a
-//! preview pane would ask too.
+//! — is pure enough to test without a GPU, and is what a thumbnailer
+//! asks too: [`thumbnail`] draws a model's tile on the CPU.
 //!
 //! # Fast on purpose
 //!
@@ -33,6 +33,7 @@
 //! | What does a loaded model hold? | [`mesh`] |
 //! | Where is the eye, and how does a drag turn it? | [`camera`] |
 //! | Which ways of drawing it exist? | [`style`] |
+//! | What does its thumbnail look like, with no GPU? | [`thumbnail`] |
 
 pub mod camera;
 pub mod loader;

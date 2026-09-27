@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
-//! `notif-render` — `Renderer` trait and `StubRenderer` for Wayland buffer rendering.
+//! `notif-render` — the `Renderer` trait, `SkiaRenderer` (the tiny-skia/cosmic-text
+//! implementation `notifd` uses, for toasts and the center panel) and `StubRenderer`
+//! (plain rectangles, for `notif-wl`'s demo and this crate's tests).
 //!
 //! Buffer format: ARGB8888 premultiplied, little-endian memory order (bytes: B, G, R, A).
 //! This matches `wl_shm::Format::Argb8888`.

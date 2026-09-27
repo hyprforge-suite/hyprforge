@@ -2,14 +2,15 @@
 
 A Displays daemon, the Window Rules/Shortcuts/Input/Appearance config
 libraries, a Settings GUI, a clipboard history, an emoji picker, a
-StatusNotifierItem tray, Network/Bluetooth/power clients, and a shared
-lock screen and greeter — all for Hyprland. See `hyprforge-vision.md` for
+StatusNotifierItem tray, Network/Bluetooth/power clients, a file manager,
+a photo, video and 3D model viewer, and a shared lock screen and greeter
+— all for Hyprland. See `hyprforge-vision.md` for
 the whole-suite context this session's work fits into; this README covers
 only what's in this workspace so far.
 
 ## Workspace layout
 
-Four layers, and the order matters: anything lower may be used by an app that
+Three groups, and the order matters: anything lower may be used by an app that
 has never heard of Hyprland.
 
 ```
@@ -18,9 +19,9 @@ Shared by every app in the suite
                             and where your Pictures and Downloads are
                             (user-dirs.dirs). No dependencies at all.
   hyprforge-look/          the Color type with the one rgba() parser, and the
-                            runtime Theme every app draws from. No iced — the
-                            lock screen and greeter paint into a raw Wayland
-                            buffer and must be able to use this.
+                            runtime Theme every app draws from. No iced —
+                            config machinery and the theme publisher use it
+                            without ever opening a window.
   hyprforge-ui/            the iced layer: spacing scale, palette, widgets.
                             Knows nothing about Hyprland.
   hyprforge-process/       a subprocess wait with a timeout, for talking to
@@ -162,9 +163,10 @@ Hyprland-facing
                             directory tree, extracting from it, making
                             one, and rewriting it. Pure Rust, so a
                             machine with no p7zip still opens a .7z.
-                            A leaf with no Hyprforge dependency at all
-                            — it is handed paths and never goes looking
-                            for one, which is what lets the file
+                            A leaf: its one Hyprforge dependency is
+                            hyprforge-secret (for archive passwords),
+                            which has none of its own. It is handed
+                            paths and never goes looking for one, which is what lets the file
                             manager, the open/save dialog or a preview
                             pane all ask the same questions without any
                             of them pulling in a GUI toolkit.
@@ -213,7 +215,8 @@ Apps
   hyprforge-files/         the file manager window: the chrome around the
                             shared browsing view, plus what a dialog
                             deliberately does not have — launching what
-                            you double-click, and file operations.
+                            you double-click, file operations, and
+                            dragging files out into other applications.
   hyprforge-photos/        the photo, video and 3D model viewer, in the
                             file manager's shell: a Places sidebar, and
                             Photo, Grid and Library as modes of one window.
@@ -272,19 +275,19 @@ today; the intent is to make them public once they've had more use.
 
 | Repository | What it is |
 |---|---|
-| [hyprforge-clipboard](https://github.com/adamrpostjr/hyprforge-clipboard) | A Wayland clipboard history library over `wlr-data-control`/`ext-data-control`, plus `hyprforge-clipd`, the daemon that watches the compositor's clipboard and writes its history. |
+| [hyprforge-clipboard](https://github.com/adamrpostjr/hyprforge-clipboard) | A Wayland clipboard history library over `wlr-data-control`/`ext-data-control`, plus `hyprforge-clipd`, the daemon that watches the compositor's clipboard and writes its history, and `hyprforge-clipmenu`, the popup that shows it and pastes what you pick. |
 | [hyprforge-lock](https://github.com/adamrpostjr/hyprforge-lock) | An `ext-session-lock-v1` lock screen for Hyprland: PAM and fingerprint unlock, a status line, media and notification counts, a power menu, and a look shared with the greeter. |
 | [hyprforge-greet](https://github.com/adamrpostjr/hyprforge-greet) | A greetd greeter for Hyprland, sharing its look and authentication conversation with the lock screen. |
 | [hyprforge-tray](https://github.com/adamrpostjr/hyprforge-tray) | A StatusNotifierItem tray library, plus `hyprforge-trayd`, the daemon that puts network (Wi-Fi and Ethernet), Bluetooth, keep-awake, night-light, battery/power-profile and display-layout icons in whatever bar is running, and draws its own right-click menu through `hyprforge-traymenu` rather than `com.canonical.dbusmenu`. |
 | [hyprforge-settings](https://github.com/adamrpostjr/hyprforge-settings) | The Settings app: an iced GUI over Hyprland's config, appearance, displays, network, Bluetooth, shortcuts and more. |
 | [hyprforge-displayd](https://github.com/adamrpostjr/hyprforge-displayd) | A monitor-arrangement daemon: it watches `wlr-output-management`, recognises a set of displays it has seen before and applies the layout saved for it, plus `hyprforge-displayctl` to drive it from a script. |
 | [hyprforge-emojimenu](https://github.com/adamrpostjr/hyprforge-emojimenu) | An emoji picker: a layer-shell popup at the pointer with type-to-filter search over the full Unicode set, frequently used first, skin tones and a remembered default tone, plus kaomoji and symbols. |
-| [hyprforge-files](https://github.com/adamrpostjr/hyprforge-files) | A file manager: tabs, a sidebar, list and grid views, the freedesktop trash, copy and paste with other applications, and zip/tar/7z archives browsed and edited in place. |
+| [hyprforge-files](https://github.com/adamrpostjr/hyprforge-files) | A file manager: tabs, a sidebar, list and grid views with thumbnails, a preview pane, the freedesktop trash, copy, paste and drag with other applications, and zip/tar/7z archives browsed and edited in place. |
 
 Seven of the eight are meant to be installed on their own: clone
 `hyprforge-clipboard` and you get a clipboard daemon and nothing else — no
 Settings app, no tray, no Hyprland config machinery. `hyprforge-settings` is
-the exception and its own README says so: it depends on fifteen other
+the exception and its own README says so: it depends on seventeen other
 Hyprforge crates, which makes it the hub rather than a small standalone thing.
 "Every component runs alone, and is better together" in `CLAUDE.md` is the
 rule this is built around; `repo-plan.md` opens with the owner's own framing
@@ -326,8 +329,9 @@ its repository and `cargo test`.
 
 `Command::output()` waits indefinitely, and every external program here —
 `hyprctl`, `gsettings`, `fc-list`, `lua` — is one that can stop answering: a
-wedged compositor, a hung dconf, a home directory on a stalled mount. All twenty
-call sites go through `hyprforge_core::command::output`, which kills the child
+wedged compositor, a hung dconf, a home directory on a stalled mount. Every
+call site goes through `hyprforge_process::output` (re-exported as
+`hyprforge_core::command::output`), which kills the child
 and reports `io::ErrorKind::TimedOut` after five seconds; the async ones use
 `tokio::time::timeout`.
 
@@ -354,9 +358,8 @@ integration tests, it has two steps worth knowing about by name:
 feature and fails if it's on, because that fact is invisible to every
 Rust test — both renderers report the same `Color` and only the pixels
 differ (see the shared-look rule in `CLAUDE.md`). **Standalone crate
-dependency pins** exists because `hyprforge-clipboard`, `hyprforge-lock`
-and `hyprforge-greet` are prepared to become their own repositories,
-which means each hand-copies every third-party dependency's version and
+dependency pins** exists because the eight components in the table
+above are their own repositories, which means each hand-copies every third-party dependency's version and
 feature set instead of inheriting from `[workspace.dependencies]` — a
 crate that is its own repository root has nothing to inherit from. If
 the root bumps a version or a feature and the copy isn't updated, cargo
@@ -379,15 +382,18 @@ on the thing it actually asks, rather than sharing one `--ignored` run:
 |---|---|---|
 | Live tests against Hyprland | does **Hyprland** agree? | Hyprland running |
 | Parse tests against the ecosystem daemons | do **hyprpaper/hypridle** agree? | hyprpaper/hypridle installed, not running |
+| Live tests against the system's archive tools | do **tar, unzip and 7z** read what this writes, and this what they write? | at least one of them installed |
 | Live tests against NetworkManager | does **NetworkManager** agree? | NetworkManager running |
 | Live tests against BlueZ | does **BlueZ** agree? | bluetooth.service running |
 | Live tests against hyprsunset | does **hyprsunset** agree? | hyprsunset running |
 | Live tests against systemd-logind | does **logind** agree? | something answering on `org.freedesktop.login1` |
 | Live tests against UPower | does **UPower** agree? | upower.service running |
 | Live tests against power-profiles-daemon | does **power-profiles-daemon** agree? | power-profiles-daemon.service running |
+| Live tests against fprintd | does **fprintd** answer the lock screen's questions? | fprintd installed (bus-activatable) |
 | Live tests against the Wayland clipboard | does the **compositor's clipboard** agree? | a Wayland session (`WAYLAND_DISPLAY` set) |
 | Trash entries written by another implementation | can this crate read the **`.trashinfo` files already on disk**? | a home trash directory with something in it |
 | Icon names against the installed theme | do the tray's icon names resolve in the **installed icon theme**? | an icon theme to ask (via `gsettings`) |
+| The installed shared MIME database | does this machine's **shared MIME database** say what the parsers expect? | shared-mime-info installed |
 | Live tests against a tray host | does a real **tray host** accept these icons? | a `StatusNotifierWatcher` running (a bar with a tray) |
 
 Tier 1 catches a mistake in the code. Every step below it catches the far
@@ -431,8 +437,9 @@ leaving the original alive but unreachable until it's restarted.
 has no skipped state — a test that returns early because a daemon isn't
 installed, or NetworkManager has no Wi-Fi device to ask, prints `ok`
 exactly like one that verified something. Every gated step except live
-tests against Hyprland — parse, NetworkManager, BlueZ, hyprsunset,
-logind, UPower, power-profiles-daemon, clipboard, icon names and tray —
+tests against Hyprland — parse, archive tools, NetworkManager, BlueZ,
+hyprsunset, logind, trash, UPower, power-profiles-daemon, fprintd,
+clipboard, icon names, MIME database and tray —
 `eprintln!`s an `HYPRFORGE-SKIP: <reason>` line before returning early from a check it
 couldn't actually run, `check.sh` runs them with `--nocapture` and greps
 for the marker, and each one found is reported separately in yellow even
@@ -446,9 +453,10 @@ cargo build --workspace --release
 
 Binaries land in `target/release/`: `hyprforge-displayd`,
 `hyprforge-displayctl`, `hyprforge-settings`, `hyprforge-files`,
-`hyprforge-clipd`,
+`hyprforge-photos`, `hyprforge-clipd`,
 `hyprforge-clipmenu`, `hyprforge-emojimenu`, `hyprforge-trayd`,
-`hyprforge-traymenu`, `hyprforge-lock`, `hyprforge-greet`.
+`hyprforge-traymenu`, `hyprforge-mimetype`, `hyprforge-mimeopen`,
+`hyprforge-lock`, `hyprforge-greet`.
 
 ## Config file locations
 
@@ -469,7 +477,10 @@ Binaries land in `target/release/`: `hyprforge-displayd`,
 | `$XDG_CONFIG_HOME/hyprforge/lock.toml` | The lock screen's theme, written by Settings, read by `hyprforge-lock` (the greeter reads an exported copy — it runs as its own user and cannot read your home) |
 | `$XDG_CONFIG_HOME/hyprforge/tray.toml` | Which tray icons show, how far below the bar their menu opens, and whether clicking away dismisses it — written by Settings' Tray screen and re-read by `hyprforge-trayd` on every poll (and by `hyprforge-traymenu` on every right click), so a change takes effect without restarting anything |
 | `$XDG_CONFIG_HOME/hyprforge/emojimenu.toml` | The emoji picker's default skin tone, and how often each emoji is picked (its "Frequently used" section) |
-| `$XDG_CONFIG_HOME/hyprforge/files.toml` | The file manager's remembered state — sort order, view mode, whether the preview pane is on, window size |
+| `$XDG_CONFIG_HOME/hyprforge/files.toml` | The file manager's remembered state — sort order, view mode, pinned folders, whether the preview pane is on, window size |
+| `$XDG_CONFIG_HOME/hyprforge/files-config.toml` | The file manager's hand-written configuration — key bindings, the sidebar's places and their icons. Only ever read, so your comments survive |
+| `$XDG_CONFIG_HOME/hyprforge/photos.toml` | The photo viewer's remembered state — window size, which panels are showing, slideshow and 3D model view settings |
+| `$XDG_CONFIG_HOME/hyprforge/photos-config.toml` | The photo viewer's hand-written key bindings. Only ever read. The order pictures page in is not here: it is read from `files.toml`, so the two apps agree |
 | `$XDG_CONFIG_HOME/hyprforge/clipboard/` | The clipboard history: `history.toml` for the index, `images/` for one file per image entry — never image bytes in the index itself |
 
 `$XDG_CONFIG_HOME` falls back to `~/.config` if unset, per the XDG spec.

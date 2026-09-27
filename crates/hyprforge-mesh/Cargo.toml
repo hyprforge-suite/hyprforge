@@ -3,7 +3,7 @@ name = "hyprforge-mesh"
 version.workspace = true
 edition.workspace = true
 license = "MIT"
-description = "Loads STL, 3MF and OBJ models into a welded indexed mesh, with fstl's camera and draw modes — the model half of view3d."
+description = "Loads STL, 3MF and OBJ models into a welded indexed mesh, with fstl's camera and draw modes and a CPU-drawn thumbnail — the model half of view3d."
 
 # The model half of view3d, as a leaf: parsing, welding, the camera's
 # matrices and the draw-mode choices, with no iced and no wgpu. The

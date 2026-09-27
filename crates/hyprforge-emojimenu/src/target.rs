@@ -3,7 +3,8 @@
 //!
 //! Identical to `hyprforge-clipmenu::target` — see this crate's
 //! `chooser` module doc for why it is hand-copied rather than shared:
-//! `hyprforge-clipmenu` has no library target, so this logic (small, and
+//! `hyprforge-clipmenu` is a binary, not part of `hyprforge-clipboard`'s
+//! library, so this logic (small, and
 //! Hyprland-flavoured rather than clipboard-flavoured) cannot be
 //! imported, only re-derived the same way. Kept byte-for-byte in
 //! behaviour rather than reinvented, so a terminal a person has already
