@@ -8,8 +8,10 @@
 //! Built as an iced `Element` so it renders two ways from one
 //! description: the lock screen hands it to `iced_tiny_skia` and paints
 //! the result into the buffer the compositor gave it, while the greeter
-//! is an ordinary window. Software rendering is not a limitation here —
-//! it is the point. This is the surface between a locked machine and its
+//! is an ordinary window — drawn by iced's tiny-skia backend too, never
+//! wgpu, because wgpu blends translucency in linear light and the glass
+//! would come out differently on each (see the greeter's `main`).
+//! Software rendering is not a limitation here — it is the point. This is the surface between a locked machine and its
 //! user, and it has no business depending on a GPU being in a good mood.
 //!
 //! Every colour comes from [`hyprforge_look::Theme`] explicitly rather

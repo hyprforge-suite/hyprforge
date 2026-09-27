@@ -56,6 +56,15 @@ feature stays off; comparing a screenshot's centre pixel against the
 theme value is how it was found, and is the way to settle any
 "these two should look the same" question.
 
+Turning `web-colors` off fixed opaque colours only. `iced_wgpu` still
+*blends* in linear light and `iced_tiny_skia` blends the sRGB values as
+written, so anything translucent still differs: the greeter's glass card
+(the theme background at 55%) came out close to clear over the wallpaper
+where the lock screen's was nearly opaque — (80, 82, 98) against
+(49, 50, 62) at the same point. No colour setting reconciles two blend
+spaces, so the greeter now forces `ICED_BACKEND=tiny-skia` at the top of
+`main` and draws with the lock screen's renderer.
+
 **In a last-one-wins format, flagging the duplicate that *wins* deletes the
 value that applies.** Every `invalid()` here doubles as a filter: `generate`
 skips whatever it reports. So "which row do I mark as the dead one" is not a
