@@ -1,3 +1,10 @@
+> **Archived on 2026-09-27.** notif now lives inside the Hyprforge suite, at
+> [`notif/`](https://github.com/hyprforge-suite/hyprforge/tree/master/notif)
+> in [hyprforge-suite/hyprforge](https://github.com/hyprforge-suite/hyprforge),
+> as a nested workspace sharing the suite's theme. Development, issues and pull
+> requests go there. This repository is kept for its history and for the
+> `notif-git` PKGBUILD, which is no longer maintained.
+
 # notif
 
 A lightweight notification daemon and control center for Wayland, built from
