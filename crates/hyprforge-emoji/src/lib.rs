@@ -16,7 +16,7 @@
 //!
 //! # Where the data comes from
 //!
-//! [`data/emoji-test.txt`](https://github.com/adamrpostjr/hyprforge/blob/master/crates/hyprforge-emoji/data/emoji-test.txt)
+//! [`data/emoji-test.txt`](https://github.com/hyprforge-suite/hyprforge/blob/master/crates/hyprforge-emoji/data/emoji-test.txt)
 //! is a verbatim copy of Unicode's `emoji-test.txt` (UTS #51 test data,
 //! Unicode 17.0), which the file itself describes as being "in CLDR
 //! order... recommended (but not required) for keyboard palettes." That
@@ -24,7 +24,7 @@
 //! not sorted alphabetically or by codepoint, because CLDR order is what
 //! makes a picker's default view look intentional rather than random.
 //!
-//! [`src/generated.rs`](https://github.com/adamrpostjr/hyprforge/blob/master/crates/hyprforge-emoji/src/generated.rs)
+//! [`src/generated.rs`](https://github.com/hyprforge-suite/hyprforge/blob/master/crates/hyprforge-emoji/src/generated.rs)
 //! is generated from that file and committed alongside it — see
 //! `src/bin/generate.rs` for the generator, exactly how it derives the
 //! table below, and how to re-run it. Nothing in this crate reads

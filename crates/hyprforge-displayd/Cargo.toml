@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "A monitor-arrangement daemon for Hyprland: it watches wlr-output-management, recognises a set of displays it has seen before, and applies the layout you saved for it — plus hyprforge-displayctl to drive it from a script."
-repository = "https://github.com/adamrpostjr/hyprforge"
+repository = "https://github.com/hyprforge-suite/hyprforge"
 documentation = "https://docs.rs/hyprforge-displayd"
 readme = "README.md"
 keywords = ["hyprland", "wayland", "monitors", "display", "linux"]
@@ -32,10 +32,10 @@ path = "src/bin/displayctl.rs"
 # touches the network; standalone, cargo fetches them from git.
 #
 # No `gui`: the daemon has no UI, so it skips iced entirely.
-hyprforge-core = { git = "https://github.com/adamrpostjr/hyprforge", features = ["dbus"] }
+hyprforge-core = { git = "https://github.com/hyprforge-suite/hyprforge", features = ["dbus"] }
 # For EXPORT_DIR only: the greeter reads the layout from there, and the
 # location must have exactly one definition.
-hyprforge-look = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-look = { git = "https://github.com/hyprforge-suite/hyprforge" }
 
 # Spelled out rather than inherited, because a standalone crate has no
 # workspace to inherit from. `check.sh`'s dependency-pin step compares

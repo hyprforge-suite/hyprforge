@@ -267,23 +267,24 @@ an export rather than a shared path.
 
 ## Ten repositories, one workspace
 
-There is no GitHub organisation for this suite — the name `hyprforge` was
-already taken — so this repository is the only place that says the other nine
-exist. Nine components have been split out of `crates/` into their own
-repositories with `git subtree`, pushed, and have green CI. They are private
-today; the intent is to make them public once they've had more use.
+The suite lives in the [hyprforge-suite](https://github.com/hyprforge-suite)
+GitHub organisation (`hyprforge` itself was already taken by an unrelated
+project), and every repository in it is public. Nine components have been
+split out of `crates/` into their own repositories with `git subtree`,
+pushed, and have green CI; this repository is where the libraries they
+share live, and the only place that says how the ten fit together.
 
 | Repository | What it is |
 |---|---|
-| [hyprforge-clipboard](https://github.com/adamrpostjr/hyprforge-clipboard) | A Wayland clipboard history library over `wlr-data-control`/`ext-data-control`, plus `hyprforge-clipd`, the daemon that watches the compositor's clipboard and writes its history, and `hyprforge-clipmenu`, the popup that shows it and pastes what you pick. |
-| [hyprforge-lock](https://github.com/adamrpostjr/hyprforge-lock) | An `ext-session-lock-v1` lock screen for Hyprland: PAM and fingerprint unlock, a status line, media and notification counts, a power menu, and a look shared with the greeter. |
-| [hyprforge-greet](https://github.com/adamrpostjr/hyprforge-greet) | A greetd greeter for Hyprland, sharing its look and authentication conversation with the lock screen. |
-| [hyprforge-tray](https://github.com/adamrpostjr/hyprforge-tray) | A StatusNotifierItem tray library, plus `hyprforge-trayd`, the daemon that puts network (Wi-Fi and Ethernet), Bluetooth, keep-awake, night-light, battery/power-profile and display-layout icons in whatever bar is running, and draws its own right-click menu through `hyprforge-traymenu` rather than `com.canonical.dbusmenu`. |
-| [hyprforge-settings](https://github.com/adamrpostjr/hyprforge-settings) | The Settings app: an iced GUI over Hyprland's config, appearance, displays, network, Bluetooth, shortcuts and more. |
-| [hyprforge-displayd](https://github.com/adamrpostjr/hyprforge-displayd) | A monitor-arrangement daemon: it watches `wlr-output-management`, recognises a set of displays it has seen before and applies the layout saved for it, plus `hyprforge-displayctl` to drive it from a script. |
-| [hyprforge-emojimenu](https://github.com/adamrpostjr/hyprforge-emojimenu) | An emoji picker: a layer-shell popup at the pointer with type-to-filter search over the full Unicode set, frequently used first, skin tones and a remembered default tone, plus kaomoji and symbols. |
-| [hyprforge-files](https://github.com/adamrpostjr/hyprforge-files) | A file manager: tabs, a sidebar, list and grid views with thumbnails, a preview pane, the freedesktop trash, copy, paste and drag with other applications, and zip/tar/7z archives browsed and edited in place. |
-| [hyprforge-photos](https://github.com/adamrpostjr/hyprforge-photos) | A photo, video and 3D model viewer: a folder browsed in the file manager's order, a date-grouped grid and library, EXIF and orientation done right, videos through libmpv, STL/3MF/OBJ models on the GPU, and a slideshow. |
+| [hyprforge-clipboard](https://github.com/hyprforge-suite/hyprforge-clipboard) | A Wayland clipboard history library over `wlr-data-control`/`ext-data-control`, plus `hyprforge-clipd`, the daemon that watches the compositor's clipboard and writes its history, and `hyprforge-clipmenu`, the popup that shows it and pastes what you pick. |
+| [hyprforge-lock](https://github.com/hyprforge-suite/hyprforge-lock) | An `ext-session-lock-v1` lock screen for Hyprland: PAM and fingerprint unlock, a status line, media and notification counts, a power menu, and a look shared with the greeter. |
+| [hyprforge-greet](https://github.com/hyprforge-suite/hyprforge-greet) | A greetd greeter for Hyprland, sharing its look and authentication conversation with the lock screen. |
+| [hyprforge-tray](https://github.com/hyprforge-suite/hyprforge-tray) | A StatusNotifierItem tray library, plus `hyprforge-trayd`, the daemon that puts network (Wi-Fi and Ethernet), Bluetooth, keep-awake, night-light, battery/power-profile and display-layout icons in whatever bar is running, and draws its own right-click menu through `hyprforge-traymenu` rather than `com.canonical.dbusmenu`. |
+| [hyprforge-settings](https://github.com/hyprforge-suite/hyprforge-settings) | The Settings app: an iced GUI over Hyprland's config, appearance, displays, network, Bluetooth, shortcuts and more. |
+| [hyprforge-displayd](https://github.com/hyprforge-suite/hyprforge-displayd) | A monitor-arrangement daemon: it watches `wlr-output-management`, recognises a set of displays it has seen before and applies the layout saved for it, plus `hyprforge-displayctl` to drive it from a script. |
+| [hyprforge-emojimenu](https://github.com/hyprforge-suite/hyprforge-emojimenu) | An emoji picker: a layer-shell popup at the pointer with type-to-filter search over the full Unicode set, frequently used first, skin tones and a remembered default tone, plus kaomoji and symbols. |
+| [hyprforge-files](https://github.com/hyprforge-suite/hyprforge-files) | A file manager: tabs, a sidebar, list and grid views with thumbnails, a preview pane, the freedesktop trash, copy, paste and drag with other applications, and zip/tar/7z archives browsed and edited in place. |
+| [hyprforge-photos](https://github.com/hyprforge-suite/hyprforge-photos) | A photo, video and 3D model viewer: a folder browsed in the file manager's order, a date-grouped grid and library, EXIF and orientation done right, videos through libmpv, STL/3MF/OBJ models on the GPU, and a slideshow. |
 
 Eight of the nine are meant to be installed on their own: clone
 `hyprforge-clipboard` and you get a clipboard daemon and nothing else — no

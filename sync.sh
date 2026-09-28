@@ -73,7 +73,7 @@ bad()  { printf '  %s✗%s %s\n' "$RED" "$OFF" "$1"; FAILURES+=("$1"); }
 note() { printf '  %s–%s %s %s(%s)%s\n' "$YELLOW" "$OFF" "$1" "$DIM" "$2" "$OFF"; }
 step() { printf '\n%s==> %s%s\n' "$BOLD" "$1" "$OFF"; }
 
-GITHUB_OWNER="adamrpostjr"
+GITHUB_OWNER="hyprforge-suite"
 NET_TIMEOUT=20
 
 PUSH=false

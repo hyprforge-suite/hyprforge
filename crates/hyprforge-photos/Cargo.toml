@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "A photo, video and 3D model viewer for Hyprland: a folder browsed in the file manager's order, a date-grouped grid and library, EXIF and orientation done right, videos through libmpv, STL/3MF/OBJ models on the GPU, and a slideshow."
-repository = "https://github.com/adamrpostjr/hyprforge"
+repository = "https://github.com/hyprforge-suite/hyprforge"
 documentation = "https://docs.rs/hyprforge-photos"
 readme = "README.md"
 keywords = ["hyprland", "wayland", "image-viewer", "iced", "linux"]
@@ -17,7 +17,7 @@ path = "src/main.rs"
 [dependencies]
 # Measuring, orienting and decoding within a budget. The whole reason
 # the viewer never hands iced a path handle — see that crate's doc.
-hyprforge-image = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-image = { git = "https://github.com/hyprforge-suite/hyprforge" }
 # Directly as well as through `hyprforge-image`: the info panel names the
 # format a file is (`image::ImageFormat`), and a crate that uses a type
 # must say so rather than relying on a dependency's dependency happening
@@ -26,13 +26,13 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # 3D models — STL, 3MF, OBJ — loaded into a mesh, with fstl's camera:
 # the model half of view3d, which this viewer took over. The renderer is
 # here (`src/model/`), not there, because its wgpu has to be iced's.
-hyprforge-mesh = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-mesh = { git = "https://github.com/hyprforge-suite/hyprforge" }
 # Videos: played through libmpv (opened at run time, so a machine without
 # mpv still runs the viewer), and thumbnailed by their first real frame.
-hyprforge-video = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-video = { git = "https://github.com/hyprforge-suite/hyprforge" }
 # The shared freedesktop thumbnail cache, for video frames and model
 # drawings — made once, and shared with the file manager.
-hyprforge-thumbnails = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-thumbnails = { git = "https://github.com/hyprforge-suite/hyprforge" }
 # The renderer's matrices and vertex bytes, at the versions hyprforge-mesh
 # already uses, so the mesh's `Vertex` and `Mat4` are the renderer's own.
 glam = "0.25"
@@ -40,14 +40,14 @@ bytemuck = { version = "1", features = ["derive"] }
 # The listing, so "the next picture" means the next one the file manager
 # was showing. Not `hyprforge-files-core`: a viewer has no use for a
 # browser widget, and this is the leaf under both.
-hyprforge-listing = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-listing = { git = "https://github.com/hyprforge-suite/hyprforge" }
 # The suite's keyboard grammar. This app answers its one open question
 # differently from the file manager — see `keys.rs` and `BareKeys`.
-hyprforge-keys = { git = "https://github.com/adamrpostjr/hyprforge" }
-hyprforge-ui = { git = "https://github.com/adamrpostjr/hyprforge" }
-hyprforge-look = { git = "https://github.com/adamrpostjr/hyprforge" }
-hyprforge-appearance = { git = "https://github.com/adamrpostjr/hyprforge" }
-hyprforge-paths = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-keys = { git = "https://github.com/hyprforge-suite/hyprforge" }
+hyprforge-ui = { git = "https://github.com/hyprforge-suite/hyprforge" }
+hyprforge-look = { git = "https://github.com/hyprforge-suite/hyprforge" }
+hyprforge-appearance = { git = "https://github.com/hyprforge-suite/hyprforge" }
+hyprforge-paths = { git = "https://github.com/hyprforge-suite/hyprforge" }
 # The actions that touch files, each through the suite's own library for
 # it rather than a copy: `trash` from the file operations the file
 # manager uses (reversible, the freedesktop spec, the cross-filesystem
@@ -58,11 +58,11 @@ hyprforge-paths = { git = "https://github.com/adamrpostjr/hyprforge" }
 # The last is the one Hyprland-shaped dependency here, taken deliberately
 # (photos-plan.md, open question 2); without hyprpaper running it saves
 # the choice and says so.
-hyprforge-fileops = { git = "https://github.com/adamrpostjr/hyprforge" }
-hyprforge-mime = { git = "https://github.com/adamrpostjr/hyprforge" }
-hyprforge-clipboard = { git = "https://github.com/adamrpostjr/hyprforge" }
-hyprforge-ecosystem = { git = "https://github.com/adamrpostjr/hyprforge" }
-hyprforge-core = { git = "https://github.com/adamrpostjr/hyprforge", default-features = false }
+hyprforge-fileops = { git = "https://github.com/hyprforge-suite/hyprforge" }
+hyprforge-mime = { git = "https://github.com/hyprforge-suite/hyprforge" }
+hyprforge-clipboard = { git = "https://github.com/hyprforge-suite/hyprforge" }
+hyprforge-ecosystem = { git = "https://github.com/hyprforge-suite/hyprforge" }
+hyprforge-core = { git = "https://github.com/hyprforge-suite/hyprforge", default-features = false }
 # The workspace's iced feature list plus `tokio` and `image`, the same
 # addition `hyprforge-files` and `hyprforge-settings` make and for the
 # same reason: `tokio` selects iced's tokio executor, so the futures a
@@ -95,7 +95,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # A picture opened on its own floats itself on Hyprland (`float.rs`):
 # three `hyprctl` calls, each bounded by hyprforge-process's timeout, and
 # `hyprctl -j`'s JSON read back to find the monitor and the window.
-hyprforge-process = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-process = { git = "https://github.com/hyprforge-suite/hyprforge" }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
@@ -112,4 +112,4 @@ tempfile = "3"
 # `MockBackend`, so the folder model — what the next picture is, what
 # happens at the ends, what a folder of mixed stills and clips does — is
 # exercised without a disk.
-hyprforge-listing = { git = "https://github.com/adamrpostjr/hyprforge", features = ["mock"] }
+hyprforge-listing = { git = "https://github.com/hyprforge-suite/hyprforge", features = ["mock"] }

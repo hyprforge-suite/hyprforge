@@ -199,9 +199,11 @@ crates to check by their shape (no workspace inheritance left at all), so a
 newly prepared crate is covered automatically rather than silently missed.
 
 **Four separate things go wrong when CI fetches a private git dependency,
-and each one reports as if it were the last.** Worth one entry, written as
-the sequence it actually was, because the error text moved every time and
-read as though nothing had changed:
+and each one reports as if it were the last.** The suite has been public
+since 2026-09-27 and the component CIs no longer carry the step, but the
+sequence is kept because it will recur the day anything here depends on a
+private repository again. Written as the sequence it actually was, because
+the error text moved every time and read as though nothing had changed:
 - An Actions `GITHUB_TOKEN` is scoped to the repository its workflow runs
   in and grants nothing on another private repository in the same account —
   first failure, no credentials reached GitHub at all.

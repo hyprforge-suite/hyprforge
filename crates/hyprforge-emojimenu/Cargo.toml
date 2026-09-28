@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "An emoji picker for Hyprland: a layer-shell popup at the pointer with type-to-filter search over the full Unicode set, frequently used first, skin tones and a remembered default tone, plus kaomoji and symbols."
-repository = "https://github.com/adamrpostjr/hyprforge"
+repository = "https://github.com/hyprforge-suite/hyprforge"
 documentation = "https://docs.rs/hyprforge-emojimenu"
 readme = "README.md"
 keywords = ["hyprland", "wayland", "emoji", "picker", "linux"]
@@ -15,8 +15,8 @@ name = "hyprforge-emojimenu"
 path = "src/main.rs"
 
 [dependencies]
-hyprforge-emoji = { git = "https://github.com/adamrpostjr/hyprforge" }
-hyprforge-clipboard = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-emoji = { git = "https://github.com/hyprforge-suite/hyprforge" }
+hyprforge-clipboard = { git = "https://github.com/hyprforge-suite/hyprforge" }
 # The layer-shell surface, its event loop, pointer/keyboard handling,
 # placement and the single-instance lock — see the `hyprforge-clipmenu`
 # binary's own
@@ -24,11 +24,11 @@ hyprforge-clipboard = { git = "https://github.com/adamrpostjr/hyprforge" }
 # ~1800 lines of Wayland/iced plumbing. This crate is also where the one
 # genuine gap this picker needed closed lives: long-press detection (see
 # `hyprforge_popup::PopupApp::long_press_duration`/`pointer_long_press`).
-hyprforge-popup = { git = "https://github.com/adamrpostjr/hyprforge" }
-hyprforge-appearance = { git = "https://github.com/adamrpostjr/hyprforge" }
-hyprforge-look = { git = "https://github.com/adamrpostjr/hyprforge" }
-hyprforge-paths = { git = "https://github.com/adamrpostjr/hyprforge" }
-hyprforge-process = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-popup = { git = "https://github.com/hyprforge-suite/hyprforge" }
+hyprforge-appearance = { git = "https://github.com/hyprforge-suite/hyprforge" }
+hyprforge-look = { git = "https://github.com/hyprforge-suite/hyprforge" }
+hyprforge-paths = { git = "https://github.com/hyprforge-suite/hyprforge" }
+hyprforge-process = { git = "https://github.com/hyprforge-suite/hyprforge" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1.1"

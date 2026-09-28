@@ -342,7 +342,8 @@ repository while keeping it a workspace member here: `split.sh` (via
 split-out repository has drifted from what this monorepo would produce.
 Nine components have been split and pushed with their own green CI
 (as of 2026-09-27): clipboard, lock, greet, tray, settings, displayd,
-emojimenu, files and photos. `repo-plan.md` is the
+emojimenu, files and photos — all public, under the `hyprforge-suite`
+organisation since 2026-09-27. `repo-plan.md` is the
 authority on this work — the reasoning behind it, the dependency-layer
 order, and what was learned doing it (a dangling `LICENSE` symlink, a
 missing README, and the two-spellings-of-one-git-URL trap once `settings`

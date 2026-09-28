@@ -26,7 +26,7 @@ installed), the shared MIME database, the freedesktop trash, and the
 wallpaper settings the Settings app's Desktop screen edits, so the two
 never disagree.
 
-Part of [Hyprforge](https://github.com/adamrpostjr/hyprforge), a suite of
+Part of [Hyprforge](https://github.com/hyprforge-suite/hyprforge), a suite of
 native Hyprland desktop applications. This repository is a split of the
 `crates/hyprforge-photos` directory there; development happens in the
 monorepo and `sync.sh` keeps this copy in step.

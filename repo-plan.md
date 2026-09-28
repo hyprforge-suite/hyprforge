@@ -76,7 +76,7 @@ is now about *convenience* rather than *possibility*.
 
 The one-manifest problem is solved and worth knowing: the clipboard's
 `Cargo.toml` names the git URL, and the root `Cargo.toml` has a
-`[patch."https://github.com/adamrpostjr/hyprforge"]` section redirecting those
+`[patch."https://github.com/hyprforge-suite/hyprforge"]` section redirecting those
 dependencies back to `crates/` (every git-named sibling now, which
 `check.sh`'s "Siblings build from this checkout" step enforces). One file, both contexts, no
 divergence for `git subtree push` to conflict on forever, and no network
@@ -221,7 +221,8 @@ arriving through the one door `split.sh` had not guarded. It refuses now
 unless `.github/workflows/ci.yml` and `rust-toolchain.toml` are
 committed in the crate. Their first runs also needed the `SUITE_READ`
 secret on each new repository, which cannot be copied from another one —
-GitHub never reads a secret back.
+GitHub never reads a secret back. (Moot since the move to the public
+organisation on 2026-09-27: the step and the secret are gone.)
 
 **Judged, and the answers are: cheap, yes, and not yet.**
 
@@ -321,12 +322,14 @@ someone has to remember to update.
 
 ### notif is a deliberate exception
 
-`notif/` is a nested workspace with its own repository, its own PKGBUILD
-and its own CI, published before the merge. `sync.sh` does not check it
-and is not going to: the plan is to archive that repository and let the
-nested workspace here be the only copy. Until that happens its published
-repository is stale on purpose, and this paragraph is the record that it
-is a decision rather than the drift `sync.sh` exists to catch.
+`notif/` is a nested workspace with its own PKGBUILD and its own CI,
+merged in from a repository published before the merge. `sync.sh` does
+not check it and is not going to: that repository
+(`github.com/adamrpostjr/notif`) was archived on 2026-09-27 with a
+pointer here, and the nested workspace is the only copy. Its
+`PKGBUILD`, `.SRCINFO` and unit file still name the archived repository,
+which is where an AUR build would fetch from; repointing those is
+notif's own packaging question, not this plan's.
 
 ## Status
 
@@ -351,6 +354,11 @@ is a decision rather than the drift `sync.sh` exists to catch.
 - [x] photos prepared standalone and split (2026-09-27), the last of the
       nine packaged components; born with its CI committed, and without
       the `SUITE_READ` step, since it is published into a public suite
+- [x] Moved to the `hyprforge-suite` organisation, every repository
+      public (2026-09-27). One commit renamed the URL everywhere at
+      once — the [patch] key, ninety-odd manifest lines, the scripts and
+      the docs — after the transfers, so the old URL redirected the
+      whole way through
 
 ## Staying in sync after the push
 

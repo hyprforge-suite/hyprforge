@@ -65,7 +65,7 @@ translators in and pure projections out.
 ## Installing
 
 This copy of notif lives inside the
-[Hyprforge](https://github.com/adamrpostjr/hyprforge) repository and takes
+[Hyprforge](https://github.com/hyprforge-suite/hyprforge) repository and takes
 two of its crates (`hyprforge-look`, `hyprforge-paths`) by path, so it builds
 from a Hyprforge checkout — see "Building from source". The standalone
 `notif` repository and the `notif-git` package below build it from there, and
