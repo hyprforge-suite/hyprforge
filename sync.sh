@@ -253,9 +253,21 @@ for crate in "${CRATES[@]}"; do
     if ! timeout "$NET_TIMEOUT" git fetch --no-tags "$url.git" main >"$fetch_err" 2>&1; then
         errtext=$(cat "$fetch_err"); rm -f "$fetch_err"
         if grep -qi 'not found' <<<"$errtext"; then
-            note "$crate: no published repository yet at $url" "run with --push to create the first sync"
+            note "$crate: no published repository yet at $url" "create it empty, then --push does the first sync"
             UNPUBLISHED+=("$crate")
             STATUS[$crate]=unpublished
+        elif grep -qi "couldn't find remote ref" <<<"$errtext"; then
+            # The repository exists and has no branches: exactly the
+            # state this script's own "create it empty, then re-run"
+            # instruction produces. It read as unreachable once — the
+            # error text names a missing ref, not a missing repository —
+            # and the first sync of hyprforge-media was skipped with a
+            # red cross while eight siblings went out. There is nothing
+            # to compare against, so it is drift by definition: the push
+            # below creates `main`.
+            note "$crate: repository exists and is empty" "first sync; --push creates main"
+            DRIFTED+=("$crate")
+            STATUS[$crate]=first_sync
         elif [[ -z "$errtext" ]] || grep -qiE 'timed out|timeout' <<<"$errtext"; then
             bad "$crate: timed out reaching $url after ${NET_TIMEOUT}s — network unreachable?"
             UNREACHABLE+=("$crate")
