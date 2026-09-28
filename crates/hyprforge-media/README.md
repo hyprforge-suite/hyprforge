@@ -1,4 +1,4 @@
-# hyprforge-photos
+# hyprforge-media
 
 A photo, video and 3D model viewer for Hyprland.
 
@@ -28,7 +28,7 @@ never disagree.
 
 Part of [Hyprforge](https://github.com/hyprforge-suite/hyprforge), a suite of
 native Hyprland desktop applications. This repository is a split of the
-`crates/hyprforge-photos` directory there; development happens in the
+`crates/hyprforge-media` directory there; development happens in the
 monorepo and `sync.sh` keeps this copy in step.
 
 ## What is here
@@ -47,7 +47,7 @@ and is deliberately thin.
 cargo install --path .
 ```
 
-Arch users can build the `hyprforge-photos` package from the monorepo's
+Arch users can build the `hyprforge-media` package from the monorepo's
 `packaging/arch` instead, which also installs the desktop entry.
 
 Nothing else in the suite is required. A missing `appearance.toml` is

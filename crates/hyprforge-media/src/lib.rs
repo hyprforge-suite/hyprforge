@@ -44,7 +44,7 @@
 //! `hyprforge-listing` for the same order the file manager is showing.
 //! Two windows over one folder that disagree about which picture follows
 //! this one is the sort of difference nobody can explain and everybody
-//! notices — see `hyprforge-paths`'s note on `photos.toml` for the same
+//! notices — see `hyprforge-paths`'s note on `media.toml` for the same
 //! decision written from the settings end.
 
 pub mod args;

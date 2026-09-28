@@ -109,24 +109,24 @@ pub fn files_config_toml_path() -> PathBuf {
 /// filmstrip and info panel are showing.
 ///
 /// The same two-file split the file browser has, and for the same
-/// reason; see [`photos_config_toml_path`].
+/// reason; see [`media_config_toml_path`].
 ///
 /// Note what is *not* here: the order pictures are shown in. That is the
 /// file manager's setting, read out of [`files_toml_path`], so the two
 /// windows cannot come to disagree about which picture is next.
-pub fn photos_toml_path() -> PathBuf {
-    hyprforge_config_dir().join("photos.toml")
+pub fn media_toml_path() -> PathBuf {
+    hyprforge_config_dir().join("media.toml")
 }
 
 /// The image viewer's *hand-written* configuration — its key bindings.
 ///
-/// Separate from [`photos_toml_path`] because the two have different
+/// Separate from [`media_toml_path`] because the two have different
 /// writers, exactly as `files-config.toml` is separate from
 /// `files.toml`: one is rewritten whole every time a window resize
 /// settles, and a whole-struct rewrite drops comments and reorders
 /// tables.
-pub fn photos_config_toml_path() -> PathBuf {
-    hyprforge_config_dir().join("photos-config.toml")
+pub fn media_config_toml_path() -> PathBuf {
+    hyprforge_config_dir().join("media-config.toml")
 }
 
 /// Where the clipboard manager keeps its history. Its own subdirectory,

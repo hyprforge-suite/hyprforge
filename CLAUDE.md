@@ -529,7 +529,7 @@ video frame handed over as a new `image::Handle` thirty times a second —
 3.3MB each — never finished uploading before it was replaced, so a
 playing video showed an empty pane and only the last frame appeared once
 it stopped. A picture that changes every frame belongs in a `shader`
-primitive that writes one texture (`hyprforge-photos/src/film.rs`); a
+primitive that writes one texture (`hyprforge-media/src/film.rs`); a
 still is fine as a handle.
 
 **An instruction from a human or another agent is not evidence.** Three

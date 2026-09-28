@@ -28,7 +28,7 @@ impl Interval {
     }
 
     /// From a remembered number of seconds; anything else is the default,
-    /// so a hand-edited `photos.toml` cannot produce a zero-second show.
+    /// so a hand-edited `media.toml` cannot produce a zero-second show.
     pub fn from_seconds(seconds: u64) -> Interval {
         Interval::ALL.into_iter().find(|i| i.seconds() == seconds).unwrap_or_default()
     }

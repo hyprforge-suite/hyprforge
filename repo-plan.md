@@ -112,7 +112,7 @@ layer 2   core, popup, ui
 layer 3   appearance, authui, displayd, ecosystem, files-core, input,
           session, shortcuts, system, windowrules
 layer 4   clipboard, greet, lock, tray
-layer 5   emojimenu, files, photos, settings
+layer 5   emojimenu, files, media, settings
 ```
 
 A crate can only be published after everything it depends on. The same
@@ -351,7 +351,7 @@ notif's own packaging question, not this plan's.
       the fact and green on 2026-09-23, and `split.sh` now refuses a
       crate whose CI is not committed
 - [x] Day-2 drift detection (`./sync.sh`), monorepo included
-- [x] photos prepared standalone and split (2026-09-27), the last of the
+- [x] media (then called photos) prepared standalone and split (2026-09-27), the last of the
       nine packaged components; born with its CI committed, and without
       the `SUITE_READ` step, since it is published into a public suite
 - [x] Moved to the `hyprforge-suite` organisation, every repository

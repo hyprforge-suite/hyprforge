@@ -37,7 +37,7 @@ members = [
     "crates/hyprforge-image",
     "crates/hyprforge-mesh",
     "crates/hyprforge-video",
-    "crates/hyprforge-photos",
+    "crates/hyprforge-media",
     "crates/hyprforge-archive",
     "crates/hyprforge-files-core",
     "crates/hyprforge-files",
@@ -104,7 +104,7 @@ hyprforge-listing = { path = "crates/hyprforge-listing", version = "0.1.0" }
 hyprforge-image = { path = "crates/hyprforge-image", version = "0.1.0" }
 hyprforge-mesh = { path = "crates/hyprforge-mesh", version = "0.1.0" }
 hyprforge-video = { path = "crates/hyprforge-video", version = "0.1.0" }
-hyprforge-photos = { path = "crates/hyprforge-photos" }
+hyprforge-media = { path = "crates/hyprforge-media" }
 hyprforge-files-core = { path = "crates/hyprforge-files-core" }
 # Zip, tar and 7z, for the file manager's archive browsing. A leaf, like
 # hyprforge-mime beside it — nothing GUI and nothing Hyprland-shaped.
@@ -170,7 +170,7 @@ iced_tiny_skia = { version = "0.14.1", default-features = false }
 #
 # bmp, tiff and ico were switched on when Files' preview pane was asked
 # to show more kinds of picture (2026-09-25); the viewer's desktop entry
-# claims them in the same change, and `hyprforge-photos`'s
+# claims them in the same change, and `hyprforge-media`'s
 # `the_desktop_entry_claims_exactly_what_this_build_decodes` keeps the two
 # in step from now on.
 #
@@ -281,7 +281,7 @@ hyprforge-image = { path = "crates/hyprforge-image" }
 hyprforge-icons = { path = "crates/hyprforge-icons" }
 hyprforge-thumbnails = { path = "crates/hyprforge-thumbnails" }
 hyprforge-video = { path = "crates/hyprforge-video" }
-# The three the photos split added: the listing it takes its order from,
+# The three the media split added: the listing it takes its order from,
 # the mesh loader, and the keyboard grammar.
 hyprforge-listing = { path = "crates/hyprforge-listing" }
 hyprforge-mesh = { path = "crates/hyprforge-mesh" }

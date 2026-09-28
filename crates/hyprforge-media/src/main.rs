@@ -1,4 +1,4 @@
-//! `hyprforge-photos`: the window.
+//! `hyprforge-media`: the window.
 //!
 //! Everything this draws is decided in the library — which picture is
 //! next ([`folder`]), where it sits and how big ([`transform`]), what a
@@ -43,18 +43,18 @@ mod view;
 
 use hyprforge_image::{decode_to_fit, Budget, Camera, Decoded, Measured, ViewportPixels};
 use hyprforge_listing::backend::{FsBackend, StdBackend};
-use hyprforge_photos::args::{self, Args};
-use hyprforge_photos::cache::Cache;
-use hyprforge_photos::folder::{Folder, Media};
-use hyprforge_photos::history::History;
-use hyprforge_photos::keys::{Action, Resolved};
-use hyprforge_photos::library::Summary;
-use hyprforge_photos::rotation::{rotate_rgba, Turns};
+use hyprforge_media::args::{self, Args};
+use hyprforge_media::cache::Cache;
+use hyprforge_media::folder::{Folder, Media};
+use hyprforge_media::history::History;
+use hyprforge_media::keys::{Action, Resolved};
+use hyprforge_media::library::Summary;
+use hyprforge_media::rotation::{rotate_rgba, Turns};
 use hyprforge_mesh::camera::{Camera as ModelCamera, ViewPoint};
 use hyprforge_mesh::style::DrawMode;
-use hyprforge_photos::slideshow::{Interval, Show};
-use hyprforge_photos::transform::{ImageSize, LogicalPoint, Transform, Viewport};
-use hyprforge_photos::{config, filmstrip, grid, launch, library, order, prefs};
+use hyprforge_media::slideshow::{Interval, Show};
+use hyprforge_media::transform::{ImageSize, LogicalPoint, Transform, Viewport};
+use hyprforge_media::{config, filmstrip, grid, launch, library, order, prefs};
 use hyprforge_ui::theme::FontScale;
 use hyprforge_ui::widgets::Tint;
 use iced::widget::{image, Id};
@@ -64,7 +64,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const APP_ID: &str = "hyprforge-photos";
+const APP_ID: &str = "hyprforge-media";
 
 /// The Places sidebar, logical pixels — the mockup's 200.
 const SIDEBAR_WIDTH: f32 = 200.0;
@@ -174,13 +174,13 @@ fn main() -> iced::Result {
     };
     // The floating size, worked out before the window exists so it can map
     // floating instead of tiling first — see `float.rs`.
-    let planned_float = float_picture.as_deref().filter(|_| hyprforge_photos::float::on_hyprland()).and_then(|picture| {
+    let planned_float = float_picture.as_deref().filter(|_| hyprforge_media::float::on_hyprland()).and_then(|picture| {
         let scale = FontScale(hyprforge_ui::theme::active().font_scale);
         let mut chrome_h = hyprforge_ui::density::bar_height(scale) + 1.0 + scale.apply(STATUS_HEIGHT) + 1.0;
         if prefs.filmstrip {
             chrome_h += FILMSTRIP_HEIGHT + 1.0;
         }
-        hyprforge_photos::float::planned_size(picture, chrome_h)
+        hyprforge_media::float::planned_size(picture, chrome_h)
             .inspect_err(|e| tracing::warn!(error = %e, "no floating size; opening tiled"))
             .ok()
     });
@@ -250,7 +250,7 @@ fn main() -> iced::Result {
     let boot = std::cell::RefCell::new(Some((app, Task::batch(boot_tasks))));
 
     iced::application(
-        move || boot.borrow_mut().take().expect("hyprforge-photos boots once"),
+        move || boot.borrow_mut().take().expect("hyprforge-media boots once"),
         App::update,
         App::view,
     )
@@ -349,7 +349,7 @@ enum Listing {
 struct ModelView {
     path: PathBuf,
     mesh: Arc<hyprforge_mesh::Mesh>,
-    facts: hyprforge_photos::info::ModelFacts,
+    facts: hyprforge_media::info::ModelFacts,
     generation: u64,
     camera: ModelCamera,
     /// A file that loaded but not entirely — an OBJ whose materials could
@@ -446,7 +446,7 @@ enum Undo {
 }
 
 struct App {
-    keymap: hyprforge_photos::keys::Keymap,
+    keymap: hyprforge_media::keys::Keymap,
     order: hyprforge_listing::order::Order,
     prefs: prefs::Prefs,
     mode: Mode,
@@ -597,9 +597,9 @@ enum Message {
 impl App {
     fn title(&self) -> String {
         match (self.mode, self.folder.current(), &self.folder_path) {
-            (Mode::Photo, Some(item), _) => format!("{} — Photos", item.name),
-            (_, _, Some(dir)) => format!("{} — Photos", display_name(dir)),
-            _ => "Photos".to_string(),
+            (Mode::Photo, Some(item), _) => format!("{} — Media", item.name),
+            (_, _, Some(dir)) => format!("{} — Media", display_name(dir)),
+            _ => "Media".to_string(),
         }
     }
 
@@ -652,7 +652,7 @@ impl App {
     /// off the UI thread, and only on Hyprland — see `float.rs`.
     fn float_to_picture(&mut self) -> Task<Message> {
         let Some(path) = self.float_picture.take() else { return Task::none() };
-        if !hyprforge_photos::float::on_hyprland() {
+        if !hyprforge_media::float::on_hyprland() {
             return Task::none();
         }
         // Mapped at its planned size, fixed: it should already be floating,
@@ -661,7 +661,7 @@ impl App {
         if let Some(size) = self.planned_float {
             return Task::perform(
                 async move {
-                    tokio::task::spawn_blocking(move || hyprforge_photos::float::settle(size))
+                    tokio::task::spawn_blocking(move || hyprforge_media::float::settle(size))
                         .await
                         .unwrap_or_else(|e| Err(e.to_string()))
                 },
@@ -679,9 +679,9 @@ impl App {
             async move {
                 tokio::task::spawn_blocking(move || {
                     let picture = hyprforge_image::measure(&path).ok().map(|m| m.display_size());
-                    let usable = hyprforge_photos::float::focused_monitor()?;
-                    let size = hyprforge_photos::float::floating_size(picture, usable, (0.0, chrome_h));
-                    hyprforge_photos::float::float_self(size)
+                    let usable = hyprforge_media::float::focused_monitor()?;
+                    let size = hyprforge_media::float::floating_size(picture, usable, (0.0, chrome_h));
+                    hyprforge_media::float::float_self(size)
                 })
                 .await
                 .unwrap_or_else(|e| Err(e.to_string()))
@@ -699,7 +699,7 @@ impl App {
         let size = (self.prefs.window_width, self.prefs.window_height);
         Task::perform(
             async move {
-                tokio::task::spawn_blocking(move || hyprforge_photos::float::resize_self(size))
+                tokio::task::spawn_blocking(move || hyprforge_media::float::resize_self(size))
                     .await
                     .unwrap_or_else(|e| Err(e.to_string()))
             },
@@ -1092,7 +1092,7 @@ impl App {
                             self.current_bytes = loaded.bytes;
                         }
                         self.model = Some(ModelView {
-                            facts: hyprforge_photos::info::ModelFacts::of(format, &loaded.mesh),
+                            facts: hyprforge_media::info::ModelFacts::of(format, &loaded.mesh),
                             path,
                             mesh: loaded.mesh,
                             generation: self.model_generation,
@@ -1768,7 +1768,7 @@ impl App {
         let (pixels, width, height) =
             rotate_rgba(&decoded.pixels, decoded.size.width, decoded.size.height, self.turns);
         let (source_w, source_h) =
-            hyprforge_photos::rotation::presented_size(decoded.measured.display_size(), self.turns);
+            hyprforge_media::rotation::presented_size(decoded.measured.display_size(), self.turns);
         self.shown = Some(Shown {
             path,
             handle: image::Handle::from_rgba(width, height, pixels),
@@ -1865,7 +1865,7 @@ impl App {
                         let _slot = EXPENSIVE_THUMBS.acquire().await;
                         let for_task = path.clone();
                         let handle = tokio::task::spawn_blocking(move || {
-                            hyprforge_photos::thumbs::of(cache.as_deref(), &for_task, media)
+                            hyprforge_media::thumbs::of(cache.as_deref(), &for_task, media)
                                 .map(|t| image::Handle::from_rgba(t.width, t.height, t.pixels))
                         })
                         .await
@@ -2321,11 +2321,11 @@ fn grid_move(action: Action) -> grid::Move {
 }
 
 fn grid_id() -> Id {
-    Id::new("photos-grid")
+    Id::new("media-grid")
 }
 
 fn library_id() -> Id {
-    Id::new("photos-library")
+    Id::new("media-library")
 }
 
 /// A folder's name as the title and headings show it; the root is `/`.

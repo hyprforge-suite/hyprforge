@@ -1,4 +1,4 @@
-//! `photos.toml` — the state this app rewrites.
+//! `media.toml` — the state this app rewrites.
 //!
 //! The written half of the two-file split every app in this suite uses.
 //! This file is rewritten whole on every save, which drops comments and
@@ -96,7 +96,7 @@ impl Prefs {
 #[derive(Debug, thiserror::Error)]
 pub enum PrefsError {
     /// The file exists and will not parse. **Not** the same as absent.
-    #[error("{path} could not be read as Photos settings: {source}")]
+    #[error("{path} could not be read as Media settings: {source}")]
     Unreadable {
         path: PathBuf,
         #[source]
@@ -120,7 +120,7 @@ pub enum PrefsError {
 /// other single-file Hyprforge setting — one crate knows the layout of
 /// the config directory and no other joins path segments to guess it.
 pub fn path() -> PathBuf {
-    hyprforge_paths::photos_toml_path()
+    hyprforge_paths::media_toml_path()
 }
 
 pub fn load() -> Result<Prefs, PrefsError> {
@@ -171,14 +171,14 @@ mod tests {
     #[test]
     fn a_missing_file_is_first_run_and_not_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        let prefs = load_from(&dir.path().join("photos.toml")).unwrap();
+        let prefs = load_from(&dir.path().join("media.toml")).unwrap();
         assert_eq!(prefs, Prefs::default());
     }
 
     #[test]
     fn everything_written_reads_back_as_itself() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("photos.toml");
+        let path = dir.path().join("media.toml");
         let prefs = Prefs {
             filmstrip: false,
             info_panel: true,
@@ -201,7 +201,7 @@ mod tests {
     #[test]
     fn a_photos_config_that_will_not_parse_is_reported_and_never_overwritten() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("photos.toml");
+        let path = dir.path().join("media.toml");
         std::fs::write(&path, "filmstrip = yes please\n").unwrap();
 
         assert!(matches!(load_from(&path), Err(PrefsError::Unreadable { .. })));
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn a_file_written_before_a_setting_existed_still_parses() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("photos.toml");
+        let path = dir.path().join("media.toml");
         std::fs::write(&path, "window_width = 800\n").unwrap();
         let prefs = load_from(&path).unwrap();
         assert_eq!(prefs.window_width, 800);
@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn an_unknown_draw_mode_reads_as_the_default_and_keeps_the_rest() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("photos.toml");
+        let path = dir.path().join("media.toml");
         std::fs::write(&path, "model_draw_mode = \"holographic\"\nwindow_width = 900\n").unwrap();
         let prefs = load_from(&path).unwrap();
         assert_eq!(prefs.model_draw_mode(), DrawMode::Shaded);
@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn updating_keeps_a_change_another_writer_made() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("photos.toml");
+        let path = dir.path().join("media.toml");
         save_to(&path, &Prefs::default()).unwrap();
 
         // Somebody else resizes their window...

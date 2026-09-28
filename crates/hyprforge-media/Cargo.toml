@@ -1,17 +1,17 @@
 [package]
-name = "hyprforge-photos"
+name = "hyprforge-media"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "A photo, video and 3D model viewer for Hyprland: a folder browsed in the file manager's order, a date-grouped grid and library, EXIF and orientation done right, videos through libmpv, STL/3MF/OBJ models on the GPU, and a slideshow."
 repository = "https://github.com/hyprforge-suite/hyprforge"
-documentation = "https://docs.rs/hyprforge-photos"
+documentation = "https://docs.rs/hyprforge-media"
 readme = "README.md"
 keywords = ["hyprland", "wayland", "image-viewer", "iced", "linux"]
 categories = ["os::linux-apis", "gui", "multimedia"]
 
 [[bin]]
-name = "hyprforge-photos"
+name = "hyprforge-media"
 path = "src/main.rs"
 
 [dependencies]
@@ -56,7 +56,7 @@ hyprforge-paths = { git = "https://github.com/hyprforge-suite/hyprforge" }
 # need not be installed — for Copy, and the wallpaper settings the
 # Desktop screen edits for Set as Wallpaper, so the two never disagree.
 # The last is the one Hyprland-shaped dependency here, taken deliberately
-# (photos-plan.md, open question 2); without hyprpaper running it saves
+# (media-plan.md, open question 2); without hyprpaper running it saves
 # the choice and says so.
 hyprforge-fileops = { git = "https://github.com/hyprforge-suite/hyprforge" }
 hyprforge-mime = { git = "https://github.com/hyprforge-suite/hyprforge" }

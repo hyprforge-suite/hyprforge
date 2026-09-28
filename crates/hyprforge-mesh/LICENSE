@@ -4,7 +4,7 @@ Copyright (c) 2026 view3d contributors
 Copyright (c) 2014-2017 Matthew Keeter and the fstl contributors (portions,
 see below)
 
-This crate, and the renderer in crates/hyprforge-photos/src/model/, are
+This crate, and the renderer in crates/hyprforge-media/src/model/, are
 carried from view3d (https://github.com/adamrpostjr/view3d) into Hyprforge.
 view3d is a re-implementation of fstl (https://github.com/fstl-app/fstl).
 fstl ships no LICENSE file; its README states these same MIT terms under
@@ -12,13 +12,13 @@ fstl ships no LICENSE file; its README states these same MIT terms under
 translations of that source and remain subject to that license, in
 particular:
 
-  * the fragment shaders in crates/hyprforge-photos/src/model/scene.wgsl, ported from
+  * the fragment shaders in crates/hyprforge-media/src/model/scene.wgsl, ported from
     fstl's gl/mesh.frag, gl/mesh_light.frag, gl/mesh_surfaceangle.frag and
     gl/quad.frag, including their color constants;
   * the camera, projection and viewpoint math in src/camera.rs (this crate), ported from
     fstl's src/canvas.cpp;
   * the axis and axis-flower geometry in
-    crates/hyprforge-photos/src/model/render.rs, ported from
+    crates/hyprforge-media/src/model/render.rs, ported from
     fstl's src/axis.cpp and src/backdrop.cpp.
 
 The mesh-light and surface-angle shaders postdate fstl's 2014-2017 copyright

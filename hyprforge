@@ -78,9 +78,9 @@ STATE_EMOJI=todo
 REASON_EMOJI=
 STATE_FILES=todo
 REASON_FILES=
-NEXT_PHOTOS=
-STATE_PHOTOS=todo
-REASON_PHOTOS=
+NEXT_MEDIA=
+STATE_MEDIA=todo
+REASON_MEDIA=
 NEXT_LOCK=
 NEXT_SETTINGS=
 NEXT_GREETER=
@@ -279,9 +279,9 @@ print_next_steps() {
     # it is labelled with its neighbour's name, which reads as a bug in
     # whichever component happened to land next to the gap.
     local labels=("Display daemon" "Tray icons" "Clipboard" "Emoji picker" "File manager" "Image viewer" "Lock" "Settings app" "Greeter")
-    local texts=("$NEXT_DISPLAYD" "$NEXT_TRAY" "$NEXT_CLIPBOARD" "$NEXT_EMOJI" "$NEXT_FILES" "$NEXT_PHOTOS" "$NEXT_LOCK" "$NEXT_SETTINGS" "$NEXT_GREETER")
-    local states=("$STATE_DISPLAYD" "$STATE_TRAY" "$STATE_CLIPBOARD" "$STATE_EMOJI" "$STATE_FILES" "$STATE_PHOTOS" "$STATE_LOCK" "$STATE_SETTINGS" "$STATE_GREETER")
-    local reasons=("$REASON_DISPLAYD" "$REASON_TRAY" "$REASON_CLIPBOARD" "$REASON_EMOJI" "$REASON_FILES" "$REASON_PHOTOS" "$REASON_LOCK" "$REASON_SETTINGS" "$REASON_GREETER")
+    local texts=("$NEXT_DISPLAYD" "$NEXT_TRAY" "$NEXT_CLIPBOARD" "$NEXT_EMOJI" "$NEXT_FILES" "$NEXT_MEDIA" "$NEXT_LOCK" "$NEXT_SETTINGS" "$NEXT_GREETER")
+    local states=("$STATE_DISPLAYD" "$STATE_TRAY" "$STATE_CLIPBOARD" "$STATE_EMOJI" "$STATE_FILES" "$STATE_MEDIA" "$STATE_LOCK" "$STATE_SETTINGS" "$STATE_GREETER")
+    local reasons=("$REASON_DISPLAYD" "$REASON_TRAY" "$REASON_CLIPBOARD" "$REASON_EMOJI" "$REASON_FILES" "$REASON_MEDIA" "$REASON_LOCK" "$REASON_SETTINGS" "$REASON_GREETER")
 
     # Steps that are `done` collapse into this count instead of being
     # read one by one, matching the "N already current" pattern used
@@ -380,7 +380,7 @@ ${B}Components${N}
                    service, plus the popup its keybind launches.
   --settings       The Settings app and its launcher entry.
   --files          The file manager, and its launcher entry.
-  --photos         The image viewer, and its launcher entry.
+  --media          The media viewer (pictures, videos, 3D models), and its launcher entry.
   --mime           hyprforge-mimetype and hyprforge-mimeopen: what kind
                    of file is this, and what opens it. See
                    --provide-mimetype for the part that changes what the
@@ -436,11 +436,11 @@ while [[ $# -gt 0 ]]; do
         --clipboard)     COMPONENTS+=(clipboard) ;;
         --emoji)         COMPONENTS+=(emoji) ;;
         --files)         COMPONENTS+=(files) ;;
-        --photos)        COMPONENTS+=(photos) ;;
+        --media)        COMPONENTS+=(media) ;;
         --mime)          COMPONENTS+=(mime) ;;
         --provide-mimetype) PROVIDE_MIMETYPE=true ;;
         --settings)      COMPONENTS+=(settings) ;;
-        --all)           COMPONENTS+=(greeter lock displayd tray clipboard emoji files photos mime settings) ;;
+        --all)           COMPONENTS+=(greeter lock displayd tray clipboard emoji files media mime settings) ;;
         --force-cleanup) FORCE_CLEANUP=true ;;
         --dry-run)       DRY_RUN=true ;;
         --no-restart)    NO_RESTART=true ;;
@@ -1126,14 +1126,14 @@ EOF
 )
 }
 
-install_photos() {
+install_media() {
     COMPONENT_CHANGED=false
-    build hyprforge-photos
+    build hyprforge-media
     step "Image viewer"
-    install_file target/release/hyprforge-photos "$PREFIX/hyprforge-photos" 755
+    install_file target/release/hyprforge-media "$PREFIX/hyprforge-media" 755
 
-    local entry=crates/hyprforge-photos/packaging/hyprforge-photos.desktop
-    local dst="$DESKTOP_DIR/hyprforge-photos.desktop"
+    local entry=crates/hyprforge-media/packaging/hyprforge-media.desktop
+    local dst="$DESKTOP_DIR/hyprforge-media.desktop"
     if $DRY_RUN; then
         skip "would install $dst"
     elif [[ -e $dst ]] && cmp -s "$entry" "$dst"; then
@@ -1152,20 +1152,20 @@ install_photos() {
     # lock. Nothing is made the default for pictures — that choice is
     # the user's, and Settings -> Default Applications is where it is
     # made.
-    NEXT_PHOTOS=$(cat <<EOF
-  ${D}It should appear in rofi as "Hyprforge Photos". To open pictures in it
+    NEXT_MEDIA=$(cat <<EOF
+  ${D}It should appear in rofi as "Hyprforge Media". To open pictures in it
   from the file manager and everywhere else, choose it in Settings ->
   Default Applications, or:
-      xdg-mime default hyprforge-photos.desktop image/png image/jpeg image/webp image/gif${N}
+      xdg-mime default hyprforge-media.desktop image/png image/jpeg image/webp image/gif${N}
 EOF
 )
 }
 
-uninstall_photos() {
+uninstall_media() {
     step "Image viewer: removing"
-    remove_file "$PREFIX/hyprforge-photos"
-    remove_file "$DESKTOP_DIR/hyprforge-photos.desktop"
-    # photos.toml is the user's and stays, for the reason uninstall_files
+    remove_file "$PREFIX/hyprforge-media"
+    remove_file "$DESKTOP_DIR/hyprforge-media.desktop"
+    # media.toml is the user's and stays, for the reason uninstall_files
     # gives for files.toml.
 }
 
@@ -1326,7 +1326,7 @@ status_summary() {
     # line under-reported what was installed and never called them stale.
     for name in hyprforge-greet hyprforge-lock hyprforge-displayd \
                 hyprforge-trayd hyprforge-traymenu hyprforge-clipd hyprforge-clipmenu \
-                hyprforge-emojimenu hyprforge-files hyprforge-photos \
+                hyprforge-emojimenu hyprforge-files hyprforge-media \
                 hyprforge-mimetype hyprforge-mimeopen hyprforge-settings; do
         if [[ ! -e $PREFIX/$name ]]; then
             missing+=("$name")
@@ -1363,7 +1363,7 @@ show_status() {
     status_binary hyprforge-clipmenu
     status_binary hyprforge-emojimenu
     status_binary hyprforge-files
-    status_binary hyprforge-photos
+    status_binary hyprforge-media
     status_binary hyprforge-mimetype
     status_binary hyprforge-mimeopen
     status_binary hyprforge-settings
@@ -1419,7 +1419,7 @@ case $ACTION in
         has_component clipboard && install_clipboard
         has_component emoji && install_emoji
         has_component files && install_files
-        has_component photos && install_photos
+        has_component media && install_media
         has_component mime && install_mime
         has_component settings && install_settings
         print_next_steps
@@ -1432,7 +1432,7 @@ case $ACTION in
         has_component clipboard && uninstall_clipboard
         has_component emoji && uninstall_emoji
         has_component files && uninstall_files
-        has_component photos && uninstall_photos
+        has_component media && uninstall_media
         has_component mime && uninstall_mime
         has_component tray && uninstall_tray
         has_component displayd && uninstall_displayd

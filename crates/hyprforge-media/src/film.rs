@@ -103,11 +103,11 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
 impl shader::Pipeline for Film {
     fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("photos film"),
+            label: Some("media film"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("photos film"),
+            label: Some("media film"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -128,12 +128,12 @@ impl shader::Pipeline for Film {
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("photos film"),
+            label: Some("media film"),
             bind_group_layouts: &[&layout],
             push_constant_ranges: &[],
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("photos film"),
+            label: Some("media film"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &module,
@@ -154,7 +154,7 @@ impl shader::Pipeline for Film {
             cache: None,
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("photos film"),
+            label: Some("media film"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
@@ -218,7 +218,7 @@ impl shader::Primitive for FilmPrimitive {
             return;
         }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("photos film"),
+            label: Some("media film"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 depth_slice: None,
@@ -248,7 +248,7 @@ impl Film {
     /// A sampled texture of `w` x `h` and its bind group.
     fn texture_of(&self, device: &wgpu::Device, w: u32, h: u32) -> (wgpu::Texture, wgpu::BindGroup) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("photos film frame"),
+            label: Some("media film frame"),
             size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
@@ -259,7 +259,7 @@ impl Film {
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("photos film frame"),
+            label: Some("media film frame"),
             layout: &self.layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },

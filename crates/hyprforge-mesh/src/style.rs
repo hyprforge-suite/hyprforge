@@ -3,7 +3,7 @@
 //! its window (recent files, the menu bar) rather than to the drawing.
 //!
 //! Here rather than beside the renderer so the choices are plain data a
-//! test and a `photos.toml` can hold; the renderer maps each one to a
+//! test and a `media.toml` can hold; the renderer maps each one to a
 //! shader entry point.
 
 use crate::camera::{P_ORTHOGRAPHIC, P_PERSPECTIVE};
@@ -31,7 +31,7 @@ impl Projection {
         }
     }
 
-    /// The word `photos.toml` stores. Part of the file format.
+    /// The word `media.toml` stores. Part of the file format.
     pub fn id(self) -> &'static str {
         match self {
             Self::Perspective => "perspective",
@@ -107,7 +107,7 @@ impl DrawMode {
         Self::ALL[(i + 1) % Self::ALL.len()]
     }
 
-    /// The word `photos.toml` stores. Part of the file format.
+    /// The word `media.toml` stores. Part of the file format.
     pub fn id(self) -> &'static str {
         match self {
             Self::Shaded => "shaded",
@@ -183,7 +183,7 @@ mod tests {
         assert_eq!(seen.len(), DrawMode::ALL.len());
     }
 
-    /// The ids are what `photos.toml` stores, so each must read back.
+    /// The ids are what `media.toml` stores, so each must read back.
     #[test]
     fn every_style_reads_back_from_its_id() {
         for mode in DrawMode::ALL {

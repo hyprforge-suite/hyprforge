@@ -24,7 +24,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// This viewer's own desktop entry — the id `mimeapps.list` knows it by.
-pub const OWN_ID: &str = "hyprforge-photos.desktop";
+pub const OWN_ID: &str = "hyprforge-media.desktop";
 
 /// The program "Open With…" should use: the user's default for the type
 /// unless that is this viewer, then the first other installed program
@@ -97,7 +97,7 @@ mod tests {
             ("image/x-qoi", "image/qoi"),
         ];
         let canonical = |kind: &'static str| CANONICAL.iter().find(|(d, _)| *d == kind).map_or(kind, |(_, c)| *c);
-        let entry = include_str!("../packaging/hyprforge-photos.desktop");
+        let entry = include_str!("../packaging/hyprforge-media.desktop");
         let mut claimed: Vec<&str> = entry
             .lines()
             .find_map(|l| l.strip_prefix("MimeType="))

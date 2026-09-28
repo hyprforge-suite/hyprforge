@@ -2153,6 +2153,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyprforge-media"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "chrono",
+ "glam",
+ "hyprforge-appearance",
+ "hyprforge-clipboard",
+ "hyprforge-core",
+ "hyprforge-ecosystem",
+ "hyprforge-fileops",
+ "hyprforge-image",
+ "hyprforge-keys",
+ "hyprforge-listing",
+ "hyprforge-look",
+ "hyprforge-mesh",
+ "hyprforge-mime",
+ "hyprforge-paths",
+ "hyprforge-process",
+ "hyprforge-thumbnails",
+ "hyprforge-ui",
+ "hyprforge-video",
+ "iced",
+ "image",
+ "naga",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "hyprforge-mesh"
 version = "0.1.0"
 dependencies = [
@@ -2198,42 +2234,6 @@ name = "hyprforge-paths"
 version = "0.1.0"
 dependencies = [
  "tempfile",
-]
-
-[[package]]
-name = "hyprforge-photos"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "chrono",
- "glam",
- "hyprforge-appearance",
- "hyprforge-clipboard",
- "hyprforge-core",
- "hyprforge-ecosystem",
- "hyprforge-fileops",
- "hyprforge-image",
- "hyprforge-keys",
- "hyprforge-listing",
- "hyprforge-look",
- "hyprforge-mesh",
- "hyprforge-mime",
- "hyprforge-paths",
- "hyprforge-process",
- "hyprforge-thumbnails",
- "hyprforge-ui",
- "hyprforge-video",
- "iced",
- "image",
- "naga",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
-//! `photos-config.toml` — the file a person writes by hand.
+//! `media-config.toml` — the file a person writes by hand.
 //!
-//! Not `photos.toml`. That one is state this app rewrites whole on every
+//! Not `media.toml`. That one is state this app rewrites whole on every
 //! save, and a whole-struct rewrite drops comments and reorders tables.
 //! Somebody writing key bindings needs a file the app only ever *reads*,
 //! or their notes vanish the next time they resize the window.
@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 
-/// Everything `photos-config.toml` configures, resolved against the
+/// Everything `media-config.toml` configures, resolved against the
 /// defaults.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -90,7 +90,7 @@ impl OneOrMany {
 }
 
 pub fn path() -> std::path::PathBuf {
-    hyprforge_paths::photos_config_toml_path()
+    hyprforge_paths::media_config_toml_path()
 }
 
 pub fn load() -> (Config, Vec<ConfigProblem>) {
@@ -150,7 +150,7 @@ mod tests {
     }
 
     fn parsed(text: &str) -> (Config, Vec<ConfigProblem>) {
-        parse(text, Path::new("photos-config.toml"))
+        parse(text, Path::new("media-config.toml"))
     }
 
     fn does(config: &Config, key: &str) -> Option<Action> {
@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn a_missing_file_is_first_run_with_nothing_to_report() {
         let dir = tempfile::tempdir().unwrap();
-        let (config, problems) = load_from(&dir.path().join("photos-config.toml"));
+        let (config, problems) = load_from(&dir.path().join("media-config.toml"));
         assert_eq!(config, Config::default());
         assert!(problems.is_empty());
     }
@@ -173,7 +173,7 @@ mod tests {
         let (config, problems) = parsed("[keys\nnext = 3");
         assert_eq!(config, Config::default());
         assert_eq!(problems.len(), 1);
-        assert!(problems[0].message.contains("photos-config.toml"));
+        assert!(problems[0].message.contains("media-config.toml"));
     }
 
     #[test]

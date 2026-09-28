@@ -282,7 +282,7 @@ fn play(
         ("input-default-bindings", "no"),
         ("input-vo-keyboard", "no"),
         ("terminal", "no"),
-        ("audio-client-name", "hyprforge-photos"),
+        ("audio-client-name", "hyprforge-media"),
         ("background-color", &format!("#{r:02x}{g:02x}{b:02x}")),
         ("pause", if options.paused { "yes" } else { "no" }),
         ("mute", if options.muted { "yes" } else { "no" }),

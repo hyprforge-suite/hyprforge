@@ -11,7 +11,7 @@
 //! # A leaf, like `hyprforge-image`
 //!
 //! No iced, no wgpu, no Wayland. The renderer that turns a [`mesh::Mesh`]
-//! into pixels lives with the window that draws it (`hyprforge-photos`),
+//! into pixels lives with the window that draws it (`hyprforge-media`),
 //! because its wgpu must be the exact one iced was built with. What is
 //! here — parsing, welding, the camera's matrices, which draw modes exist
 //! — is pure enough to test without a GPU, and is what a thumbnailer

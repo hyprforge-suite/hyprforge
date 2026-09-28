@@ -1,6 +1,6 @@
-# CI for the standalone hyprforge-photos repository (this file only takes
+# CI for the standalone hyprforge-media repository (this file only takes
 # effect at `.github/workflows/ci.yml` — the path `./split.sh` produces
-# once `crates/hyprforge-photos` becomes a repository root).
+# once `crates/hyprforge-media` becomes a repository root).
 #
 # What this checks: the crate builds, clippy is silent (a clippy warning
 # is a build failure in Hyprforge), and the tests that need nothing but

@@ -1,7 +1,7 @@
 //! What this app can be asked to do, and the keys that ask for it.
 //!
 //! The grammar is `hyprforge-keys`; this is the table. Written as strings
-//! and parsed by the same function that reads `photos-config.toml`, so
+//! and parsed by the same function that reads `media-config.toml`, so
 //! the shipped defaults *are* a config and there is no second table for
 //! the file to drift from.
 //!
@@ -162,7 +162,7 @@ impl Action {
         ]
     }
 
-    /// The id `photos-config.toml` uses. Part of the file format:
+    /// The id `media-config.toml` uses. Part of the file format:
     /// renaming one breaks somebody's config.
     pub fn id(self) -> &'static str {
         match self {
@@ -339,7 +339,7 @@ impl Action {
         }
     }
 
-    /// The action a `photos-config.toml` id names, or `None` for one this
+    /// The action a `media-config.toml` id names, or `None` for one this
     /// version does not know — which the caller reports, never ignores.
     pub fn from_id(id: &str) -> Option<Action> {
         Action::all().into_iter().find(|a| a.id() == id)

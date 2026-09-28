@@ -20,10 +20,10 @@
 
 use super::{App, Listing, Message, Mode, Tiles, GRID_PAD, INSPECTOR_WIDTH, SIDEBAR_WIDTH};
 use super::{FILMSTRIP_HEIGHT, STATUS_HEIGHT, STRIP_CURRENT, STRIP_GAP, STRIP_TILE, TILE_LINE, TILE_PAD};
-use hyprforge_photos::folder::Media;
-use hyprforge_photos::keys::{self, Action};
-use hyprforge_photos::slideshow::Interval;
-use hyprforge_photos::{grid, info, library};
+use hyprforge_media::folder::Media;
+use hyprforge_media::keys::{self, Action};
+use hyprforge_media::slideshow::Interval;
+use hyprforge_media::{grid, info, library};
 use hyprforge_ui::density;
 use hyprforge_ui::glyph;
 use hyprforge_ui::theme::{self, spacing, surface, FontScale, BASE_TEXT_SIZE};
@@ -114,7 +114,7 @@ impl App {
         let tools = row![
             glyph_button("⟲", photo.then_some(Message::Perform(Action::RotateLeft)), false, scale),
             // Edit (mockup `1d`) is not built: it writes to somebody's
-            // original, which `photos-plan.md` keeps as a separate
+            // original, which `media-plan.md` keeps as a separate
             // decision. Drawn disabled rather than left out, the way the
             // file manager shows its Columns view — a control that is
             // visibly waiting is a smaller surprise than one that appears.
@@ -600,8 +600,8 @@ impl App {
     /// lit — the same "filled means on" idiom as the header's buttons.
     fn zoom_pill(&self) -> Element<'_, Message> {
         let scale = self.font_scale;
-        let fit = self.transform.zoom == hyprforge_photos::transform::Zoom::Fit;
-        let actual = self.transform.zoom == hyprforge_photos::transform::Zoom::Factor(1.0);
+        let fit = self.transform.zoom == hyprforge_media::transform::Zoom::Fit;
+        let actual = self.transform.zoom == hyprforge_media::transform::Zoom::Factor(1.0);
         let segment = |label: &'static str, action: Action, lit: bool| -> Element<'_, Message> {
             button(text(label).font(theme::mono_font()).size(scale.apply(density::META_TEXT_BASE * 0.85)))
                 .padding([3.0, 8.0])
@@ -886,7 +886,7 @@ impl App {
                     .map(|s| &s.decoded.measured)
                     .or(details.and_then(|d| d.measured.as_ref()));
                 let camera = details.map(|d| &d.camera);
-                let turns = if self.mode == Mode::Photo { self.turns } else { hyprforge_photos::rotation::Turns::none() };
+                let turns = if self.mode == Mode::Photo { self.turns } else { hyprforge_media::rotation::Turns::none() };
 
                 let mut col = column![column![
                     scaled_text(item.name.clone(), 14.0, scale)
@@ -1103,7 +1103,7 @@ impl App {
             // than as a blur stretched across the screen.
             Some(shown) if self.current_path().as_deref() == Some(shown.path.as_path()) => {
                 let viewport = self.viewport();
-                let fit = hyprforge_photos::transform::Transform::default();
+                let fit = hyprforge_media::transform::Transform::default();
                 let (w, h) = fit.drawn_size(shown.size, viewport);
                 container(
                     image(shown.handle.clone())

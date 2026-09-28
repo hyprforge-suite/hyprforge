@@ -28,7 +28,7 @@ pkgname=(
   hyprforge-clipboard
   hyprforge-emojimenu
   hyprforge-files
-  hyprforge-photos
+  hyprforge-media
   hyprforge
 )
 pkgver=0.1.0
@@ -102,7 +102,7 @@ package_hyprforge-files() {
     "$pkgdir/usr/share/applications/hyprforge-files.desktop"
 }
 
-package_hyprforge-photos() {
+package_hyprforge-media() {
   pkgdesc="Photo, video and 3D model viewer for Hyprland"
   depends=(wayland libxkbcommon)
   optdepends=(
@@ -118,9 +118,9 @@ package_hyprforge-photos() {
     'ffmpeg: thumbnails of videos, from their first real frame'
   )
   cd "$startdir/../.."
-  _bin hyprforge-photos
-  install -Dm644 crates/hyprforge-photos/packaging/hyprforge-photos.desktop \
-    "$pkgdir/usr/share/applications/hyprforge-photos.desktop"
+  _bin hyprforge-media
+  install -Dm644 crates/hyprforge-media/packaging/hyprforge-media.desktop \
+    "$pkgdir/usr/share/applications/hyprforge-media.desktop"
 }
 
 package_hyprforge-lock() {
@@ -218,7 +218,7 @@ package_hyprforge() {
     hyprforge-clipboard
     hyprforge-emojimenu
     hyprforge-files
-    hyprforge-photos
+    hyprforge-media
   )
   # The greeter is deliberately not here. Installing it is not the
   # dangerous step — enabling greetd is, because that decides which VT

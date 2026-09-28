@@ -115,11 +115,11 @@ fn depth_state(write: bool, test: bool) -> Option<wgpu::DepthStencilState> {
 impl Scene {
     pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
         let scene_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("photos model scene"),
+            label: Some("media model scene"),
             source: wgpu::ShaderSource::Wgsl(include_str!("scene.wgsl").into()),
         });
         let line_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("photos model lines"),
+            label: Some("media model lines"),
             source: wgpu::ShaderSource::Wgsl(include_str!("lines.wgsl").into()),
         });
 
@@ -134,20 +134,20 @@ impl Scene {
             count: None,
         };
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("photos model uniforms"),
+            label: Some("media model uniforms"),
             entries: &[uniform_entry(false, std::mem::size_of::<Uniforms>() as u64)],
         });
         let line_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("photos model line uniforms"),
+            label: Some("media model line uniforms"),
             entries: &[uniform_entry(true, 64)],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("photos model scene layout"),
+            label: Some("media model scene layout"),
             bind_group_layouts: &[&bgl],
             push_constant_ranges: &[],
         });
         let line_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("photos model line layout"),
+            label: Some("media model line layout"),
             bind_group_layouts: &[&line_bgl],
             push_constant_ranges: &[],
         });
@@ -184,7 +184,7 @@ impl Scene {
         };
 
         let backdrop = make_pipeline(
-            "photos model backdrop",
+            "media model backdrop",
             &scene_shader,
             &layout,
             "vs_backdrop",
@@ -209,7 +209,7 @@ impl Scene {
             })
             .collect();
         let wireframe = make_pipeline(
-            "photos model wireframe",
+            "media model wireframe",
             &scene_shader,
             &layout,
             "vs_mesh",
@@ -219,7 +219,7 @@ impl Scene {
             depth_state(true, true),
         );
         let line = make_pipeline(
-            "photos model axes",
+            "media model axes",
             &line_shader,
             &line_layout,
             "vs_line",
@@ -230,7 +230,7 @@ impl Scene {
         );
         // The flower sits over everything, so it ignores depth.
         let line_hud = make_pipeline(
-            "photos model axis flower",
+            "media model axis flower",
             &line_shader,
             &line_layout,
             "vs_line",
@@ -241,24 +241,24 @@ impl Scene {
         );
 
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("photos model uniforms"),
+            label: Some("media model uniforms"),
             size: std::mem::size_of::<Uniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("photos model uniforms"),
+            label: Some("media model uniforms"),
             layout: &bgl,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() }],
         });
         let line_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("photos model line uniforms"),
+            label: Some("media model line uniforms"),
             size: LINE_SLOTS as u64 * LINE_SLOT_SIZE,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let line_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("photos model line uniforms"),
+            label: Some("media model line uniforms"),
             layout: &line_bgl,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
@@ -270,12 +270,12 @@ impl Scene {
             }],
         });
         let hud_lines = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("photos model axis flower"),
+            label: Some("media model axis flower"),
             contents: bytemuck::cast_slice(&hud_line_verts()),
             usage: wgpu::BufferUsages::VERTEX,
         });
         let axis_lines = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("photos model axes"),
+            label: Some("media model axes"),
             size: (6 * std::mem::size_of::<Vertex>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -306,12 +306,12 @@ impl Scene {
     /// held on the card — the window holds one on the CPU side too.
     pub fn upload_mesh(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, mesh: &Mesh) {
         let verts = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("photos model vertices"),
+            label: Some("media model vertices"),
             contents: bytemuck::cast_slice(&mesh.verts),
             usage: wgpu::BufferUsages::VERTEX,
         });
         let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("photos model indices"),
+            label: Some("media model indices"),
             contents: bytemuck::cast_slice(&mesh.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
@@ -343,7 +343,7 @@ impl Scene {
         }
         let edges = mesh.edge_indices();
         let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("photos model edges"),
+            label: Some("media model edges"),
             contents: bytemuck::cast_slice(&edges),
             usage: wgpu::BufferUsages::INDEX,
         });
@@ -359,7 +359,7 @@ impl Scene {
             return;
         }
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("photos model depth"),
+            label: Some("media model depth"),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
@@ -405,7 +405,7 @@ impl Scene {
             return;
         }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("photos model"),
+            label: Some("media model"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 depth_slice: None,

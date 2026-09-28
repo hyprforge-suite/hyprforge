@@ -217,7 +217,7 @@ Apps
                             deliberately does not have — launching what
                             you double-click, file operations, and
                             dragging files out into other applications.
-  hyprforge-photos/        the photo, video and 3D model viewer, in the
+  hyprforge-media/        the photo, video and 3D model viewer, in the
                             file manager's shell: a Places sidebar, and
                             Photo, Grid and Library as modes of one window.
                             A picture opened on its own gets a compact,
@@ -241,7 +241,7 @@ Apps
 ```
 
 Nine of these directories — clipboard, lock, greet, tray, settings,
-displayd, emojimenu, files and photos — are also their own repositories, published
+displayd, emojimenu, files and media — are also their own repositories, published
 separately from this one. See "Ten repositories, one workspace" below for what that means and where a change to
 one of them should actually be made.
 
@@ -284,7 +284,7 @@ share live, and the only place that says how the ten fit together.
 | [hyprforge-displayd](https://github.com/hyprforge-suite/hyprforge-displayd) | A monitor-arrangement daemon: it watches `wlr-output-management`, recognises a set of displays it has seen before and applies the layout saved for it, plus `hyprforge-displayctl` to drive it from a script. |
 | [hyprforge-emojimenu](https://github.com/hyprforge-suite/hyprforge-emojimenu) | An emoji picker: a layer-shell popup at the pointer with type-to-filter search over the full Unicode set, frequently used first, skin tones and a remembered default tone, plus kaomoji and symbols. |
 | [hyprforge-files](https://github.com/hyprforge-suite/hyprforge-files) | A file manager: tabs, a sidebar, list and grid views with thumbnails, a preview pane, the freedesktop trash, copy, paste and drag with other applications, and zip/tar/7z archives browsed and edited in place. |
-| [hyprforge-photos](https://github.com/hyprforge-suite/hyprforge-photos) | A photo, video and 3D model viewer: a folder browsed in the file manager's order, a date-grouped grid and library, EXIF and orientation done right, videos through libmpv, STL/3MF/OBJ models on the GPU, and a slideshow. |
+| [hyprforge-media](https://github.com/hyprforge-suite/hyprforge-media) | A photo, video and 3D model viewer: a folder browsed in the file manager's order, a date-grouped grid and library, EXIF and orientation done right, videos through libmpv, STL/3MF/OBJ models on the GPU, and a slideshow. |
 
 Eight of the nine are meant to be installed on their own: clone
 `hyprforge-clipboard` and you get a clipboard daemon and nothing else — no
@@ -455,7 +455,7 @@ cargo build --workspace --release
 
 Binaries land in `target/release/`: `hyprforge-displayd`,
 `hyprforge-displayctl`, `hyprforge-settings`, `hyprforge-files`,
-`hyprforge-photos`, `hyprforge-clipd`,
+`hyprforge-media`, `hyprforge-clipd`,
 `hyprforge-clipmenu`, `hyprforge-emojimenu`, `hyprforge-trayd`,
 `hyprforge-traymenu`, `hyprforge-mimetype`, `hyprforge-mimeopen`,
 `hyprforge-lock`, `hyprforge-greet`.
@@ -481,8 +481,8 @@ Binaries land in `target/release/`: `hyprforge-displayd`,
 | `$XDG_CONFIG_HOME/hyprforge/emojimenu.toml` | The emoji picker's default skin tone, and how often each emoji is picked (its "Frequently used" section) |
 | `$XDG_CONFIG_HOME/hyprforge/files.toml` | The file manager's remembered state — sort order, view mode, pinned folders, whether the preview pane is on, window size |
 | `$XDG_CONFIG_HOME/hyprforge/files-config.toml` | The file manager's hand-written configuration — key bindings, the sidebar's places and their icons. Only ever read, so your comments survive |
-| `$XDG_CONFIG_HOME/hyprforge/photos.toml` | The photo viewer's remembered state — window size, which panels are showing, slideshow and 3D model view settings |
-| `$XDG_CONFIG_HOME/hyprforge/photos-config.toml` | The photo viewer's hand-written key bindings. Only ever read. The order pictures page in is not here: it is read from `files.toml`, so the two apps agree |
+| `$XDG_CONFIG_HOME/hyprforge/media.toml` | The photo viewer's remembered state — window size, which panels are showing, slideshow and 3D model view settings |
+| `$XDG_CONFIG_HOME/hyprforge/media-config.toml` | The photo viewer's hand-written key bindings. Only ever read. The order pictures page in is not here: it is read from `files.toml`, so the two apps agree |
 | `$XDG_CONFIG_HOME/hyprforge/clipboard/` | The clipboard history: `history.toml` for the index, `images/` for one file per image entry — never image bytes in the index itself |
 
 `$XDG_CONFIG_HOME` falls back to `~/.config` if unset, per the XDG spec.

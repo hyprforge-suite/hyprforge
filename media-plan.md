@@ -1,5 +1,10 @@
 # Building the image viewer
 
+*Renamed on 2026-09-27: the crate, binary and package are
+`hyprforge-media`, because a viewer of pictures, videos and 3D models is
+not a photo viewer. "photos" below is the name it had while this plan
+was being carried out; the paths are current.*
+
 **Status, 2026-09-23.** Phases 0 to 3 are built: packaging, the window,
 the viewer grammar and the actions that touch files. The three open
 questions at the end were answered by the owner — PNG, JPEG, WebP and GIF;
@@ -79,7 +84,7 @@ went another way.
 - No golden-image test renders the viewer headlessly; the centre-pixel
   comparison was done by hand (see the 3D entry above).
 
-`hyprforge-photos`, the "Photo Viewer" row the inventory in
+`hyprforge-media`, the "Photo Viewer" row the inventory in
 `hyprforge-vision.md` carried as *not started* when this was written. This is the plan for
 it, written the way `repo-plan.md` is: the decisions, what each one costs,
 and the things that were checked rather than assumed.
@@ -103,7 +108,7 @@ already a rule somewhere in `CLAUDE.md` or the README:
    rewrites whole (window size, view prefs); `files-config.toml` is
    hand-written and only ever read (key bindings, menus). Missing is
    first-run, unparseable is *reported and defaulted*, partly-bad keeps
-   every good entry. `photos.toml` / `photos-config.toml`, same split,
+   every good entry. `media.toml` / `media-config.toml`, same split,
    same three states. This is the 37-binds rule and it is not optional.
 3. **The keyboard grammar is config, not code.** Vision pillar 9 says one
    grammar across every app; Files is the only app that has one. See
@@ -114,10 +119,10 @@ already a rule somewhere in `CLAUDE.md` or the README:
    "copy image" — the clipboard *library* is what this uses, never the
    daemon. `hyprforge-files` not installed makes "Show in Files" a logged
    warning, not a crash.
-5. **The packaging shape.** Its own `package_hyprforge-photos()` in
+5. **The packaging shape.** Its own `package_hyprforge-media()` in
    `packaging/arch/PKGBUILD`, its own
-   `crates/hyprforge-photos/packaging/hyprforge-photos.desktop`, its own
-   `install_photos()` in `./hyprforge`, and a line in `--status`.
+   `crates/hyprforge-media/packaging/hyprforge-media.desktop`, its own
+   `install_media()` in `./hyprforge`, and a line in `--status`.
    Installing only this package on a clean machine must give a working
    viewer.
 6. **Tiered tests that gate on what they actually ask.** Almost all of
@@ -131,7 +136,7 @@ already a rule somewhere in `CLAUDE.md` or the README:
 hyprforge-image     a leaf. Identify, measure, orient, budget, downscale,
                     decode. No iced, no Wayland, no async runtime, no
                     Hyprland. Depends on `image` and nothing of ours.
-hyprforge-photos    the window. iced, the viewer grammar, the filmstrip,
+hyprforge-media    the window. iced, the viewer grammar, the filmstrip,
                     and the actions that touch files.
 ```
 
@@ -145,7 +150,7 @@ already half-specified in a shipped struct. Everything in that leaf —
 is", "what may I safely decode" — is the same question the preview pane
 will ask, and it is all pure enough to test without a GPU.
 
-**Why there is no third crate**, no `hyprforge-photos-core` mirroring
+**Why there is no third crate**, no `hyprforge-media-core` mirroring
 `hyprforge-files-core`: that crate exists for one specific reason, which
 is that the portal's open/save dialog has to render *the identical view*
 and the type system is what enforces it. There is no second host for a
@@ -239,9 +244,9 @@ it is wrong.
 ## Phases
 
 **Phase 0 — the skeleton, before any pixels.** Two crates in `members`,
-manifests with the comment density this repo uses, `photos.toml` /
-`photos-config.toml` in `hyprforge-paths`, the desktop entry, the PKGBUILD
-package, `install_photos()` and the `--status` line, and the vision table
+manifests with the comment density this repo uses, `media.toml` /
+`media-config.toml` in `hyprforge-paths`, the desktop entry, the PKGBUILD
+package, `install_media()` and the `--status` line, and the vision table
 row moved off "not started". Doing packaging last is how an app ends up
 unable to be installed alone; doing it first makes "install only this
 package on a clean machine" answerable from day one.

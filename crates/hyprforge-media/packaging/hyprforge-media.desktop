@@ -1,10 +1,10 @@
 [Desktop Entry]
 Type=Application
-Name=Hyprforge Photos
-GenericName=Image Viewer
+Name=Hyprforge Media
+GenericName=Media Viewer
 Comment=View pictures, videos and 3D models, one folder at a time
 # No absolute path, for the reason hyprforge-files.desktop gives.
-Exec=hyprforge-photos %U
+Exec=hyprforge-media %U
 Icon=image-viewer
 Terminal=false
 Categories=Graphics;Viewer;
