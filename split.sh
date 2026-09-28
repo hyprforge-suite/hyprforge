@@ -131,7 +131,11 @@ done
 # So the URL is allowed to change — it just has to change everywhere at
 # once.
 printf '\n%s==> Checking every manifest agrees on the git URL%s\n' "$BOLD" "$OFF"
-urls=$(grep -rhoE 'git = "[^"]+"' --include=Cargo.toml . | sort -u)
+# `.claude/` is excluded because it can hold git-ignored worktrees of
+# this repository from before a URL change, whose manifests still name
+# the old one — a disagreement between the tree being split and a
+# stale copy of itself, not between two manifests that will ship.
+urls=$(grep -rhoE 'git = "[^"]+"' --include=Cargo.toml --exclude-dir=.claude --exclude-dir=target . | sort -u)
 if [[ -z "$urls" ]]; then
     ok "no git dependencies to disagree about"
 elif [[ $(wc -l <<<"$urls") -eq 1 ]]; then

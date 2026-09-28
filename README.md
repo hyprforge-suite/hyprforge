@@ -240,9 +240,9 @@ Apps
                             conversation model
 ```
 
-Eight of these directories — clipboard, lock, greet, tray, settings,
-displayd, emojimenu and files — are also their own repositories, published
-separately from this one. See "Nine repositories, one workspace" below for what that means and where a change to
+Nine of these directories — clipboard, lock, greet, tray, settings,
+displayd, emojimenu, files and photos — are also their own repositories, published
+separately from this one. See "Ten repositories, one workspace" below for what that means and where a change to
 one of them should actually be made.
 
 ### Why the look is one crate
@@ -265,11 +265,11 @@ greeter runs as its own user and a home directory is `drwx------`: it cannot
 traverse into `$HOME` at all, so continuity across the login boundary has to be
 an export rather than a shared path.
 
-## Nine repositories, one workspace
+## Ten repositories, one workspace
 
 There is no GitHub organisation for this suite — the name `hyprforge` was
-already taken — so this repository is the only place that says the other eight
-exist. Eight components have been split out of `crates/` into their own
+already taken — so this repository is the only place that says the other nine
+exist. Nine components have been split out of `crates/` into their own
 repositories with `git subtree`, pushed, and have green CI. They are private
 today; the intent is to make them public once they've had more use.
 
@@ -283,8 +283,9 @@ today; the intent is to make them public once they've had more use.
 | [hyprforge-displayd](https://github.com/adamrpostjr/hyprforge-displayd) | A monitor-arrangement daemon: it watches `wlr-output-management`, recognises a set of displays it has seen before and applies the layout saved for it, plus `hyprforge-displayctl` to drive it from a script. |
 | [hyprforge-emojimenu](https://github.com/adamrpostjr/hyprforge-emojimenu) | An emoji picker: a layer-shell popup at the pointer with type-to-filter search over the full Unicode set, frequently used first, skin tones and a remembered default tone, plus kaomoji and symbols. |
 | [hyprforge-files](https://github.com/adamrpostjr/hyprforge-files) | A file manager: tabs, a sidebar, list and grid views with thumbnails, a preview pane, the freedesktop trash, copy, paste and drag with other applications, and zip/tar/7z archives browsed and edited in place. |
+| [hyprforge-photos](https://github.com/adamrpostjr/hyprforge-photos) | A photo, video and 3D model viewer: a folder browsed in the file manager's order, a date-grouped grid and library, EXIF and orientation done right, videos through libmpv, STL/3MF/OBJ models on the GPU, and a slideshow. |
 
-Seven of the eight are meant to be installed on their own: clone
+Eight of the nine are meant to be installed on their own: clone
 `hyprforge-clipboard` and you get a clipboard daemon and nothing else — no
 Settings app, no tray, no Hyprland config machinery. `hyprforge-settings` is
 the exception and its own README says so: it depends on seventeen other
@@ -358,7 +359,7 @@ integration tests, it has two steps worth knowing about by name:
 feature and fails if it's on, because that fact is invisible to every
 Rust test — both renderers report the same `Color` and only the pixels
 differ (see the shared-look rule in `CLAUDE.md`). **Standalone crate
-dependency pins** exists because the eight components in the table
+dependency pins** exists because the nine components in the table
 above are their own repositories, which means each hand-copies every third-party dependency's version and
 feature set instead of inheriting from `[workspace.dependencies]` — a
 crate that is its own repository root has nothing to inherit from. If

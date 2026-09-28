@@ -165,8 +165,8 @@ if $PUSH; then
     if ./check.sh --quick; then
         ok "tier 1 passed"
     else
-        die "./check.sh --quick failed. Publishing code that doesn't pass tier 1 to five
-     repositories other people clone is worse than not publishing it.
+        die "./check.sh --quick failed. Publishing code that doesn't pass tier 1 to every
+     component repository other people clone is worse than not publishing it.
      Fix it, then re-run ./sync.sh --push."
     fi
 fi

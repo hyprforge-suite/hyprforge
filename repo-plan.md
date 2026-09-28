@@ -251,7 +251,7 @@ every standalone-ready manifest against the workspace table in tier 1.
 
 *Reversibility, which the plan asserts and nobody had checked* — at the
 time, nothing had left this machine; there was still no remote. (All
-eight components have been pushed since.) Undoing it is deleting
+nine components have been pushed since.) Undoing it is deleting
 the branches and reverting the rejoin commits. Nothing is irreversible
 until something is pushed and somebody clones it.
 
@@ -348,6 +348,9 @@ is a decision rather than the drift `sync.sh` exists to catch.
       the fact and green on 2026-09-23, and `split.sh` now refuses a
       crate whose CI is not committed
 - [x] Day-2 drift detection (`./sync.sh`), monorepo included
+- [x] photos prepared standalone and split (2026-09-27), the last of the
+      nine packaged components; born with its CI committed, and without
+      the `SUITE_READ` step, since it is published into a public suite
 
 ## Staying in sync after the push
 
@@ -365,7 +368,7 @@ step discovers its list) it computes, without pushing anything, the tree
 published repository's `main`. `./sync.sh --push` re-splits and pushes
 only the components that have actually drifted, after refusing on a dirty
 tree or a failing `./check.sh --quick` — publishing code that hasn't
-passed tier 1 to eight repositories is worse than not publishing. It never
+passed tier 1 to nine repositories is worse than not publishing. It never
 force-pushes: a component whose published history is not an ancestor of
 the new split has diverged (an outside contributor, a direct push) and is
 left for a human with `git subtree pull`, not resolved automatically.

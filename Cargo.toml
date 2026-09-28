@@ -281,3 +281,8 @@ hyprforge-image = { path = "crates/hyprforge-image" }
 hyprforge-icons = { path = "crates/hyprforge-icons" }
 hyprforge-thumbnails = { path = "crates/hyprforge-thumbnails" }
 hyprforge-video = { path = "crates/hyprforge-video" }
+# The three the photos split added: the listing it takes its order from,
+# the mesh loader, and the keyboard grammar.
+hyprforge-listing = { path = "crates/hyprforge-listing" }
+hyprforge-mesh = { path = "crates/hyprforge-mesh" }
+hyprforge-keys = { path = "crates/hyprforge-keys" }

@@ -276,9 +276,19 @@ else
 import tomllib
 from pathlib import Path
 
-URL = "https://github.com/adamrpostjr/hyprforge"
 root = tomllib.loads(Path("Cargo.toml").read_text())
-patched = set(root.get("patch", {}).get(URL, {}))
+# The URL comes from the [patch] table's own key, not from a literal
+# here. A literal would have to be updated when the repository moves,
+# and if it were not, this check would match no manifest and report
+# "all 0 siblings build from crates/" in green — a check that silently
+# never runs, wearing a tick. The table is the one place the URL must
+# be right for anything to build locally, so it is the one to trust.
+patches = root.get("patch", {})
+if len(patches) != 1:
+    print(f"PROBLEM the root [patch] table has {len(patches)} source(s) ({', '.join(patches) or 'none'}); exactly one — the suite's git URL — is expected")
+    raise SystemExit
+URL = next(iter(patches))
+patched = set(patches[URL])
 
 named = {}
 for manifest in sorted(Path("crates").glob("*/Cargo.toml")):
@@ -292,6 +302,11 @@ for manifest in sorted(Path("crates").glob("*/Cargo.toml")):
                 named.setdefault(name, set()).add(manifest.parent.name)
 
 print(f"CHECKED {len(named)}")
+if not named:
+    # Nine standalone manifests name the URL today; zero means the
+    # manifests and the table have stopped agreeing on what it is, and
+    # every sibling is being fetched from wherever the manifests point.
+    print(f"PROBLEM no manifest under crates/ names {URL}, the URL the root [patch] table redirects — the two have diverged, and nothing is being redirected")
 for name in sorted(set(named) - patched):
     print(f"PROBLEM {name} is named by git in {', '.join(sorted(named[name]))} but not redirected by [patch] — it builds from GitHub, not from crates/")
 PYEOF
