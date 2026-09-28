@@ -1,0 +1,66 @@
+# CI for the standalone hyprforge-media repository (this file only takes
+# effect at `.github/workflows/ci.yml` — the path `./split.sh` produces
+# once `crates/hyprforge-media` becomes a repository root).
+#
+# What this checks: the crate builds, clippy is silent (a clippy warning
+# is a build failure in Hyprforge), and the tests that need nothing but
+# this process. That is most of the crate — the folder model, the
+# ordering, the fit-to-window arithmetic, the decode cache's budget, the
+# keyboard grammar, the grid's date grouping, the slideshow, and every
+# WGSL shader parsed by the compiler wgpu itself uses.
+#
+# What it deliberately does NOT check:
+#   - it never opens a window and never touches a GPU. Whether a model
+#     actually draws is a question for a machine with one.
+#   - mpv and ffmpeg are not installed on the runner. libmpv is opened at
+#     run time, not linked, and ffmpeg is a subprocess, so the build does
+#     not need them — and a test that needs one has to say so with the
+#     `HYPRFORGE-SKIP:` marker rather than fail, the same rule the suite's
+#     `check.sh` applies.
+#
+# A green run means the code is internally consistent. It does not mean
+# a picture has ever been drawn.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tier-1:
+    name: "Tier 1 (no compositor, no GPU, no mpv): build, clippy -D warnings, cargo test"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the pinned Rust toolchain (rust-toolchain.toml)
+        # `rustup show` is what makes rustup notice rust-toolchain.toml
+        # here and install exactly the channel and components it pins,
+        # rather than whatever `stable` resolves to on the day the job
+        # runs — which matters because clippy's lint set moves between
+        # releases and this job treats a warning as a failure.
+        run: rustup show
+
+      - name: Cache the cargo registry and build output
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install native dependencies
+        # The `*-sys` crates in this crate's graph, confirmed with
+        # `cargo tree --edges normal,build` rather than assumed: xkbcommon
+        # through hyprforge-clipboard, wayland-sys through iced's
+        # softbuffer. There is no `-sys` crate for mpv or ffmpeg — see
+        # the header.
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y pkg-config libxkbcommon-dev libwayland-dev
+
+      - name: cargo build
+        run: cargo build --all-targets
+
+      - name: cargo clippy --all-targets -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: "cargo test (tier 1 only)"
+        run: cargo test --all-targets
