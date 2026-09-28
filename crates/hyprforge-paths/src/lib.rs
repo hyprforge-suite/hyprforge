@@ -293,6 +293,12 @@ mod tests {
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
+            // SAFETY: `_lock` is still held — it is a field of `self`, and
+            // fields drop after this body runs — so this restore is
+            // serialised against every other env mutation in this module
+            // exactly as `set` was. No other thread reads the environment
+            // unlocked: `config_home` is only called from tests that hold
+            // the guard.
             unsafe {
                 match &self.xdg {
                     Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),

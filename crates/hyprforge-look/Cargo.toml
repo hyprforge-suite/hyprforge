@@ -1,10 +1,12 @@
 [package]
 name = "hyprforge-look"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
 description = "The Hyprforge suite's shared Color and Theme types, with no GUI toolkit dependency so the lock screen and greeter can paint the same look as every iced app."
-repository = "https://github.com/hyprforge-suite/hyprforge"
 documentation = "https://docs.rs/hyprforge-look"
 keywords = ["theme", "color", "hyprland", "wayland", "config"]
 categories = ["graphics", "config"]

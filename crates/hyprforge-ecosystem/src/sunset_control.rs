@@ -158,7 +158,7 @@ pub fn turn_off_command() -> Vec<&'static str> {
 }
 
 /// Whatever can drive night light at runtime — the real hyprsunset
-/// process, or [`mock::MockBackend`] in a test.
+/// process, or `mock::MockBackend` (behind the `mock` feature) in a test.
 pub trait SunsetBackend {
     /// The temperature hyprsunset is currently set to hold. See the
     /// module doc: this is **not** whether night light is on or off,

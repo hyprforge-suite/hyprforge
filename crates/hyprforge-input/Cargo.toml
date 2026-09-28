@@ -3,6 +3,10 @@ name = "hyprforge-input"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "The keyboard, pointer and touchpad hl.config catalog, XKB layout discovery and the require line for the generated file; Hyprforge-internal, published so the suite's apps build from crates.io"
 
 [dependencies]
 # For paths::write_atomic, apply_lua and lua_setup — default-features = false

@@ -3,6 +3,10 @@ name = "hyprforge-keys"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "The suite's keyboard grammar: one Combo parser, a Keymap generic over each app's actions, and one merge policy for user overrides, so Ctrl+Shift+N means the same thing in every Hyprforge app"
 
 # One dependency, and it is for the error type. This crate is the
 # suite's keyboard grammar — vision pillar 9, "one keyboard shortcut

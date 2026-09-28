@@ -1,10 +1,12 @@
 [package]
 name = "hyprforge-icons"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
 description = "Finds an icon by name the way the freedesktop icon theme specification says to: the configured theme, what it inherits, then hicolor."
-repository = "https://github.com/hyprforge-suite/hyprforge"
 
 # A leaf, like hyprforge-mime beside it: no GUI toolkit and nothing
 # Hyprland-shaped. It answers "which file is the icon called this" and
@@ -13,7 +15,7 @@ repository = "https://github.com/hyprforge-suite/hyprforge"
 [dependencies]
 # Only to ask gsettings which theme is configured — and nothing may wait
 # on another process without a bound (CLAUDE.md).
-hyprforge-process = { path = "../hyprforge-process" }
+hyprforge-process.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

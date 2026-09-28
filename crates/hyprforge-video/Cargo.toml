@@ -3,6 +3,9 @@ name = "hyprforge-video"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
 description = "Plays a video into memory through libmpv (loaded at run time), and finds a video's first real frame for its thumbnail."
 
 # Videos for the photo viewer, and thumbnails for it and the file manager.

@@ -172,6 +172,13 @@ pub enum Happened {
 /// for mpv to hold and reclaimed when the owner is dropped.
 type Nudge = Box<dyn Fn() + Send + Sync>;
 
+// SAFETY: the caller is libmpv, which by the contract of
+// `mpv_set_wakeup_callback` / `mpv_render_context_set_update_callback`
+// passes back exactly the `*mut c_void` it was registered with — and the
+// only pointer this crate ever registers is a `Box<Nudge>` leaked with
+// `Box::into_raw`. Nothing else may call this. The closure is `Send +
+// Sync` because mpv invokes it from its own threads, and it must only
+// signal: the docs on `Mpv::on_wakeup` forbid calling back into mpv here.
 unsafe extern "C" fn nudge(data: *mut c_void) {
     // SAFETY: `data` is the `Nudge` this crate boxed and handed to mpv; it
     // lives until mpv is told to stop calling (see the `Drop`s below).

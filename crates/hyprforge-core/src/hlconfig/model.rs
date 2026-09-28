@@ -2,7 +2,7 @@
 //!
 //! The central idea is that a setting is either **ours** or **not present**.
 //! `hl.config` updates only the keys it's passed (measured, not assumed —
-//! see [`crate::codegen`]), so a settings file holding three keys overrides
+//! see [`codegen`](crate::hlconfig::codegen)), so a settings file holding three keys overrides
 //! exactly those three and leaves every other input option to Hyprland's
 //! default or the user's own config. That is what makes this module safe to
 //! adopt gradually rather than all at once.

@@ -192,7 +192,7 @@ impl Emoji {
     /// asking a plain emoji for a tone is not an error, it just has
     /// nothing to change. This is what lets a picker hold a `Tone` (the
     /// user's chosen default) and call this on *every* grid entry
-    /// without checking [`supports_tones`] first: a tone-incapable
+    /// without checking [`supports_tones`](Self::supports_tones) first: a tone-incapable
     /// entry simply ignores the request rather than producing a broken
     /// sequence.
     pub fn tone(&self, tone: Tone) -> &'static str {
@@ -358,7 +358,7 @@ fn score(normalized_name: &str, normalized_query: &str) -> Option<MatchTier> {
 /// table order decide, which is exactly the "feels random" a picker
 /// should not have.
 ///
-/// Matching is case- and whitespace-insensitive (see [`normalize`]). An
+/// Matching is case- and whitespace-insensitive (see `normalize`). An
 /// empty or all-whitespace query returns every entry in `table`'s own
 /// order, rather than nothing — a picker with no query typed yet should
 /// show the full grid, not a blank one.

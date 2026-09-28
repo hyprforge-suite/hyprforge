@@ -27,7 +27,7 @@
 //! # Why this crate does not depend on `hyprforge-clipboard`
 //!
 //! `hyprforge-clipmenu`'s "teardown, then paste" ordering is the poster
-//! child for what belongs here (see [`popup::finish_after_teardown`]),
+//! child for what belongs here (see `popup::finish_after_teardown`),
 //! and it would be tempting to also move `hyprforge-clipboard`'s
 //! `Chooser`/paste-synthesis seam in alongside it. That was considered
 //! and rejected: `hyprforge-clipboard` pulls in `tokio` for its own

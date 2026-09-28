@@ -4,8 +4,8 @@
 //! how its raw properties map to [`BatteryState`] and a rounded
 //! percentage, are pure functions kept testable without a bus — see
 //! [`crate::types`] for the ones that live above this line, and this
-//! file's own `#[cfg(test)]` block for the two ([`duration_from_upower_seconds`],
-//! [`percentage_from_upower`]) that are D-Bus-adjacent enough to live
+//! file's own `#[cfg(test)]` block for the two (`duration_from_upower_seconds`,
+//! `percentage_from_upower`) that are D-Bus-adjacent enough to live
 //! here instead.
 
 use crate::backend::BatteryBackend;

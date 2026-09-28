@@ -60,40 +60,45 @@ exclude = ["notif"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+repository = "https://github.com/hyprforge-suite/hyprforge"
+# The toolchain pin in rust-toolchain.toml is what actually builds this;
+# the MSRV is published so cargo can refuse an older compiler with a clear
+# message instead of a parse error deep in some dependency.
+rust-version = "1.97"
 
 [workspace.dependencies]
 # default-features = false so nobody picks up the optional `dbus`
 # (zbus) support by accident; only the settings app, displayctl and the
 # tray want it.
-hyprforge-core = { path = "crates/hyprforge-core", default-features = false }
+hyprforge-core = { path = "crates/hyprforge-core", version = "0.1.0", default-features = false }
 hyprforge-process = { path = "crates/hyprforge-process", version = "0.1.0" }
 hyprforge-secret = { path = "crates/hyprforge-secret", version = "0.1.0" }
-hyprforge-windowrules = { path = "crates/hyprforge-windowrules" }
-hyprforge-input = { path = "crates/hyprforge-input" }
-hyprforge-appearance = { path = "crates/hyprforge-appearance" }
-hyprforge-ecosystem = { path = "crates/hyprforge-ecosystem" }
-hyprforge-session = { path = "crates/hyprforge-session" }
-hyprforge-system = { path = "crates/hyprforge-system" }
-hyprforge-authui = { path = "crates/hyprforge-authui" }
+hyprforge-windowrules = { path = "crates/hyprforge-windowrules", version = "0.1.0" }
+hyprforge-input = { path = "crates/hyprforge-input", version = "0.1.0" }
+hyprforge-appearance = { path = "crates/hyprforge-appearance", version = "0.1.0" }
+hyprforge-ecosystem = { path = "crates/hyprforge-ecosystem", version = "0.1.0" }
+hyprforge-session = { path = "crates/hyprforge-session", version = "0.1.0" }
+hyprforge-system = { path = "crates/hyprforge-system", version = "0.1.0" }
+hyprforge-authui = { path = "crates/hyprforge-authui", version = "0.1.0" }
 hyprforge-paths = { path = "crates/hyprforge-paths", version = "0.1.0" }
 # The suite's keyboard grammar — one parser and one merge policy, so
 # `Ctrl+Shift+N` means the same thing in every app that binds a key.
 # Deliberately iced-free; the toolkit adapter lives in hyprforge-ui.
 hyprforge-keys = { path = "crates/hyprforge-keys", version = "0.1.0" }
 hyprforge-look = { path = "crates/hyprforge-look", version = "0.1.0" }
-hyprforge-ui = { path = "crates/hyprforge-ui" }
-hyprforge-lock = { path = "crates/hyprforge-lock" }
-hyprforge-shortcuts = { path = "crates/hyprforge-shortcuts" }
-hyprforge-lua-import = { path = "crates/hyprforge-lua-import" }
-hyprforge-network = { path = "crates/hyprforge-network" }
-hyprforge-bluetooth = { path = "crates/hyprforge-bluetooth" }
-hyprforge-power = { path = "crates/hyprforge-power" }
-hyprforge-tray = { path = "crates/hyprforge-tray" }
-hyprforge-clipboard = { path = "crates/hyprforge-clipboard" }
-hyprforge-popup = { path = "crates/hyprforge-popup" }
+hyprforge-ui = { path = "crates/hyprforge-ui", version = "0.1.0" }
+hyprforge-lock = { path = "crates/hyprforge-lock", version = "0.1.0" }
+hyprforge-shortcuts = { path = "crates/hyprforge-shortcuts", version = "0.1.0" }
+hyprforge-lua-import = { path = "crates/hyprforge-lua-import", version = "0.1.0" }
+hyprforge-network = { path = "crates/hyprforge-network", version = "0.1.0" }
+hyprforge-bluetooth = { path = "crates/hyprforge-bluetooth", version = "0.1.0" }
+hyprforge-power = { path = "crates/hyprforge-power", version = "0.1.0" }
+hyprforge-tray = { path = "crates/hyprforge-tray", version = "0.1.0" }
+hyprforge-clipboard = { path = "crates/hyprforge-clipboard", version = "0.1.0" }
+hyprforge-popup = { path = "crates/hyprforge-popup", version = "0.1.0" }
 hyprforge-emoji = { path = "crates/hyprforge-emoji", version = "0.1.0" }
-hyprforge-emojimenu = { path = "crates/hyprforge-emojimenu" }
-hyprforge-fileops = { path = "crates/hyprforge-fileops" }
+hyprforge-emojimenu = { path = "crates/hyprforge-emojimenu", version = "0.1.0" }
+hyprforge-fileops = { path = "crates/hyprforge-fileops", version = "0.1.0" }
 # What a directory listing is, how it is read and what order it is in —
 # the leaf under both the file manager and the image viewer, so the two
 # cannot disagree about which picture comes next in a folder.
@@ -104,20 +109,20 @@ hyprforge-listing = { path = "crates/hyprforge-listing", version = "0.1.0" }
 hyprforge-image = { path = "crates/hyprforge-image", version = "0.1.0" }
 hyprforge-mesh = { path = "crates/hyprforge-mesh", version = "0.1.0" }
 hyprforge-video = { path = "crates/hyprforge-video", version = "0.1.0" }
-hyprforge-media = { path = "crates/hyprforge-media" }
-hyprforge-files-core = { path = "crates/hyprforge-files-core" }
+hyprforge-media = { path = "crates/hyprforge-media", version = "0.1.0" }
+hyprforge-files-core = { path = "crates/hyprforge-files-core", version = "0.1.0" }
 # Zip, tar and 7z, for the file manager's archive browsing. A leaf, like
 # hyprforge-mime beside it — nothing GUI and nothing Hyprland-shaped.
-hyprforge-archive = { path = "crates/hyprforge-archive" }
-hyprforge-mime = { path = "crates/hyprforge-mime" }
+hyprforge-archive = { path = "crates/hyprforge-archive", version = "0.1.0" }
+hyprforge-mime = { path = "crates/hyprforge-mime", version = "0.1.0" }
 # Which file is the icon called `image-png`, through the configured icon
 # theme and what it inherits. A leaf beside hyprforge-mime, which knows
 # which *name* a type's icon has.
-hyprforge-icons = { path = "crates/hyprforge-icons" }
+hyprforge-icons = { path = "crates/hyprforge-icons", version = "0.1.0" }
 # The freedesktop thumbnail cache, shared with every other program that
 # thumbnails files. A leaf; pixels in, pixels out.
-hyprforge-thumbnails = { path = "crates/hyprforge-thumbnails" }
-hyprforge-files = { path = "crates/hyprforge-files" }
+hyprforge-thumbnails = { path = "crates/hyprforge-thumbnails", version = "0.1.0" }
+hyprforge-files = { path = "crates/hyprforge-files", version = "0.1.0" }
 
 # Only hyprforge-lua-import depends on this — evaluating a user's own
 # hyprland.lua (with hl.* stubbed to record calls) to import hand-written
@@ -238,30 +243,30 @@ async-trait = "0.1"
 # `[workspace.dependencies]` names a git URL — each exists entirely for
 # a split crate's sake.
 [patch."https://github.com/hyprforge-suite/hyprforge"]
-hyprforge-paths = { path = "crates/hyprforge-paths" }
-hyprforge-secret = { path = "crates/hyprforge-secret" }
-hyprforge-authui = { path = "crates/hyprforge-authui" }
-hyprforge-look = { path = "crates/hyprforge-look" }
-hyprforge-network = { path = "crates/hyprforge-network" }
-hyprforge-bluetooth = { path = "crates/hyprforge-bluetooth" }
-hyprforge-power = { path = "crates/hyprforge-power" }
-hyprforge-ecosystem = { path = "crates/hyprforge-ecosystem" }
+hyprforge-paths = { path = "crates/hyprforge-paths", version = "0.1.0" }
+hyprforge-secret = { path = "crates/hyprforge-secret", version = "0.1.0" }
+hyprforge-authui = { path = "crates/hyprforge-authui", version = "0.1.0" }
+hyprforge-look = { path = "crates/hyprforge-look", version = "0.1.0" }
+hyprforge-network = { path = "crates/hyprforge-network", version = "0.1.0" }
+hyprforge-bluetooth = { path = "crates/hyprforge-bluetooth", version = "0.1.0" }
+hyprforge-power = { path = "crates/hyprforge-power", version = "0.1.0" }
+hyprforge-ecosystem = { path = "crates/hyprforge-ecosystem", version = "0.1.0" }
 # The rest of these exist for hyprforge-settings alone: it is the hub
 # of the suite (repo-plan.md's layer 5, split last), and names all
 # seventeen of its Hyprforge dependencies as git dependencies in its own
 # Cargo.toml so that manifest works unchanged both here and as the root
 # of its own standalone repository.
-hyprforge-core = { path = "crates/hyprforge-core" }
-hyprforge-ui = { path = "crates/hyprforge-ui" }
-hyprforge-windowrules = { path = "crates/hyprforge-windowrules" }
-hyprforge-input = { path = "crates/hyprforge-input" }
-hyprforge-appearance = { path = "crates/hyprforge-appearance" }
-hyprforge-session = { path = "crates/hyprforge-session" }
-hyprforge-system = { path = "crates/hyprforge-system" }
-hyprforge-shortcuts = { path = "crates/hyprforge-shortcuts" }
-hyprforge-lua-import = { path = "crates/hyprforge-lua-import" }
-hyprforge-tray = { path = "crates/hyprforge-tray" }
-hyprforge-mime = { path = "crates/hyprforge-mime" }
+hyprforge-core = { path = "crates/hyprforge-core", version = "0.1.0" }
+hyprforge-ui = { path = "crates/hyprforge-ui", version = "0.1.0" }
+hyprforge-windowrules = { path = "crates/hyprforge-windowrules", version = "0.1.0" }
+hyprforge-input = { path = "crates/hyprforge-input", version = "0.1.0" }
+hyprforge-appearance = { path = "crates/hyprforge-appearance", version = "0.1.0" }
+hyprforge-session = { path = "crates/hyprforge-session", version = "0.1.0" }
+hyprforge-system = { path = "crates/hyprforge-system", version = "0.1.0" }
+hyprforge-shortcuts = { path = "crates/hyprforge-shortcuts", version = "0.1.0" }
+hyprforge-lua-import = { path = "crates/hyprforge-lua-import", version = "0.1.0" }
+hyprforge-tray = { path = "crates/hyprforge-tray", version = "0.1.0" }
+hyprforge-mime = { path = "crates/hyprforge-mime", version = "0.1.0" }
 # The siblings the files, displayd and emojimenu split named by git URL,
 # and the popups' shared shell. Missing from this table, each one quietly
 # built from whatever GitHub had at the lockfile's commit instead of from
@@ -270,19 +275,19 @@ hyprforge-mime = { path = "crates/hyprforge-mime" }
 # their tests ran against yesterday's copies. `check.sh`'s "Siblings build
 # from this checkout" step now fails if a manifest names a sibling this
 # table does not redirect.
-hyprforge-archive = { path = "crates/hyprforge-archive" }
-hyprforge-clipboard = { path = "crates/hyprforge-clipboard" }
-hyprforge-emoji = { path = "crates/hyprforge-emoji" }
-hyprforge-fileops = { path = "crates/hyprforge-fileops" }
-hyprforge-files-core = { path = "crates/hyprforge-files-core" }
-hyprforge-popup = { path = "crates/hyprforge-popup" }
-hyprforge-process = { path = "crates/hyprforge-process" }
-hyprforge-image = { path = "crates/hyprforge-image" }
-hyprforge-icons = { path = "crates/hyprforge-icons" }
-hyprforge-thumbnails = { path = "crates/hyprforge-thumbnails" }
-hyprforge-video = { path = "crates/hyprforge-video" }
+hyprforge-archive = { path = "crates/hyprforge-archive", version = "0.1.0" }
+hyprforge-clipboard = { path = "crates/hyprforge-clipboard", version = "0.1.0" }
+hyprforge-emoji = { path = "crates/hyprforge-emoji", version = "0.1.0" }
+hyprforge-fileops = { path = "crates/hyprforge-fileops", version = "0.1.0" }
+hyprforge-files-core = { path = "crates/hyprforge-files-core", version = "0.1.0" }
+hyprforge-popup = { path = "crates/hyprforge-popup", version = "0.1.0" }
+hyprforge-process = { path = "crates/hyprforge-process", version = "0.1.0" }
+hyprforge-image = { path = "crates/hyprforge-image", version = "0.1.0" }
+hyprforge-icons = { path = "crates/hyprforge-icons", version = "0.1.0" }
+hyprforge-thumbnails = { path = "crates/hyprforge-thumbnails", version = "0.1.0" }
+hyprforge-video = { path = "crates/hyprforge-video", version = "0.1.0" }
 # The three the media split added: the listing it takes its order from,
 # the mesh loader, and the keyboard grammar.
-hyprforge-listing = { path = "crates/hyprforge-listing" }
-hyprforge-mesh = { path = "crates/hyprforge-mesh" }
-hyprforge-keys = { path = "crates/hyprforge-keys" }
+hyprforge-listing = { path = "crates/hyprforge-listing", version = "0.1.0" }
+hyprforge-mesh = { path = "crates/hyprforge-mesh", version = "0.1.0" }
+hyprforge-keys = { path = "crates/hyprforge-keys", version = "0.1.0" }

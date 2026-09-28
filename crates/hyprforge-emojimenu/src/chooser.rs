@@ -1,8 +1,8 @@
 //! Putting a picked emoji where the rest of the desktop can see it.
 //!
 //! Almost the same seam `hyprforge-clipmenu::chooser::Chooser` defines,
-//! and for the same reason: [`dispatch_action`](crate::popup_app::dispatch_action)
-//! is tested end to end against [`mock::MockChooser`], with no
+//! and for the same reason: `dispatch_action` in `popup_app`
+//! is tested end to end against `mock::MockChooser`, with no
 //! compositor and no daemon involved. The one difference from
 //! `hyprforge-clipmenu`'s version is what [`Chooser::set_clipboard`]
 //! takes — a plain `&str`, not an already-recorded

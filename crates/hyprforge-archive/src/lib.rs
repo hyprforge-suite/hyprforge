@@ -15,11 +15,11 @@
 //!
 //! | Question | Module |
 //! |---|---|
-//! | What kind of archive is this, really? | [`format`] |
+//! | What kind of archive is this, really? | [`format`](mod@format) |
 //! | What is inside it? | [`model`] |
 //! | How do I get at it? | [`backend`] |
 //! | What will extracting write, and where? | [`extract`] |
-//! | How is one created or changed? | [`write`] |
+//! | How is one created or changed? | [`write`](mod@write) |
 //!
 //! [`backend::ArchiveBackend`] is the seam: [`StdArchives`] is the real
 //! one, and `backend::mock::MockArchives` (behind the `mock` feature)

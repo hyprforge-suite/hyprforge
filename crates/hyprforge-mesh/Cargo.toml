@@ -3,7 +3,10 @@ name = "hyprforge-mesh"
 version.workspace = true
 edition.workspace = true
 license = "MIT"
-description = "Loads STL, 3MF and OBJ models into a welded indexed mesh, with fstl's camera and draw modes and a CPU-drawn thumbnail — the model half of view3d."
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "Loads STL, 3MF and OBJ models into a welded indexed mesh, with fstl's camera and draw modes and a CPU-drawn thumbnail — the model half of the Hyprforge media viewer, carried over from view3d."
 
 # The model half of view3d, as a leaf: parsing, welding, the camera's
 # matrices and the draw-mode choices, with no iced and no wgpu. The
@@ -22,7 +25,6 @@ bytemuck = { version = "1", features = ["derive"] }
 # The parallel parse and the parallel sort the weld is built on — the
 # reason a two-million-triangle STL opens in a fraction of a second.
 rayon = "1"
-memmap2 = "0.9"
 rustc-hash = "2"
 # A 3MF is a zip of XML. Deflate only: the 3MF spec allows nothing else,
 # and every other method would be decoder code no model can reach.

@@ -3,6 +3,10 @@ name = "hyprforge-power"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "Keep-awake inhibitors, battery state and power profiles over systemd-logind, UPower and power-profiles-daemon, each behind its own backend trait with a mock"
 
 [dependencies]
 # systemd-logind is already a daemon, so this crate is a client and not a
@@ -25,3 +29,9 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"
 # crate's own tests (the tray's "keep awake" item, wired up separately)
 # can drive an `InhibitBackend` without a real D-Bus connection.
 mock = []
+
+# docs.rs builds with every feature on, so the mock backend (and, for
+# core, the D-Bus proxy) is documented rather than hidden behind a flag
+# nobody reading the docs knows to enable.
+[package.metadata.docs.rs]
+all-features = true

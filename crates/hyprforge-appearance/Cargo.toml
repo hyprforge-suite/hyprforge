@@ -3,6 +3,10 @@ name = "hyprforge-appearance"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "The Appearance model: the hl.config look catalog, animations, the gsettings bridge and look::resolve() into the shared Theme; Hyprforge-internal, published so the suite's apps build from crates.io"
 
 [dependencies]
 # default-features = false keeps iced out of this pure-logic crate.

@@ -3,6 +3,9 @@ name = "hyprforge-archive"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
 description = "Reads and writes zip, tar and 7z archives: what is inside one, as a directory tree; extracting from it; and rewriting it."
 
 # A leaf. No iced, no Hyprland, no `hyprforge-core` — the file manager
@@ -70,3 +73,9 @@ mock = []
 # and which is exactly what the extraction guard exists to refuse.
 zip = "8"
 flate2 = "1"
+
+# docs.rs builds with every feature on, so the mock backend (and, for
+# core, the D-Bus proxy) is documented rather than hidden behind a flag
+# nobody reading the docs knows to enable.
+[package.metadata.docs.rs]
+all-features = true

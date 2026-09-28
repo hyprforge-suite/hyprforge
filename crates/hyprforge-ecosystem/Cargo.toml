@@ -3,6 +3,10 @@ name = "hyprforge-ecosystem"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "hyprpaper, hyprsunset, hypridle and portal settings: one generated hyprlang file per daemon, and how a change reaches it; Hyprforge-internal, published so the suite's apps build from crates.io"
 
 [dependencies]
 # default-features = false keeps iced out of this pure-logic crate.
@@ -21,3 +25,9 @@ tempfile = "3"
 # can exercise a `SunsetBackend` without a running hyprsunset. Same
 # convention as `hyprforge-network`'s `mock` feature.
 mock = []
+
+# docs.rs builds with every feature on, so the mock backend (and, for
+# core, the D-Bus proxy) is documented rather than hidden behind a flag
+# nobody reading the docs knows to enable.
+[package.metadata.docs.rs]
+all-features = true

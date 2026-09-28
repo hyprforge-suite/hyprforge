@@ -92,7 +92,7 @@ pub fn monitor_at(monitors: &[Monitor], global: Point) -> Option<&Monitor> {
 /// edge it drew the popup *over* the cursor, with the pointer somewhere
 /// in the middle of it — exactly what a context menu does not do; a
 /// context menu flips to the other side of the point that opened it
-/// instead. [`flip_axis`] is that rule, applied to each axis
+/// instead. `flip_axis` is that rule, applied to each axis
 /// independently.
 pub fn clamp_popup(cursor: Point, popup: Size, monitor: Size) -> Point {
     Point {

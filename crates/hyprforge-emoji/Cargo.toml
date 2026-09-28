@@ -1,10 +1,12 @@
 [package]
 name = "hyprforge-emoji"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
 description = "CLDR-ordered emoji data and pure search, generated from Unicode's emoji-test.txt, for building an emoji picker."
-repository = "https://github.com/hyprforge-suite/hyprforge"
 documentation = "https://docs.rs/hyprforge-emoji"
 keywords = ["emoji", "unicode", "cldr", "picker", "search"]
 categories = ["internationalization", "data-structures"]
@@ -19,3 +21,10 @@ categories = ["internationalization", "data-structures"]
 # The generator (src/bin/generate.rs) that turns data/emoji-test.txt into
 # src/generated.rs is a bin target in this same package, so it needs no
 # dependency either — see that file's doc comment for how to run it.
+
+# Named explicitly, because cargo would otherwise discover src/bin/generate.rs
+# as a binary called `generate` — and `cargo install hyprforge-emoji` would
+# put a program of that name on someone's PATH.
+[[bin]]
+name = "hyprforge-emoji-generate"
+path = "src/bin/generate.rs"

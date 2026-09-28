@@ -263,7 +263,7 @@ pub fn restart_idle() -> Result<(), std::io::Error> {
 /// change needs one — but restarting it drops any screen share in
 /// progress, and a save button that can end someone's call mid-sentence
 /// is not a trade this app makes for them. Same reasoning as
-/// [`idle`]: report [`Applied::NeedsRestart`] and let them choose.
+/// [`idle`](idle()): report [`Applied::NeedsRestart`] and let them choose.
 pub fn portal(
     generated: &Path,
     target: &Path,

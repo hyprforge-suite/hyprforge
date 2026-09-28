@@ -3,6 +3,10 @@ name = "hyprforge-windowrules"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "Window and workspace rules: TOML storage, window-rules.lua codegen, import, and live windows and monitors to build a rule from; Hyprforge-internal, published so the suite's apps build from crates.io"
 
 [dependencies]
 # Only for paths::write_atomic — default-features = false keeps iced out of

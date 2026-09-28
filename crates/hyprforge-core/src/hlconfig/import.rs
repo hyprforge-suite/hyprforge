@@ -230,7 +230,7 @@ pub fn read_gaps(raw: &str) -> Option<Value> {
 /// evaluator — and therefore never on `mlua`. `serde_json::Value` is the
 /// shared currency, the same arrangement window rules and shortcuts use.
 ///
-/// This is [`crate::codegen`] in reverse: nested tables under `input`
+/// This is [`codegen`](crate::hlconfig::codegen) in reverse: nested tables under `input`
 /// become the colon keys the catalog is written in.
 pub fn settings_from_call(
     kind: &str,

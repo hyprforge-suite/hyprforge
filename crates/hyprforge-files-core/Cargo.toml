@@ -3,6 +3,10 @@ name = "hyprforge-files-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "The model layer of the Hyprforge file manager: the Browser update/view state shared with the portal's file dialog, preferences, clipboard, drag, undo and sidebar, over iced 0.14 widgets"
 
 [dependencies]
 # Only `format::looks_decodable`, to know which entries are worth asking
@@ -81,3 +85,9 @@ hyprforge-archive = { workspace = true, features = ["mock"] }
 # test that drives a window against `MockBackend` — exactly as it was
 # written.
 mock = ["hyprforge-listing/mock", "hyprforge-archive/mock"]
+
+# docs.rs builds with every feature on, so the mock backend (and, for
+# core, the D-Bus proxy) is documented rather than hidden behind a flag
+# nobody reading the docs knows to enable.
+[package.metadata.docs.rs]
+all-features = true

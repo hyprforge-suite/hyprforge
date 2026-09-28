@@ -30,7 +30,7 @@
 //! whether the destination already has something in the way at every
 //! level (so a collision is never discovered mid-copy, after it's too
 //! late to ask cleanly). So this crate walks the whole source tree before
-//! copying a single byte — but not as one blocking call: [`Phase::Walking`]
+//! copying a single byte — but not as one blocking call: `Phase::Walking`
 //! lists exactly one directory per `step()`, the same bounded-unit-of-work
 //! discipline as everything else here. The honest cost: a tree with a
 //! million files takes a million-ish `stat` calls, spread over that many
@@ -45,7 +45,7 @@
 //! completes in one `step()` call. Reusing [`Filesystem`] rather than
 //! calling `std::fs::rename` and inspecting its error is deliberate: a
 //! test can declare "these are different devices" through
-//! [`crate::fs::mock::MockFilesystem`] without a second real mount, which
+//! `crate::fs::mock::MockFilesystem` (behind the `mock` feature) without a second real mount, which
 //! is the entire reason that trait exists (see the module doc on
 //! [`crate::fs`]).
 //!
@@ -190,7 +190,7 @@ pub enum CollisionPolicy {
     Skip,
     Replace,
     /// Auto-renamed via the same `stem.N.ext` scheme `trash.rs` uses for
-    /// exactly this purpose — see [`crate::trash::unique_name`].
+    /// exactly this purpose — see `crate::trash::unique_name`.
     KeepBoth,
     Cancel,
 }
@@ -928,7 +928,7 @@ impl Operation<crate::fs::RealFilesystem> {
     /// Convenience for the overwhelmingly common case: the real
     /// filesystem. Anything driving a test against a fake cross-device
     /// layout uses [`Operation::new`] directly with a
-    /// [`crate::fs::mock::MockFilesystem`].
+    /// `crate::fs::mock::MockFilesystem`.
     pub fn real(kind: OpKind, source: impl Into<PathBuf>, dest: impl Into<PathBuf>) -> Self {
         Operation::new(crate::fs::RealFilesystem, kind, source, dest)
     }

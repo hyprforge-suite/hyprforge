@@ -3,6 +3,10 @@ name = "hyprforge-lua-import"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "A sandboxed mlua evaluator that runs a hand-written hyprland.lua to record its hl.bind, hl.window_rule and hl.monitor calls; Hyprforge-internal, published so the suite's apps build from crates.io"
 
 [lib]
 name = "hyprforge_lua_import"

@@ -3,6 +3,10 @@ name = "hyprforge-shortcuts"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "Keyboard shortcuts: TOML storage, a dispatcher catalog, keybinds.lua codegen and conflict detection against hyprctl binds; Hyprforge-internal, published so the suite's apps build from crates.io"
 
 [dependencies]
 # Only for paths + the shared require-line installer — default-features = false

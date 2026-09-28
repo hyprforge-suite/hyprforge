@@ -3,6 +3,10 @@ name = "hyprforge-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "Hyprland config machinery: the hl.config overlay, hyprlang files, Lua quoting, require() setup and reload-or-roll-back; Hyprforge-internal, published so the suite's apps build from crates.io"
 
 [features]
 # The GUI half moved to hyprforge-ui, so nothing here needs iced any
@@ -22,3 +26,9 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+
+# docs.rs builds with every feature on, so the mock backend (and, for
+# core, the D-Bus proxy) is documented rather than hidden behind a flag
+# nobody reading the docs knows to enable.
+[package.metadata.docs.rs]
+all-features = true

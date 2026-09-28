@@ -9,7 +9,7 @@
 //! behaviour when a member cannot be read) should be testable without
 //! arranging any of them.
 //!
-//! Synchronous, like [`hyprforge_files_core::backend::FsBackend`] and
+//! Synchronous, like `hyprforge_files_core::backend::FsBackend` and
 //! for the same reason: this is a library over files, not a service
 //! behind a socket, and the caller that must not block already knows how
 //! to move blocking work off its thread.

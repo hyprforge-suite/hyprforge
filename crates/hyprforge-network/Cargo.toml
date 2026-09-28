@@ -3,6 +3,10 @@ name = "hyprforge-network"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "Wi-Fi, wired status and the radio toggle over NetworkManager, behind a backend trait with a mock so everything above the D-Bus client is testable without an adapter or access point"
 
 [dependencies]
 # NetworkManager is already a daemon, so this crate is a client and not a
@@ -32,3 +36,9 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"
 # crate's own tests (hyprforge-settings' Network screen) can drive a
 # `NetworkBackend` without a real D-Bus connection.
 mock = []
+
+# docs.rs builds with every feature on, so the mock backend (and, for
+# core, the D-Bus proxy) is documented rather than hidden behind a flag
+# nobody reading the docs knows to enable.
+[package.metadata.docs.rs]
+all-features = true

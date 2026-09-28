@@ -17,9 +17,9 @@
 //! and so that a click that lands on a file becomes [`Outcome::Activated`]
 //! for the host to interpret — the app opens the file, the dialog treats
 //! it as the chosen one. `view` never reads `Mode` to decide what to
-//! draw: see [`ViewModel`], the struct `render` actually takes, which has
+//! draw: see `ViewModel`, the struct `render` actually takes, which has
 //! no `Mode` field at all — not "doesn't currently use one", structurally
-//! cannot have one without every call site changing. [`tests::view_never_branches_on_mode`]
+//! cannot have one without every call site changing. `tests::view_never_branches_on_mode`
 //! pins the property that matters: two browsers differing only in `Mode`
 //! feed `render` the exact same data.
 
@@ -125,7 +125,7 @@ pub enum DirErrorKind {
     /// either: the host opens a password prompt and reads again.
     PasswordRequired,
     /// The path led through a file that looked like an archive and is
-    /// not one. Never rendered: [`Browser::apply_dir_loaded`] turns it
+    /// not one. Never rendered: `Browser::apply_dir_loaded` turns it
     /// into an ordinary activation instead — see there.
     NotAnArchive,
     Other,
@@ -398,7 +398,7 @@ pub enum Outcome {
     /// off the UI thread) and feed the result back as
     /// [`Message::DirLoaded`].
     ReadDir(PathBuf),
-    /// A file (never a directory — see [`Browser::activate`]) was
+    /// A file (never a directory — see `Browser::activate`) was
     /// activated. The app opens it; the dialog treats it as the chosen
     /// path. `Browser` does not know or care which.
     Activated(PathBuf),

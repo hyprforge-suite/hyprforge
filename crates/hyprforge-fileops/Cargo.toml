@@ -3,6 +3,10 @@ name = "hyprforge-fileops"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "Trash, copy, move and rename per the freedesktop specifications, aware of which filesystem a path is on, as step-driven operations with no async runtime or D-Bus"
 
 [dependencies]
 # No async runtime and no D-Bus: this crate is syscalls and arithmetic.
@@ -21,3 +25,9 @@ tempfile = "3"
 # crate's tests can drive trash placement without a second real mount.
 # Same arrangement as `hyprforge-power`'s own `mock` feature.
 mock = []
+
+# docs.rs builds with every feature on, so the mock backend (and, for
+# core, the D-Bus proxy) is documented rather than hidden behind a flag
+# nobody reading the docs knows to enable.
+[package.metadata.docs.rs]
+all-features = true

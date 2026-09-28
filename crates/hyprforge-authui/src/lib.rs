@@ -8,7 +8,7 @@
 //! greeter is an ordinary window.
 //!
 //! So this crate is that screen, and nothing else. Two thin hosts
-//! ([`hyprforge-lock`] and `hyprforge-greet`) supply a surface and a
+//! (`hyprforge-lock` and `hyprforge-greet`) supply a surface and a
 //! [`conversation::Backend`]. Neither knows the other exists, and there
 //! is no "matching them up" to do, because there is only one of them.
 //!

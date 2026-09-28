@@ -3,6 +3,10 @@ name = "hyprforge-session"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "Autostart, environment variables, touchpad gestures and app permissions in a Hyprland session, as one generated Lua file; Hyprforge-internal, published so the suite's apps build from crates.io"
 
 [dependencies]
 hyprforge-core.workspace = true

@@ -68,6 +68,31 @@ ok()   { printf '  %s✓%s %s\n' "$GREEN" "$OFF" "$1"; }
 bad()  { printf '  %s✗%s %s\n' "$RED" "$OFF" "$1"; FAILURES+=("$1"); }
 skip() { printf '  %s–%s %s %s(%s)%s\n' "$YELLOW" "$OFF" "$1" "$DIM" "$2" "$OFF"; }
 
+# Linking is what a workspace this size does most of: sixty-odd test
+# binaries, each carrying iced and wgpu, every one a two-gigabyte write.
+# Cargo's default is one job per core, which on a sixteen-core machine
+# means sixteen linkers writing at once — and that, on a disk with no
+# room, stalled the whole computer for the better part of an hour. Four
+# is the ceiling here unless the caller says otherwise; a two-core CI
+# runner never notices.
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
+
+# Nothing below is trustworthy on a full disk: a build killed by ENOSPC
+# looks like a failed test, and a test that could not write its scratch
+# file looks like a bug in the code under test. Refuse up front, with the
+# number, rather than let every step below report something else.
+step "Room to build"
+avail_gb=$(df --output=avail -BG . | tail -1 | tr -dc 0-9)
+if [[ "${avail_gb:-0}" -lt 20 ]]; then
+    bad "only ${avail_gb}GB free on this filesystem — a build needs room, and a full btrfs volume stalls every write on the machine. \`du -sh target .claude/worktrees/*/target\` is where it usually went."
+    # Printed directly rather than through step(): the docs check counts
+    # indented `step` lines as gated tiers, and this is not one.
+    printf '\n%s==> Summary%s\n  %s1 check(s) failed:%s\n    • not enough disk to build\n' "$BOLD" "$OFF" "$RED" "$OFF"
+    exit 1
+else
+    ok "${avail_gb}GB free"
+fi
+
 # Counts the tests reported across every binary in a `cargo test` run.
 count_tests() { grep 'test result' | awk -F'[.;] ' '{s+=$2} END {print s+0}'; }
 
@@ -77,6 +102,19 @@ if [[ "$warnings" -eq 0 ]]; then
     ok "clippy: no warnings"
 else
     bad "clippy: $warnings warning(s) — run: cargo clippy --workspace --all-targets"
+fi
+
+# The library crates are published, and docs.rs renders their `//!` docs
+# as the front page. A broken intra-doc link — `[MockBackend]` behind a
+# feature that is off, `[tests::x]` — is a warning here and plain text
+# there, and clippy does not see it: only rustdoc does. Warnings are
+# errors, the same rule clippy lives under.
+step "Docs build without warnings"
+if output=$(RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps 2>&1); then
+    ok "rustdoc: no warnings"
+else
+    bad "rustdoc: $(grep -cE '^(error|warning)' <<<"$output") warning(s) — run: RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps"
+    grep -E '^(error|warning)' <<<"$output" | head -10
 fi
 
 # A dependency-feature fact, so no Rust test can see it — and the damage
@@ -596,13 +634,41 @@ PYEOF
     fi
 fi
 
+# A library crate's README is rendered from its `//!` doc by
+# tools/crate-readme.py, so the crates.io front page and the docs.rs
+# front page cannot disagree. This asks that nobody has edited a README
+# by hand, or changed a crate doc without re-rendering.
+step "Library READMEs match their crate docs"
+if ! command -v python3 >/dev/null; then
+    skip "README check" "python3 not available to render the crate docs"
+elif output=$(python3 tools/crate-readme.py --check 2>&1); then
+    ok "every library README is its crate doc, rendered"
+else
+    bad "$(grep -c '^STALE' <<<"$output") library README(s) differ from their crate doc — run: tools/crate-readme.py --write"
+    sed -n 's/^STALE /    • /p' <<<"$output"
+    grep -v '^STALE' <<<"$output" | head -5
+fi
+
+# Two ways this step can produce a tick without having tested anything,
+# and both happened on the same evening: `cargo test` killed partway
+# through prints no "test result: FAILED" line (there was no result), and
+# a run that compiled nothing reports zero tests. Either is "0 tests
+# passed" — which was a green tick, and a commit went through on it. So
+# cargo's own exit status counts, and a count of zero is a failure, not a
+# very small success.
 step "Unit and integration tests"
-output=$(cargo test --workspace 2>&1)
+if output=$(cargo test --workspace 2>&1); then cargo_ok=true; else cargo_ok=false; fi
+tests=$(count_tests <<<"$output")
 if grep -q "test result: FAILED" <<<"$output"; then
     bad "$(grep -c 'test result: FAILED' <<<"$output") test binary(ies) failed"
     grep -E '^(test .* FAILED|failures:)' <<<"$output" | head -20
+elif ! $cargo_ok; then
+    bad "cargo test did not finish (exit status non-zero, no test result to read) — run: cargo test --workspace"
+    tail -5 <<<"$output"
+elif [[ "$tests" -eq 0 ]]; then
+    bad "cargo test ran zero tests — that is not a pass"
 else
-    ok "$(count_tests <<<"$output") tests passed"
+    ok "$tests tests passed"
 fi
 
 # Tier 1, and a separate invocation because `notif/` is a separate cargo
@@ -626,12 +692,18 @@ if [[ "$warnings" -eq 0 ]]; then
 else
     bad "notif clippy: $warnings warning(s) — run: (cd notif && cargo clippy --all-targets)"
 fi
-output=$(cd notif && cargo test 2>&1)
+if output=$(cd notif && cargo test 2>&1); then cargo_ok=true; else cargo_ok=false; fi
+tests=$(count_tests <<<"$output")
 if grep -q "test result: FAILED" <<<"$output"; then
     bad "$(grep -c 'test result: FAILED' <<<"$output") notif test binary(ies) failed"
     grep -E '^(test .* FAILED|failures:)' <<<"$output" | head -20
+elif ! $cargo_ok; then
+    bad "notif's cargo test did not finish — run: (cd notif && cargo test)"
+    tail -5 <<<"$output"
+elif [[ "$tests" -eq 0 ]]; then
+    bad "notif's cargo test ran zero tests — that is not a pass"
 else
-    ok "$(count_tests <<<"$output") notif tests passed"
+    ok "$tests notif tests passed"
 fi
 
 if $QUICK; then
@@ -1039,6 +1111,27 @@ else
                 [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
             done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^(]*\).*/\1/p' <<<"$output" | sort -u)
         fi
+    fi
+
+    # Does cargo's packager agree that every library is publishable? It
+    # asks what nothing above does: that each manifest has the metadata
+    # crates.io requires, that every sibling dependency carries a version
+    # and not just a path, that the README the manifest names exists, and
+    # that the crate builds from its packaged tarball alone. The nine
+    # components are excluded because they are installed from packages,
+    # not published; `--workspace` publishes the rest in dependency order.
+    # Behind the gate because verification builds every crate over again
+    # in target/package, which is far too slow for a pre-commit hook.
+    step "Every library crate packages for crates.io"
+    exclude=()
+    for c in clipboard lock greet tray settings displayd emojimenu files media; do
+        exclude+=(--exclude "hyprforge-$c")
+    done
+    if output=$(cargo publish --workspace --dry-run --allow-dirty "${exclude[@]}" 2>&1); then
+        ok "$(grep -c '^\s*Packaged ' <<<"$output") library crate(s) package cleanly"
+    else
+        bad "a library crate does not package — run: cargo publish --workspace --dry-run ${exclude[*]}"
+        grep -E '^(error|warning)' <<<"$output" | head -10
     fi
 fi
 

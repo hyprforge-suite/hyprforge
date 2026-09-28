@@ -10,11 +10,15 @@ const BINARY_HEADER: usize = 80;
 const BINARY_RECORD: usize = 50;
 
 pub fn load(path: &Path) -> Result<Mesh> {
-    let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    // SAFETY: as with any mmap, concurrent truncation by another process is UB.
-    // Autoreload only ever re-opens the file, so we never keep a stale mapping.
-    let data = unsafe { memmap2::Mmap::map(&file) }
-        .with_context(|| format!("mapping {}", path.display()))?;
+    // Read, not memory-mapped. fstl mapped the file, and this began as a
+    // copy of that — but a mapping of a file another process may truncate
+    // while it is mapped is undefined behaviour, and a user's model on
+    // disk is exactly such a file; there was no invariant here that ruled
+    // it out, only a comment about a reload path this crate never had.
+    // The whole file is parsed once and dropped, so reading it costs one
+    // copy of the file's size for the duration of `load` and nothing else,
+    // and it takes the crate's only `unsafe` with it.
+    let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
 
     if is_binary(&data) {
         parse_binary(&data)

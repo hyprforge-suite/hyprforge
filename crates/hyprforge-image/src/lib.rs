@@ -29,7 +29,7 @@
 //!
 //! # Where to start
 //!
-//! [`measure`] first, always — it allocates nothing and everything else
+//! [`measure`](measure()) first, always — it allocates nothing and everything else
 //! depends on its answer. Then [`budget`], which is pure arithmetic and
 //! the only place a cap lives. Then [`decode::decode_to_fit`].
 //!

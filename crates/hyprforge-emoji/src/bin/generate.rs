@@ -50,7 +50,7 @@
 //!      valid, already-qualified emoji and not a synthesised one.
 //!    - If any toned member carries *two* modifiers (a two-person
 //!      sequence, e.g. "handshake", "people holding hands"), a single
-//!      [`Tone`] cannot pick between the independent tones of each
+//!      `Tone` cannot pick between the independent tones of each
 //!      person, so tone modeling is deliberately not attempted: the
 //!      neutral member represents the family with no tone variants if
 //!      one exists, and the family is dropped from the table entirely if

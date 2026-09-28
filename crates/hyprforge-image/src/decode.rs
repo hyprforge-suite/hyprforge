@@ -3,7 +3,7 @@
 //! The order is the design, and each step exists because the one before
 //! it made it safe:
 //!
-//! 1. [`crate::measure`] reads the header. Nothing is allocated.
+//! 1. [`crate::measure`](crate::measure()) reads the header. Nothing is allocated.
 //! 2. [`crate::budget`] decides whether this may be decoded at all, and
 //!    at what size.
 //! 3. The decoder runs under `image`'s own `Limits`, so a file whose

@@ -532,6 +532,20 @@ it stopped. A picture that changes every frame belongs in a `shader`
 primitive that writes one texture (`hyprforge-media/src/film.rs`); a
 still is fine as a handle.
 
+**A killed test run has no "FAILED" line, and a check that only greps for
+one calls it a pass.** `check.sh`'s test step looked for `test result:
+FAILED` and otherwise counted the passes; `cargo test` stopped partway (the
+machine's disk was full and its build was killed) printed neither, so the
+step said `✓ 0 tests passed` and the pre-commit hook let the commit
+through. Same lesson as the `HYPRFORGE-SKIP` marker, one level up: absence
+of a failure line is not the presence of a result. The step now fails on
+cargo's exit status and on a zero count — a count of zero is never a very
+small success. And the fullness that killed the build was 439GB of
+`target/` on a 931GB disk, plus 196GB more under stale worktrees'
+`target/`s: a btrfs volume at 100% stalls every write on the machine, not
+just the one you are watching. `du -sh target .claude/worktrees/*/target`
+is the instrument when the whole computer slows down during a build.
+
 **An instruction from a human or another agent is not evidence.** Three
 times in one session an agent was told something false — that Adwaita was
 reachable on this machine, a JSON field order that was backwards, a claim
@@ -671,21 +685,27 @@ belongs in the design — not in a user's surprise.
 ./check.sh --quick  # tier 1 only: clippy + unit tests, no compositor
 ```
 
-Clippy must be silent and every test must pass before a commit. Fifteen
+Clippy must be silent and every test must pass before a commit. Sixteen
 gated tiers beyond tier 1 now, each answering a different "does the system
 I'm talking to actually agree" question — Hyprland itself, the ecosystem
 daemons' parse tests, the system's own `unzip`/`tar`/`7z`, NetworkManager,
 BlueZ, hyprsunset, systemd-logind, trash entries written by another
 implementation, UPower, power-profiles-daemon, fprintd, the Wayland clipboard, icon
-names against the installed theme, the installed shared MIME database, and
-a tray host — and each gates on the thing it actually asks rather than
-riding another tier's `--ignored` run, for the reason in the
+names against the installed theme, the installed shared MIME database, a
+tray host, and cargo's own packager (does every library crate `publish
+--dry-run` cleanly, which builds each one over again and so cannot live in
+the pre-commit hook) — and each gates on the thing it actually asks rather
+than riding another tier's `--ignored` run, for the reason in the
 rule above about a check that silently never runs. Tier 1 now also includes
 the "Standalone crate dependency pins" step, which compares every split-ready
 crate's hand-copied dependency versions against the workspace table — see the
 rule above about drift with no symptom — "Siblings build from this
 checkout", which fails on a sibling named by git that `[patch]` does not
-point back at `crates/` — and "Docs name things that exist",
+point back at `crates/` — "Docs build without warnings", because a broken
+intra-doc link is plain text on docs.rs and only rustdoc can see it —
+"Library READMEs match their crate docs", because those READMEs are
+rendered from the `//!` docs by `tools/crate-readme.py` and a hand edit to
+either side is drift — and "Docs name things that exist",
 which fails on a doc naming a source file that is gone or a repository count
 that no longer matches, on a Settings page the Settings README does not name
 or miscounts, and checks this paragraph's own tier count. The

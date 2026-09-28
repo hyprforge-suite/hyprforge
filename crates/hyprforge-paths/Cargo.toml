@@ -1,10 +1,12 @@
 [package]
 name = "hyprforge-paths"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
 description = "XDG config paths, the user's own Pictures/Downloads directories, and crash-safe atomic file writes shared by every app in the Hyprforge desktop suite."
-repository = "https://github.com/hyprforge-suite/hyprforge"
 documentation = "https://docs.rs/hyprforge-paths"
 keywords = ["xdg", "config-dir", "atomic-write", "hyprland", "linux"]
 categories = ["filesystem", "config"]

@@ -20,7 +20,7 @@
 //! mockup's translucent glass is the theme's own colours at an alpha,
 //! never a colour of this file's choosing.
 //!
-//! Sizes are the mockup's, in logical pixels, multiplied by [`unit`] so
+//! Sizes are the mockup's, in logical pixels, multiplied by [`unit`](unit()) so
 //! a larger desktop font makes a larger lock screen. The mockup was drawn
 //! against a 10pt desktop font, so at 10pt this is the mockup exactly.
 

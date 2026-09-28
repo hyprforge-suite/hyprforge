@@ -3,6 +3,10 @@ name = "hyprforge-image"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "Bounded, orientation-correct picture decoding: measure without decoding, decide how much may safely be decoded, decode that much, and apply EXIF orientation; no GUI toolkit"
 
 # What a picture is before anything draws it: how big, which way up, and
 # what it is safe to decode.

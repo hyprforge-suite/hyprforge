@@ -3,6 +3,10 @@ name = "hyprforge-popup"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "The wlr-layer-shell popup shell the clipboard, emoji and tray menus share: surface, event loop, placement, single-instance lock and kit widgets, drawn with iced 0.14 on iced_tiny_skia"
 
 [dependencies]
 # `Theme` is the one thing every consumer draws with — CLAUDE.md: "no

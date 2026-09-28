@@ -69,6 +69,9 @@ pub fn name_for_uid(uid: u32) -> Option<String> {
     let mut len = INITIAL_BUF;
     loop {
         let mut buf = vec![0 as c_char; len];
+        // SAFETY: all-zero bytes are a valid `Passwd` — its pointer fields
+        // become null and its two `u32`s zero — and nothing reads it
+        // until `getpwuid_r` has filled it and `result` is non-null.
         let mut pwd: Passwd = unsafe { std::mem::zeroed() };
         let mut result: *mut Passwd = std::ptr::null_mut();
         // SAFETY: `pwd` and `result` are live stack values, and `buf` is
@@ -146,6 +149,7 @@ mod tests {
 
     #[test]
     fn the_current_user_resolves_to_a_name() {
+        // SAFETY: `current_uid` has no preconditions; see its comment.
         let uid = unsafe { super::current_uid() };
         let name = name_for_uid(uid).expect("this process's own uid always has a passwd entry");
         assert!(!name.is_empty());
@@ -192,6 +196,7 @@ mod ffi_audit {
 
     #[test]
     fn our_user_names_agree_with_the_id_command_the_rest_of_the_system_uses() {
+        // SAFETY: `current_uid` has no preconditions; see its comment.
         for uid in [0_u32, unsafe { super::current_uid() }] {
             let ours = name_for_uid(uid);
             let theirs = std::process::Command::new("id")
@@ -210,10 +215,16 @@ mod ffi_audit {
 
 /// This process's own uid — test-only, so the audit below has a second
 /// uid to check besides root's.
+// SAFETY: this is `unsafe fn` only because its body is an FFI call; it
+// asks nothing of its caller. `getuid` takes no arguments, cannot fail
+// (POSIX: "no errors are defined"), touches no memory of ours and is
+// always the same `uid_t`-sized answer — the same 32-bit `uid_t` this
+// module's `getpwuid_r` binding is declared against.
 #[cfg(test)]
 unsafe fn current_uid() -> u32 {
     extern "C" {
         fn getuid() -> u32;
     }
+    // SAFETY: as above — no arguments, no failure mode, no state of ours.
     unsafe { getuid() }
 }

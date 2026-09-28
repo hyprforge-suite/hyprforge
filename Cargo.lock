@@ -2195,7 +2195,6 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "glam",
- "memmap2",
  "png 0.18.1",
  "quick-xml",
  "rayon",

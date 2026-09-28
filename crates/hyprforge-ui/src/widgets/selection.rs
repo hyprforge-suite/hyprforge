@@ -16,7 +16,7 @@ use iced::{Background, Border};
 /// Hover must never share the selected colour: a row the pointer happens
 /// to be over looking like the one you picked makes "is this selected?"
 /// ambiguous the instant the mouse moves.
-/// [`tests::only_the_selected_row_ever_uses_the_accent_colour`] pins
+/// `tests::only_the_selected_row_ever_uses_the_accent_colour` pins
 /// this.
 ///
 /// One function for every list of rows — Files' sidebar, its entry list,

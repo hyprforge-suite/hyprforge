@@ -20,7 +20,7 @@
 //! anyone ever enables `avif` to write one, this module would start
 //! claiming AVIF is readable and the viewer would advertise a MIME type
 //! it cannot open. [`decodable_formats`] filters that case out by hand,
-//! and [`tests::avif_is_never_reported_as_decodable`] fails if the
+//! and `tests::avif_is_never_reported_as_decodable` fails if the
 //! situation changes.
 
 use std::path::Path;

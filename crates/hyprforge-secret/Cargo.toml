@@ -1,10 +1,12 @@
 [package]
 name = "hyprforge-secret"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
 description = "A Secret<T> wrapper whose Debug impl renders only a length, never the wrapped value, so every place a password or passphrase is exposed is a single greppable expose() call."
-repository = "https://github.com/hyprforge-suite/hyprforge"
 documentation = "https://docs.rs/hyprforge-secret"
 keywords = ["secret", "redact", "debug", "password", "hyprland"]
 categories = ["development-tools::debugging", "rust-patterns"]

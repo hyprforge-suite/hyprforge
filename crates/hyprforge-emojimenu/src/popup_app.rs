@@ -136,7 +136,7 @@ impl<C: Chooser + 'static> hyprforge_popup::PopupApp for EmojiApp<C> {
     }
 
     /// While the tone picker is open it is the only thing that responds —
-    /// it is modal, the same rule [`Self::pointer_click`] applies.
+    /// it is modal, the same rule `Self::pointer_click` applies.
     fn pointer_move(&mut self, theme: &Theme, position: (f64, f64)) -> bool {
         let layout = Layout::for_font_size(theme.font_size);
         if let Some(picker) = self.picker(&layout) {
@@ -201,7 +201,7 @@ impl<C: Chooser + 'static> hyprforge_popup::PopupApp for EmojiApp<C> {
     }
 
     /// Re-hit-tests at the press's own position, for the same reason
-    /// [`Self::pointer_click`] does.
+    /// `Self::pointer_click` does.
     fn pointer_long_press(&mut self, theme: &Theme, position: (f64, f64)) -> bool {
         let layout = Layout::for_font_size(theme.font_size);
         if self.model.tone_picker().is_some() {

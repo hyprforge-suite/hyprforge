@@ -206,7 +206,7 @@ impl Magic {
     }
 
     /// The best content match for a file, reading only its first
-    /// [`SNIFF_BYTES`].
+    /// `SNIFF_BYTES`.
     pub fn of_file(&self, path: &std::path::Path) -> Option<Match> {
         self.of_data(&head(path)?)
     }
@@ -225,7 +225,7 @@ impl Magic {
     }
 }
 
-/// The first [`SNIFF_BYTES`] of a file, for content matching.
+/// The first `SNIFF_BYTES` of a file, for content matching.
 ///
 /// **The one way to read a file for typing.** Bounded on purpose: this
 /// is asked about files a person just pointed at, which can be a 40GB

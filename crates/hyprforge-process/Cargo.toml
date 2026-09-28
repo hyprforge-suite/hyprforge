@@ -1,10 +1,12 @@
 [package]
 name = "hyprforge-process"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
 description = "A bounded replacement for Command::output() so a hung subprocess like hyprctl, gsettings or fc-list never blocks the caller forever."
-repository = "https://github.com/hyprforge-suite/hyprforge"
 documentation = "https://docs.rs/hyprforge-process"
 keywords = ["subprocess", "timeout", "command", "process", "hyprland"]
 categories = ["os"]

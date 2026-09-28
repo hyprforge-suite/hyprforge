@@ -1,20 +1,22 @@
 [package]
 name = "hyprforge-mime"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
 description = "Reads the freedesktop shared MIME database: what type a file is by name or by its contents, which applications handle a type, which one is the default, and which icon a type has."
-repository = "https://github.com/hyprforge-suite/hyprforge"
 
 # Only `hyprforge-paths`, for the XDG directories and the atomic write
 # that `mimeapps.list` needs. No GUI toolkit and nothing Hyprland-shaped:
 # the file manager, the Settings app and any future viewer all ask the
 # same questions of the same files.
 [dependencies]
-hyprforge-paths = { path = "../hyprforge-paths" }
+hyprforge-paths.workspace = true
 # `mimeopen` waits for `gio launch`, and nothing here may wait on
 # another process without a bound (CLAUDE.md).
-hyprforge-process = { path = "../hyprforge-process" }
+hyprforge-process.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

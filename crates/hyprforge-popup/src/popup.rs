@@ -44,7 +44,7 @@
 //! than a lie — and is not something this workspace's own compositor
 //! ever exercises, so it is unverified beyond compiling and matching
 //! the protocol's own contract; see this module's own tests and the
-//! doc on [`Popup::draw`] for what *is* verified.
+//! doc on `Popup::draw` for what *is* verified.
 //!
 //! Everything downstream of the buffer stays in logical pixels
 //! regardless of which path is taken: [`Placement`]'s margins, the
@@ -56,7 +56,7 @@
 //! the scrollbar's own thumb) has to know the scale changed at all —
 //! changing what the buffer holds cannot change what coordinate space
 //! the compositor hands back for a click. That invariant is why this
-//! change touches only [`Popup::draw`] and surface setup, not one line
+//! change touches only `Popup::draw` and surface setup, not one line
 //! of any consumer's hit-testing.
 //!
 //! [`PopupApp`] bundles three things a consumer might have expected to
@@ -132,7 +132,7 @@ fn iced_color(c: hyprforge_look::Color) -> iced_runtime::core::Color {
 /// and calling [`PopupApp::finish`] anyway.
 ///
 /// `Connection::roundtrip` itself has no bound — see
-/// [`finish_after_teardown`]'s doc for why a roundtrip is what this
+/// `finish_after_teardown`'s doc for why a roundtrip is what this
 /// needs — and CLAUDE.md is explicit that nothing here waits on another
 /// process (here, the compositor) without one, so the bound is applied
 /// from outside on a helper thread. A healthy compositor answers a
@@ -349,7 +349,7 @@ pub trait PopupApp {
     /// Runs once [`Self::needs_finish`] said yes, and — critically —
     /// only after this popup's own layer surface is gone and a bounded
     /// roundtrip has proven the compositor has processed that; see
-    /// [`finish_after_teardown`]'s own doc for why the proof matters and
+    /// `finish_after_teardown`'s own doc for why the proof matters and
     /// not just a flush. By the time this runs, anything synthesized
     /// here structurally cannot be delivered back to this popup, because
     /// this popup no longer has a surface to deliver it to.

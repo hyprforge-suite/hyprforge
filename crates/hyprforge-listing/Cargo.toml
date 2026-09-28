@@ -3,6 +3,10 @@ name = "hyprforge-listing"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "A directory listing and its order: reading, sorting and filtering behind a mockable backend, shared so the file manager and the image viewer agree which file comes next"
 
 # What a directory listing is, how it is read, and what order it is shown
 # in — extracted from `hyprforge-files-core` when the image viewer needed
@@ -33,3 +37,9 @@ toml.workspace = true
 # without a real disk. `hyprforge-files-core` forwards its own `mock` to
 # this one, which is what keeps the file manager's test setup unchanged.
 mock = []
+
+# docs.rs builds with every feature on, so the mock backend (and, for
+# core, the D-Bus proxy) is documented rather than hidden behind a flag
+# nobody reading the docs knows to enable.
+[package.metadata.docs.rs]
+all-features = true

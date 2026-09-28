@@ -66,6 +66,11 @@ impl LocalDateTime {
     }
 
     fn from_unix(secs: i64) -> Self {
+        // SAFETY: all-zero bytes are a valid `Tm` — every field is a
+        // `c_int`/`c_long`, for which zero is an ordinary value, or the
+        // `tm_zone` pointer, for which zero is null; nothing reads the
+        // struct before `localtime_r` has either filled it or reported
+        // failure below.
         let mut tm: Tm = unsafe { std::mem::zeroed() };
         // SAFETY: the return value is checked below — this call may
         // leave `tm` untouched. `localtime_r` is given a valid pointer to `secs` (a
@@ -140,7 +145,7 @@ impl LocalDateTime {
         Some(LocalDateTime { year, month, day, hour, minute, second })
     }
 
-    /// This local date and time as a [`SystemTime`], folded back through
+    /// This local date and time as a [`SystemTime`](std::time::SystemTime), folded back through
     /// `/etc/localtime` by the same C library that produced it.
     ///
     /// `mktime` and not arithmetic: it is `localtime_r`'s actual
@@ -156,6 +161,9 @@ impl LocalDateTime {
     /// "will not parse" case, for a caller to fall back from rather than
     /// display a plausible wrong date.
     pub fn to_system_time(self) -> Option<std::time::SystemTime> {
+        // SAFETY: as in `from_unix` — all-zero bytes are a valid `Tm`
+        // (integers zero, `tm_zone` null), and every field `mktime` reads
+        // is assigned below before the call.
         let mut tm: Tm = unsafe { std::mem::zeroed() };
         tm.tm_year = self.year - 1900;
         tm.tm_mon = self.month as c_int - 1;

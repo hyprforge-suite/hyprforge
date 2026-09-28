@@ -10,7 +10,7 @@
 //!    replacement.
 //! 2. **A later call wins over an earlier one.** `repeat_delay` went from
 //!    600 to 601 and `set` flipped to true. That is why
-//!    [`crate::setup::PLACEMENT`] is `AtEnd` and not `BeforeUserRequires`
+//!    `PLACEMENT` is `AtEnd` and not `BeforeUserRequires`
 //!    like window rules: sourced first, every setting saved in the app
 //!    would be silently overwritten by the user's own `hl.config` block,
 //!    and the app would report a successful save that changed nothing.

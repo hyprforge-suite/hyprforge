@@ -313,7 +313,7 @@ pub fn mode(state: &State, typed: usize, since_key: Option<Duration>) -> Mode {
 /// The rejection to show, `elapsed` after a failed attempt of
 /// `attempted` characters.
 ///
-/// A damped sine: [`SHAKE_SWINGS`] full swings that die away to nothing
+/// A damped sine: `SHAKE_SWINGS` full swings that die away to nothing
 /// at [`SHAKE`], where the red dots go too. After that the field stays
 /// red, empty and still, until the person types — a failure that fades
 /// out by itself would leave someone who looked away not knowing why the

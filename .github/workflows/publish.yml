@@ -1,0 +1,68 @@
+# Publishes every library crate to crates.io when a version tag is pushed.
+#
+# The nine components are excluded: they are installed from packages (and
+# `cargo install`-able from their own repositories), not published. Cargo
+# 1.90+'s `publish --workspace` orders the rest by dependency and waits for
+# each wave to appear on the index before publishing the next, so the five
+# waves repo-plan.md lists are cargo's problem rather than this file's.
+#
+# The very first publish of each crate is not done here: crates.io
+# rate-limits new crate names from one account (a small burst, then a slow
+# trickle), and a workflow that hits that limit fails halfway through a
+# wave with the index in a state nobody chose. The first round is run by
+# hand, wave by wave, after asking help@crates.io for a raise. This
+# workflow is for every release after that, when every name already
+# exists and only versions move.
+#
+# Versions are lockstep: `version.workspace = true` in every library, so
+# one tag is one version for the whole set. See repo-plan.md.
+
+name: Publish to crates.io
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    name: "cargo publish --workspace (libraries only)"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the pinned Rust toolchain (rust-toolchain.toml)
+        run: rustup show
+
+      - name: Install native dependencies
+        # The same set check.yml installs: verification builds every crate
+        # from its packaged tarball, so anything a library links has to be
+        # here even though no binary is produced.
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y pkg-config libpam0g-dev libxkbcommon-dev libwayland-dev
+
+      - name: The tag matches the workspace version
+        # A tag `v0.2.0` on a tree whose workspace says 0.1.0 would publish
+        # 0.1.0 again (an error from the index) or, worse, a version the tag
+        # does not name. Refuse rather than guess.
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          have=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')
+          [ "$want" = "$have" ] || { echo "tag says $want, Cargo.toml says $have"; exit 1; }
+
+      - name: cargo publish --workspace
+        env:
+          # An organisation secret: a crates.io API token scoped to
+          # publish-update (and publish-new, for a library added later),
+          # with the hyprforge-* crates as its scope.
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cargo publish --workspace \
+            --exclude hyprforge-clipboard --exclude hyprforge-lock \
+            --exclude hyprforge-greet --exclude hyprforge-tray \
+            --exclude hyprforge-settings --exclude hyprforge-displayd \
+            --exclude hyprforge-emojimenu --exclude hyprforge-files \
+            --exclude hyprforge-media

@@ -363,6 +363,9 @@ mod publishing {
             "an isolated run must never resolve to the real greeter export"
         );
 
+        // SAFETY: `_lock` (ENV_LOCK, taken at the top of this test) is
+        // still held, so putting the variable back is serialised against
+        // every other env mutation in this module just as setting it was.
         match previous {
             Some(p) => unsafe {
                 std::env::set_var(hyprforge_look::theme::EXPORT_DIR_ENV, p)

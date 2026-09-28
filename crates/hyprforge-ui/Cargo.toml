@@ -1,10 +1,12 @@
 [package]
 name = "hyprforge-ui"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
 description = "The iced widget layer built on hyprforge-look's shared theme, giving every Hyprforge app the same spacing scale, palette and widgets."
-repository = "https://github.com/hyprforge-suite/hyprforge"
 documentation = "https://docs.rs/hyprforge-ui"
 keywords = ["iced", "widgets", "gui", "hyprland", "theme"]
 categories = ["gui"]
