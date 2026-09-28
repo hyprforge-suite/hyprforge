@@ -1,8 +1,14 @@
 [package]
 name = "hyprforge-photos"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A photo, video and 3D model viewer for Hyprland: a folder browsed in the file manager's order, a date-grouped grid and library, EXIF and orientation done right, videos through libmpv, STL/3MF/OBJ models on the GPU, and a slideshow."
+repository = "https://github.com/adamrpostjr/hyprforge"
+documentation = "https://docs.rs/hyprforge-photos"
+readme = "README.md"
+keywords = ["hyprland", "wayland", "image-viewer", "iced", "linux"]
+categories = ["os::linux-apis", "gui", "multimedia"]
 
 [[bin]]
 name = "hyprforge-photos"
@@ -11,22 +17,22 @@ path = "src/main.rs"
 [dependencies]
 # Measuring, orienting and decoding within a budget. The whole reason
 # the viewer never hands iced a path handle — see that crate's doc.
-hyprforge-image.workspace = true
+hyprforge-image = { git = "https://github.com/adamrpostjr/hyprforge" }
 # Directly as well as through `hyprforge-image`: the info panel names the
 # format a file is (`image::ImageFormat`), and a crate that uses a type
 # must say so rather than relying on a dependency's dependency happening
 # to be in the tree.
-image.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff", "ico"] }
 # 3D models — STL, 3MF, OBJ — loaded into a mesh, with fstl's camera:
 # the model half of view3d, which this viewer took over. The renderer is
 # here (`src/model/`), not there, because its wgpu has to be iced's.
-hyprforge-mesh.workspace = true
+hyprforge-mesh = { git = "https://github.com/adamrpostjr/hyprforge" }
 # Videos: played through libmpv (opened at run time, so a machine without
 # mpv still runs the viewer), and thumbnailed by their first real frame.
-hyprforge-video.workspace = true
+hyprforge-video = { git = "https://github.com/adamrpostjr/hyprforge" }
 # The shared freedesktop thumbnail cache, for video frames and model
 # drawings — made once, and shared with the file manager.
-hyprforge-thumbnails.workspace = true
+hyprforge-thumbnails = { git = "https://github.com/adamrpostjr/hyprforge" }
 # The renderer's matrices and vertex bytes, at the versions hyprforge-mesh
 # already uses, so the mesh's `Vertex` and `Mat4` are the renderer's own.
 glam = "0.25"
@@ -34,14 +40,14 @@ bytemuck = { version = "1", features = ["derive"] }
 # The listing, so "the next picture" means the next one the file manager
 # was showing. Not `hyprforge-files-core`: a viewer has no use for a
 # browser widget, and this is the leaf under both.
-hyprforge-listing.workspace = true
+hyprforge-listing = { git = "https://github.com/adamrpostjr/hyprforge" }
 # The suite's keyboard grammar. This app answers its one open question
 # differently from the file manager — see `keys.rs` and `BareKeys`.
-hyprforge-keys.workspace = true
-hyprforge-ui.workspace = true
-hyprforge-look.workspace = true
-hyprforge-appearance.workspace = true
-hyprforge-paths.workspace = true
+hyprforge-keys = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-ui = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-look = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-appearance = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-paths = { git = "https://github.com/adamrpostjr/hyprforge" }
 # The actions that touch files, each through the suite's own library for
 # it rather than a copy: `trash` from the file operations the file
 # manager uses (reversible, the freedesktop spec, the cross-filesystem
@@ -52,39 +58,50 @@ hyprforge-paths.workspace = true
 # The last is the one Hyprland-shaped dependency here, taken deliberately
 # (photos-plan.md, open question 2); without hyprpaper running it saves
 # the choice and says so.
-hyprforge-fileops.workspace = true
-hyprforge-mime.workspace = true
-hyprforge-clipboard.workspace = true
-hyprforge-ecosystem.workspace = true
-hyprforge-core.workspace = true
-# `tokio` on top of the workspace base, the same addition
-# `hyprforge-files` and `hyprforge-settings` make and for the same
-# reason: it selects iced's tokio executor, so the futures a `Task` runs
-# are polled inside a tokio runtime. Without it `Task::perform` runs on a
-# `futures` thread pool with no ambient runtime and the free function
-# `tokio::task::spawn_blocking()` panics with "there is no reactor
-# running" — which a viewer would hit on the first picture it opened,
-# since every decode goes off the UI thread.
+hyprforge-fileops = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-mime = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-clipboard = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-ecosystem = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-core = { git = "https://github.com/adamrpostjr/hyprforge", default-features = false }
+# The workspace's iced feature list plus `tokio` and `image`, the same
+# addition `hyprforge-files` and `hyprforge-settings` make and for the
+# same reason: `tokio` selects iced's tokio executor, so the futures a
+# `Task` runs are polled inside a tokio runtime. Without it
+# `Task::perform` runs on a `futures` thread pool with no ambient
+# runtime and the free function `tokio::task::spawn_blocking()` panics
+# with "there is no reactor running" — which a viewer would hit on the
+# first picture it opened, since every decode goes off the UI thread.
 #
-# Declared here rather than inherited: that unification only happens when
-# something builds both, so `cargo build -p hyprforge-photos` alone would
-# not get it.
-iced = { workspace = true, features = ["tokio", "image"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+# Spelled out rather than inherited, like every dependency in this
+# file: this manifest is the root of its own repository once split, and
+# `check.sh`'s "Standalone crate dependency pins" step holds the copy to
+# the workspace table.
+iced = { version = "0.14", default-features = false, features = [
+    "wgpu",
+    "tiny-skia",
+    "crisp",
+    "thread-pool",
+    "linux-theme-detection",
+    "x11",
+    "wayland",
+    "tokio",
+    "image",
+] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time"] }
 # Local days and times: the grid's date headings, the library's date
 # spans and the inspector's "Sat 12 Sep 2026 · 18:42". The same crate and
 # features the file manager formats its Modified column with.
-chrono.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # A picture opened on its own floats itself on Hyprland (`float.rs`):
 # three `hyprctl` calls, each bounded by hyprforge-process's timeout, and
 # `hyprctl -j`'s JSON read back to find the monitor and the window.
-hyprforge-process.workspace = true
-serde_json.workspace = true
-serde.workspace = true
-toml.workspace = true
-thiserror.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
+hyprforge-process = { git = "https://github.com/adamrpostjr/hyprforge" }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "1.1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 # Every WGSL shader this window compiles is parsed and validated in
@@ -95,4 +112,4 @@ tempfile = "3"
 # `MockBackend`, so the folder model — what the next picture is, what
 # happens at the ends, what a folder of mixed stills and clips does — is
 # exercised without a disk.
-hyprforge-listing = { workspace = true, features = ["mock"] }
+hyprforge-listing = { git = "https://github.com/adamrpostjr/hyprforge", features = ["mock"] }
