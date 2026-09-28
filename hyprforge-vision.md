@@ -348,7 +348,7 @@ authority on this work — the reasoning behind it, the dependency-layer
 order, and what was learned doing it (a dangling `LICENSE` symlink, a
 missing README, and the two-spellings-of-one-git-URL trap once `settings`
 depends on an already-split `tray`) — read it rather than this summary.
-Nothing in the suite is published to crates.io; the split repositories
-currently build against `crates/` via git dependencies and a `[patch]`
-section, which is what makes standalone builds possible without a
-crates.io account.
+Every library crate is published to crates.io (as of 2026-09-28, all at
+0.1.0), and the split repositories depend on those versions; inside this
+workspace a `[patch.crates-io]` section points each name back at
+`crates/`.

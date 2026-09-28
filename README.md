@@ -296,9 +296,14 @@ rule this is built around; `repo-plan.md` opens with the owner's own framing
 of why repository identity and installable-alone are worth keeping as separate
 questions, rather than restated here.
 
-Each of these repositories takes its Hyprforge dependencies as **git**
-dependencies on this repository, not as versions from crates.io — nothing in
-this suite is published there yet.
+Each of these repositories takes its Hyprforge dependencies as **versions
+from crates.io** — `hyprforge-look = "0.1"` — where every library crate in
+this workspace is published. So a clone of one component fetches the
+published libraries it uses and nothing else; it never needs this
+repository. Inside this workspace the root `[patch.crates-io]` table points
+every one of those names back at `crates/`, so a change to a library
+reaches every app built here at once. The libraries share one version and
+are published together; see `repo-plan.md`.
 
 ### Where development happens
 

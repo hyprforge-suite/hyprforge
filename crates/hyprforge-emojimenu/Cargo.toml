@@ -15,8 +15,8 @@ name = "hyprforge-emojimenu"
 path = "src/main.rs"
 
 [dependencies]
-hyprforge-emoji = { git = "https://github.com/hyprforge-suite/hyprforge" }
-hyprforge-clipboard = { git = "https://github.com/hyprforge-suite/hyprforge" }
+hyprforge-emoji = "0.1"
+hyprforge-clipboard = "0.1"
 # The layer-shell surface, its event loop, pointer/keyboard handling,
 # placement and the single-instance lock — see the `hyprforge-clipmenu`
 # binary's own
@@ -24,11 +24,11 @@ hyprforge-clipboard = { git = "https://github.com/hyprforge-suite/hyprforge" }
 # ~1800 lines of Wayland/iced plumbing. This crate is also where the one
 # genuine gap this picker needed closed lives: long-press detection (see
 # `hyprforge_popup::PopupApp::long_press_duration`/`pointer_long_press`).
-hyprforge-popup = { git = "https://github.com/hyprforge-suite/hyprforge" }
-hyprforge-appearance = { git = "https://github.com/hyprforge-suite/hyprforge" }
-hyprforge-look = { git = "https://github.com/hyprforge-suite/hyprforge" }
-hyprforge-paths = { git = "https://github.com/hyprforge-suite/hyprforge" }
-hyprforge-process = { git = "https://github.com/hyprforge-suite/hyprforge" }
+hyprforge-popup = "0.1"
+hyprforge-appearance = "0.1"
+hyprforge-look = "0.1"
+hyprforge-paths = "0.1"
+hyprforge-process = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1.1"

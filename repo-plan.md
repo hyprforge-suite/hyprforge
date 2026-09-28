@@ -74,13 +74,16 @@ dependency cannot itself be published and pins consumers to a repository
 rather than a version. But it is no longer the gate, and the order below
 is now about *convenience* rather than *possibility*.
 
-The one-manifest problem is solved and worth knowing: the clipboard's
-`Cargo.toml` names the git URL, and the root `Cargo.toml` has a
-`[patch."https://github.com/hyprforge-suite/hyprforge"]` section redirecting those
-dependencies back to `crates/` (every git-named sibling now, which
-`check.sh`'s "Siblings build from this checkout" step enforces). One file, both contexts, no
-divergence for `git subtree push` to conflict on forever, and no network
-access when building here.
+The one-manifest problem is solved and worth knowing: a component's
+`Cargo.toml` names its siblings by crates.io version, and the root
+`Cargo.toml` has a `[patch.crates-io]` section redirecting those names back
+to `crates/` (every one of them, which `check.sh`'s "Siblings build from
+this checkout" step enforces, along with the version still satisfying the
+requirement). One file, both contexts, no divergence for `git subtree
+push` to conflict on forever, and no network access when building here.
+Until 2026-09-28 the same trick ran on the suite's git URL instead, which
+worked, but a clone of one component fetched this entire repository and
+built against whatever its main branch held that hour.
 
 The good news is still how small the foundation is (measured
 2026-09-12; `paths`, `look` and `secret` have grown since, to roughly
@@ -339,8 +342,13 @@ notif's own packaging question, not this plan's.
       mechanism, and proof that a differently-shaped project can share
       the theme without sharing a runtime
 - [x] Publishing metadata on the foundation crates
-- [x] Independent versions for the publishable crates
-- [ ] First publish
+- [x] Independent versions for the publishable crates — since replaced:
+      every library inherits one workspace version, like iced's crates,
+      because re-exports chain across them and a breaking change rarely
+      stays in one
+- [x] First publish: all 31 libraries at 0.1.0, plus the clipboard and
+      tray (components other components use as libraries), 2026-09-28.
+      `.github/workflows/publish.yml` publishes later versions on a tag
 - [x] First split prepared and verified standalone; not yet pushed
 - [x] Step 4 judged: continue, with drift detection and per-repo CI added
 - [x] `lock` and `greet` prepared and verified standalone; not yet pushed

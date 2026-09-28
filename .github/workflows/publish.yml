@@ -1,7 +1,10 @@
 # Publishes every library crate to crates.io when a version tag is pushed.
 #
-# The nine components are excluded: they are installed from packages (and
-# `cargo install`-able from their own repositories), not published. Cargo
+# Seven components are excluded: they are installed from packages (and
+# `cargo install`-able from their own repositories), not published. The
+# clipboard and the tray are published, because other components use them
+# as libraries — and `cargo install hyprforge-clipboard` giving you both
+# its binaries is a feature. Cargo
 # 1.90+'s `publish --workspace` orders the rest by dependency and waits for
 # each wave to appear on the index before publishing the next, so the five
 # waves repo-plan.md lists are cargo's problem rather than this file's.
@@ -61,8 +64,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           cargo publish --workspace \
-            --exclude hyprforge-clipboard --exclude hyprforge-lock \
-            --exclude hyprforge-greet --exclude hyprforge-tray \
+            --exclude hyprforge-lock --exclude hyprforge-greet \
             --exclude hyprforge-settings --exclude hyprforge-displayd \
             --exclude hyprforge-emojimenu --exclude hyprforge-files \
             --exclude hyprforge-media

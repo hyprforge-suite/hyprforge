@@ -298,62 +298,99 @@ fi
 # somebody adds is covered without anyone remembering to add it, the same
 # way the dependency-pin step above discovers its own crates by shape.
 step "Siblings build from this checkout"
-# A standalone manifest names its Hyprforge siblings by git URL, and the
-# root `[patch]` table is what points each one back at `crates/`. A name
-# missing from that table does not fail to build — cargo fetches the
-# sibling from GitHub at whatever commit the lockfile holds and builds
-# against that. Seven were missing at once after the files, displayd and
-# emojimenu split: Files built its archive, file-operation and
-# browser crates from a days-old GitHub snapshot, the tray and clipboard
-# their popup shell, and every local fix to those crates — and every test
-# of the apps using them — silently ran against the old copy.
+# Every component names its Hyprforge siblings by version, as
+# crates.io dependencies, so the manifest works unchanged both here and
+# as the root of its own repository. The root `[patch.crates-io]` table
+# is what points each name back at `crates/` inside this workspace.
+#
+# Two ways that silently stops being true, and both build fine:
+#
+# - A name missing from the table. Cargo fetches the sibling from
+#   crates.io and builds against the published copy, so a fix here never
+#   reaches the component or the tests that use it. Seven were missing at
+#   once when these were still git dependencies, and Files ran its tests
+#   against days-old copies of three crates without anything failing.
+# - A patch whose local version no longer *satisfies* the component's
+#   requirement: a component asking for "0.1" while `crates/` is at
+#   0.2.0. Cargo ignores a patch that does not match — with a warning
+#   nobody reads — and fetches 0.1 from the index. Same failure, new door.
+#
+# So this asks both, and additionally that nothing in the resolved tree
+# comes from a registry or a git source under a hyprforge- name.
 if ! command -v python3 >/dev/null; then
     skip "sibling patch check" "python3 not available to parse Cargo.toml"
 else
     output=$(python3 - <<'PYEOF'
+import re
 import tomllib
 from pathlib import Path
 
 root = tomllib.loads(Path("Cargo.toml").read_text())
-# The URL comes from the [patch] table's own key, not from a literal
-# here. A literal would have to be updated when the repository moves,
-# and if it were not, this check would match no manifest and report
-# "all 0 siblings build from crates/" in green — a check that silently
-# never runs, wearing a tick. The table is the one place the URL must
-# be right for anything to build locally, so it is the one to trust.
-patches = root.get("patch", {})
-if len(patches) != 1:
-    print(f"PROBLEM the root [patch] table has {len(patches)} source(s) ({', '.join(patches) or 'none'}); exactly one — the suite's git URL — is expected")
-    raise SystemExit
-URL = next(iter(patches))
-patched = set(patches[URL])
+patched = root.get("patch", {}).get("crates-io", {})
+local_version = {}
+for manifest in Path("crates").glob("*/Cargo.toml"):
+    pkg = tomllib.loads(manifest.read_text())["package"]
+    v = pkg.get("version")
+    if isinstance(v, dict):
+        v = root["workspace"]["package"]["version"]
+    local_version[pkg["name"]] = v
+
+def satisfies(req, have):
+    """Cargo's default (caret) requirement, which is all this suite uses."""
+    req = req.strip().lstrip("^")
+    want = [int(x) for x in req.split(".")]
+    got = [int(x) for x in have.split(".")]
+    want += [0] * (3 - len(want))
+    # The leftmost non-zero component is the one that must match exactly.
+    for i in range(3):
+        if want[i] != 0 or i == 2:
+            break
+    if got[:i + 1] != want[:i + 1]:
+        return False
+    return got >= want
 
 named = {}
+problems = []
 for manifest in sorted(Path("crates").glob("*/Cargo.toml")):
     data = tomllib.loads(manifest.read_text())
-    tables = [data.get("dependencies", {}), data.get("dev-dependencies", {}), data.get("build-dependencies", {})]
+    tables = [data.get(k, {}) for k in ("dependencies", "dev-dependencies", "build-dependencies")]
     for target in data.get("target", {}).values():
         tables += [target.get(k, {}) for k in ("dependencies", "dev-dependencies", "build-dependencies")]
     for table in tables:
         for name, spec in table.items():
-            if isinstance(spec, dict) and spec.get("git") == URL:
-                named.setdefault(name, set()).add(manifest.parent.name)
+            if not name.startswith("hyprforge-"):
+                continue
+            if isinstance(spec, dict) and ("path" in spec or spec.get("workspace") is True):
+                continue
+            if isinstance(spec, dict) and "git" in spec:
+                problems.append(f"{manifest.parent.name} names {name} by git; components depend on published versions now")
+                continue
+            req = spec if isinstance(spec, str) else spec.get("version", "")
+            named.setdefault(name, set()).add(manifest.parent.name)
+            if name not in patched:
+                problems.append(f"{name} is required by {', '.join(sorted(named[name]))} but not in [patch.crates-io] — it builds from crates.io, not from crates/")
+            elif name in local_version and not satisfies(req, local_version[name]):
+                problems.append(f"{manifest.parent.name} asks for {name} \"{req}\" but crates/ is at {local_version[name]}, so cargo ignores the patch and fetches the published copy")
 
 print(f"CHECKED {len(named)}")
 if not named:
-    # Nine standalone manifests name the URL today; zero means the
-    # manifests and the table have stopped agreeing on what it is, and
-    # every sibling is being fetched from wherever the manifests point.
-    print(f"PROBLEM no manifest under crates/ names {URL}, the URL the root [patch] table redirects — the two have diverged, and nothing is being redirected")
-for name in sorted(set(named) - patched):
-    print(f"PROBLEM {name} is named by git in {', '.join(sorted(named[name]))} but not redirected by [patch] — it builds from GitHub, not from crates/")
+    problems.append("no component names a hyprforge- sibling by version — either the manifests changed shape or this check is looking in the wrong place")
+for p in dict.fromkeys(problems):
+    print(f"PROBLEM {p}")
 PYEOF
     )
+    # And what cargo actually resolved, since that is the claim that
+    # matters: a hyprforge- crate from anywhere but a path is one that did
+    # not come from this checkout.
+    while IFS= read -r line; do
+        output+=$'\n'"PROBLEM resolved from outside this checkout: $line"
+    done < <(cargo tree --workspace -e normal,build,dev --prefix none 2>/dev/null \
+        | grep -E '^hyprforge-' | grep -v '(/' | sort -u)
     if grep -q "^PROBLEM" <<<"$output"; then
-        bad "$(grep -c '^PROBLEM' <<<"$output") sibling(s) build from GitHub instead of this checkout"
+        bad "$(grep -c '^PROBLEM' <<<"$output") sibling(s) do not build from this checkout"
         sed -n 's/^PROBLEM /    • /p' <<<"$output"
     else
-        ok "all $(sed -n 's/^CHECKED //p' <<<"$output") git-named siblings build from crates/"
+        ok "all $(sed -n 's/^CHECKED //p' <<<"$output") versioned siblings build from crates/"
     fi
 fi
 
@@ -1119,12 +1156,14 @@ else
     # and not just a path, that the README the manifest names exists, and
     # that the crate builds from its packaged tarball alone. The nine
     # components are excluded because they are installed from packages,
-    # not published; `--workspace` publishes the rest in dependency order.
+    # not published (the clipboard and the tray excepted); `--workspace` publishes the rest in dependency order.
     # Behind the gate because verification builds every crate over again
     # in target/package, which is far too slow for a pre-commit hook.
     step "Every library crate packages for crates.io"
     exclude=()
-    for c in clipboard lock greet tray settings displayd emojimenu files media; do
+    # Seven, not nine: the clipboard and the tray are components that other
+    # components also use as libraries, so they are published too.
+    for c in lock greet settings displayd emojimenu files media; do
         exclude+=(--exclude "hyprforge-$c")
     done
     if output=$(cargo publish --workspace --dry-run --allow-dirty "${exclude[@]}" 2>&1); then

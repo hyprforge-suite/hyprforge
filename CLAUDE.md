@@ -166,18 +166,23 @@ own manifest, and that is the first pair with this shape. The URL is allowed
 to change; it has to change everywhere at once, which is what `split.sh`
 checks before it will split anything.
 
-**A sibling named by git URL and missing from the root `[patch]` table
-builds from GitHub, not from this checkout — and nothing fails.** Cargo
-fetches it at the lockfile's commit and builds against that. After the
-files, displayd and emojimenu split, seven siblings were missing at once:
-Files built its archive, file-operation and browser crates from a days-old
+**A sibling missing from the root `[patch.crates-io]` table builds from
+the published copy, not from this checkout — and nothing fails.** Cargo
+fetches it and builds against that. When the components still named
+siblings by git URL, seven were missing from the table at once: Files
+built its archive, file-operation and browser crates from a days-old
 snapshot, and the tray and clipboard their popup shell, so every local fix
 to those crates — the archive race fix included — never reached the
 binaries or the tests that exercised them. It surfaced only as a type
-mismatch while merging a branch that changed one of them. `cargo tree
---workspace | grep github.com` is the instrument; `check.sh`'s "Siblings
-build from this checkout" step now refuses a git-named sibling the table
-does not redirect.
+mismatch while merging a branch that changed one of them. Components
+depend on published versions now (`hyprforge-core = "0.1"`), and the same
+failure has a second door: cargo silently ignores a patch whose version
+does not *satisfy* the requirement, so bumping a library to 0.2 without
+bumping a component's "0.1" puts the published 0.1 back in the build.
+`cargo tree --workspace --prefix none | grep '^hyprforge-' | grep -v '(/'`
+is the instrument — a Hyprforge crate with no path after it came from
+somewhere else — and `check.sh`'s "Siblings build from this checkout" step
+asks both questions.
 
 **A git dependency on a crate that still inherits from the workspace
 resolves fine.** Cargo clones the whole repository, so the workspace root

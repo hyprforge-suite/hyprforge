@@ -32,10 +32,10 @@ path = "src/bin/displayctl.rs"
 # touches the network; standalone, cargo fetches them from git.
 #
 # No `gui`: the daemon has no UI, so it skips iced entirely.
-hyprforge-core = { git = "https://github.com/hyprforge-suite/hyprforge", features = ["dbus"] }
+hyprforge-core = { version = "0.1", features = ["dbus"] }
 # For EXPORT_DIR only: the greeter reads the layout from there, and the
 # location must have exactly one definition.
-hyprforge-look = { git = "https://github.com/hyprforge-suite/hyprforge" }
+hyprforge-look = "0.1"
 
 # Spelled out rather than inherited, because a standalone crate has no
 # workspace to inherit from. `check.sh`'s dependency-pin step compares

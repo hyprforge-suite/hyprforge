@@ -228,66 +228,58 @@ futures-util = "0.3"
 # displayd's `OutputBackend` uses to make its daemon testable.
 async-trait = "0.1"
 
-# `hyprforge-clipboard`, `hyprforge-lock` and `hyprforge-greet` each name
-# their Hyprforge dependencies as git dependencies on this same
-# repository's GitHub URL, not path dependencies — those manifests have
-# to build unchanged both in here and as the root of their own
-# standalone repository after `git subtree split` pulls them out, and a
-# standalone repo has no workspace to path into. Left alone, that would
-# make every build here reach across the network for crates that are
-# sitting right there in `crates/`. This patch is what stops that: it
-# rewrites those git dependencies back to the local directories for
-# anyone building inside this workspace, so resolution never leaves disk
-# and `cargo build` keeps working with no network access at all. Do not
-# delete an entry thinking it is unused just because nothing in
-# `[workspace.dependencies]` names a git URL — each exists entirely for
-# a split crate's sake.
-[patch."https://github.com/hyprforge-suite/hyprforge"]
-hyprforge-paths = { path = "crates/hyprforge-paths", version = "0.1.0" }
-hyprforge-secret = { path = "crates/hyprforge-secret", version = "0.1.0" }
-hyprforge-authui = { path = "crates/hyprforge-authui", version = "0.1.0" }
-hyprforge-look = { path = "crates/hyprforge-look", version = "0.1.0" }
-hyprforge-network = { path = "crates/hyprforge-network", version = "0.1.0" }
-hyprforge-bluetooth = { path = "crates/hyprforge-bluetooth", version = "0.1.0" }
-hyprforge-power = { path = "crates/hyprforge-power", version = "0.1.0" }
-hyprforge-ecosystem = { path = "crates/hyprforge-ecosystem", version = "0.1.0" }
-# The rest of these exist for hyprforge-settings alone: it is the hub
-# of the suite (repo-plan.md's layer 5, split last), and names all
-# seventeen of its Hyprforge dependencies as git dependencies in its own
-# Cargo.toml so that manifest works unchanged both here and as the root
-# of its own standalone repository.
-hyprforge-core = { path = "crates/hyprforge-core", version = "0.1.0" }
-hyprforge-ui = { path = "crates/hyprforge-ui", version = "0.1.0" }
-hyprforge-windowrules = { path = "crates/hyprforge-windowrules", version = "0.1.0" }
-hyprforge-input = { path = "crates/hyprforge-input", version = "0.1.0" }
-hyprforge-appearance = { path = "crates/hyprforge-appearance", version = "0.1.0" }
-hyprforge-session = { path = "crates/hyprforge-session", version = "0.1.0" }
-hyprforge-system = { path = "crates/hyprforge-system", version = "0.1.0" }
-hyprforge-shortcuts = { path = "crates/hyprforge-shortcuts", version = "0.1.0" }
-hyprforge-lua-import = { path = "crates/hyprforge-lua-import", version = "0.1.0" }
-hyprforge-tray = { path = "crates/hyprforge-tray", version = "0.1.0" }
-hyprforge-mime = { path = "crates/hyprforge-mime", version = "0.1.0" }
-# The siblings the files, displayd and emojimenu split named by git URL,
-# and the popups' shared shell. Missing from this table, each one quietly
-# built from whatever GitHub had at the lockfile's commit instead of from
-# this checkout — so a fix here to the archive crate, the popup shell or
-# the file operations never reached Files, the tray or the clipboard, and
-# their tests ran against yesterday's copies. `check.sh`'s "Siblings build
-# from this checkout" step now fails if a manifest names a sibling this
-# table does not redirect.
-hyprforge-archive = { path = "crates/hyprforge-archive", version = "0.1.0" }
-hyprforge-clipboard = { path = "crates/hyprforge-clipboard", version = "0.1.0" }
-hyprforge-emoji = { path = "crates/hyprforge-emoji", version = "0.1.0" }
-hyprforge-fileops = { path = "crates/hyprforge-fileops", version = "0.1.0" }
-hyprforge-files-core = { path = "crates/hyprforge-files-core", version = "0.1.0" }
-hyprforge-popup = { path = "crates/hyprforge-popup", version = "0.1.0" }
-hyprforge-process = { path = "crates/hyprforge-process", version = "0.1.0" }
-hyprforge-image = { path = "crates/hyprforge-image", version = "0.1.0" }
-hyprforge-icons = { path = "crates/hyprforge-icons", version = "0.1.0" }
-hyprforge-thumbnails = { path = "crates/hyprforge-thumbnails", version = "0.1.0" }
-hyprforge-video = { path = "crates/hyprforge-video", version = "0.1.0" }
-# The three the media split added: the listing it takes its order from,
-# the mesh loader, and the keyboard grammar.
-hyprforge-listing = { path = "crates/hyprforge-listing", version = "0.1.0" }
-hyprforge-mesh = { path = "crates/hyprforge-mesh", version = "0.1.0" }
-hyprforge-keys = { path = "crates/hyprforge-keys", version = "0.1.0" }
+# Every component names its Hyprforge siblings by version, as crates.io
+# dependencies — `hyprforge-core = "0.1"` — because those manifests have to
+# build unchanged both in here and as the root of their own repository
+# after `git subtree split` pulls them out, and a clone of one component
+# should fetch published crates, not this whole repository. Left alone,
+# that would make every build here use the published copies of crates
+# that are sitting right there in `crates/`, so a fix to a library would
+# never reach the apps built from this checkout, or their tests.
+#
+# This table is what stops that: inside this workspace, every published
+# name resolves to its directory. Cargo only honours a patch whose
+# version satisfies the requirement, so bumping a library to 0.2 means
+# bumping the components' "0.1" in the same commit — `check.sh`'s
+# "Siblings build from this checkout" step fails if one is missed, which
+# is otherwise silent: cargo ignores the patch and fetches 0.1.
+#
+# Do not delete an entry because nothing in `[workspace.dependencies]`
+# needs it; each exists for a component's manifest. `hyprforge-clipboard`
+# and `hyprforge-tray` are here because they are components that other
+# components also use as libraries — emojimenu, files and media use the
+# clipboard's, settings the tray's preferences.
+[patch.crates-io]
+hyprforge-appearance = { path = "crates/hyprforge-appearance" }
+hyprforge-archive = { path = "crates/hyprforge-archive" }
+hyprforge-authui = { path = "crates/hyprforge-authui" }
+hyprforge-bluetooth = { path = "crates/hyprforge-bluetooth" }
+hyprforge-clipboard = { path = "crates/hyprforge-clipboard" }
+hyprforge-core = { path = "crates/hyprforge-core" }
+hyprforge-ecosystem = { path = "crates/hyprforge-ecosystem" }
+hyprforge-emoji = { path = "crates/hyprforge-emoji" }
+hyprforge-fileops = { path = "crates/hyprforge-fileops" }
+hyprforge-files-core = { path = "crates/hyprforge-files-core" }
+hyprforge-icons = { path = "crates/hyprforge-icons" }
+hyprforge-image = { path = "crates/hyprforge-image" }
+hyprforge-input = { path = "crates/hyprforge-input" }
+hyprforge-keys = { path = "crates/hyprforge-keys" }
+hyprforge-listing = { path = "crates/hyprforge-listing" }
+hyprforge-look = { path = "crates/hyprforge-look" }
+hyprforge-lua-import = { path = "crates/hyprforge-lua-import" }
+hyprforge-mesh = { path = "crates/hyprforge-mesh" }
+hyprforge-mime = { path = "crates/hyprforge-mime" }
+hyprforge-network = { path = "crates/hyprforge-network" }
+hyprforge-paths = { path = "crates/hyprforge-paths" }
+hyprforge-popup = { path = "crates/hyprforge-popup" }
+hyprforge-power = { path = "crates/hyprforge-power" }
+hyprforge-process = { path = "crates/hyprforge-process" }
+hyprforge-secret = { path = "crates/hyprforge-secret" }
+hyprforge-session = { path = "crates/hyprforge-session" }
+hyprforge-shortcuts = { path = "crates/hyprforge-shortcuts" }
+hyprforge-system = { path = "crates/hyprforge-system" }
+hyprforge-thumbnails = { path = "crates/hyprforge-thumbnails" }
+hyprforge-tray = { path = "crates/hyprforge-tray" }
+hyprforge-ui = { path = "crates/hyprforge-ui" }
+hyprforge-video = { path = "crates/hyprforge-video" }
+hyprforge-windowrules = { path = "crates/hyprforge-windowrules" }
