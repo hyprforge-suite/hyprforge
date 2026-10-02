@@ -1506,12 +1506,12 @@ mod tests {
         assert!(
             matches!(&signals[0], DbusSignal::ActionInvoked { id: sid, action_key } if *sid == id && action_key == "default"),
             "first signal must be ActionInvoked{{default}}, got: {:?}",
-            &signals[0]
+            signals[0]
         );
         assert!(
             matches!(&signals[1], DbusSignal::NotificationClosed { id: sid, reason: CloseReason::Dismissed } if *sid == id),
             "second signal must be NotificationClosed{{Dismissed}}, got: {:?}",
-            &signals[1]
+            signals[1]
         );
         assert!(core.active.is_empty(), "notification must be removed");
     }
@@ -1534,7 +1534,7 @@ mod tests {
         assert!(
             matches!(&signals[0], DbusSignal::ActionInvoked { id: sid, action_key } if *sid == id && action_key == "default"),
             "signal must be ActionInvoked{{default}}, got: {:?}",
-            &signals[0]
+            signals[0]
         );
         assert_eq!(
             core.active.len(),
@@ -1558,7 +1558,7 @@ mod tests {
         assert!(
             matches!(&signals[0], DbusSignal::NotificationClosed { id: sid, reason: CloseReason::Dismissed } if *sid == id),
             "signal must be NotificationClosed{{Dismissed}}, got: {:?}",
-            &signals[0]
+            signals[0]
         );
         assert!(core.active.is_empty(), "notification must be removed");
     }
@@ -1578,7 +1578,7 @@ mod tests {
         assert!(
             matches!(&signals[0], DbusSignal::NotificationClosed { id: sid, reason: CloseReason::Dismissed } if *sid == id),
             "signal must be NotificationClosed{{Dismissed}}, got: {:?}",
-            &signals[0]
+            signals[0]
         );
         assert!(core.active.is_empty());
     }

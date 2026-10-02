@@ -10,7 +10,7 @@
 use notif_render::{HitTarget, Renderer, SkiaRenderer};
 use notif_types::{
     Action, DisplayNotification, ImageSource, Notification, RawImage, Timeout, Urgency,
-    config::Config,
+    config::{Config, Rgba, Theme},
 };
 use std::path::{Path, PathBuf};
 use std::{collections::HashMap, time::SystemTime};
@@ -333,12 +333,28 @@ fn skia_render_produces_non_empty_output() {
     );
 }
 
+/// The buffer is BGRA, and the colour in it is the *theme's*.
+///
+/// Two claims in one test, both invisible to the type system. The
+/// channel order is a real one — this renderer writes BGRA deliberately,
+/// same as `iced_tiny_skia` does, and "fixing" it to RGBA would swap
+/// every notification's colour with nothing failing to compile. And
+/// reading the pixel back against `hyprforge_look::Theme` rather than
+/// against a literal is the only way to prove the shared theme actually
+/// reaches the screen: a second palette could be reintroduced anywhere
+/// between here and `Config::from_theme` and every other test here
+/// would still pass.
 #[test]
 fn skia_render_bgra_format() {
-    // For the catppuccin default background #1e1e2e, in the raw BGRA buffer
-    // byte[0] (B) = 0x2e and byte[2] (R) = 0x1e.
     let mut r = test_renderer();
     let cfg = Config::default();
+    // What the theme says a notification's panel is, taken from the
+    // theme itself rather than copied out of it.
+    let expected: Rgba = Theme::default().surface.into();
+    assert_eq!(
+        cfg.normal.background, expected,
+        "the default palette must be the theme's"
+    );
     let items = vec![make_notif(42, "BGRA check", "", Urgency::Normal)];
     let layout = r.measure(&items, &cfg, 1.0);
     let buf_w = layout.width;
@@ -357,8 +373,17 @@ fn skia_render_bgra_format() {
     let idx = mid_y * stride as usize + mid_x * 4;
 
     assert_eq!(buf[idx + 3], 0xff, "pixel should be fully opaque");
-    assert_eq!(buf[idx], 0x2e, "expected BGRA byte order with B=0x2e");
-    assert_eq!(buf[idx + 2], 0x1e, "expected BGRA byte order with R=0x1e");
+    assert_eq!(buf[idx], expected.b, "expected BGRA byte order: B first");
+    assert_eq!(
+        buf[idx + 1],
+        expected.g,
+        "expected BGRA byte order: G second"
+    );
+    assert_eq!(
+        buf[idx + 2],
+        expected.r,
+        "expected BGRA byte order: R third"
+    );
 }
 
 #[test]

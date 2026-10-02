@@ -8,6 +8,8 @@
 
 pub use notif_types::config::*;
 
+pub use hyprforge_look::Theme;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -30,18 +32,97 @@ pub enum ConfigError {
     },
 }
 
-/// Load configuration from `path`.
+/// The look this machine publishes, or the built-in one.
 ///
-/// If the file does not exist, the built-in defaults are returned.
+/// `lock.toml` is where the Settings app writes the resolved theme and
+/// where the lock screen reads it; a notification reading the same file
+/// is how it ends up the same colour as everything else on the screen.
+///
+/// A **missing** file is first-run, not a problem: nobody has installed
+/// or run the Settings app, and notif must still draw correctly themed
+/// on that machine. A file that **exists and will not parse** is a
+/// different thing and gets said out loud — collapsing the two is how a
+/// user ends up staring at default colours with nothing anywhere
+/// telling them their theme file is broken.
+pub fn published_theme() -> Theme {
+    let path = hyprforge_paths::lock_toml_path();
+    match Theme::load(&path) {
+        Ok(theme) => theme,
+        Err(e) => {
+            log::warn!(
+                "using the built-in look: couldn't read {}: {e}",
+                path.display()
+            );
+            Theme::default()
+        }
+    }
+}
+
+/// Load configuration from `path`, themed by [`published_theme`].
+///
+/// If the file does not exist, the theme's own values are returned.
 /// If the file exists but cannot be parsed or validated, an error is returned.
 pub fn load(path: &Path) -> Result<Config, ConfigError> {
+    load_with_theme(path, &published_theme())
+}
+
+/// [`load`] against a named theme.
+///
+/// Split out because `load` reads a real path under `$XDG_CONFIG_HOME`,
+/// and a test that went through it would assert against whatever look
+/// the developer running it happens to have installed.
+pub fn load_with_theme(path: &Path, theme: &Theme) -> Result<Config, ConfigError> {
+    let base = Config::from_theme(theme);
     if !path.exists() {
-        return Ok(Config::default());
+        return Ok(base);
     }
     let text = std::fs::read_to_string(path)?;
-    let config: Config = toml::from_str(&text)?;
+
+    // Merged as TOML rather than deserialized straight into `Config`,
+    // and the difference is the whole point of this function.
+    //
+    // `#[serde(default)]` fills an absent field from `Config::default()`,
+    // which is the *compile-time* theme — so with a plain
+    // `toml::from_str` a user who set nothing but `margin_x` would get
+    // notif's built-in palette back and the machine's published one
+    // would never be read at all. Merging the file over a
+    // theme-seeded base makes "absent" mean "whatever the theme says",
+    // which is what absent has to mean for any of this to work.
+    //
+    // It also makes a partial `[normal]` table legal, which it was not
+    // before: `UrgencyStyle` has no field defaults of its own, so
+    // `[normal]\nborder_width = 2` used to fail to parse with a
+    // complaint about a missing `background`.
+    let user: toml::Value = toml::from_str(&text)?;
+    let seeded = toml::Value::try_from(&base).map_err(|e| ConfigError::Validation {
+        message: format!("couldn't represent the theme as config: {e}"),
+    })?;
+
+    let config: Config = merge(seeded, user).try_into().map_err(ConfigError::Parse)?;
     validate(&config)?;
     Ok(config)
+}
+
+/// Overlay `user` onto `base`, recursing into tables.
+///
+/// Tables merge key by key; everything else is replaced outright. An
+/// array is replaced rather than appended because there is no config
+/// here where "add to the list the theme gave you" is the thing a user
+/// means.
+fn merge(base: toml::Value, user: toml::Value) -> toml::Value {
+    match (base, user) {
+        (toml::Value::Table(mut base), toml::Value::Table(user)) => {
+            for (key, value) in user {
+                let merged = match base.remove(&key) {
+                    Some(existing) => merge(existing, value),
+                    None => value,
+                };
+                base.insert(key, merged);
+            }
+            toml::Value::Table(base)
+        }
+        (_, user) => user,
+    }
 }
 
 /// Validate a [`Config`], returning a descriptive error for out-of-range values.
@@ -240,7 +321,7 @@ mod tests {
     #[test]
     fn test_missing_file_gives_defaults() {
         let path = PathBuf::from("/nonexistent/path/that/does/not/exist/notif.toml");
-        let config = load(&path).unwrap();
+        let config = load_with_theme(&path, &Theme::default()).unwrap();
         assert_eq!(config.anchor, AnchorCorner::TopRight);
         assert_eq!(config.max_visible, 5);
         assert_eq!(config.margin_x, 12);
@@ -255,7 +336,11 @@ mod tests {
     #[test]
     fn test_example_config_parses_to_defaults() {
         let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/config.toml"));
-        let config = load(path).unwrap();
+        // Against a named theme, not the machine's: the sample now
+        // leaves every colour commented out precisely so they follow
+        // whatever theme is published, and `load` would compare it
+        // against the developer's own.
+        let config = load_with_theme(path, &Theme::default()).unwrap();
         // The sample documents the defaults, so it must round-trip to them.
         let defaults = Config::default();
         assert_eq!(config.anchor, defaults.anchor);
@@ -275,11 +360,56 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[center]\nwidth = 320\nbackground = \"#101010\"\n").unwrap();
-        let config = load(&path).unwrap();
+        let config = load_with_theme(&path, &Theme::default()).unwrap();
         assert_eq!(config.center.width, Some(320));
         assert_eq!(config.center.background, Some(Rgba::rgb(0x10, 0x10, 0x10)));
         assert_eq!(config.center.anchor, None);
         assert_eq!(config.center.margin_x, None);
+    }
+
+    /// The point of the whole merge: a config that mentions one layout
+    /// knob must not drag notif's old palette back in behind it.
+    ///
+    /// Deserializing straight into `Config` does exactly that, because
+    /// `#[serde(default)]` fills an absent field from the compile-time
+    /// default — so this is the test that fails if anyone "simplifies"
+    /// `load_with_theme` back to a `toml::from_str`.
+    #[test]
+    fn a_config_that_sets_only_layout_still_takes_its_colours_from_the_theme() {
+        let theme = Theme {
+            accent: hyprforge_look::Color::rgba(0x12, 0x34, 0x56, 0xff),
+            ..Theme::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "margin_x = 40\n").unwrap();
+
+        let config = load_with_theme(&path, &theme).unwrap();
+        assert_eq!(config.margin_x, 40, "the one thing the user did say");
+        assert_eq!(
+            config.normal.border_color,
+            Rgba::rgb(0x12, 0x34, 0x56),
+            "everything they didn't say follows the theme"
+        );
+    }
+
+    /// A user who wants a colour of their own keeps it. Sharing a look
+    /// by default is not the same as taking the choice away.
+    #[test]
+    fn a_colour_written_in_the_config_still_beats_the_theme() {
+        let theme = Theme {
+            accent: hyprforge_look::Color::rgba(0x12, 0x34, 0x56, 0xff),
+            ..Theme::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[normal]\nborder_color = \"#abcdef\"\n").unwrap();
+
+        let config = load_with_theme(&path, &theme).unwrap();
+        assert_eq!(config.normal.border_color, Rgba::rgb(0xab, 0xcd, 0xef));
+        // And the rest of that same table still follows the theme,
+        // rather than failing to parse for want of a `background`.
+        assert_eq!(config.normal.foreground, Rgba::from(theme.foreground));
     }
 
     #[test]

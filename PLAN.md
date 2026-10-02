@@ -140,6 +140,8 @@ On approval, work begins with **Task 1** (workspace scaffold + notif-types + not
 
 Phase 1 delivered the daemon (popups). Phase 2 adds external control and the history panel. Three tasks, same protocol: architect-authored prompts, builder implements, architect reviews against §Review Criteria, one commit per task.
 
+**Status: Tasks 6–8 are built** — `notif-ipc` serves the socket below, `bin/notifctl` has every subcommand listed, and `notif-wl` draws the `"notif-center"` surface through `Renderer::measure_center`/`render_center`. Where the code moved past this section, the code is the contract: `UiCommand::SetCenter` carries `active` and `history` separately rather than one `entries` list, because the panel shows the live notifications followed by history; and `UiEvent` also has `BodyClicked(u32)`, which core turns into the `"default"` action or a dismiss. The center's golden-image tests were not written — its rendering is covered by unit tests in `skia_renderer.rs` (`center_sections_hit_targets`, `shape_count_regression_center`), and `crates/notif-render/tests/golden/` holds toast goldens only.
+
 ## Phase-2 message vocabulary (notif-types additions — frozen once Task 6 lands)
 
 ```rust

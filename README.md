@@ -1,10 +1,3 @@
-> **Archived on 2026-09-27.** notif now lives inside the Hyprforge suite, at
-> [`notif/`](https://github.com/hyprforge-suite/hyprforge/tree/master/notif)
-> in [hyprforge-suite/hyprforge](https://github.com/hyprforge-suite/hyprforge),
-> as a nested workspace sharing the suite's theme. Development, issues and pull
-> requests go there. This repository is kept for its history and for the
-> `notif-git` PKGBUILD, which is no longer maintained.
-
 # notif
 
 A lightweight notification daemon and control center for Wayland, built from
@@ -71,26 +64,46 @@ translators in and pure projections out.
 
 ## Installing
 
-### Arch Linux (AUR)
+notif is part of [Hyprforge](https://github.com/hyprforge-suite/hyprforge),
+a suite of native Hyprland desktop applications, where it lives as
+`crates/hyprforge-notif`; this repository,
+[hyprforge-notif](https://github.com/hyprforge-suite/hyprforge-notif), is a
+split of that directory and `sync.sh` keeps it in step. It takes two of the
+suite's libraries, `hyprforge-look` and `hyprforge-paths`, from crates.io,
+so it builds on its own. Nothing else in the suite is required: with no
+Hyprforge theme published on the machine, it draws in the theme's defaults.
+
+The binaries keep the names they always had — `notifd` and `notifctl` — and
+so does the layer namespace, `notif`, so existing keybinds and layer rules
+keep working.
+
+### Arch Linux
+
+The suite's split package builds it as `hyprforge-notif`, which replaces the
+old `notif-git`. From a checkout of the suite:
 
 ```sh
-yay -S notif-git
-```
-
-Or manually with the `PKGBUILD` in this repo:
-
-```sh
-git clone https://github.com/adamrpostjr/notif.git
-cd notif
+git clone https://github.com/hyprforge-suite/hyprforge.git
+cd hyprforge/packaging/arch
 makepkg -si
 ```
 
-This installs `notifd`, `notifctl`, and a systemd user unit
-(`notifd.service`).
+That builds every package in the suite; install just this one with
+`sudo pacman -U hyprforge-notif-*.pkg.tar.zst`. It installs `notifd`,
+`notifctl`, and a systemd user unit (`notifd.service`). There is no AUR
+package.
+
+Or with the suite's installer, which puts the binaries in `/usr/local/bin`
+and the unit in `~/.config/systemd/user`:
+
+```sh
+./hyprforge --install --notif
+```
 
 ### Building from source
 
-Requires a recent stable Rust toolchain.
+Requires the Rust toolchain pinned in `rust-toolchain.toml`. From this
+repository, or from `crates/hyprforge-notif` in a Hyprforge checkout:
 
 ```sh
 cargo build --release --workspace
@@ -156,7 +169,15 @@ bind = $mainMod SHIFT, N, exec, notifctl dnd
 no restart needed. A missing file just means defaults. Point it elsewhere
 with `notifd --config <path>`.
 
-Every field below is optional; unset fields fall back to the default shown.
+Every field below is optional. Colours, fonts and corner rounding fall back
+to the **Hyprforge theme this machine publishes** — the same `lock.toml` the
+lock screen and the Settings app read — so notifications match your windows
+without being told the colours twice. Setting one here stops that value
+following the theme.
+
+The values shown beside the commented-out colour lines are what the built-in
+theme gives, which is what you see on a machine where nothing else has been
+configured. Everything else falls back to the default shown.
 
 ```toml
 # Corner to anchor the notification stack.
@@ -173,9 +194,10 @@ max_width = 400
 max_height = 200
 max_visible = 5
 
-# Font.
-font_family = "sans-serif"
-font_size = 13.0
+# Font. From the theme (gsettings, times its accessibility scale) unless
+# set here.
+# font_family = "Sans"
+# font_size = 15.0
 
 # Icon size (px).
 icon_size = 48
@@ -205,39 +227,35 @@ center_width = 400
 # margin_y = 12
 # width = 400
 # max_entries = 100
-# font_family = "sans-serif"
-# font_size = 13.0
-# background = "#1e1e2e"
-# foreground = "#cdd6f4"
-# border_color = "#89b4fa"
+# font_family = "Sans"
+# font_size = 15.0
+# background = "#26263a"
+# foreground = "#f8f8f2"
+# border_color = "#bd93f9"
 # border_width = 1
-# corner_radius = 8
+# corner_radius = 12
 
 # Per-urgency appearance. Sections: [low], [normal], [critical].
+# The commented colours are the theme's, not literals notif carries.
 [low]
-background = "#1e1e2e"
-foreground = "#cdd6f4"
-border_color = "#313244"
-border_width = 1
-corner_radius = 8
+# background = "#26263a"    # theme: surface
+# foreground = "#f8f8f2"    # theme: foreground
+# border_color = "#373a47"  # theme: card border - present, not shouting
+# border_width = 1
+# corner_radius = 12        # theme: rounding
 default_timeout_ms = 5000   # 0 = never expire
 ignore_timeout = false      # if true, always use default_timeout_ms
 
 [normal]
-background = "#1e1e2e"
-foreground = "#cdd6f4"
-border_color = "#89b4fa"
-border_width = 1
-corner_radius = 8
+# border_color = "#bd93f9"  # theme: accent, i.e. general:col:active_border
+# border_width = 1
 default_timeout_ms = 8000
 ignore_timeout = false
 
 [critical]
-background = "#1e1e2e"
-foreground = "#f38ba8"
-border_color = "#f38ba8"
-border_width = 2
-corner_radius = 8
+# foreground = "#ff5555"    # theme: error
+# border_color = "#ff5555"  # theme: error
+# border_width = 2
 default_timeout_ms = 0      # never auto-expire critical notifications
 ignore_timeout = true
 ```

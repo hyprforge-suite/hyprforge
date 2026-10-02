@@ -1,6 +1,6 @@
 [Unit]
 Description=notif notification daemon
-Documentation=https://github.com/adamrpostjr/notif
+Documentation=https://github.com/hyprforge-suite/hyprforge/tree/main/notif
 PartOf=graphical-session.target
 After=graphical-session.target
 

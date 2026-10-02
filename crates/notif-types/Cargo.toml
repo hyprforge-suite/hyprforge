@@ -8,5 +8,6 @@ workspace = true
 
 [dependencies]
 serde = { workspace = true }
+hyprforge-look = { workspace = true }
 async-channel = { workspace = true }
 zvariant = { workspace = true }

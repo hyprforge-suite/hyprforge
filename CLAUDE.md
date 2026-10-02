@@ -4,9 +4,37 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`notif` — a notification daemon + (future) notification center for Wayland, built from scratch in Rust. Optimized for Hyprland, portable to any wlr-layer-shell compositor via strict adherence to the org.freedesktop.Notifications D-Bus spec. Zero-bloat: no UI frameworks, smol-family async only (no tokio, no calloop — their absence from Cargo.lock is a hard invariant).
+**This is a nested cargo workspace inside the Hyprforge repository**, at
+`crates/hyprforge-notif`, and that directory is also split out as its own
+repository, `hyprforge-suite/hyprforge-notif`. It is deliberately
+`exclude`d from the parent workspace, and the reason is a
+runtime one, not tidiness: cargo unifies features across a workspace, and
+zbus picks its async runtime with `#[cfg(feature = "tokio")]`. The suite
+needs `zbus/tokio`; notif needs `zbus/async-io`. Unified, tokio wins for
+both and notif's D-Bus code takes a tokio path with no tokio runtime
+under it — an immediate panic, with nothing at compile time to see it
+coming. So: **never add `notif` to the parent's `members`**, and keep
+checking after any dependency change that
+`(cd notif && cargo tree -e features | grep 'zbus feature')` still says
+`async-io` and never `tokio`.
 
-**PLAN.md is the architecture contract.** Module responsibilities, message types, crate choices, review criteria, and spec gotchas live there — read it before structural changes. Phase 2 (notif-ipc socket, notifctl, history/control-center panel) is designed but unbuilt; the seams for it already exist (`IpcCmd`, core's history ring).
+`../../check.sh` has a tier-1 step that runs this workspace's clippy,
+fmt and tests separately, because `cargo test --workspace` up there
+cannot reach them and would not say so.
+
+`hyprforge-look` and `hyprforge-paths` are crates.io dependencies
+(`"0.1"`), so this manifest is the same in both places. Inside the suite,
+`crates/.cargo/config.toml` patches them back to the local copies — the
+parent's own `[patch.crates-io]` cannot, because cargo reads patches only
+from the root of the workspace being built and this is its own root.
+Check with `cargo tree --workspace --prefix none | grep '^hyprforge-'`:
+both should name a path. In the split repository they come from crates.io,
+which is correct there and means a change to either library reaches that
+repository only once it is released.
+
+`notif` — a notification daemon + notification center for Wayland, built from scratch in Rust. Optimized for Hyprland, portable to any wlr-layer-shell compositor via strict adherence to the org.freedesktop.Notifications D-Bus spec. Zero-bloat: no UI frameworks, smol-family async only (no tokio, no calloop — their absence from Cargo.lock is a hard invariant).
+
+**PLAN.md is the architecture contract.** Module responsibilities, message types, crate choices, review criteria, and spec gotchas live there — read it before structural changes. Phase 2 (the notif-ipc socket, notifctl, DND and the notification-center panel) is built too; its section of PLAN.md is the contract for it.
 
 ## Commands
 
@@ -27,6 +55,7 @@ Manual smoke scripts (all run on an ISOLATED bus via `dbus-run-session` — neve
 bash crates/notif-dbus/tests/manual/dbus_smoke.sh        # D-Bus interface conformance
 bash crates/notif-core/tests/manual/core_smoke.sh        # headless dbus+core, expiry via notify-send
 bash bin/notifd/tests/manual/shutdown_smoke.sh           # SIGINT/SIGTERM exit <2s
+bash bin/notifctl/tests/manual/ctl_smoke.sh              # notifctl round-trips over the IPC socket
 bash bin/notifd/tests/manual/e2e_smoke.sh                # full daemon rendering on the live compositor
 ```
 
@@ -55,8 +84,36 @@ Key invariants that span multiple files:
 
 - Deny lints: `clippy::unwrap_used`, `clippy::expect_used`, `clippy::indexing_slicing` (allowed in `#[cfg(test)]`); `#![forbid(unsafe_code)]` everywhere. Pixel loops use `.get()`/`chunks_exact_mut`, never `[]`.
 - Errors: thiserror enums in lib crates, anyhow only in bins. Peer misbehavior (malformed hints, bad config, protocol oddities) is logged-and-degraded, never fatal; only startup failures may exit.
-- No new dependencies without checking PLAN.md's approved crate table.
-- Golden-image tests (crates/notif-render/tests/) compare byte-exact against committed PNGs using bundled DejaVu test fonts. If a rendering refactor isn't supposed to change output, the PNGs must not change — fix the code, never regenerate the goldens to make a test pass.
+- No new dependencies without checking PLAN.md's approved crate table. The two exceptions are `hyprforge-look` and `hyprforge-paths`, the suite's own crates: both are runtime-free (no zbus, no tokio, no async-io, no GUI toolkit — `hyprforge-paths` has no dependencies at all), so neither can disturb the smol-only invariant. Their absence of tokio in `Cargo.lock` is checked the same way everything else is.
+- Golden-image tests (crates/notif-render/tests/) compare byte-exact against committed PNGs using bundled DejaVu test fonts. If a rendering refactor isn't supposed to change output, the PNGs must not change — fix the code, never regenerate the goldens to make a test pass. They *were* regenerated once, when the palette moved to the shared theme: that change was to the output, which is the one case where regenerating is the honest answer rather than the lazy one. The guard against doing it lazily is `skia_render_bgra_format`, which reads a pixel back and compares it against `hyprforge_look::Theme` rather than against a literal — a golden regenerated to paper over a real regression would still have to satisfy that.
+
+## The look is not notif's to choose
+
+Every colour, the font and the corner radius come from one
+`hyprforge_look::Theme`, read from the `lock.toml` the Settings app
+publishes and the lock screen reads. notif shipped a catppuccin palette
+of its own before it was part of a suite, which meant a notification drew
+a blue border while the window under it wore whatever
+`general:col:active_border` actually was. **Do not add a colour constant
+here**; if the Theme is missing a colour, it belongs in `hyprforge-look`.
+
+Two consequences worth knowing before editing config code:
+
+- `Config::default()` is deliberately *pure* — the theme's own defaults,
+  never this machine's. `notif_config::load` is the only thing that reads
+  the published theme. If `Default` read a file, every golden render
+  would differ depending on whose machine ran it.
+- `load_with_theme` merges the user's TOML **over** a theme-seeded base
+  rather than deserializing straight into `Config`, and that is load
+  bearing. `#[serde(default)]` fills an absent field from
+  `Config::default()`, so a plain `toml::from_str` would hand back the
+  compile-time palette to anyone whose config set so much as `margin_x`,
+  and the published theme would never be read at all.
+  `a_config_that_sets_only_layout_still_takes_its_colours_from_the_theme`
+  is the test that fails if someone "simplifies" it back.
+
+A value written in the user's config still wins over the theme. Sharing a
+look by default is not the same as taking the choice away.
 
 ## Wayland/spec gotchas (cost real debugging time; details in PLAN.md §Risks)
 

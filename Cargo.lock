@@ -770,6 +770,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "hyprforge-look"
+version = "0.1.0"
+dependencies = [
+ "hyprforge-paths",
+ "serde",
+ "thiserror 2.0.18",
+ "toml",
+]
+
+[[package]]
+name = "hyprforge-paths"
+version = "0.1.0"
+
+[[package]]
 name = "image"
 version = "0.25.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1001,6 +1015,8 @@ dependencies = [
  "async-channel",
  "async-io",
  "futures-lite",
+ "hyprforge-look",
+ "hyprforge-paths",
  "inotify",
  "log",
  "notif-types",
@@ -1075,6 +1091,7 @@ name = "notif-types"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "hyprforge-look",
  "serde",
  "zvariant",
 ]

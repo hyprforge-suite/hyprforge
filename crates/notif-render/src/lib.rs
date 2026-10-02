@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
-//! `notif-render` — `Renderer` trait and `StubRenderer` for Wayland buffer rendering.
+//! `notif-render` — the `Renderer` trait, `SkiaRenderer` (the tiny-skia/cosmic-text
+//! implementation `notifd` uses, for toasts and the center panel) and `StubRenderer`
+//! (plain rectangles, for `notif-wl`'s demo and this crate's tests).
 //!
 //! Buffer format: ARGB8888 premultiplied, little-endian memory order (bytes: B, G, R, A).
 //! This matches `wl_shm::Format::Argb8888`.
@@ -380,7 +382,8 @@ mod tests {
         let region = &layout.hit_regions[0];
         let row_off = region.rect.y as usize * stride as usize;
         let col_off = region.rect.x as usize * 4;
-        // Blue channel (byte 0 of BGRA) should be non-zero for the default bg (#1e1e2e).
+        // Blue channel (byte 0 of BGRA) should be non-zero: the theme's
+        // surface is a dark blue-grey, not black.
         let blue = buf[row_off + col_off];
         assert_ne!(blue, 0, "expected non-zero blue in filled rect");
     }

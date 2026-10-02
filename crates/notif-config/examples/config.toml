@@ -1,5 +1,14 @@
 # notif configuration file
-# All values shown are defaults
+#
+# Everything here is optional. Anything you leave out comes from the
+# Hyprforge theme this machine publishes — the same file the lock screen
+# and the Settings app read — so notifications match your windows
+# without being told the colours twice.
+#
+# The colour, font and rounding lines below are therefore commented out:
+# uncommenting one stops that value following the theme, for good. The
+# values shown beside them are what the *built-in* theme gives, which is
+# what you see on a machine where nothing else has been configured.
 
 # Corner to anchor the notification stack
 # Options: top_left, top_right, bottom_left, bottom_right
@@ -23,9 +32,10 @@ max_height = 200
 # Maximum number of notifications visible at once
 max_visible = 5
 
-# Font settings
-font_family = "sans-serif"
-font_size = 13.0
+# Font settings. From the theme (gsettings, times its accessibility
+# scale) unless set here.
+# font_family = "Sans"
+# font_size = 15.0
 
 # Icon size (pixels)
 icon_size = 48
@@ -52,40 +62,42 @@ center_width = 400
 # margin_y = 12
 # width = 400
 # max_entries = 100
-# font_family = "sans-serif"
-# font_size = 13.0
-# background = "#1e1e2e"
-# foreground = "#cdd6f4"
-# border_color = "#89b4fa"
+# font_family = "Sans"
+# font_size = 15.0
+# background = "#26263a"
+# foreground = "#f8f8f2"
+# border_color = "#bd93f9"
 # border_width = 1
-# corner_radius = 8
+# corner_radius = 12
 
-# Low urgency style
+# Low urgency style. Colours and rounding come from the theme.
 [low]
-background = "#1e1e2e"
-foreground = "#cdd6f4"
-border_color = "#313244"
-border_width = 1
-corner_radius = 8
+# background = "#26263a"    # theme: surface
+# foreground = "#f8f8f2"    # theme: foreground
+# border_color = "#373a47"  # theme: card border — present, not shouting
+# border_width = 1
+# corner_radius = 12        # theme: rounding
 default_timeout_ms = 5000
 ignore_timeout = false
 
-# Normal urgency style
+# Normal urgency style. The border is the theme's accent, which is
+# Hyprland's own `general:col:active_border`.
 [normal]
-background = "#1e1e2e"
-foreground = "#cdd6f4"
-border_color = "#89b4fa"
-border_width = 1
-corner_radius = 8
+# background = "#26263a"
+# foreground = "#f8f8f2"
+# border_color = "#bd93f9"  # theme: accent
+# border_width = 1
+# corner_radius = 12
 default_timeout_ms = 8000
 ignore_timeout = false
 
-# Critical urgency style
+# Critical urgency style. The theme's error colour, and never
+# self-dismissing — that last part is the freedesktop spec, not taste.
 [critical]
-background = "#1e1e2e"
-foreground = "#f38ba8"
-border_color = "#f38ba8"
-border_width = 2
-corner_radius = 8
+# background = "#26263a"
+# foreground = "#ff5555"    # theme: error
+# border_color = "#ff5555"  # theme: error
+# border_width = 2
+# corner_radius = 12
 default_timeout_ms = 0
 ignore_timeout = true
