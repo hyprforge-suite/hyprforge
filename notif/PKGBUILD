@@ -1,16 +1,21 @@
 # Maintainer: apost <apost@intradatech.com>
 pkgname=notif-git
-pkgver=r22.b0ac7ed
+pkgver=r671.2c082c0
 pkgrel=1
 pkgdesc="Wayland notification daemon + control center for Hyprland and other wlr-layer-shell compositors"
 arch=('x86_64' 'aarch64')
-url="https://github.com/adamrpostjr/notif"
+url="https://github.com/hyprforge-suite/hyprforge"
 license=('MIT')
 depends=('wayland' 'gcc-libs' 'glibc')
 makedepends=('cargo' 'git')
 provides=('notif' 'notifd' 'notifctl')
 conflicts=('notif')
-source=("$pkgname::git+https://github.com/adamrpostjr/notif.git")
+# notif lives in the Hyprforge suite's notif/ directory, and takes two of
+# its crates (hyprforge-look, hyprforge-paths) by path, so the whole suite
+# is cloned and the build runs from notif/ inside it. The old standalone
+# repository, github.com/adamrpostjr/notif, is archived and predates the
+# merge: building from it gets a notif with no shared theme.
+source=("$pkgname::git+https://github.com/hyprforge-suite/hyprforge.git")
 sha256sums=('SKIP')
 
 pkgver() {
@@ -19,25 +24,25 @@ pkgver() {
 }
 
 prepare() {
-    cd "$pkgname"
+    cd "$pkgname/notif"
     cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
 build() {
-    cd "$pkgname"
+    cd "$pkgname/notif"
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
     cargo build --frozen --release --workspace
 }
 
 check() {
-    cd "$pkgname"
+    cd "$pkgname/notif"
     export RUSTUP_TOOLCHAIN=stable
     cargo test --frozen --release --workspace
 }
 
 package() {
-    cd "$pkgname"
+    cd "$pkgname/notif"
     install -Dm755 target/release/notifd "$pkgdir/usr/bin/notifd"
     install -Dm755 target/release/notifctl "$pkgdir/usr/bin/notifctl"
     install -Dm644 notifd.service "$pkgdir/usr/lib/systemd/user/notifd.service"

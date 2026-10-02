@@ -64,29 +64,27 @@ translators in and pure projections out.
 
 ## Installing
 
-This copy of notif lives inside the
-[Hyprforge](https://github.com/hyprforge-suite/hyprforge) repository and takes
-two of its crates (`hyprforge-look`, `hyprforge-paths`) by path, so it builds
-from a Hyprforge checkout — see "Building from source". The standalone
-`notif` repository and the `notif-git` package below build it from there, and
-that repository predates the merge: it has no shared theme.
+notif lives inside the
+[Hyprforge](https://github.com/hyprforge-suite/hyprforge) repository, in its
+`notif/` directory, and takes two of its crates (`hyprforge-look`,
+`hyprforge-paths`) by path, so it builds from a Hyprforge checkout. The old
+standalone repository, `github.com/adamrpostjr/notif`, is archived and
+predates the merge: building from it gets a notif with no shared theme.
 
-### Arch Linux (AUR)
+### Arch Linux
 
-```sh
-yay -S notif-git
-```
-
-Or manually with the `PKGBUILD` in this repo:
+There is no AUR package. The `PKGBUILD` in this directory builds `notif-git`
+from the Hyprforge repository:
 
 ```sh
-git clone https://github.com/adamrpostjr/notif.git
-cd notif
+git clone https://github.com/hyprforge-suite/hyprforge.git
+cd hyprforge/notif
 makepkg -si
 ```
 
 This installs `notifd`, `notifctl`, and a systemd user unit
-(`notifd.service`).
+(`notifd.service`). It is not part of the suite's own split package in
+`packaging/arch`, so `pacman -S hyprforge` does not install it.
 
 ### Building from source
 

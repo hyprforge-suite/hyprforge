@@ -330,9 +330,10 @@ merged in from a repository published before the merge. `sync.sh` does
 not check it and is not going to: that repository
 (`github.com/adamrpostjr/notif`) was archived on 2026-09-27 with a
 pointer here, and the nested workspace is the only copy. Its
-`PKGBUILD`, `.SRCINFO` and unit file still name the archived repository,
-which is where an AUR build would fetch from; repointing those is
-notif's own packaging question, not this plan's.
+`PKGBUILD`, `.SRCINFO` and unit file named the archived repository until
+2026-10-01, so a `makepkg` built the pre-merge notif with no shared
+theme; they now clone this repository and build from `notif/` inside it.
+notif is still not in `packaging/arch` and not on the AUR.
 
 ## Status
 

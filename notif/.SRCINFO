@@ -1,8 +1,8 @@
 pkgbase = notif-git
 	pkgdesc = Wayland notification daemon + control center for Hyprland and other wlr-layer-shell compositors
-	pkgver = r18.709003f
+	pkgver = r671.2c082c0
 	pkgrel = 1
-	url = https://github.com/adamrpostjr/notif
+	url = https://github.com/hyprforge-suite/hyprforge
 	arch = x86_64
 	arch = aarch64
 	license = MIT
@@ -15,7 +15,7 @@ pkgbase = notif-git
 	provides = notifd
 	provides = notifctl
 	conflicts = notif
-	source = notif-git::git+https://github.com/adamrpostjr/notif.git
+	source = notif-git::git+https://github.com/hyprforge-suite/hyprforge.git
 	sha256sums = SKIP
 
 pkgname = notif-git
