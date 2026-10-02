@@ -323,17 +323,37 @@ package installs"**. `check.sh`'s "Every package is a repository" step
 asks it now, discovered from the PKGBUILD rather than from a list
 someone has to remember to update.
 
-### notif is a deliberate exception
+### notif is a workspace, not a crate
 
-`notif/` is a nested workspace with its own PKGBUILD and its own CI,
-merged in from a repository published before the merge. `sync.sh` does
-not check it and is not going to: that repository
-(`github.com/adamrpostjr/notif`) was archived on 2026-09-27 with a
-pointer here, and the nested workspace is the only copy. Its
-`PKGBUILD`, `.SRCINFO` and unit file named the archived repository until
-2026-10-01, so a `makepkg` built the pre-merge notif with no shared
-theme; they now clone this repository and build from `notif/` inside it.
-notif is still not in `packaging/arch` and not on the AUR.
+notif arrived as a repository of its own (`git subtree add` of
+`github.com/adamrpostjr/notif`) and sat at `notif/` as a nested
+workspace, outside everything `split.sh` and `sync.sh` look at. On
+2026-10-01 it became the tenth component: moved to
+`crates/hyprforge-notif`, packaged as `hyprforge-notif` in
+`packaging/arch` (replacing `notif-git`), given `--notif` in the
+installer and CI of its own, and split to `hyprforge-suite/hyprforge-notif`.
+
+It is still a nested workspace, excluded from this one — zbus picks its
+runtime by feature, and the suite's tokio would unify into notif's
+async-io and panic — and three things follow from that shape:
+
+- **Its siblings are patched somewhere else.** Cargo reads `[patch]` only
+  from the root of the workspace being built, and notif is its own root,
+  so the root `[patch.crates-io]` never reaches it. `crates/.cargo/config.toml`
+  does it instead, from outside the split directory, where the
+  standalone repository will never see paths that point at nothing.
+  `check.sh`'s "Siblings build from this checkout" asks the same two
+  questions of that table as of the root one.
+- **Its versions are its own.** The dependency-pin step skips it: its
+  `[workspace.dependencies]` pins zbus to async-io where the root table
+  carries tokio, and its own `Cargo.lock` keeps it reproducible.
+- **The repository kept its history across a move.** `git subtree split`
+  does not follow a directory rename, so a split of
+  `crates/hyprforge-notif` begins at the move and shares nothing with
+  the archived repository. A merge commit joins the two — the archived
+  repository's last commit and the first split commit as parents — and
+  is recorded here with `git subtree merge`, so later splits descend from
+  it and the published history fast-forwards from what was archived.
 
 ## Status
 
@@ -373,6 +393,15 @@ notif is still not in `packaging/arch` and not on the AUR.
 - [x] `CARGO_REGISTRY_TOKEN` set as an organisation secret readable by
       this repository only (2026-10-01), so
       `.github/workflows/publish.yml` can publish later versions on a tag
+- [x] notif made the tenth component (2026-10-01): moved to
+      `crates/hyprforge-notif`, its siblings by crates.io version with
+      `crates/.cargo/config.toml` pointing them here, packaged as
+      `hyprforge-notif` in `packaging/arch`, `--notif` in the installer,
+      its own CI, and `split.sh`, `sync.sh` and `check.sh` taught that a
+      component can be a workspace
+- [ ] notif's history joined to the archived repository, which is
+      transferred into the organisation as `hyprforge-notif`, unarchived,
+      and brought in step by `./sync.sh --push`
 - [ ] First tagged release through that workflow — which is also the
       first proof the secret holds a value: its run shows
       `CARGO_REGISTRY_TOKEN: ***`, and a bare name means the paste never

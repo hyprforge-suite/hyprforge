@@ -546,7 +546,9 @@ pub fn clamp_spans_to_lines(
 fn blit_rgba_to_bgra(pixmap: &Pixmap, buf: &mut [u8], stride: usize) {
     let width = pixmap.width() as usize;
     for (row, pixels) in pixmap.data().chunks_exact(width * 4).enumerate() {
-        let Some(out) = buf.get_mut(row * stride..) else { break };
+        let Some(out) = buf.get_mut(row * stride..) else {
+            break;
+        };
         for (dst, src) in out.chunks_exact_mut(4).zip(pixels.chunks_exact(4)) {
             // Destructured rather than indexed: `chunks_exact(4)` yields
             // exactly four bytes, and the pattern is how that is said to
@@ -591,7 +593,10 @@ impl SkiaRenderer {
     /// already treat as "skip this frame" — a renderer that panicked
     /// here would take the daemon down over a transient.
     fn take_scratch(&mut self, w: u32, h: u32) -> Option<Pixmap> {
-        let reusable = self.scratch.as_ref().is_some_and(|p| p.width() == w && p.height() == h);
+        let reusable = self
+            .scratch
+            .as_ref()
+            .is_some_and(|p| p.width() == w && p.height() == h);
         if !reusable {
             self.scratch = Pixmap::new(w, h);
         }
@@ -689,7 +694,9 @@ impl SkiaRenderer {
             }
         }
 
-        FrameCacheKey { fingerprint: hasher.finish() }
+        FrameCacheKey {
+            fingerprint: hasher.finish(),
+        }
     }
 
     // ── Center-panel helpers ───────────────────────────────────────────────────
@@ -2554,7 +2561,11 @@ mod tests {
             notif_types::DisplayNotification::new(n)
         };
 
-        assert_eq!(key(std::slice::from_ref(&base)), key(std::slice::from_ref(&base)), "the same frame hashes the same");
+        assert_eq!(
+            key(std::slice::from_ref(&base)),
+            key(std::slice::from_ref(&base)),
+            "the same frame hashes the same"
+        );
 
         type Edit<'a> = (&'a str, &'a dyn Fn(&mut notif_types::Notification));
         let edits: Vec<Edit<'_>> = vec![
@@ -2563,12 +2574,19 @@ mod tests {
             ("body", &|n| n.body = "different".into()),
             ("urgency", &|n| n.urgency = Urgency::Critical),
             ("app icon", &|n| n.app_icon = "other-icon".into()),
-            ("an action's label", &|n| n.actions[0].label = "Cancel".into()),
+            ("an action's label", &|n| {
+                n.actions[0].label = "Cancel".into()
+            }),
             ("an action's key", &|n| n.actions[0].key = "cancel".into()),
             ("an added action", &|n| {
-                n.actions.push(Action { key: "more".into(), label: "More".into() })
+                n.actions.push(Action {
+                    key: "more".into(),
+                    label: "More".into(),
+                })
             }),
-            ("an image appearing", &|n| n.image = Some(ImageSource::Icon("dialog".into()))),
+            ("an image appearing", &|n| {
+                n.image = Some(ImageSource::Icon("dialog".into()))
+            }),
         ];
         for (what, edit) in edits {
             assert_ne!(
@@ -2599,7 +2617,10 @@ mod tests {
         let cfg = Config::default();
         let plain = make_test_dn(1);
         let mut n = (*plain.notification).clone();
-        n.actions.push(Action { key: "default".into(), label: "Open".into() });
+        n.actions.push(Action {
+            key: "default".into(),
+            label: "Open".into(),
+        });
         let with_default = notif_types::DisplayNotification::new(n);
         assert_eq!(
             SkiaRenderer::make_cache_key(&[plain], 1.0, &cfg),

@@ -4,8 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-**This is a nested cargo workspace inside the Hyprforge repository.** It
-is deliberately `exclude`d from the parent workspace, and the reason is a
+**This is a nested cargo workspace inside the Hyprforge repository**, at
+`crates/hyprforge-notif`, and that directory is also split out as its own
+repository, `hyprforge-suite/hyprforge-notif`. It is deliberately
+`exclude`d from the parent workspace, and the reason is a
 runtime one, not tidiness: cargo unifies features across a workspace, and
 zbus picks its async runtime with `#[cfg(feature = "tokio")]`. The suite
 needs `zbus/tokio`; notif needs `zbus/async-io`. Unified, tokio wins for
@@ -16,9 +18,19 @@ checking after any dependency change that
 `(cd notif && cargo tree -e features | grep 'zbus feature')` still says
 `async-io` and never `tokio`.
 
-`../check.sh` has a tier-1 step that runs this workspace's clippy and
-tests separately, because `cargo test --workspace` up there cannot reach
-them and would not say so.
+`../../check.sh` has a tier-1 step that runs this workspace's clippy,
+fmt and tests separately, because `cargo test --workspace` up there
+cannot reach them and would not say so.
+
+`hyprforge-look` and `hyprforge-paths` are crates.io dependencies
+(`"0.1"`), so this manifest is the same in both places. Inside the suite,
+`crates/.cargo/config.toml` patches them back to the local copies — the
+parent's own `[patch.crates-io]` cannot, because cargo reads patches only
+from the root of the workspace being built and this is its own root.
+Check with `cargo tree --workspace --prefix none | grep '^hyprforge-'`:
+both should name a path. In the split repository they come from crates.io,
+which is correct there and means a change to either library reaches that
+repository only once it is released.
 
 `notif` — a notification daemon + notification center for Wayland, built from scratch in Rust. Optimized for Hyprland, portable to any wlr-layer-shell compositor via strict adherence to the org.freedesktop.Notifications D-Bus spec. Zero-bloat: no UI frameworks, smol-family async only (no tokio, no calloop — their absence from Cargo.lock is a hard invariant).
 
@@ -72,7 +84,7 @@ Key invariants that span multiple files:
 
 - Deny lints: `clippy::unwrap_used`, `clippy::expect_used`, `clippy::indexing_slicing` (allowed in `#[cfg(test)]`); `#![forbid(unsafe_code)]` everywhere. Pixel loops use `.get()`/`chunks_exact_mut`, never `[]`.
 - Errors: thiserror enums in lib crates, anyhow only in bins. Peer misbehavior (malformed hints, bad config, protocol oddities) is logged-and-degraded, never fatal; only startup failures may exit.
-- No new dependencies without checking PLAN.md's approved crate table. The two exceptions are `hyprforge-look` and `hyprforge-paths`, path deps into the parent repo: both are runtime-free (no zbus, no tokio, no async-io, no GUI toolkit — `hyprforge-paths` has no dependencies at all), so neither can disturb the smol-only invariant. Their absence of tokio in `Cargo.lock` is checked the same way everything else is.
+- No new dependencies without checking PLAN.md's approved crate table. The two exceptions are `hyprforge-look` and `hyprforge-paths`, the suite's own crates: both are runtime-free (no zbus, no tokio, no async-io, no GUI toolkit — `hyprforge-paths` has no dependencies at all), so neither can disturb the smol-only invariant. Their absence of tokio in `Cargo.lock` is checked the same way everything else is.
 - Golden-image tests (crates/notif-render/tests/) compare byte-exact against committed PNGs using bundled DejaVu test fonts. If a rendering refactor isn't supposed to change output, the PNGs must not change — fix the code, never regenerate the goldens to make a test pass. They *were* regenerated once, when the palette moved to the shared theme: that change was to the output, which is the one case where regenerating is the honest answer rather than the lazy one. The guard against doing it lazily is `skia_render_bgra_format`, which reads a pixel back and compares it against `hyprforge_look::Theme` rather than against a literal — a golden regenerated to paper over a real regression would still have to satisfy that.
 
 ## The look is not notif's to choose

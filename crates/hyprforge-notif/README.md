@@ -64,32 +64,46 @@ translators in and pure projections out.
 
 ## Installing
 
-notif lives inside the
-[Hyprforge](https://github.com/hyprforge-suite/hyprforge) repository, in its
-`notif/` directory, and takes two of its crates (`hyprforge-look`,
-`hyprforge-paths`) by path, so it builds from a Hyprforge checkout. The old
-standalone repository, `github.com/adamrpostjr/notif`, is archived and
-predates the merge: building from it gets a notif with no shared theme.
+notif is part of [Hyprforge](https://github.com/hyprforge-suite/hyprforge),
+a suite of native Hyprland desktop applications, where it lives as
+`crates/hyprforge-notif`; this repository,
+[hyprforge-notif](https://github.com/hyprforge-suite/hyprforge-notif), is a
+split of that directory and `sync.sh` keeps it in step. It takes two of the
+suite's libraries, `hyprforge-look` and `hyprforge-paths`, from crates.io,
+so it builds on its own. Nothing else in the suite is required: with no
+Hyprforge theme published on the machine, it draws in the theme's defaults.
+
+The binaries keep the names they always had — `notifd` and `notifctl` — and
+so does the layer namespace, `notif`, so existing keybinds and layer rules
+keep working.
 
 ### Arch Linux
 
-There is no AUR package. The `PKGBUILD` in this directory builds `notif-git`
-from the Hyprforge repository:
+The suite's split package builds it as `hyprforge-notif`, which replaces the
+old `notif-git`. From a checkout of the suite:
 
 ```sh
 git clone https://github.com/hyprforge-suite/hyprforge.git
-cd hyprforge/notif
+cd hyprforge/packaging/arch
 makepkg -si
 ```
 
-This installs `notifd`, `notifctl`, and a systemd user unit
-(`notifd.service`). It is not part of the suite's own split package in
-`packaging/arch`, so `pacman -S hyprforge` does not install it.
+That builds every package in the suite; install just this one with
+`sudo pacman -U hyprforge-notif-*.pkg.tar.zst`. It installs `notifd`,
+`notifctl`, and a systemd user unit (`notifd.service`). There is no AUR
+package.
+
+Or with the suite's installer, which puts the binaries in `/usr/local/bin`
+and the unit in `~/.config/systemd/user`:
+
+```sh
+./hyprforge --install --notif
+```
 
 ### Building from source
 
-Requires a recent stable Rust toolchain. From the `notif/` directory of a
-Hyprforge checkout:
+Requires the Rust toolchain pinned in `rust-toolchain.toml`. From this
+repository, or from `crates/hyprforge-notif` in a Hyprforge checkout:
 
 ```sh
 cargo build --release --workspace

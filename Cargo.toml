@@ -42,7 +42,8 @@ members = [
     "crates/hyprforge-files-core",
     "crates/hyprforge-files",
 ]
-# `notif/` is a nested cargo workspace, deliberately kept out of this one.
+# `crates/hyprforge-notif/` is a nested cargo workspace, deliberately kept
+# out of this one.
 #
 # Not tidiness — a feature-unification bug that would only appear at
 # runtime. Cargo unifies features across a workspace, and zbus picks its
@@ -53,8 +54,11 @@ members = [
 # to see it coming. Excluded, each workspace resolves its own graph.
 #
 # The seam costs one thing: `cargo test --workspace` here does not run
-# notif's tests. check.sh's "notif workspace" step is what covers that.
-exclude = ["notif"]
+# notif's tests. check.sh's "notif workspace" step is what covers that. And
+# this file's [patch.crates-io] does not reach it — cargo reads patches
+# only from the root of the workspace being built, and notif is its own
+# root — which is what `crates/.cargo/config.toml` is for.
+exclude = ["crates/hyprforge-notif"]
 
 [workspace.package]
 version = "0.1.0"

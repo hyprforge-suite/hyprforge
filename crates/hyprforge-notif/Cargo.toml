@@ -14,17 +14,22 @@ members = [
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
-# The suite's shared look, by path into the parent repository.
+# The suite's shared look, by crates.io version, like every other
+# component's siblings — so this manifest works unchanged as the root of
+# its own repository (hyprforge-suite/hyprforge-notif). Inside the suite,
+# `crates/.cargo/config.toml` patches both back to the local copies: this
+# workspace is its own root, and the suite's [patch.crates-io] does not
+# reach it.
 #
 # `hyprforge-look` is deliberately runtime-free — no zbus, no tokio, no
 # async-io, not even a GUI toolkit — so depending on it from here cannot
 # reintroduce the feature-unification problem that keeps these two
-# workspaces apart (see `exclude` in ../Cargo.toml). It is Color, Theme
-# and the file they are read from, and nothing else.
-hyprforge-look = { path = "../crates/hyprforge-look" }
+# workspaces apart (see `exclude` in the suite's Cargo.toml). It is Color,
+# Theme and the file they are read from, and nothing else.
+hyprforge-look = "0.1"
 # Only for `lock_toml_path()`: where the shared theme is published. This
 # crate has no dependencies at all.
-hyprforge-paths = { path = "../crates/hyprforge-paths" }
+hyprforge-paths = "0.1"
 serde_json = "1"
 toml = "1.1.2"
 async-channel = "2"

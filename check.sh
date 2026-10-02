@@ -6,7 +6,7 @@
 #   1. clippy + unit tests  — does the code do what *this project* thinks?
 #                             No system needed; safe anywhere. Run twice:
 #                             once for this workspace, once for the nested
-#                             `notif/` one, which cargo will not reach from
+#                             `crates/hyprforge-notif/` one, which cargo will not reach from
 #                             here (it is `exclude`d, and for a reason —
 #                             see Cargo.toml).
 #   2. live tests           — does Hyprland agree? Every claim the option
@@ -229,6 +229,13 @@ for manifest_path in sorted(glob.glob("crates/*/Cargo.toml")):
 
     if has_workspace_inheritance(doc):
         continue  # still inherits from the workspace — not standalone-ready
+    if "workspace" in doc and "package" not in doc:
+        # A nested workspace (hyprforge-notif): standalone, but its
+        # versions are its own on purpose, not copies of this table —
+        # it pins zbus to async-io where the suite's carries tokio, and
+        # comparing would demand the very feature that panics it. Its own
+        # Cargo.lock is what keeps it reproducible.
+        continue
 
     crate_name = doc.get("package", {}).get("name", manifest_path)
     checked_crates += 1
@@ -329,7 +336,9 @@ root = tomllib.loads(Path("Cargo.toml").read_text())
 patched = root.get("patch", {}).get("crates-io", {})
 local_version = {}
 for manifest in Path("crates").glob("*/Cargo.toml"):
-    pkg = tomllib.loads(manifest.read_text())["package"]
+    pkg = tomllib.loads(manifest.read_text()).get("package")
+    if pkg is None:
+        continue  # a nested workspace's root: its members are not siblings
     v = pkg.get("version")
     if isinstance(v, dict):
         v = root["workspace"]["package"]["version"]
@@ -372,6 +381,29 @@ for manifest in sorted(Path("crates").glob("*/Cargo.toml")):
             elif name in local_version and not satisfies(req, local_version[name]):
                 problems.append(f"{manifest.parent.name} asks for {name} \"{req}\" but crates/ is at {local_version[name]}, so cargo ignores the patch and fetches the published copy")
 
+# A nested workspace (hyprforge-notif) is its own root, so the table
+# above never reaches it: its siblings are patched by
+# crates/.cargo/config.toml instead, and its requirements live in its
+# own [workspace.dependencies]. Same two questions, other table.
+config = Path("crates/.cargo/config.toml")
+config_patched = tomllib.loads(config.read_text()).get("patch", {}).get("crates-io", {}) if config.is_file() else {}
+for manifest in sorted(Path("crates").glob("*/Cargo.toml")):
+    data = tomllib.loads(manifest.read_text())
+    if "package" in data or "workspace" not in data:
+        continue
+    for name, spec in data["workspace"].get("dependencies", {}).items():
+        if not name.startswith("hyprforge-"):
+            continue
+        if isinstance(spec, dict) and "path" in spec:
+            problems.append(f"{manifest.parent.name} names {name} by path; it would point at nothing in its own repository")
+            continue
+        req = spec if isinstance(spec, str) else spec.get("version", "")
+        named.setdefault(name, set()).add(manifest.parent.name)
+        if name not in config_patched:
+            problems.append(f"{name} is required by {manifest.parent.name} but not patched in crates/.cargo/config.toml — it builds from crates.io, not from crates/")
+        elif name in local_version and not satisfies(req, local_version[name]):
+            problems.append(f"{manifest.parent.name} asks for {name} \"{req}\" but crates/ is at {local_version[name]}, so cargo ignores the patch and fetches the published copy")
+
 print(f"CHECKED {len(named)}")
 if not named:
     problems.append("no component names a hyprforge- sibling by version — either the manifests changed shape or this check is looking in the wrong place")
@@ -386,6 +418,16 @@ PYEOF
         output+=$'\n'"PROBLEM resolved from outside this checkout: $line"
     done < <(cargo tree --workspace -e normal,build,dev --prefix none 2>/dev/null \
         | grep -E '^hyprforge-' | grep -v '(/' | sort -u)
+    # And each nested workspace, from inside it, where
+    # crates/.cargo/config.toml is in scope as it is for every real build.
+    for nested in crates/*/Cargo.toml; do
+        grep -q '^\[package\]' "$nested" && continue
+        grep -q '^\[workspace\]' "$nested" || continue
+        while IFS= read -r line; do
+            output+=$'\n'"PROBLEM resolved from outside this checkout ($(basename "$(dirname "$nested")")): $line"
+        done < <(cd "$(dirname "$nested")" && cargo tree --workspace -e normal,build,dev --prefix none 2>/dev/null \
+            | grep -E '^hyprforge-' | grep -v '(/' | sort -u)
+    done
     if grep -q "^PROBLEM" <<<"$output"; then
         bad "$(grep -c '^PROBLEM' <<<"$output") sibling(s) do not build from this checkout"
         sed -n 's/^PROBLEM /    • /p' <<<"$output"
@@ -437,12 +479,16 @@ for package in packages:
     # one that happens to be used today is how this check silently stops
     # checking: the first version matched `usr/bin/...` and reported
     # "0 packages" in green.
+    # Any name, not only hyprforge-*: notif's binaries are `notifd` and
+    # `notifctl`, kept so users' keybinds and layer rules keep working,
+    # and matching only the prefix would have reported its package as
+    # installing nothing.
     binaries = sorted(
-        set(re.findall(r"^\s*_bin\s+(hyprforge-[a-z0-9-]+)", body.group(1), re.M))
-        | set(re.findall(r"usr/bin/(hyprforge-[a-z0-9-]+)", body.group(1)))
+        set(re.findall(r"^\s*_bin\s+([a-z0-9][a-z0-9-]*)", body.group(1), re.M))
+        | set(re.findall(r"usr/bin/([a-z0-9][a-z0-9-]*)", body.group(1)))
     )
     if not binaries:
-        problems.append(f"{package}: installs no hyprforge binary this check can see")
+        problems.append(f"{package}: installs no binary this check can see")
         continue
 
     checked += 1
@@ -450,18 +496,27 @@ for package in packages:
     # Which crate directory declares each binary. One directory for the
     # whole package is the rule; several means the split cannot produce
     # a repository that is the package.
+    # A nested workspace's binaries live in its members, and the
+    # directory that becomes the repository is the workspace's, so each
+    # member is credited to the top-level crate directory it sits in.
     owners = {}
-    for manifest in sorted(Path("crates").glob("*/Cargo.toml")):
-        data = tomllib.loads(manifest.read_text())
-        declared = {b.get("name") for b in data.get("bin", [])}
-        if not declared:
-            # A crate with no [[bin]] but a src/main.rs builds one named
-            # after the package.
-            if (manifest.parent / "src" / "main.rs").is_file():
-                declared = {data.get("package", {}).get("name")}
-        for binary in binaries:
-            if binary in declared:
-                owners.setdefault(binary, manifest.parent.name)
+    for top in sorted(Path("crates").glob("*/Cargo.toml")):
+        top_data = tomllib.loads(top.read_text())
+        manifests = [top] + [
+            top.parent / member / "Cargo.toml"
+            for member in top_data.get("workspace", {}).get("members", [])
+        ]
+        for manifest in manifests:
+            data = tomllib.loads(manifest.read_text())
+            declared = {b.get("name") for b in data.get("bin", [])}
+            if not declared:
+                # A crate with no [[bin]] but a src/main.rs builds one named
+                # after the package.
+                if (manifest.parent / "src" / "main.rs").is_file():
+                    declared = {data.get("package", {}).get("name")}
+            for binary in binaries:
+                if binary in declared:
+                    owners.setdefault(binary, top.parent.name)
 
     missing = [b for b in binaries if b not in owners]
     if missing:
@@ -539,7 +594,7 @@ problems = []
 docs = subprocess.run(
     ["git", "ls-files", "*.md"], capture_output=True, text=True, check=True
 ).stdout.split()
-docs = [Path(d) for d in docs if not d.startswith("notif/")]
+docs = [Path(d) for d in docs]
 crates = sorted(p for p in Path("crates").iterdir() if p.is_dir())
 path_in_backticks = re.compile(
     r"`((?:crates/|src/|tests/|testing/|config/|packaging/)[A-Za-z0-9_./-]+)`"
@@ -680,6 +735,12 @@ if ! command -v python3 >/dev/null; then
     skip "README check" "python3 not available to render the crate docs"
 elif output=$(python3 tools/crate-readme.py --check 2>&1); then
     ok "every library README is its crate doc, rendered"
+elif ! grep -q '^STALE' <<<"$output"; then
+    # Failing with nothing stale is the script itself breaking — a
+    # manifest shape it did not expect — and once read as "0 README(s)
+    # differ", which points at the READMEs instead of at it.
+    bad "tools/crate-readme.py failed without naming a stale README"
+    tail -5 <<<"$output"
 else
     bad "$(grep -c '^STALE' <<<"$output") library README(s) differ from their crate doc — run: tools/crate-readme.py --write"
     sed -n 's/^STALE /    • /p' <<<"$output"
@@ -708,7 +769,7 @@ else
     ok "$tests tests passed"
 fi
 
-# Tier 1, and a separate invocation because `notif/` is a separate cargo
+# Tier 1, and a separate invocation because `crates/hyprforge-notif/` is a separate cargo
 # workspace — excluded from this one on purpose (see `exclude` in
 # Cargo.toml: the suite needs zbus/tokio and notif needs zbus/async-io,
 # and unified they would panic at runtime).
@@ -723,19 +784,28 @@ fi
 # It needs no compositor, no daemon and no bus, so it belongs here with
 # the rest of tier 1 rather than behind the --quick gate.
 step "The notif workspace (its own cargo workspace)"
-if warnings=$(cd notif && cargo clippy --all-targets 2>&1 | grep -cE '^(error|warning)'); then :; fi
+NOTIF=crates/hyprforge-notif
+if warnings=$(cd "$NOTIF" && cargo clippy --all-targets 2>&1 | grep -cE '^(error|warning)'); then :; fi
 if [[ "$warnings" -eq 0 ]]; then
     ok "notif clippy: no warnings"
 else
-    bad "notif clippy: $warnings warning(s) — run: (cd notif && cargo clippy --all-targets)"
+    bad "notif clippy: $warnings warning(s) — run: (cd $NOTIF && cargo clippy --all-targets)"
 fi
-if output=$(cd notif && cargo test 2>&1); then cargo_ok=true; else cargo_ok=false; fi
+# notif's own CLAUDE.md has always called fmt a gate, and nothing here
+# asked: a file drifted unnoticed until its split repository's CI, which
+# does ask, was about to fail on it.
+if (cd "$NOTIF" && cargo fmt --all --check >/dev/null 2>&1); then
+    ok "notif fmt: clean"
+else
+    bad "notif fmt: not clean — run: (cd $NOTIF && cargo fmt --all)"
+fi
+if output=$(cd "$NOTIF" && cargo test 2>&1); then cargo_ok=true; else cargo_ok=false; fi
 tests=$(count_tests <<<"$output")
 if grep -q "test result: FAILED" <<<"$output"; then
     bad "$(grep -c 'test result: FAILED' <<<"$output") notif test binary(ies) failed"
     grep -E '^(test .* FAILED|failures:)' <<<"$output" | head -20
 elif ! $cargo_ok; then
-    bad "notif's cargo test did not finish — run: (cd notif && cargo test)"
+    bad "notif's cargo test did not finish — run: (cd $NOTIF && cargo test)"
     tail -5 <<<"$output"
 elif [[ "$tests" -eq 0 ]]; then
     bad "notif's cargo test ran zero tests — that is not a pass"

@@ -69,15 +69,22 @@ PREFIX="crates/$CRATE"
 # `version.workspace = true` and friends resolve to nothing once the
 # crate is its own root, and the failure is at manifest-parse time.
 printf '\n%s==> Checking the manifest stands alone%s\n' "$BOLD" "$OFF"
-if grep -q 'workspace = true\|workspace.dependencies' "$PREFIX/Cargo.toml"; then
+# A nested workspace (hyprforge-notif) is the other shape that stands
+# alone: its members inherit from *its* [workspace], which is the root of
+# the split and comes along with it. Only a package inheriting from the
+# suite's workspace is stuck.
+if grep -q '^\[workspace\]' "$PREFIX/Cargo.toml" && ! grep -q '^\[package\]' "$PREFIX/Cargo.toml"; then
+    ok "a workspace of its own, which the split carries with it"
+elif grep -q 'workspace = true\|workspace.dependencies' "$PREFIX/Cargo.toml"; then
     die "$PREFIX/Cargo.toml still inherits from the workspace.
      A standalone crate has no workspace to inherit from: spell out
      version, edition, license and every dependency version. See
      hyprforge-clipboard's manifest for the shape, and the [patch]
      section in the root Cargo.toml for how its Hyprforge dependencies,
      named by crates.io version, build from crates/ here."
+else
+    ok "no workspace inheritance left"
 fi
-ok "no workspace inheritance left"
 
 for f in LICENSE README.md; do
     if [[ ! -f "$PREFIX/$f" ]]; then

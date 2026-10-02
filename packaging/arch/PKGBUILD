@@ -29,6 +29,7 @@ pkgname=(
   hyprforge-emojimenu
   hyprforge-files
   hyprforge-media
+  hyprforge-notif
   hyprforge
 )
 pkgver=0.1.0
@@ -45,6 +46,10 @@ prepare() {
   cd "$startdir/../.."
   export RUSTUP_TOOLCHAIN=stable
   cargo fetch --locked
+  # notif is a workspace of its own with its own Cargo.lock — see
+  # `exclude` in the root Cargo.toml — so it is fetched, built and tested
+  # on its own as well.
+  (cd crates/hyprforge-notif && cargo fetch --locked)
 }
 
 build() {
@@ -54,6 +59,7 @@ build() {
   # One build for every package below. Splitting the repository would
   # mean building the shared crates once per component instead.
   cargo build --release --frozen --workspace
+  (cd crates/hyprforge-notif && cargo build --release --frozen --workspace)
 }
 
 check() {
@@ -64,6 +70,7 @@ check() {
   # BlueZ, logind and a bar, none of which exist in a build chroot — see
   # check.sh's header.
   cargo test --release --frozen --workspace
+  (cd crates/hyprforge-notif && cargo test --release --frozen --workspace)
 }
 
 _bin() {
@@ -208,6 +215,25 @@ package_hyprforge-emojimenu() {
   _bin hyprforge-emojimenu
 }
 
+package_hyprforge-notif() {
+  pkgdesc="Notification daemon and notification center, with notifctl to drive them"
+  # Nothing but libc: notif's Wayland and D-Bus clients are pure Rust,
+  # and `ldd notifd` names no libwayland, libxkbcommon or libdbus. The
+  # standalone notif-git package listed `wayland` without needing it.
+  depends=(gcc-libs glibc)
+  # The binaries keep the names they had as notif — users bind
+  # `notifctl center` and write `layerrule = blur, notif` — so this
+  # package replaces the old one rather than installing beside it.
+  provides=(notif notif-git)
+  conflicts=(notif notif-git)
+  replaces=(notif-git)
+  cd "$startdir/../.."
+  _bin notifd
+  _bin notifctl
+  install -Dm644 crates/hyprforge-notif/notifd.service \
+    "$pkgdir/usr/lib/systemd/user/notifd.service"
+}
+
 package_hyprforge() {
   pkgdesc="Native Hyprland desktop applications (everything)"
   depends=(
@@ -219,6 +245,7 @@ package_hyprforge() {
     hyprforge-emojimenu
     hyprforge-files
     hyprforge-media
+    hyprforge-notif
   )
   # The greeter is deliberately not here. Installing it is not the
   # dangerous step — enabling greetd is, because that decides which VT

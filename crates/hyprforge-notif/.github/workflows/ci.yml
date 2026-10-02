@@ -1,0 +1,76 @@
+# CI for the standalone hyprforge-notif repository (this file only takes
+# effect at `.github/workflows/ci.yml` — the path `./split.sh` produces
+# once `crates/hyprforge-notif` becomes a repository root).
+#
+# What this checks: that the workspace builds, that clippy is silent
+# (with notif's own deny lints — unwrap, expect, indexing — on top of
+# `-D warnings`), that formatting is clean, and every test that needs
+# nothing but this process, including the byte-exact golden renders,
+# which bring their own DejaVu fonts.
+#
+# It builds against hyprforge-look and hyprforge-paths from crates.io.
+# Inside the suite, `crates/.cargo/config.toml` points those at the local
+# copies instead; that file is outside this repository on purpose.
+#
+# What this deliberately does NOT check, and must never claim to:
+#   - the two `#[ignore]`d shaping tests need system fonts with CJK and
+#     emoji coverage, which this runner does not have.
+#   - the manual smoke scripts under `*/tests/manual/` — D-Bus
+#     conformance, expiry, shutdown, notifctl and the full daemon on a
+#     live compositor. They need a session bus, and the last one a
+#     running Hyprland; see CLAUDE.md.
+#   - it never runs `notifd`, which claims org.freedesktop.Notifications.
+#
+# A green run means "the code is internally consistent". It does not mean
+# "a notification appeared on a real screen".
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tier-1:
+    name: "Tier 1 (no bus, no compositor): build, clippy -D warnings, fmt, cargo test"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the pinned Rust toolchain (rust-toolchain.toml)
+        # `rustup show` is what makes rustup notice rust-toolchain.toml
+        # and install exactly that channel with clippy and rustfmt.
+        #
+        # No native packages: notif's Wayland and D-Bus clients are pure
+        # Rust (wayland-backend without its `client_system` feature,
+        # zbus over async-io), and `ldd notifd` names no libwayland,
+        # libxkbcommon or libdbus.
+        run: rustup show
+
+      - name: Cache the cargo registry and build output
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: The async runtime is smol's, never tokio
+        # A hard invariant (CLAUDE.md): zbus picks its runtime by feature,
+        # and a tokio feature here would compile and then panic on the
+        # first D-Bus call with no tokio runtime under it.
+        run: |
+          if cargo tree --workspace -e features | grep -q 'zbus feature "tokio"'; then
+            echo "zbus has its tokio feature enabled"; exit 1
+          fi
+          if cargo tree --workspace --prefix none | grep -qE '^(tokio|calloop) '; then
+            echo "tokio or calloop is in the dependency graph"; exit 1
+          fi
+
+      - name: cargo build
+        run: cargo build --workspace --all-targets
+
+      - name: cargo clippy --all-targets -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: "cargo test (tier 1 only — #[ignore]d font-coverage tests do not run)"
+        run: cargo test --workspace --all-targets

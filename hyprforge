@@ -81,6 +81,9 @@ REASON_FILES=
 NEXT_MEDIA=
 STATE_MEDIA=todo
 REASON_MEDIA=
+NEXT_NOTIF=
+STATE_NOTIF=todo
+REASON_NOTIF=
 NEXT_LOCK=
 NEXT_SETTINGS=
 NEXT_GREETER=
@@ -278,10 +281,10 @@ print_next_steps() {
     # to all four at the same position — miss one and every entry after
     # it is labelled with its neighbour's name, which reads as a bug in
     # whichever component happened to land next to the gap.
-    local labels=("Display daemon" "Tray icons" "Clipboard" "Emoji picker" "File manager" "Image viewer" "Lock" "Settings app" "Greeter")
-    local texts=("$NEXT_DISPLAYD" "$NEXT_TRAY" "$NEXT_CLIPBOARD" "$NEXT_EMOJI" "$NEXT_FILES" "$NEXT_MEDIA" "$NEXT_LOCK" "$NEXT_SETTINGS" "$NEXT_GREETER")
-    local states=("$STATE_DISPLAYD" "$STATE_TRAY" "$STATE_CLIPBOARD" "$STATE_EMOJI" "$STATE_FILES" "$STATE_MEDIA" "$STATE_LOCK" "$STATE_SETTINGS" "$STATE_GREETER")
-    local reasons=("$REASON_DISPLAYD" "$REASON_TRAY" "$REASON_CLIPBOARD" "$REASON_EMOJI" "$REASON_FILES" "$REASON_MEDIA" "$REASON_LOCK" "$REASON_SETTINGS" "$REASON_GREETER")
+    local labels=("Display daemon" "Tray icons" "Clipboard" "Notifications" "Emoji picker" "File manager" "Image viewer" "Lock" "Settings app" "Greeter")
+    local texts=("$NEXT_DISPLAYD" "$NEXT_TRAY" "$NEXT_CLIPBOARD" "$NEXT_NOTIF" "$NEXT_EMOJI" "$NEXT_FILES" "$NEXT_MEDIA" "$NEXT_LOCK" "$NEXT_SETTINGS" "$NEXT_GREETER")
+    local states=("$STATE_DISPLAYD" "$STATE_TRAY" "$STATE_CLIPBOARD" "$STATE_NOTIF" "$STATE_EMOJI" "$STATE_FILES" "$STATE_MEDIA" "$STATE_LOCK" "$STATE_SETTINGS" "$STATE_GREETER")
+    local reasons=("$REASON_DISPLAYD" "$REASON_TRAY" "$REASON_CLIPBOARD" "$REASON_NOTIF" "$REASON_EMOJI" "$REASON_FILES" "$REASON_MEDIA" "$REASON_LOCK" "$REASON_SETTINGS" "$REASON_GREETER")
 
     # Steps that are `done` collapse into this count instead of being
     # read one by one, matching the "N already current" pattern used
@@ -378,6 +381,9 @@ ${B}Components${N}
                    light), as a systemd user service.
   --clipboard      Clipboard history: the daemon as a systemd user
                    service, plus the popup its keybind launches.
+  --notif          Notifications: notifd as a systemd user service,
+                   and notifctl to drive its center and do-not-disturb.
+                   Does not stop dunst or mako — see the output.
   --settings       The Settings app and its launcher entry.
   --files          The file manager, and its launcher entry.
   --media          The media viewer (pictures, videos, 3D models), and its launcher entry.
@@ -434,13 +440,14 @@ while [[ $# -gt 0 ]]; do
         --displayd)      COMPONENTS+=(displayd) ;;
         --tray)          COMPONENTS+=(tray) ;;
         --clipboard)     COMPONENTS+=(clipboard) ;;
+        --notif)         COMPONENTS+=(notif) ;;
         --emoji)         COMPONENTS+=(emoji) ;;
         --files)         COMPONENTS+=(files) ;;
         --media)        COMPONENTS+=(media) ;;
         --mime)          COMPONENTS+=(mime) ;;
         --provide-mimetype) PROVIDE_MIMETYPE=true ;;
         --settings)      COMPONENTS+=(settings) ;;
-        --all)           COMPONENTS+=(greeter lock displayd tray clipboard emoji files media mime settings) ;;
+        --all)           COMPONENTS+=(greeter lock displayd tray clipboard notif emoji files media mime settings) ;;
         --force-cleanup) FORCE_CLEANUP=true ;;
         --dry-run)       DRY_RUN=true ;;
         --no-restart)    NO_RESTART=true ;;
@@ -453,7 +460,7 @@ done
 
 [[ -n $ACTION ]] || die "pick one of --install, --uninstall or --status"
 if [[ $ACTION != status && ${#COMPONENTS[@]} -eq 0 ]]; then
-    die "--$ACTION needs at least one component (--greeter, --lock, --displayd, --tray, --clipboard, --settings, --all)"
+    die "--$ACTION needs at least one component (--greeter, --lock, --displayd, --tray, --clipboard, --notif, --settings, --all)"
 fi
 
 has_component() {
@@ -899,6 +906,85 @@ EOF
     restart_if_running hyprforge-clipd "clipboard history"
 }
 
+# notif is a cargo workspace of its own (see `exclude` in Cargo.toml: its
+# zbus runs on async-io, the suite's on tokio, and one workspace would
+# unify them into a panic), so `build` — which is `cargo build -p` in
+# this workspace — cannot reach it. It is built from its own directory,
+# into this workspace's target/, so every other part of this script
+# (status, the stale check) finds its binaries where it finds the rest.
+#
+# The binaries are still `notifd` and `notifctl`, the names they had as
+# notif: users bind `notifctl center` and write `layerrule = blur, notif`.
+install_notif() {
+    COMPONENT_CHANGED=false
+    step "Building hyprforge-notif"
+    [[ -f crates/hyprforge-notif/Cargo.toml ]] || die "no workspace at crates/hyprforge-notif"
+    if ! $DRY_RUN; then
+        (cd crates/hyprforge-notif && CARGO_TARGET_DIR="$PWD/../../target" \
+            cargo build --release --workspace 2>&1 | grep -vE "^\s*(Compiling|Finished)") || true
+        for binary in notifd notifctl; do
+            [[ -x target/release/$binary ]] || die "cargo did not produce target/release/$binary"
+            ok "built target/release/$binary"
+        done
+    fi
+    step "Notifications"
+    install_file target/release/notifd "$PREFIX/notifd" 755
+    install_file target/release/notifctl "$PREFIX/notifctl" 755
+
+    local unit_dir="$HOME/.config/systemd/user"
+    local unit=crates/hyprforge-notif/notifd.service
+    local generated
+    generated=$(mktemp)
+    trap 'rm -f "$generated"' RETURN
+    sed "s|^ExecStart=.*|ExecStart=$PREFIX/notifd|" "$unit" > "$generated"
+
+    if $DRY_RUN; then
+        skip "would install $unit_dir/notifd.service (ExecStart=$PREFIX/notifd)"
+    elif [[ -e $unit_dir/notifd.service ]] && cmp -s "$generated" "$unit_dir/notifd.service"; then
+        mark_current
+    else
+        install -Dm644 "$generated" "$unit_dir/notifd.service"
+        systemctl --user daemon-reload
+        ok "installed $unit_dir/notifd.service"
+    fi
+    flush_current
+
+    # A packaged notifd (the old notif-git, or hyprforge-notif from the
+    # PKGBUILD) ships /usr/lib/systemd/user/notifd.service. The unit just
+    # installed has the same name and takes precedence, so the service now
+    # runs this build — which is the point, but two copies of a daemon on
+    # one machine is worth hearing about, not discovering.
+    if [[ -e /usr/bin/notifd ]]; then
+        local owner
+        owner=$(pacman -Qqo /usr/bin/notifd 2>/dev/null) || owner=
+        warn "a packaged notifd is also installed${owner:+ ($owner)}; this build's unit overrides its service. Remove it with: sudo pacman -R ${owner:-<its package>}"
+    fi
+
+    NEXT_NOTIF=$(cat <<EOF
+    Only one program can own org.freedesktop.Notifications. If dunst,
+    mako or swaync is running, stop and disable it first, or notifd will
+    exit at start-up rather than fight it for the name:
+        systemctl --user disable --now dunst    (or mako, swaync)
+
+    Then:
+        systemctl --user enable --now notifd
+
+    Blur and rounding are the compositor's job, not notifd's:
+        layerrule = blur, notif
+        layerrule = blur, notif-center
+
+    The center and do-not-disturb are notifctl commands; bind them in
+    Settings -> Shortcuts:
+        ${B}notifctl center${N}
+        ${B}notifctl dnd${N}
+EOF
+)
+    service_state --user notifd
+    STATE_NOTIF=$CHECK_STATE; REASON_NOTIF=$CHECK_REASON
+
+    restart_if_running notifd "notifications"
+}
+
 install_emoji() {
     COMPONENT_CHANGED=false
     build hyprforge-emojimenu
@@ -1009,6 +1095,34 @@ uninstall_emoji() {
     # reason the clipboard history is.
     if [[ -e "$HOME/.config/hyprforge/emojimenu.toml" ]]; then
         skip "kept your emoji settings in ~/.config/hyprforge/emojimenu.toml"
+    fi
+}
+
+# Removes only what install_notif put here. A packaged notifd ships a
+# unit with the same name in /usr/lib, so disabling the service outright
+# would also switch off a notification daemon that belongs to pacman.
+uninstall_notif() {
+    step "Notifications: removing"
+    if [[ -e "$HOME/.config/systemd/user/notifd.service" ]]; then
+        if $DRY_RUN; then
+            skip "would remove the user unit"
+        else
+            if [[ ! -e /usr/lib/systemd/user/notifd.service ]] \
+                && systemctl --user is-enabled notifd >/dev/null 2>&1; then
+                systemctl --user disable --now notifd || true
+                ok "disabled the user service"
+            fi
+            rm -f "$HOME/.config/systemd/user/notifd.service"
+            systemctl --user daemon-reload
+            ok "removed the user unit"
+            [[ -e /usr/lib/systemd/user/notifd.service ]] &&
+                skip "notifd.service now means the packaged /usr/bin/notifd again; it takes over at the next restart"
+        fi
+    fi
+    remove_file "$PREFIX/notifd"
+    remove_file "$PREFIX/notifctl"
+    if [[ -e "$HOME/.config/notif/config.toml" ]]; then
+        skip "kept your notification settings in ~/.config/notif/config.toml"
     fi
 }
 
@@ -1326,7 +1440,7 @@ status_summary() {
     # line under-reported what was installed and never called them stale.
     for name in hyprforge-greet hyprforge-lock hyprforge-displayd \
                 hyprforge-trayd hyprforge-traymenu hyprforge-clipd hyprforge-clipmenu \
-                hyprforge-emojimenu hyprforge-files hyprforge-media \
+                notifd notifctl hyprforge-emojimenu hyprforge-files hyprforge-media \
                 hyprforge-mimetype hyprforge-mimeopen hyprforge-settings; do
         if [[ ! -e $PREFIX/$name ]]; then
             missing+=("$name")
@@ -1361,6 +1475,8 @@ show_status() {
     status_binary hyprforge-traymenu
     status_binary hyprforge-clipd
     status_binary hyprforge-clipmenu
+    status_binary notifd
+    status_binary notifctl
     status_binary hyprforge-emojimenu
     status_binary hyprforge-files
     status_binary hyprforge-media
@@ -1383,6 +1499,7 @@ show_status() {
     status_service --user hyprforge-displayd "monitor layouts are applied and remembered"
     status_service --user hyprforge-trayd "the tray icons are running"
     status_service --user hyprforge-clipd "clipboard history is being recorded"
+    status_service --user notifd "notifications are being shown"
 
     step "Session"
     if command -v loginctl >/dev/null && [[ -n ${XDG_SESSION_ID:-} ]]; then
@@ -1417,6 +1534,7 @@ case $ACTION in
         has_component displayd && install_displayd
         has_component tray && install_tray
         has_component clipboard && install_clipboard
+        has_component notif && install_notif
         has_component emoji && install_emoji
         has_component files && install_files
         has_component media && install_media
@@ -1430,6 +1548,7 @@ case $ACTION in
         has_component greeter  && uninstall_greeter
         has_component lock     && uninstall_lock
         has_component clipboard && uninstall_clipboard
+        has_component notif && uninstall_notif
         has_component emoji && uninstall_emoji
         has_component files && uninstall_files
         has_component media && uninstall_media

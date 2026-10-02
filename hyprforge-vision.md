@@ -83,7 +83,7 @@ with zero GTK/Qt dependency anywhere in the stack.
 | **Bar** | *(planned)* | waybar | no | not started; would also be the `StatusNotifierHost`, so the tray items already target it |
 | **Clipboard** | `hyprforge-clipboard` (lib + two binaries: the `hyprforge-clipd` daemon and the `hyprforge-clipmenu` popup) | copyq | **yes**, `hyprforge-clipd`, a user daemon over `wlr-data-control`/`ext-data-control` | in progress; history recording, paste synthesis, and a popup that appears at the pointer, drawn to the menus mockup, are built — search, filter tabs (text, images, links, files, read from the content since nothing else is recorded), Pinned and Recent sections, a preview pane, and pin, delete and a two-click "clear history" that never touches pinned entries. Built around one rule: `Sensitivity` is checked before an offer's bytes are ever requested, so a secret is never read, hashed, stored or logged, and `Debug` on an entry renders a description rather than content. `hyprforge-clipboard` is deliberately standalone — no settings app, no tray, no Hyprland config machinery — and is one of the nine components already split into its own repository (see "Where things stand"). `check.sh` has a live tier, "Live tests against the Wayland clipboard"; the CI in the split repository is tier-1 only, since a compositor-backed test needs a real Wayland session no runner has |
 | **Emoji picker** | `hyprforge-emoji` (data + pure search), `hyprforge-emojimenu` (popup) | the emoji picker GNOME/KDE ship and Hyprland users otherwise go without | no (short-lived, per-invocation process on a keybind, same shape as `hyprforge-clipmenu`) | built, drawn to the menus mockup; a grid of all 1914 fully-qualified Unicode 17.0 emoji at the pointer, type-to-filter search, a "Frequently used" section from remembered pick counts, skin tones with a long-press (or Shift+Enter) for the five variants and a persisted default tone, and Kaomoji and Symbols tabs, bound to a key the user sets. `hyprforge-emoji` is pure data and a pure `search` function, no filesystem/network/runtime access at all; `hyprforge-emojimenu` is the popup built on `hyprforge-popup` |
-| **Notifications** | the nested `notif/` workspace: `notif-types`, `notif-config`, `notif-core`, `notif-dbus`, `notif-render`, `notif-wl`, `notif-ipc`, plus the `notifd`/`notifctl` binaries | dunst/mako | **yes**, `notifd`, a user daemon (`org.freedesktop.Notifications` over D-Bus) | built and usable standalone: full D-Bus notification server, layer-shell toasts, a notification-center panel, history, do-not-disturb, hot-reloading config, and `notifctl` for CLI control. Kept as its own nested Cargo workspace on purpose, excluded from the root workspace's `members` — zbus picks its async runtime by feature, the suite needs `zbus/tokio` and notif needs `zbus/async-io`, and unifying the two would give notif's D-Bus code a tokio code path with no tokio runtime under it. `notif-render`'s golden-image tests read the shared `hyprforge_look::Theme` (the same `lock.toml` the lock screen and Settings app read) so notification colours match the rest of the suite without being configured twice. `check.sh`'s "notif workspace" step is what runs its tests, since `cargo test --workspace` at the root does not reach it |
+| **Notifications** | `hyprforge-notif`, a nested workspace at `crates/hyprforge-notif`: `notif-types`, `notif-config`, `notif-core`, `notif-dbus`, `notif-render`, `notif-wl`, `notif-ipc`, plus the `notifd`/`notifctl` binaries | dunst/mako | **yes**, `notifd`, a user daemon (`org.freedesktop.Notifications` over D-Bus) | built and usable standalone: full D-Bus notification server, layer-shell toasts, a notification-center panel, history, do-not-disturb, hot-reloading config, and `notifctl` for CLI control. Kept as its own nested Cargo workspace on purpose, excluded from the root workspace's `members` — zbus picks its async runtime by feature, the suite needs `zbus/tokio` and notif needs `zbus/async-io`, and unifying the two would give notif's D-Bus code a tokio code path with no tokio runtime under it. `notif-render`'s golden-image tests read the shared `hyprforge_look::Theme` (the same `lock.toml` the lock screen and Settings app read) so notification colours match the rest of the suite without being configured twice. `check.sh`'s "notif workspace" step is what runs its tests, since `cargo test --workspace` at the root does not reach it. Its own repository (`hyprforge-notif`) and package (`hyprforge-notif`, replacing `notif-git`) since 2026-10-01; the binaries are still `notifd` and `notifctl` |
 | **Lock screen** | `hyprforge-lock` (binary), `hyprforge-authui` (conversation model) | hyprlock | no (a client holding `ext-session-lock-v1`) | locks, draws, authenticates against PAM (or a finger through fprintd, then PAM's account stack) and unlocks, drawn to the glass-card mockup at each output's real resolution — idle clock, card, shake on failure, status line, media and notification counts, power menu, the card on the keyboard's monitor only — with a look shared with the greeter via `hyprforge-look`; see "The lock screen" in the README for the genuine remaining gaps (no input-method support, no password attempt limiting of its own — deliberately, since that belongs in `/etc/pam.d`; the fingerprint path limits itself to three misses because PAM never sees it). The typed password is now erased on drop by `hyprforge-secret`; what PAM and greetd keep once the answer is handed over is outside this code |
 | *(shared foundation)* | `hyprforge-paths` (xdg + atomic writes), `hyprforge-look` (colour type + runtime Theme), `hyprforge-ui` (iced widgets and palette), `hyprforge-popup` (layer-shell popup shell: surface, pointer/keyboard, flip-then-clamp placement, singleton lock, scrollbar, fractional-scale rendering, and the `Dismissal` choice that decides whether a click elsewhere closes the popup or is swallowed by it) | — | no | in place; every future app builds on these. `hyprforge-popup` was extracted from `hyprforge-clipmenu` once a second and third popup (`hyprforge-emojimenu`, `hyprforge-traymenu`) needed the same Wayland/iced plumbing rather than copying it; it is listed here rather than as its own inventory component because, like `hyprforge-look`/`hyprforge-ui`, nothing user-facing depends on it alone — it only ever appears through a popup that builds on it |
 | **Greeter / display manager** | `hyprforge-greet`, on `hyprforge-authui` | greetd greeters (gtkgreet/tuigreet) | runs under greetd | ~1.1k lines, drawn to the same glass-card mockup as the lock screen; has an installer (`./hyprforge --install --greeter`) and its own `INSTALL.md` |
@@ -110,8 +110,8 @@ locked spec.
 ## Workspace structure
 
 Single Cargo workspace at the repo root, 40 crates under `crates/` plus the
-`notif/` nested workspace (see "Notifications" above for why that one is
-kept separate). The original intent was for every component above to get
+`crates/hyprforge-notif` nested workspace (see "Notifications" above for why
+that one is kept separate). The original intent was for every component above to get
 its own crate(s) under `crates/`, even before it's built — stub/empty
 crates as placeholders so the workspace shape reflects the intended full
 suite. That convention was not followed in practice: `Cargo.toml`'s
@@ -169,7 +169,7 @@ hyprforge/
     hyprforge-authui/            # shared auth conversation model
     hyprforge-lock/
     hyprforge-greet/
-  notif/                        # separate nested Cargo workspace, excluded
+    hyprforge-notif/             # separate nested Cargo workspace, excluded
                                   # from the root's members (see "Notifications")
 ```
 
@@ -217,7 +217,7 @@ occurring inside the suite. A new app should depend on `hyprforge-ui` and get
 the look for free; if it ever needs to define a colour of its own, that is a
 sign something belongs in `hyprforge-look` instead.
 
-### Where things stand (as of 2026-09-27)
+### Where things stand (as of 2026-10-01)
 
 The Settings modules above marked *in progress* are functional, and their
 look now follows the Settings mockup: the shared widget kit, the
@@ -310,8 +310,10 @@ a window that captured raw bytes (0 bytes exiting immediately after flush,
 a real pixel-offset scrollbar with a draggable thumb, replacing
 item-at-a-time scrolling with nothing to show position.
 
-Notifications (the nested `notif/` workspace, replacing dunst/mako) are
-unchanged and described in the inventory table above.
+Notifications (`hyprforge-notif`, a nested workspace, replacing
+dunst/mako) moved from `notif/` to `crates/hyprforge-notif` on 2026-10-01
+and became a component like the rest, with its own repository and
+package; the inventory table above has the detail.
 
 Two components not previously in this document exist and work: the emoji
 picker (`hyprforge-emoji` + `hyprforge-emojimenu`, replacing the emoji
@@ -340,9 +342,9 @@ The suite also gained tooling to extract a component into its own
 repository while keeping it a workspace member here: `split.sh` (via
 `git subtree ... --rejoin`) and `sync.sh`, which checks whether a
 split-out repository has drifted from what this monorepo would produce.
-Nine components have been split and pushed with their own green CI
-(as of 2026-09-27): clipboard, lock, greet, tray, settings, displayd,
-emojimenu, files and media — all public, under the `hyprforge-suite`
+Ten components have been split and pushed with their own green CI
+(as of 2026-10-01): clipboard, lock, greet, tray, settings, displayd,
+emojimenu, files, media and notif — all public, under the `hyprforge-suite`
 organisation since 2026-09-27. `repo-plan.md` is the
 authority on this work — the reasoning behind it, the dependency-layer
 order, and what was learned doing it (a dangling `LICENSE` symlink, a

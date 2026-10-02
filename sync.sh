@@ -128,6 +128,10 @@ for manifest_path in sorted(glob.glob("crates/*/Cargo.toml")):
     name = doc.get("package", {}).get("name")
     if name:
         print(name)
+    elif "workspace" in doc:
+        # A nested workspace (hyprforge-notif) has no package of its own;
+        # its directory is its name, which is also its repository's.
+        print(manifest_path.split("/")[1])
 PYEOF
 )
 [[ ${#CRATES[@]} -gt 0 ]] || die "no standalone-ready crates found — nothing to sync against"

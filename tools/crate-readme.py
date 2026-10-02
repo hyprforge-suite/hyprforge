@@ -88,8 +88,10 @@ def render(crate_dir: Path) -> str:
 
 def libraries():
     for manifest in sorted((ROOT / "crates").glob("*/Cargo.toml")):
-        name = tomllib.loads(manifest.read_text())["package"]["name"]
-        if name not in COMPONENTS:
+        package = tomllib.loads(manifest.read_text()).get("package")
+        # No [package] is a nested workspace (hyprforge-notif): a
+        # component, whose README is written by hand like the others'.
+        if package is not None and package["name"] not in COMPONENTS:
             yield manifest.parent
 
 

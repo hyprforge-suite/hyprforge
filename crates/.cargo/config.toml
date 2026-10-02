@@ -1,0 +1,23 @@
+# Points hyprforge-notif's two suite dependencies at this checkout.
+#
+# hyprforge-notif is a cargo workspace of its own, excluded from the
+# suite's (see `exclude` in the root Cargo.toml: zbus's runtime features
+# would unify and panic). Cargo reads [patch] only from the root manifest
+# of the workspace being built, so the suite's [patch.crates-io] never
+# reaches notif, and without this it would build against the published
+# hyprforge-look and hyprforge-paths — and nothing would fail. That is
+# CLAUDE.md's "a sibling missing from [patch] builds from the published
+# copy" through a different door.
+#
+# It lives here, not inside crates/hyprforge-notif/, because that
+# directory is what `git subtree split` publishes: these paths would point
+# at nothing in the split repository, which builds from crates.io and is
+# meant to. Cargo reads `.cargo/config.toml` from the directory it is run
+# in and every parent, so a build anywhere under crates/ sees this file;
+# for the suite's own crates it repeats what the root [patch] already
+# says, and a config patch wins over a manifest one, so nothing changes.
+#
+# Relative paths here resolve against this file's directory, crates/.
+[patch.crates-io]
+hyprforge-look = { path = "hyprforge-look" }
+hyprforge-paths = { path = "hyprforge-paths" }

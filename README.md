@@ -210,6 +210,17 @@ Hyprland-facing
                             hyprforge-emoji, with long-press support for
                             picking a skin tone, frequently used emoji
                             first, and tabs for kaomoji and symbols.
+  hyprforge-notif/         the notification daemon, notifd, and notifctl
+                            to drive it: toasts on layer-shell surfaces, a
+                            notification center, history and
+                            do-not-disturb. A cargo workspace of its own,
+                            excluded from this one, because it runs zbus
+                            on async-io and the suite runs it on tokio,
+                            and one workspace would unify the two into a
+                            runtime panic. Its two suite dependencies
+                            are patched to this checkout by
+                            crates/.cargo/config.toml, since this
+                            workspace's [patch] cannot reach it.
 
 Apps
   hyprforge-files/         the file manager window: the chrome around the
@@ -240,9 +251,9 @@ Apps
                             conversation model
 ```
 
-Nine of these directories — clipboard, lock, greet, tray, settings,
-displayd, emojimenu, files and media — are also their own repositories, published
-separately from this one. See "Ten repositories, one workspace" below for what that means and where a change to
+Ten of these directories — clipboard, lock, greet, tray, settings,
+displayd, emojimenu, files, media and notif — are also their own repositories, published
+separately from this one. See "Eleven repositories, one workspace" below for what that means and where a change to
 one of them should actually be made.
 
 ### Why the look is one crate
@@ -265,14 +276,14 @@ greeter runs as its own user and a home directory is `drwx------`: it cannot
 traverse into `$HOME` at all, so continuity across the login boundary has to be
 an export rather than a shared path.
 
-## Ten repositories, one workspace
+## Eleven repositories, one workspace
 
 The suite lives in the [hyprforge-suite](https://github.com/hyprforge-suite)
 GitHub organisation (`hyprforge` itself was already taken by an unrelated
-project), and every repository in it is public. Nine components have been
+project), and every repository in it is public. Ten components have been
 split out of `crates/` into their own repositories with `git subtree`,
 pushed, and have green CI; this repository is where the libraries they
-share live, and the only place that says how the ten fit together.
+share live, and the only place that says how the eleven fit together.
 
 | Repository | What it is |
 |---|---|
@@ -285,8 +296,9 @@ share live, and the only place that says how the ten fit together.
 | [hyprforge-emojimenu](https://github.com/hyprforge-suite/hyprforge-emojimenu) | An emoji picker: a layer-shell popup at the pointer with type-to-filter search over the full Unicode set, frequently used first, skin tones and a remembered default tone, plus kaomoji and symbols. |
 | [hyprforge-files](https://github.com/hyprforge-suite/hyprforge-files) | A file manager: tabs, a sidebar, list and grid views with thumbnails, a preview pane, the freedesktop trash, copy, paste and drag with other applications, and zip/tar/7z archives browsed and edited in place. |
 | [hyprforge-media](https://github.com/hyprforge-suite/hyprforge-media) | A photo, video and 3D model viewer: a folder browsed in the file manager's order, a date-grouped grid and library, EXIF and orientation done right, videos through libmpv, STL/3MF/OBJ models on the GPU, and a slideshow. |
+| [hyprforge-notif](https://github.com/hyprforge-suite/hyprforge-notif) | A notification daemon, `notifd`, replacing dunst or mako: the full `org.freedesktop.Notifications` server, layer-shell toasts, a notification center with history, do-not-disturb, and `notifctl` to drive them. A cargo workspace of its own, on smol rather than tokio. |
 
-Eight of the nine are meant to be installed on their own: clone
+Nine of the ten are meant to be installed on their own: clone
 `hyprforge-clipboard` and you get a clipboard daemon and nothing else — no
 Settings app, no tray, no Hyprland config machinery. `hyprforge-settings` is
 the exception and its own README says so: it depends on seventeen other
@@ -378,7 +390,7 @@ the suite quietly builds two versions of the same dependency. A dropped
 before this step existed. It discovers which crates to check by their
 shape — nothing in the manifest inherits from the workspace — rather
 than from a hardcoded list, so a newly prepared crate is covered
-automatically. It's also why `notif/` gets its own step: that's a
+automatically. It's also why `crates/hyprforge-notif/` gets its own step: that's a
 second, separate cargo workspace (`exclude`d from this one — see
 Cargo.toml), so `cargo test --workspace` never reaches it, and a
 component whose tests silently never run is exactly the failure this
