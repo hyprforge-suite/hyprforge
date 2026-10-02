@@ -399,9 +399,11 @@ async-io and panic — and three things follow from that shape:
       `hyprforge-notif` in `packaging/arch`, `--notif` in the installer,
       its own CI, and `split.sh`, `sync.sh` and `check.sh` taught that a
       component can be a workspace
-- [ ] notif's history joined to the archived repository, which is
-      transferred into the organisation as `hyprforge-notif`, unarchived,
-      and brought in step by `./sync.sh --push`
+- [x] notif's history joined to the archived repository, which was
+      unarchived and transferred into the organisation as
+      `hyprforge-notif` (the old URL redirects), and brought in step by
+      `./sync.sh --push` as a fast-forward from its archived head, with
+      green CI on the first run (2026-10-01)
 - [ ] First tagged release through that workflow — which is also the
       first proof the secret holds a value: its run shows
       `CARGO_REGISTRY_TOKEN: ***`, and a bare name means the paste never
