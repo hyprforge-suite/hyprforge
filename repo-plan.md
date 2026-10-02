@@ -346,14 +346,10 @@ notif's own packaging question, not this plan's.
       every library inherits one workspace version, like iced's crates,
       because re-exports chain across them and a breaking change rarely
       stays in one
-- [x] First publish: all 31 libraries at 0.1.0, plus the clipboard and
-      tray (components other components use as libraries), 2026-09-28.
-      `.github/workflows/publish.yml` publishes later versions on a tag
-- [x] First split prepared and verified standalone; not yet pushed
+- [x] First split, `clipboard`, prepared and verified standalone
 - [x] Step 4 judged: continue, with drift detection and per-repo CI added
-- [x] `lock` and `greet` prepared and verified standalone; not yet pushed
-- [x] `tray` prepared and verified standalone; not yet pushed
-- [x] `settings` prepared and verified standalone; not yet pushed
+- [x] `lock`, `greet`, `tray` and `settings` prepared and verified
+      standalone
 - [x] All five pushed: clipboard, lock, greet, tray, settings, all green CI
 - [x] displayd, emojimenu and files split and pushed; CI committed after
       the fact and green on 2026-09-23, and `split.sh` now refuses a
@@ -367,6 +363,19 @@ notif's own packaging question, not this plan's.
       once — the [patch] key, ninety-odd manifest lines, the scripts and
       the docs — after the transfers, so the old URL redirected the
       whole way through
+- [x] First publish: all 31 libraries at 0.1.0, plus the clipboard and
+      tray (components other components use as libraries), 2026-09-28
+- [x] Components name their siblings by version, not by this
+      repository's URL (2026-09-28): a clone of one fetches published
+      crates and never this repository, and the root's
+      `[patch.crates-io]` points every one back at `crates/` here
+- [x] `CARGO_REGISTRY_TOKEN` set as an organisation secret readable by
+      this repository only (2026-10-01), so
+      `.github/workflows/publish.yml` can publish later versions on a tag
+- [ ] First tagged release through that workflow — which is also the
+      first proof the secret holds a value: its run shows
+      `CARGO_REGISTRY_TOKEN: ***`, and a bare name means the paste never
+      arrived
 
 ## Staying in sync after the push
 
