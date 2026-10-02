@@ -74,8 +74,8 @@ if grep -q 'workspace = true\|workspace.dependencies' "$PREFIX/Cargo.toml"; then
      A standalone crate has no workspace to inherit from: spell out
      version, edition, license and every dependency version. See
      hyprforge-clipboard's manifest for the shape, and the [patch]
-     section in the root Cargo.toml for how its Hyprforge dependencies
-     stay local while naming a git URL."
+     section in the root Cargo.toml for how its Hyprforge dependencies,
+     named by crates.io version, build from crates/ here."
 fi
 ok "no workspace inheritance left"
 
@@ -123,10 +123,12 @@ done
 # locally, and if that URL does not resolve, `unexpected http status
 # code: 404`.
 #
-# hyprforge-settings is the case that has this shape today: it depends
-# on hyprforge-tray, which is itself standalone-ready and names the URL
-# in its own manifest. The rest do not, which is why this only bites
-# once there are two of them in a chain.
+# hyprforge-settings was the case with this shape: it depends on
+# hyprforge-tray, which is itself standalone-ready and named the URL in
+# its own manifest. Since 2026-09-28 every component names its siblings
+# by crates.io version and no manifest names a git URL at all, so this
+# passes trivially — and stays, because the first git dependency brings
+# the rule straight back.
 #
 # So the URL is allowed to change — it just has to change everywhere at
 # once.

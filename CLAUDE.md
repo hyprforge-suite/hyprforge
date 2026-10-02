@@ -161,10 +161,11 @@ identically.** A standalone crate that depends on another standalone crate
 resolves two manifests — its own, and the depended-on crate's as fetched
 from inside its own repository. Two spellings of the same repository read
 as two different sources, and the second one gets fetched over the network.
-`hyprforge-settings` depends on `hyprforge-tray`, which names the URL in its
-own manifest, and that is the first pair with this shape. The URL is allowed
-to change; it has to change everywhere at once, which is what `split.sh`
-checks before it will split anything.
+`hyprforge-settings` depending on `hyprforge-tray`, which named the URL in
+its own manifest, was the first pair with this shape. No manifest names a
+git URL now — siblings come from crates.io — but the rule returns with the
+first git dependency, so `split.sh` still refuses to split while more than
+one spelling exists.
 
 **A sibling missing from the root `[patch.crates-io]` table builds from
 the published copy, not from this checkout — and nothing fails.** Cargo
@@ -318,18 +319,23 @@ theme rather than merely somewhere in the chain — two names can each resolve
 and still look wrong together if one falls through several levels of
 inheritance to reach hicolor while its sibling is drawn directly.
 
-**Publishing the components without publishing the monorepo tests them
-against code nobody has.** Every standalone manifest names the monorepo's
-URL for every sibling it needs — `hyprforge-settings` alone pulls seventeen
-crates that way — so a component pushed while the monorepo is behind gets
+**Publishing a component ahead of the libraries it needs tests it against
+code nobody has.** While every standalone manifest named the monorepo's URL
+for its siblings, a component pushed while the monorepo was behind got
 built by its own CI against whatever was published days ago. The failure
 names the component, not the stale dependency: `cannot find function
 `update` in module `hyprforge_tray::prefs`` in a repository whose copy of
 that function is right there in the diff you just pushed. `sync.sh`
 checked five components and said nothing about the repository all five
-depend on; it now checks and pushes the monorepo first, because a
-component's CI starts the moment its push lands and resolves siblings
-from there while it runs.
+depended on, so it learned to push the monorepo first. Components now
+name their siblings by crates.io version and their CI never reads the
+monorepo, so that ordering stopped guarding anything — the same failure
+arrives through crates.io, whenever a component uses a library change
+that has not been released. `sync.sh --push` now builds each component
+outside the workspace against the published crates, the way its CI will,
+and refuses to push one that fails. When a mechanism changes, the guard
+that depended on it has to move with it; this one kept running and
+passing for three days after it stopped meaning anything.
 
 **A layer surface that leaves its exclusive zone at `0` is positioned in
 what the bar left over, so a margin gets the bar's height added twice.**
@@ -487,7 +493,7 @@ made it invisible is that it degrades well: the daemon logs a warning
 and carries on, exactly as the rule about an absent sibling says it
 should. What made it *confusing* is that `hyprforge-settings` has seventeen
 crates outside its repository and is fine — because those are libraries
-its manifest pulls by URL, and Cargo fetches them. Nothing fetches a
+its manifest names by version, and Cargo fetches them. Nothing fetches a
 second executable into someone's `$PATH`. A package that installs two
 binaries ships two `[[bin]]` targets from one crate, the way
 `hyprforge-displayd` already ships `displayd` and `displayctl`.

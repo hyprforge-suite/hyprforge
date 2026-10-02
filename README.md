@@ -323,8 +323,10 @@ happened or checking it stayed true. `./sync.sh` is the day-2 counterpart:
 run alone, it reports — read-only — whether each published component
 repository still matches what this monorepo would produce right now.
 `./sync.sh --push` re-splits and pushes only the ones that have drifted; it
-refuses on a dirty tree, refuses if `./check.sh --quick` fails, and never
-force-pushes. A component whose published history is not an ancestor of the
+refuses on a dirty tree, refuses if `./check.sh --quick` fails, refuses a
+component that does not build on its own against the libraries published
+on crates.io (one that needs an unreleased library change — release
+first), and never force-pushes. A component whose published history is not an ancestor of the
 new split has diverged — meaning something was pushed to it directly — and
 that's `git subtree pull` and a human decision, not something this script
 will guess at.

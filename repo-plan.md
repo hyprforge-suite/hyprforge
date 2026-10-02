@@ -208,7 +208,7 @@ crate that still inherits from the workspace resolves fine.
 
 It did surface the one constraint that only appears once two of these
 exist in a chain. `settings` depends on `tray`, which is itself
-standalone-ready and names the git URL in its own manifest — so
+standalone-ready and then named the git URL in its own manifest — so
 resolving `settings` standalone reads two manifests, and cargo keys a
 git source on the URL *string*. Two spellings of the same repository
 are two sources, and the second gets fetched over the network. The URL
@@ -305,8 +305,8 @@ down rather than remembered:
 That is the whole difference between the two failures and the three
 non-failures. `hyprforge-settings`'s repository does not contain
 `windowrules`, `input`, `session`, `shortcuts` or `system` either — and
-nobody noticed, because those are libraries its manifest pulls from this
-repository by URL. `hyprforge-traymenu` is a *binary*, so when
+nobody noticed, because those are libraries its manifest pulls from
+crates.io (from this repository by URL, at the time). `hyprforge-traymenu` is a *binary*, so when
 `hyprforge-tray` was split without it, the published repository built a
 daemon whose right-click spawns a program that is not in it. Same for
 `hyprforge-clipboard` and `hyprforge-clipmenu`: a clipboard daemon with
@@ -398,14 +398,23 @@ force-pushes: a component whose published history is not an ancestor of
 the new split has diverged (an outside contributor, a direct push) and is
 left for a human with `git subtree pull`, not resolved automatically.
 
-It checks the monorepo first, and pushes that before any component. Every
-standalone manifest names this repository's URL for every sibling it
-needs — `hyprforge-settings` alone pulls seventeen crates that way — so a
-component published while this repository is behind gets built by its own
-CI against siblings from whenever it was last pushed, and the failure
-names the component rather than the stale dependency it resolved. That
-happened on the first real use of `--push`: three components published,
-five green ticks, and a red build twenty seconds later on a function
-sitting in the diff that had just gone out. Order matters as much as the
-check, because a component's CI starts the moment its push lands and
-resolves its siblings while it runs.
+It checks the monorepo first, and pushes that before any component. That
+used to be the whole defence against one failure: while every standalone
+manifest named this repository's URL for its siblings, a component
+published while this repository was behind got built by its own CI against
+siblings from whenever it was last pushed, and the failure named the
+component rather than the stale dependency it resolved. It happened on the
+first real use of `--push`: three components published, five green ticks,
+and a red build twenty seconds later on a function sitting in the diff
+that had just gone out.
+
+Since 2026-09-28 components name their siblings by crates.io version, so
+their CI never reads this repository, and the same failure arrives through
+crates.io instead: a component calling a library function added since the
+last release builds here, where `[patch.crates-io]` points it at
+`crates/`, and fails on GitHub. Pushing the monorepo first cannot prevent
+that — only a release can. So before `--push` sends a component out, it
+extracts the split tree outside this workspace and runs `cargo check
+--all-targets` on it the way its CI will, resolving fresh from crates.io,
+and refuses the push if that fails. The monorepo still goes first, because
+it is where every component's README says its code comes from.

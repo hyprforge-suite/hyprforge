@@ -171,21 +171,21 @@ if $PUSH; then
     fi
 fi
 
-# The monorepo comes first, and it is not optional.
+# The monorepo comes first.
 #
-# Every standalone manifest names https://github.com/<owner>/hyprforge for
-# every sibling crate it needs — hyprforge-settings alone pulls seventeen of
-# them that way. So a component pushed while this repository is behind
-# gets built by its own CI against whatever siblings were published days
-# ago, and the failure names the *component* (`cannot find function
-# `update` in module `hyprforge_tray::prefs``) rather than the stale
-# dependency it actually resolved. That happened: five components checked,
-# three pushed, and not one word about the repository all five depend on.
-#
-# Pushed before any component, for the same reason: a component's CI
-# starts the moment its push lands, and resolves siblings from here as it
-# runs.
-step "The monorepo every component's manifest points at"
+# Until 2026-09-28 this was not optional: every standalone manifest named
+# https://github.com/<owner>/hyprforge for its siblings, so a component
+# pushed while this repository was behind got built by its own CI against
+# stale siblings, and the failure named the *component* (`cannot find
+# function `update` in module `hyprforge_tray::prefs``) rather than the
+# dependency it actually resolved. Components now name their siblings by
+# crates.io version, so their CI never reads this repository and that
+# reason is gone — the danger moved to crates.io, and the standalone build
+# below is what guards it. The monorepo still goes first because every
+# component's README links here as the place its code comes from, and a
+# component whose history points at commits the monorepo has not published
+# is a confusing thing to hand anyone.
+step "The monorepo every component's README points at"
 MONOREPO_URL="https://github.com/$GITHUB_OWNER/hyprforge"
 # The branch this checkout is on, not a hardcoded name: the URL in the
 # manifests carries no branch, so cargo fetches the repository's default,
@@ -197,7 +197,7 @@ if [[ -z "$MONOREPO_BRANCH" ]]; then
     bad "HEAD is detached; cannot tell which branch should be published"
     FAILURES+=("monorepo")
 elif ! timeout "$NET_TIMEOUT" git fetch --no-tags "$MONOREPO_URL.git" "$MONOREPO_BRANCH" >/dev/null 2>&1; then
-    bad "$MONOREPO_URL is unreachable — every component's manifest depends on it"
+    bad "$MONOREPO_URL is unreachable"
     FAILURES+=("monorepo")
 else
     monorepo_local=$(git rev-parse HEAD)
@@ -207,7 +207,7 @@ else
     elif git merge-base --is-ancestor "$monorepo_remote" "$monorepo_local"; then
         ahead=$(git rev-list --count "$monorepo_remote..$monorepo_local")
         note "monorepo is behind by $ahead commit(s)" \
-             "every component's CI resolves its siblings from here, so this goes first"
+             "pushed before any component, so their history is never ahead of it"
         MONOREPO_BEHIND=true
     else
         bad "$MONOREPO_BRANCH has diverged from $MONOREPO_URL — resolve by hand, never with --force"
@@ -324,6 +324,53 @@ if ! $PUSH; then
 fi
 
 # --push from here on: act on what the pass above found.
+
+# Build each component the way its own CI is about to, before it gets the
+# chance to.
+#
+# A component names its siblings by crates.io version, and here the root
+# `[patch.crates-io]` table points every one back at crates/ — so
+# `check.sh` passing proves the component builds against *this checkout's*
+# libraries, and says nothing about the published ones its CI will fetch.
+# A component that starts calling a library function added since the last
+# `v*` tag passes every check here and fails on GitHub with `cannot find
+# function`, the same failure the monorepo-first rule above once existed
+# to prevent, arriving through crates.io instead. Only a release fixes
+# that, so the push is refused until there is one.
+#
+# The split tree is extracted outside this workspace, where no `[patch]`
+# applies, and resolved fresh, as CI does: no component commits a
+# Cargo.lock. `cargo check --all-targets` covers the tests' code too, and
+# compiling is the whole question — nothing here is ever run. One shared
+# target directory, so nine components cost one build of iced rather than
+# nine.
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
+STANDALONE_TARGET="$PWD/target/sync-standalone"
+builds_against_crates_io() {
+    local crate="$1" sha="$2" dir log status
+    dir=$(mktemp -d "${TMPDIR:-/tmp}/hyprforge-sync-$crate.XXXXXX") || return 1
+    log="$dir.log"
+    # `-m` is load-bearing. `git archive` dates every file at its commit,
+    # tar restores those dates, and cargo leaves a package's directory out
+    # of its fingerprint — so two extractions of one component share a
+    # fingerprint in the shared target, and an older-dated tree than the
+    # last one built is judged fresh and never compiled. That passed a
+    # planted tree that does not compile. Extracted files dated now always
+    # rebuild the component itself; its dependencies stay shared.
+    if git archive "$sha" | tar -x -m -C "$dir" \
+        && (cd "$dir" && CARGO_TARGET_DIR="$STANDALONE_TARGET" cargo check --all-targets --quiet) >"$log" 2>&1; then
+        status=0
+    else
+        status=1
+        # A compile error starts `error`; a failed fetch or resolution may
+        # not, and must not be shown as nothing at all.
+        { grep -q '^error' "$log" && grep '^error' -A8 "$log" || tail -n 15 "$log"; } \
+            | head -n 30 | sed 's/^/     /'
+    fi
+    rm -rf "$dir" "$log"
+    return $status
+}
+
 step "Pushing what has drifted"
 if [[ ${#DRIFTED[@]} -eq 0 ]]; then
     ok "nothing to push — every reachable component already matches its repository"
@@ -331,6 +378,16 @@ else
     for crate in "${DRIFTED[@]}"; do
         url="$(url_for "$crate")"
         sha="${LOCAL_SHA[$crate]}"
+        printf '  %s…%s %s: building against published crates, as its CI will\n' "$DIM" "$OFF" "$crate"
+        if ! builds_against_crates_io "$crate" "$sha"; then
+            bad "$crate: does not build on its own against crates.io — not pushed.
+     A compile error naming a Hyprforge library means it needs a change
+     that has not been released: release first (bump the workspace
+     version, tag vX.Y.Z; see repo-plan.md), then re-run ./sync.sh --push.
+     Anything else above is the build's own problem, and would have
+     failed the component's CI the same way."
+            continue
+        fi
         # NEVER --force: a component repository can carry commits nobody
         # pushed from here (an outside contributor, a hotfix on GitHub
         # directly). The divergence check above is what stands between
