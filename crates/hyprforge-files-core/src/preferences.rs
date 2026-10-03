@@ -121,7 +121,9 @@ pub const CONFLICT_POLICIES: [OnConflict; 4] =
 pub fn group(action: Action) -> &'static str {
     use Action::*;
     match action {
-        Open | OpenInNewTab | GoUp | GoBack | GoForward | EditLocation | CommandPalette | Refresh => "Going places",
+        Open | OpenInNewTab | ShowInFolder | GoUp | GoBack | GoForward | EditLocation | CommandPalette | Refresh => {
+            "Going places"
+        }
         FocusUp | FocusDown | FocusLeft | FocusRight | ExtendUp | ExtendDown | SelectAll | ClearSearch
         | ContextMenu => "Selecting",
         Trash | DeletePermanently | Restore | EmptyTrash | Copy | Cut | Paste | CopyPath | Rename | NewFolder

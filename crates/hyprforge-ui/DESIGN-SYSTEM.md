@@ -98,13 +98,13 @@ Each is `hyprforge_ui::widgets::<name>`.
 |---|---|
 | Text | `scaled_text` (every text goes through it, so `font_scale` reaches the screen), `meta_text`, `hint_text`, `section_label`, `spaced_caps`, `config_line` |
 | Selection | `selectable_row_style`: the one rule, accent means selected and hover never shares it. `Tint` for a row mark's role |
-| Fields | `inset_field_style` (the recessed box Files' path bar and every search share), `inset_input_style`, `search_field` |
+| Fields | `inset_field_style` (the recessed box Files' path bar and every search share), `inset_input_style`, `search_field`, and `token_field`: a search field holding finished tokens between the magnifier and the cursor (Files' `ext:rs` chips) |
 | Under a field | `anchored` (an `Anchored`): hangs one element under another, at its width, as an overlay; placed from the anchor's own layout, because a window cannot ask where a widget landed. `suggestions` (of `Suggestion` rows): the list that hangs there, with a heading line, an empty message and the shared row look |
 | Controls | `toggle` and `toggle_style`, `value_slider`, `stepped_slider` with `step_index`, `slider_style`, `segmented`, `segmented_choice`, `segment_style` with `SegmentLook`, `dropdown_style`, `dropdown_menu_style`, `tri_state` |
 | Buttons | `primary_button`, `secondary_button`, `danger_button` |
 | Layout | `section`, `divider`, `vertical_divider`, `row_field`, `page_header`, `setting_list`, `setting_row`, `setting_row_style`, `hero_card`, `status_dot`, `pending_bar`, `pending_label` |
 | Panels | `panel_tabs`: words across a docked panel's top, the chosen one over an accent underline. `fact_row` and `fact`: a dim label at a fixed width and its value beside it, so a panel's values line up (Files' Properties inspector) |
-| Badges | `chip`, `keycap` |
+| Badges | `chip` (something the system says about a row, in a state colour), `removable_chip` (something the person typed and can take back: neutral, with a ×), `keycap` |
 | Dialogs | `confirm_dialog` |
 | Time | `countdown_ring`, with `remaining_fraction` |
 | Progress | `progress_line` (with `progress_line_style`): a thin bar in the foreground colour on the `row` step, never the accent; drawn only when there is an honest fraction |

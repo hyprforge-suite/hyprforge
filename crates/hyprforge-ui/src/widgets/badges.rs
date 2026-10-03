@@ -48,6 +48,52 @@ pub fn chip<'a, Message: 'a>(
     .into()
 }
 
+/// A token the user wrote and can take back — Files' `ext:rs` in its
+/// search field: the label in the mono font, and a × that sends
+/// `on_remove`.
+///
+/// Neutral, not tinted like [`chip`]: a [`chip`] is something the system
+/// says about a row, in a state colour; this is something the person
+/// typed, and colouring it would claim a state it does not have. It
+/// takes the raised row surface — "a live control" in this suite's
+/// three-level idiom — with the hairline the keycaps have.
+pub fn removable_chip<'a, Message: Clone + 'a>(
+    label: impl IntoFragment<'a>,
+    on_remove: Message,
+    scale: FontScale,
+) -> Element<'a, Message> {
+    let size = scale.apply(density::META_TEXT_BASE * 0.9);
+    let cross = iced::widget::button(text("\u{00d7}").size(size).color(theme::text_dim()))
+        .padding([0.0, scale.apply(2.0)])
+        .on_press(on_remove)
+        .style(|_t: &iced::Theme, status| iced::widget::button::Style {
+            background: matches!(status, iced::widget::button::Status::Hovered)
+                .then(|| Background::Color(surface::card())),
+            text_color: theme::text(),
+            border: Border { radius: density::nested_radius().into(), ..Border::default() },
+            ..iced::widget::button::Style::default()
+        });
+    container(
+        iced::widget::row![
+            text(label)
+                .font(theme::mono_font())
+                .size(size)
+                .color(theme::text())
+                .wrapping(iced::widget::text::Wrapping::None),
+            cross,
+        ]
+        .spacing(scale.apply(2.0))
+        .align_y(iced::Alignment::Center),
+    )
+    .padding([0.0, scale.apply(4.0)])
+    .style(|_t: &iced::Theme| container::Style {
+        background: Some(Background::Color(surface::row())),
+        border: Border { radius: density::nested_radius().into(), width: 1.0, color: surface::card_border() },
+        ..container::Style::default()
+    })
+    .into()
+}
+
 /// One key of a chord, as a cap: `SUPER`, `SHIFT`, `⏎`.
 ///
 /// A chord is drawn as a row of these rather than as `SUPER + SHIFT + S`

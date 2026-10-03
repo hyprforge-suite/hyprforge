@@ -76,6 +76,30 @@ pub fn search_field<'a, Message: Clone + 'a>(
     id: Option<iced::widget::Id>,
     scale: FontScale,
 ) -> Container<'a, Message> {
+    token_field(placeholder, value, Vec::new(), on_input, on_submit, id, scale)
+}
+
+/// A [`search_field`] holding finished tokens ahead of the text — Files'
+/// `ext:rs` and `modified:<7d` chips, each a [`super::removable_chip`].
+///
+/// The tokens sit *inside* the field, between the magnifier and the
+/// cursor, because they are part of what was typed: a row of chips off
+/// to one side would read as a second control with a meaning of its own.
+/// The caller decides which text became a token and what removing one
+/// does; this only draws them. With no tokens it is exactly
+/// `search_field`, which is built on it so the two cannot drift apart.
+///
+/// The placeholder is dropped once a token is in: "Search crates" after
+/// `ext:rs` would read as though the token were not part of the search.
+pub fn token_field<'a, Message: Clone + 'a>(
+    placeholder: &str,
+    value: &str,
+    tokens: Vec<iced::Element<'a, Message>>,
+    on_input: impl Fn(String) -> Message + 'a,
+    on_submit: Option<Message>,
+    id: Option<iced::widget::Id>,
+    scale: FontScale,
+) -> Container<'a, Message> {
     let ring_side = scale.apply(SEARCH_RING_BASE);
     let ring = container(iced::widget::Space::new())
         .width(Length::Fixed(ring_side))
@@ -90,6 +114,7 @@ pub fn search_field<'a, Message: Clone + 'a>(
             ..container::Style::default()
         });
 
+    let placeholder = if tokens.is_empty() { placeholder } else { "" };
     let mut input = text_input(placeholder, value)
         .on_input(on_input)
         .size(scale.apply(density::META_TEXT_BASE))
@@ -112,9 +137,16 @@ pub fn search_field<'a, Message: Clone + 'a>(
         input = input.on_submit(submit);
     }
 
-    container(row![ring, input].spacing(spacing::XS).align_y(iced::Alignment::Center))
+    let mut parts = row![ring].spacing(spacing::XS).align_y(iced::Alignment::Center);
+    for token in tokens {
+        parts = parts.push(token);
+    }
+    container(parts.push(input))
         .height(Length::Fixed(density::field_height(scale)))
         .center_y(Length::Fixed(density::field_height(scale)))
         .padding([0, spacing::SM as u16])
+        // A field narrower than its tokens cuts them off at its edge
+        // rather than drawing them over whatever sits beside it.
+        .clip(true)
         .style(inset_field_style)
 }
