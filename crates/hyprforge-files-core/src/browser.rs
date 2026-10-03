@@ -3506,12 +3506,7 @@ fn status_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> 
         return plane(iced::widget::Space::new().into());
     }
 
-    // A search that found nothing has not found an empty folder.
-    let summary = if vm.search.active && vm.rows.is_empty() && vm.hidden_count == 0 {
-        "No matches".to_string()
-    } else {
-        crate::format::status_summary(&vm.rows, vm.selection.selected_paths(), vm.hidden_count, vm.archive)
-    };
+    let summary = status_line(vm);
 
     // Left: what is in here. Right: where "here" is on disk, which is
     // the other question a status bar is asked and the one the path bar
@@ -4302,6 +4297,22 @@ fn column_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message>
 fn reveal_tag<'a>(row: Element<'a, Message>, focused: bool) -> Element<'a, Message> {
     let tagged = container(row);
     if focused { tagged.id(crate::reveal::focused_row()) } else { tagged }.into()
+}
+
+/// The status bar's left-hand words.
+///
+/// A search that found nothing has not found an empty folder — and
+/// searching this folder counts what it filtered out as hidden, so the
+/// hidden count is no sign the folder is empty either. It says how many
+/// are there and not shown.
+fn status_line(vm: &ViewModel<'_>) -> String {
+    if vm.search.active && vm.rows.is_empty() {
+        return match vm.hidden_count {
+            0 => "No matches".to_string(),
+            n => format!("No matches \u{00B7} {n} hidden"),
+        };
+    }
+    crate::format::status_summary(&vm.rows, vm.selection.selected_paths(), vm.hidden_count, vm.archive)
 }
 
 /// A quiet line in the middle of a pane that has no rows to show.
@@ -7871,5 +7882,18 @@ mod properties_tests {
         let outcome = browser.update(Message::Adopt(crate::preferences::Setting::ShowHidden(true)));
         assert_eq!(browser.rows().len(), 2);
         assert!(!matches!(outcome, Outcome::PrefsChanged(_)), "the window saves it once: {outcome:?}");
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::tests_support::loaded;
+    use super::*;
+
+    #[test]
+    fn a_search_here_that_matches_nothing_is_not_called_an_empty_folder() {
+        let mut browser = loaded(&[("a.txt", false), ("b.txt", false)]);
+        browser.update(Message::SearchChanged("zzz".into()));
+        assert_eq!(status_line(&browser.view_model(1400.0)), "No matches \u{00B7} 2 hidden");
     }
 }
