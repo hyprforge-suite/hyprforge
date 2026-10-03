@@ -1343,6 +1343,25 @@ else
     done
     if output=$(cargo publish --workspace --dry-run --allow-dirty "${exclude[@]}" 2>&1); then
         ok "$(grep -c '^\s*Packaged ' <<<"$output") library crate(s) package cleanly"
+    elif grep -q 'already exists on crates.io index' <<<"$output" \
+        && grep -q 'changed between lock files' <<<"$output"; then
+        # Between a release and the next version bump the dry run cannot
+        # pass, and not because anything is wrong: a packaged crate
+        # records the commit it was made from, so every commit since the
+        # release makes a tarball whose checksum differs from the one
+        # crates.io holds under the same version, and verification
+        # refuses the mismatch. Found the day this tier first ran with
+        # nothing but comments changed. Packaging without the
+        # verification build still catches a missing file or a manifest
+        # crates.io would refuse; the compile it skips is the part a bump
+        # gives back. Said in yellow — it is not a pass.
+        version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+        if output=$(cargo package --workspace --no-verify --allow-dirty "${exclude[@]}" 2>&1); then
+            skip "$(grep -c '^\s*Packaged ' <<<"$output") library crate(s) package; verifying them" "v$version is already on crates.io, and only the next version can be compared — bump to check fully"
+        else
+            bad "a library crate does not package — run: cargo package --workspace --no-verify ${exclude[*]}"
+            grep -E '^error' -A8 <<<"$output" | head -16
+        fi
     else
         bad "a library crate does not package — run: cargo publish --workspace --dry-run ${exclude[*]}"
         # The reason, not the warnings: an unbumped version prints one
