@@ -350,7 +350,8 @@ authority on this work — the reasoning behind it, the dependency-layer
 order, and what was learned doing it (a dangling `LICENSE` symlink, a
 missing README, and the two-spellings-of-one-git-URL trap once `settings`
 depends on an already-split `tray`) — read it rather than this summary.
-Every library crate is published to crates.io (as of 2026-09-28, all at
-0.1.0), and the split repositories depend on those versions; inside this
+Every library crate is published to crates.io (0.1.0 on 2026-09-28; all
+at 0.1.1 since 2026-10-03, the first release through `publish.yml`), and
+the split repositories depend on those versions; inside this
 workspace a `[patch.crates-io]` section points each name back at
 `crates/`.

@@ -404,10 +404,14 @@ async-io and panic — and three things follow from that shape:
       `hyprforge-notif` (the old URL redirects), and brought in step by
       `./sync.sh --push` as a fast-forward from its archived head, with
       green CI on the first run (2026-10-01)
-- [ ] First tagged release through that workflow — which is also the
-      first proof the secret holds a value: its run shows
-      `CARGO_REGISTRY_TOKEN: ***`, and a bare name means the paste never
-      arrived
+- [x] First tagged release through that workflow, v0.1.1 (2026-10-03):
+      the secret held a value (`CARGO_REGISTRY_TOKEN: ***` in the run),
+      and the release hit exactly the limit `publish.yml` was prepared
+      for — crates.io's burst of 30 updates ran out on the 31st crate
+      with a 429. Re-running the job after the limit's stated time plus
+      a minute per remaining crate skipped the 30 already on the index
+      and published the last three; all 33 are at 0.1.1. Expect the same
+      on every release while there are more than 30 crates
 
 ## Staying in sync after the push
 
