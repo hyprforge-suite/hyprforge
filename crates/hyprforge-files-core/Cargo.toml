@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 readme = "README.md"
-description = "The model layer of the Hyprforge file manager: the Browser update/view state shared with the portal's file dialog, preferences, clipboard, drag, undo and sidebar, over iced 0.14 widgets"
+description = "The model layer of the Hyprforge file manager: the Browser update/view state shared with the portal's file dialog, the fuzzy path bar, preferences, clipboard, drag, undo and sidebar, over iced 0.14 widgets"
 
 [dependencies]
 # Only `format::looks_decodable`, to know which entries are worth asking

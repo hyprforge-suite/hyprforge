@@ -28,6 +28,7 @@ use crate::filter::{is_hidden, matches_query};
 use crate::format::{format_kind, format_modified_at, format_origin, format_owner, format_packed, format_permissions, format_size};
 use crate::glyph;
 use crate::icon::{self, entry_icon};
+use crate::jump;
 use crate::preview::{Picture, Preview};
 use crate::action::{self, Action, ActionContext, Scope};
 use crate::config::Config;
@@ -369,6 +370,27 @@ struct Renaming {
     id: Id,
 }
 
+/// The path bar while it is being typed into — see [`crate::jump`].
+#[derive(Debug, Clone, PartialEq)]
+struct PathEdit {
+    text: String,
+    /// Where the text could take you, best first, as last answered.
+    candidates: Vec<jump::Candidate>,
+    /// The text `candidates` answer. Behind `text` while a resolve is
+    /// out — and the old answers stay on screen meanwhile, because a
+    /// panel that empties on every keystroke flickers.
+    answered: Option<String>,
+    /// Which candidate Enter and Tab act on.
+    highlighted: usize,
+    /// Enter was pressed before the answer for this text arrived: commit
+    /// to the best one the moment it does. Without this a quick typist's
+    /// Enter would go to the previous text's answer — somewhere they
+    /// were only passing through.
+    commit_pending: bool,
+    /// Fresh per edit, for the same reason as [`Renaming::id`].
+    id: Id,
+}
+
 /// A context menu that is showing.
 #[derive(Debug, Clone, PartialEq)]
 struct OpenMenu {
@@ -456,6 +478,14 @@ pub enum Outcome {
     Rename { from: PathBuf, to: PathBuf },
     /// Create this folder, then show it being renamed.
     CreateFolder(PathBuf),
+    /// Work out where typed text could go — [`crate::jump::Request::run`],
+    /// off the UI thread, through the host's backend — and hand the
+    /// answer back as [`Message::PathResolved`].
+    ResolvePath(jump::Request),
+    /// Focus the path bar's field: selecting everything in it when it
+    /// has just opened, so typing replaces where you are, or with the
+    /// cursor at the end after a completion, so typing carries on.
+    FocusPath { id: Id, select_all: bool },
     /// Tell the person something, in the status bar.
     Notice(String),
     /// Several things to do, in order.
@@ -574,6 +604,21 @@ pub enum Message {
     /// Type a character into the search box. The host decides a key
     /// press means this; see [`crate::keymap::Resolved::Text`].
     TypeToSearch(char),
+    /// Start typing a location into the path bar.
+    EditPath,
+    /// The path bar's text changed.
+    PathInput(String),
+    /// Enter in the path bar.
+    PathCommit,
+    /// Leave the path bar as it was.
+    PathCancel,
+    /// Tab in the path bar: take the highlighted answer's path as the
+    /// text, so the next letters go a level below it.
+    PathComplete,
+    /// A candidate under the path bar was clicked.
+    PathChose(usize),
+    /// Answers to [`Outcome::ResolvePath`], for `text`.
+    PathResolved { text: String, candidates: Vec<jump::Candidate> },
     /// The Pinned sidebar section's content, computed off the UI thread
     /// via [`crate::sidebar::build_pinned`] — see that function's own doc
     /// for why this is a message rather than a `Browser::new` argument
@@ -595,6 +640,8 @@ struct ViewModel<'a> {
     archive: Option<&'a str>,
     /// The name being edited, if any.
     renaming: Option<&'a Renaming>,
+    /// The path bar, while it is being typed into.
+    path_edit: Option<&'a PathEdit>,
     column_picker_open: bool,
     /// Whether the sidebar is collapsed right now — the resolved answer,
     /// not the preference, so `render` never has to ask twice.
@@ -720,6 +767,8 @@ pub struct Browser {
     archive: Option<String>,
     /// The name being edited in place, if any.
     renaming: Option<Renaming>,
+    /// The path bar, while it is being typed into.
+    path_edit: Option<PathEdit>,
     /// See [`Message::AfterListing`].
     after_listing: Option<(PathBuf, bool)>,
     /// How many of `entries` are dotfiles, counted when the listing
@@ -770,6 +819,7 @@ impl Browser {
             can_paste: false,
             archive: None,
             renaming: None,
+            path_edit: None,
             after_listing: None,
             dotfiles: 0,
             // The shipped default, until `set_config` says otherwise.
@@ -911,6 +961,7 @@ impl Browser {
                 if !on_edited {
                     self.renaming = None;
                 }
+                self.path_edit = None;
                 self.with_rows(|selection, rows| selection.click_with(rows, index, ctrl, shift));
                 Outcome::None
             }
@@ -995,7 +1046,141 @@ impl Browser {
                 self.pinned = items;
                 Outcome::None
             }
+            Message::EditPath => self.begin_path_edit(),
+            Message::PathInput(text) => {
+                let Some(edit) = &mut self.path_edit else { return Outcome::None };
+                edit.text = text;
+                edit.highlighted = 0;
+                edit.commit_pending = false;
+                self.request_resolve()
+            }
+            Message::PathCommit => {
+                let Some(edit) = &mut self.path_edit else { return Outcome::None };
+                if edit.answered.as_deref() == Some(edit.text.as_str()) {
+                    return self.commit_path();
+                }
+                // Asked again rather than assumed to be in flight: Ctrl+L
+                // then Enter at once has sent nothing yet. The host keeps
+                // one resolve per tab in flight, so asking twice for the
+                // same text costs nothing.
+                edit.commit_pending = true;
+                self.request_resolve()
+            }
+            Message::PathCancel => {
+                self.path_edit = None;
+                Outcome::None
+            }
+            Message::PathComplete => {
+                let home = home_dir();
+                let Some(edit) = &mut self.path_edit else { return Outcome::None };
+                let Some(chosen) = edit.candidates.get(edit.highlighted) else { return Outcome::None };
+                edit.text = jump::completion(chosen, home.as_deref());
+                edit.highlighted = 0;
+                edit.commit_pending = false;
+                let focus = Outcome::FocusPath { id: edit.id.clone(), select_all: false };
+                Outcome::Many(vec![focus, self.request_resolve()])
+            }
+            Message::PathChose(index) => {
+                let Some(edit) = &mut self.path_edit else { return Outcome::None };
+                if index >= edit.candidates.len() {
+                    return Outcome::None;
+                }
+                edit.highlighted = index;
+                self.commit_path()
+            }
+            Message::PathResolved { text, candidates } => {
+                let Some(edit) = &mut self.path_edit else { return Outcome::None };
+                // An answer for text since typed over is not an answer to
+                // anything on screen — the same guard the preview uses.
+                if edit.text != text {
+                    return Outcome::None;
+                }
+                edit.candidates = candidates;
+                edit.answered = Some(text);
+                edit.highlighted = 0;
+                if edit.commit_pending {
+                    edit.commit_pending = false;
+                    return self.commit_path();
+                }
+                Outcome::None
+            }
         }
+    }
+
+    /// Whether the path bar is being typed into — for a host deciding
+    /// what Tab means.
+    pub fn editing_path(&self) -> bool {
+        self.path_edit.is_some()
+    }
+
+    /// Opens the path bar for typing, holding where you are — written as
+    /// the crumbs wrote it, `~` and all, and selected, so typing replaces
+    /// it and an arrow key keeps it.
+    fn begin_path_edit(&mut self) -> Outcome {
+        self.menu = None;
+        self.renaming = None;
+        let text = jump::display(&self.current_dir, home_dir().as_deref());
+        let id = Id::unique();
+        self.path_edit = Some(PathEdit {
+            text,
+            candidates: Vec::new(),
+            answered: None,
+            highlighted: 0,
+            commit_pending: false,
+            id: id.clone(),
+        });
+        Outcome::FocusPath { id, select_all: true }
+    }
+
+    /// Asks the host where the path bar's text could go.
+    fn request_resolve(&mut self) -> Outcome {
+        let Some(edit) = &mut self.path_edit else { return Outcome::None };
+        if edit.text.trim().is_empty() {
+            edit.candidates.clear();
+            edit.answered = Some(edit.text.clone());
+            edit.commit_pending = false;
+            return Outcome::None;
+        }
+        let home = home_dir();
+        let query = jump::parse(&edit.text, &self.current_dir, home.as_deref());
+        // Where this window has a reason to think you mean: where you
+        // have been, and what the sidebar offers.
+        let known: HashSet<PathBuf> = self
+            .back_stack
+            .iter()
+            .chain(&self.forward_stack)
+            .cloned()
+            .chain(self.sidebar.iter().map(|item| item.path.clone()))
+            .chain(self.prefs.pinned.iter().cloned())
+            .collect();
+        Outcome::ResolvePath(jump::Request {
+            text: edit.text.clone(),
+            query,
+            known,
+            show_hidden: self.prefs.show_hidden,
+        })
+    }
+
+    /// Goes where the highlighted candidate says. With nothing to go to
+    /// the field stays open, saying so, rather than closing on a guess.
+    fn commit_path(&mut self) -> Outcome {
+        let Some(edit) = &self.path_edit else { return Outcome::None };
+        let Some(chosen) = edit.candidates.get(edit.highlighted).cloned() else {
+            return Outcome::None;
+        };
+        self.path_edit = None;
+        let name = chosen.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        // An archive typed out in full means going into it, the way a
+        // double click does; one only matched on the way past is a file
+        // like any other.
+        if chosen.is_dir || (chosen.exact && crate::archive::looks_browsable(&name)) {
+            return self.go_to(chosen.path);
+        }
+        // A file: its folder, with it selected when the listing arrives.
+        let Some(parent) = chosen.path.parent().map(Path::to_path_buf) else { return Outcome::None };
+        let outcome = self.go_to(parent);
+        self.after_listing = Some((chosen.path, false));
+        outcome
     }
 
     /// Uses `config` for menus and shortcut hints from now on. A host
@@ -1288,6 +1473,27 @@ impl Browser {
         // keyboard while it is focused, so a key reaching here was not
         // typed into it.
         self.renaming = None;
+        // The path bar keeps the arrows: they move through its answers,
+        // not the listing behind it. A text field does not take Up and
+        // Down, so they arrive here as the listing's own actions.
+        if let Some(edit) = &mut self.path_edit {
+            let count = edit.candidates.len();
+            match action {
+                Action::FocusUp | Action::ExtendUp => {
+                    edit.highlighted = edit.highlighted.saturating_sub(1);
+                    return Outcome::None;
+                }
+                Action::FocusDown | Action::ExtendDown => {
+                    edit.highlighted = (edit.highlighted + 1).min(count.saturating_sub(1));
+                    return Outcome::None;
+                }
+                Action::ClearSearch => {
+                    self.path_edit = None;
+                    return Outcome::None;
+                }
+                _ => {}
+            }
+        }
         // An open menu has the keyboard: arrows move through it, Open
         // runs the highlighted item, Escape closes it. Anything else
         // closes it and then does what it normally does.
@@ -1323,6 +1529,7 @@ impl Browser {
             // index against a list that may have been re-sorted since
             // the focus was set.
             Action::Open => self.activate_focused(),
+            Action::EditLocation => self.begin_path_edit(),
             // The focused row, like `Open` beside it — and like the
             // check that enables it, which reads `focused_is_dir`.
             // Taking the selection here instead meant the two halves
@@ -1499,6 +1706,7 @@ impl Browser {
     /// menu there is about the folder, not about whatever was selected.
     fn open_menu(&mut self, spot: MenuSpot, at: (f32, f32)) {
         self.renaming = None;
+        self.path_edit = None;
         if let MenuSpot::Sidebar(path) = spot {
             let kind = if self.prefs.pinned.contains(&path) { MenuKind::Pinned } else { MenuKind::Place };
             let items = menus::build(
@@ -1738,6 +1946,7 @@ impl Browser {
     fn arrive_at(&mut self, path: PathBuf) -> Outcome {
         self.menu = None;
         self.renaming = None;
+        self.path_edit = None;
         self.after_listing = None;
         self.current_dir = path.clone();
         self.selection.clear();
@@ -1871,6 +2080,7 @@ impl Browser {
             in_trash: self.in_trash(),
             archive: self.archive.as_deref(),
             renaming: self.renaming.as_ref(),
+            path_edit: self.path_edit.as_ref(),
             column_picker_open: self.column_picker_open,
             sidebar_collapsed,
             viewport_width,
@@ -2259,7 +2469,7 @@ fn header_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> 
     container(
         row![
             nav,
-            path_bar(vm.current_dir, scale),
+            path_bar(vm, scale),
             search_field(vm.search_query, vm.current_dir, scale),
             view_mode_toggle(vm.prefs, scale),
             preview_toggle(vm.prefs.preview_pane, scale),
@@ -2816,7 +3026,11 @@ fn sidebar_menu_area<'a>(
         .into()
 }
 
-fn path_bar<'a>(current_dir: &Path, scale: FontScale) -> Element<'a, Message> {
+fn path_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
+    if let Some(edit) = vm.path_edit {
+        return path_field(edit, scale);
+    }
+    let current_dir = vm.current_dir;
     let mut crumbs = row![].spacing(spacing::XS).align_y(iced::Alignment::Center);
     let segments = elide(breadcrumb(current_dir));
     let last = segments.len().saturating_sub(1);
@@ -2876,13 +3090,97 @@ fn path_bar<'a>(current_dir: &Path, scale: FontScale) -> Element<'a, Message> {
     // controls beside the navigation ones.
     // The only thing on the bar that flexes. Everything else is fixed,
     // so dragging the window edge stretches this and nothing else moves.
-    container(crumbs)
+    //
+    // A click on the field's empty space opens it for typing. The crumbs
+    // are buttons and capture their own presses, so clicking one still
+    // goes there — `mouse_area` only hears a press nothing inside took.
+    iced::widget::mouse_area(
+        container(crumbs)
+            .width(Length::Fill)
+            .height(Length::Fixed(density::field_height(scale)))
+            .center_y(Length::Fixed(density::field_height(scale)))
+            .padding([0, spacing::SM as u16])
+            .style(inset_field_style),
+    )
+    .on_press(Message::EditPath)
+    .interaction(iced::mouse::Interaction::Text)
+    .into()
+}
+
+/// How many answers hang under the path bar at once.
+const MAX_PATH_ANSWERS: usize = 8;
+
+/// The path bar being typed into, with where it could go hanging below.
+///
+/// The same inset field the crumbs sit in, the same height and the same
+/// monospace, so opening it moves nothing: the crumbs become text in
+/// place. The answers are an overlay hung from the field
+/// ([`hyprforge_ui::widgets::anchored`]) rather than a row of the window,
+/// so typing never pushes the listing down.
+fn path_field<'a>(edit: &'a PathEdit, scale: FontScale) -> Element<'a, Message> {
+    let field = text_input("", &edit.text)
+        .id(edit.id.clone())
+        .on_input(Message::PathInput)
+        .on_submit(Message::PathCommit)
+        .font(hyprforge_ui::theme::mono_font())
+        .size(scale.apply(density::META_TEXT_BASE))
+        .padding(0)
+        .width(Length::Fill)
+        .style(path_input_style);
+    let boxed = container(field)
         .width(Length::Fill)
         .height(Length::Fixed(density::field_height(scale)))
         .center_y(Length::Fixed(density::field_height(scale)))
         .padding([0, spacing::SM as u16])
-        .style(inset_field_style)
-        .into()
+        .style(inset_field_style);
+
+    let home = home_dir();
+    let rows: Vec<hyprforge_ui::widgets::Suggestion> = edit
+        .candidates
+        .iter()
+        .take(MAX_PATH_ANSWERS)
+        .map(|c| hyprforge_ui::widgets::Suggestion {
+            label: jump::display(&c.path, home.as_deref()),
+            hint: (!c.is_dir).then(|| "file".to_string()),
+        })
+        .collect();
+    let answered = edit.answered.as_deref() == Some(edit.text.as_str());
+    // The resolution, said as the design draws it: what you typed, and
+    // where Enter will take you.
+    let heading = rows
+        .get(edit.highlighted)
+        .filter(|_| answered)
+        .map(|row| format!("{} \u{2192} {}", edit.text.trim(), row.label));
+    // "Nothing matches" only once the answer is in — before then an
+    // empty list means "still looking", and saying otherwise would be a
+    // claim about a folder nobody has read yet.
+    let empty = (answered && !edit.text.trim().is_empty()).then(|| format!("Nothing matches \u{201c}{}\u{201d}", edit.text.trim()));
+    let panel = hyprforge_ui::widgets::suggestions(
+        heading,
+        &rows,
+        Some(edit.highlighted),
+        Message::PathChose,
+        empty,
+        true,
+        scale,
+    );
+    hyprforge_ui::widgets::anchored(boxed, panel, spacing::XS).into()
+}
+
+/// The path bar's text input: no box of its own, because it sits inside
+/// the inset field the crumbs use — one outline, not two.
+fn path_input_style(
+    theme: &iced::Theme,
+    _status: iced::widget::text_input::Status,
+) -> iced::widget::text_input::Style {
+    iced::widget::text_input::Style {
+        background: iced::Background::Color(iced::Color::TRANSPARENT),
+        border: iced::Border::default(),
+        icon: hyprforge_ui::theme::text_dim(),
+        placeholder: hyprforge_ui::theme::text_dim(),
+        value: hyprforge_ui::theme::text(),
+        selection: theme.extended_palette().primary.weak.color,
+    }
 }
 
 /// Whether a separator belongs *after* the crumb labelled `previous`.
@@ -5231,6 +5529,7 @@ mod tests {
             in_trash: false,
             archive: None,
             renaming: None,
+            path_edit: None,
             column_picker_open: false,
             sidebar_collapsed: false,
             viewport_width: 1000.0,
@@ -5696,5 +5995,163 @@ mod media_tests {
         assert!(!browser.media.requested.is_empty());
         browser.update(Message::Navigate(PathBuf::from("/other")));
         assert!(browser.media.requested.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod path_bar_tests {
+    //! The path bar as typed into — what the keys and the host's answers
+    //! do to it. Where an answer comes *from* is `jump`'s, and tested
+    //! there.
+    use super::tests_support::loaded;
+    use super::*;
+    use crate::jump::Candidate;
+
+    fn dir(path: &str) -> Candidate {
+        Candidate { path: PathBuf::from(path), is_dir: true, exact: false }
+    }
+
+    fn file(path: &str) -> Candidate {
+        Candidate { path: PathBuf::from(path), is_dir: false, exact: false }
+    }
+
+    /// Everything in an outcome, `Many` flattened.
+    fn flat(outcome: Outcome) -> Vec<Outcome> {
+        match outcome {
+            Outcome::Many(all) => all.into_iter().flat_map(flat).collect(),
+            Outcome::None => vec![],
+            one => vec![one],
+        }
+    }
+
+    fn text(browser: &Browser) -> &str {
+        &browser.path_edit.as_ref().expect("the path bar is open").text
+    }
+
+    /// Opens the bar, types `typed`, and answers it with `candidates`.
+    fn answered(typed: &str, candidates: Vec<Candidate>) -> Browser {
+        let mut browser = loaded(&[("a.txt", false), ("b.txt", false)]);
+        browser.perform(Action::EditLocation);
+        browser.update(Message::PathInput(typed.to_string()));
+        browser.update(Message::PathResolved { text: typed.to_string(), candidates });
+        browser
+    }
+
+    #[test]
+    fn ctrl_l_opens_the_location_field_holding_where_you_are_selected() {
+        let mut browser = loaded(&[("a.txt", false)]);
+        let outcome = browser.perform(Action::EditLocation);
+        assert!(matches!(outcome, Outcome::FocusPath { select_all: true, .. }), "{outcome:?}");
+        assert!(browser.editing_path());
+        assert_eq!(text(&browser), "/dir");
+        let keys = Config::default().keymap.combos_for(Action::EditLocation);
+        assert!(keys.iter().any(|k| k.to_string() == "Ctrl+L"), "{keys:?}");
+    }
+
+    #[test]
+    fn typing_asks_the_host_where_the_text_could_go() {
+        let mut browser = loaded(&[]);
+        browser.perform(Action::EditLocation);
+        let outcome = browser.update(Message::PathInput("~/pr".to_string()));
+        let Outcome::ResolvePath(request) = outcome else { panic!("{outcome:?}") };
+        assert_eq!(request.text, "~/pr");
+    }
+
+    #[test]
+    fn an_answer_for_text_since_replaced_is_ignored() {
+        let mut browser = loaded(&[]);
+        browser.perform(Action::EditLocation);
+        browser.update(Message::PathInput("~/pr".to_string()));
+        browser.update(Message::PathInput("~/pri".to_string()));
+        browser.update(Message::PathResolved { text: "~/pr".to_string(), candidates: vec![dir("/home/a/projects")] });
+        assert!(browser.path_edit.as_ref().unwrap().candidates.is_empty());
+    }
+
+    #[test]
+    fn enter_before_the_answer_arrives_goes_where_the_answer_says() {
+        let mut browser = loaded(&[]);
+        browser.perform(Action::EditLocation);
+        browser.update(Message::PathInput("~/pr".to_string()));
+        // The previous text's answers are still on screen.
+        browser.update(Message::PathResolved { text: "~/pr".to_string(), candidates: vec![dir("/home/a/prints")] });
+        browser.update(Message::PathInput("~/pro".to_string()));
+        let early = browser.update(Message::PathCommit);
+        assert!(!flat(early).iter().any(|o| matches!(o, Outcome::ReadDir(_))), "not to the stale answer");
+        let outcome = browser.update(Message::PathResolved {
+            text: "~/pro".to_string(),
+            candidates: vec![dir("/home/a/projects")],
+        });
+        assert_eq!(outcome, Outcome::ReadDir(PathBuf::from("/home/a/projects")));
+        assert!(!browser.editing_path());
+    }
+
+    #[test]
+    fn enter_with_nothing_to_go_to_keeps_the_field_open() {
+        let mut browser = answered("~/zz", vec![]);
+        assert_eq!(browser.update(Message::PathCommit), Outcome::None);
+        assert!(browser.editing_path());
+    }
+
+    #[test]
+    fn choosing_a_file_opens_its_folder_with_it_selected() {
+        let mut browser = answered("~/no", vec![file("/other/notes.txt")]);
+        let outcome = browser.update(Message::PathChose(0));
+        assert_eq!(outcome, Outcome::ReadDir(PathBuf::from("/other")));
+        let entries = vec![Entry { path: PathBuf::from("/other/notes.txt"), ..tests_entry("notes.txt") }];
+        browser.update(Message::DirLoaded(PathBuf::from("/other"), Ok(entries)));
+        assert_eq!(browser.selection().focused(), Some(Path::new("/other/notes.txt")));
+    }
+
+    fn tests_entry(name: &str) -> Entry {
+        let mut entry = crate::backend::mock::MockBackend::file(Path::new("/dir"), name, 1);
+        entry.owner = None;
+        entry
+    }
+
+    #[test]
+    fn up_and_down_move_through_candidates_not_the_listing_while_editing() {
+        let mut browser = answered("~/p", vec![dir("/p1"), dir("/p2"), dir("/p3")]);
+        let before = browser.selection().focused().map(Path::to_path_buf);
+        browser.perform(Action::FocusDown);
+        browser.perform(Action::FocusDown);
+        browser.perform(Action::FocusDown);
+        assert_eq!(browser.path_edit.as_ref().unwrap().highlighted, 2, "stops at the last");
+        browser.perform(Action::FocusUp);
+        assert_eq!(browser.path_edit.as_ref().unwrap().highlighted, 1);
+        assert_eq!(browser.selection().focused().map(Path::to_path_buf), before, "the listing did not move");
+        assert_eq!(browser.update(Message::PathCommit), Outcome::ReadDir(PathBuf::from("/p2")));
+    }
+
+    #[test]
+    fn tab_completes_to_the_highlighted_folder_and_keeps_typing_below_it() {
+        let mut browser = answered("/u/s", vec![dir("/usr/share"), dir("/usr/src")]);
+        browser.perform(Action::FocusDown);
+        let outcome = flat(browser.update(Message::PathComplete));
+        assert_eq!(text(&browser), "/usr/src/");
+        assert!(outcome.iter().any(|o| matches!(o, Outcome::FocusPath { select_all: false, .. })));
+        assert!(outcome.iter().any(|o| matches!(o, Outcome::ResolvePath(r) if r.text == "/usr/src/")));
+    }
+
+    #[test]
+    fn navigating_anywhere_closes_the_location_field() {
+        let mut browser = answered("~/p", vec![dir("/p1")]);
+        browser.update(Message::Navigate(PathBuf::from("/elsewhere")));
+        assert!(!browser.editing_path());
+
+        let mut browser = answered("~/p", vec![dir("/p1")]);
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+        assert!(!browser.editing_path(), "a click in the listing");
+
+        let mut browser = answered("~/p", vec![dir("/p1")]);
+        browser.perform(Action::ClearSearch);
+        assert!(!browser.editing_path(), "Escape");
+    }
+
+    #[test]
+    fn the_open_save_dialog_has_the_same_path_bar() {
+        let (mut browser, _) =
+            Browser::new(Mode::Dialog(DialogKind::Open), Prefs::default(), PathBuf::from("/dir"), vec![]);
+        browser.perform(Action::EditLocation);
+        assert!(browser.editing_path());
     }
 }

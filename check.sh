@@ -724,7 +724,28 @@ elif said.group(1).lower() != page_words.get(len(page_titles), str(len(page_titl
         f"Screen::title has {len(page_titles)}"
     )
 
-print(f"CHECKED {named} {len(standalone)} {len(tiers)} {len(page_titles)}")
+# --- the design-system catalogue names everything hyprforge-ui exports -
+#
+# The catalogue exists so the next widget is found rather than written
+# again, and a catalogue missing the newest widget sends its author to
+# write a second one. Names, not prose: every public widget, size and
+# mark must appear in backticks somewhere in it.
+ui = Path("crates/hyprforge-ui/src")
+catalogue = Path("crates/hyprforge-ui/DESIGN-SYSTEM.md").read_text()
+exported = set()
+widgets_rs = (ui / "widgets.rs").read_text()
+for group in re.findall(r"^pub use \w+::\{([^}]*)\};", widgets_rs, re.M | re.S):
+    exported.update(n.strip() for n in group.split(",") if n.strip())
+exported.update(re.findall(r"^pub use \w+::(\w+);", widgets_rs, re.M))
+for source in (widgets_rs, (ui / "density.rs").read_text(), (ui / "glyph.rs").read_text()):
+    exported.update(re.findall(r"^pub (?:fn|const) (\w+)", source, re.M))
+if not exported:
+    problems.append("couldn't find what hyprforge-ui exports to check its catalogue against")
+for name in sorted(exported):
+    if f"`{name}`" not in catalogue:
+        problems.append(f"crates/hyprforge-ui/DESIGN-SYSTEM.md does not name `{name}`")
+
+print(f"CHECKED {named} {len(standalone)} {len(tiers)} {len(page_titles)} {len(exported)}")
 for problem in problems:
     print(f"PROBLEM {problem}")
 PYEOF
@@ -733,8 +754,8 @@ PYEOF
         bad "$(grep -c '^PROBLEM' <<<"$output") doc claim(s) no longer true"
         sed -n 's/^PROBLEM /    • /p' <<<"$output"
     else
-        read -r named repos tiers pages < <(sed -n 's/^CHECKED //p' <<<"$output")
-        ok "$named source path(s) named in docs all exist; README lists all $repos standalone repositories; CLAUDE.md counts all $tiers gated tiers; Settings' README names all $pages pages"
+        read -r named repos tiers pages shared < <(sed -n 's/^CHECKED //p' <<<"$output")
+        ok "$named source path(s) named in docs all exist; README lists all $repos standalone repositories; CLAUDE.md counts all $tiers gated tiers; Settings' README names all $pages pages; the design-system catalogue names all $shared shared exports"
     fi
 fi
 

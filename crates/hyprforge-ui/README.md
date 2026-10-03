@@ -13,6 +13,10 @@ able to use these widgets without inheriting Lua codegen, which is
 why the one widget that *did* know — the "your config can't take a
 require line" banner — lives in the Settings app instead.
 
+`DESIGN-SYSTEM.md`, beside this crate's manifest, is the catalogue:
+every token with where it comes from, every size, mark and widget,
+and the rule for what belongs here rather than in an app.
+
 ## Where this lives
 
 Part of [Hyprforge](https://github.com/hyprforge-suite/hyprforge), a suite of native Hyprland desktop

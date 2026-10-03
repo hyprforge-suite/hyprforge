@@ -25,5 +25,7 @@ hyprforge-look.workspace = true
 hyprforge-keys.workspace = true
 # `canvas` for `glyph`: the drawn marks, stroked because a chevron or a
 # battery cannot be built out of axis-aligned boxes and a font's own
-# symbols are a different shape on every machine.
-iced = { workspace = true, features = ["canvas"] }
+# symbols are a different shape on every machine. `advanced` for
+# `widgets::anchored`, which places an overlay from its anchor's own
+# layout — the one thing no stock widget does.
+iced = { workspace = true, features = ["canvas", "advanced"] }

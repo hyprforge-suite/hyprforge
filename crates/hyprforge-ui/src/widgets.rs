@@ -1,16 +1,21 @@
 //! Every widget the suite shares.
 //!
 //! The functions in this file are the original set; the modules below
-//! arrived with the Settings redesign and are re-exported, so every
-//! widget is `hyprforge_ui::widgets::<name>` wherever it happens to live.
+//! arrived with the Settings redesign and Files' path bar and are
+//! re-exported, so every widget is `hyprforge_ui::widgets::<name>`
+//! wherever it happens to live. `DESIGN-SYSTEM.md` beside this crate's
+//! manifest catalogues all of them, and `check.sh` fails if it misses one.
 
+mod anchor;
 mod badges;
 mod controls;
 mod field;
 mod layout;
 mod ring;
 mod selection;
+mod suggestions;
 
+pub use anchor::{anchored, Anchored};
 pub use badges::{chip, config_line, keycap};
 pub use controls::{
     dropdown_menu_style, dropdown_style, segment_style, segmented, segmented_choice,
@@ -23,6 +28,7 @@ pub use layout::{
 };
 pub use ring::{countdown_ring, remaining_fraction};
 pub use selection::{section_label, selectable_row_style, spaced_caps, Tint};
+pub use suggestions::{suggestions, Suggestion};
 
 use crate::theme::{self, spacing, surface, FontScale};
 use iced::widget::{button, column, container, row, text, text::IntoFragment, Text};

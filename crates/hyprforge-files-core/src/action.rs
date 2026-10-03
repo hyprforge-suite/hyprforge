@@ -32,6 +32,8 @@ pub enum Action {
     GoUp,
     GoBack,
     GoForward,
+    /// Type where to go, in the path bar — see [`crate::jump`].
+    EditLocation,
     /// Move the keyboard focus one row, collapsing the selection onto it.
     FocusUp,
     FocusDown,
@@ -138,6 +140,7 @@ impl Action {
             Action::GoUp,
             Action::GoBack,
             Action::GoForward,
+            Action::EditLocation,
             Action::FocusUp,
             Action::FocusDown,
             Action::FocusLeft,
@@ -186,6 +189,7 @@ impl Action {
             Action::GoUp => "go-up",
             Action::GoBack => "go-back",
             Action::GoForward => "go-forward",
+            Action::EditLocation => "edit-location",
             Action::FocusUp => "focus-up",
             Action::FocusDown => "focus-down",
             Action::FocusLeft => "focus-left",
@@ -253,6 +257,7 @@ impl Action {
             Action::GoUp => "Go Up",
             Action::GoBack => "Back",
             Action::GoForward => "Forward",
+            Action::EditLocation => "Go to Location…",
             Action::FocusUp => "Previous Item",
             Action::FocusDown => "Next Item",
             Action::FocusLeft => "Item to the Left",
@@ -330,6 +335,9 @@ impl Action {
             Action::GoUp => &["Backspace", "Alt+Up"],
             Action::GoBack => &["Alt+Left"],
             Action::GoForward => &["Alt+Right"],
+            // What every browser and GTK's own file chooser use for
+            // "type a location".
+            Action::EditLocation => &["Ctrl+L"],
             Action::FocusUp => &["Up"],
             Action::FocusDown => &["Down"],
             Action::FocusLeft => &["Left"],
@@ -476,6 +484,7 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         Action::GoUp => ctx.has_parent,
         Action::GoBack => ctx.can_go_back,
         Action::GoForward => ctx.can_go_forward,
+        Action::EditLocation => true,
         Action::FocusUp
         | Action::FocusDown
         | Action::FocusLeft

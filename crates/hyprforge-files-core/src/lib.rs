@@ -33,6 +33,7 @@ pub mod format;
 // same design; re-exported so `crate::glyph` still names them here.
 pub use hyprforge_ui::glyph;
 pub mod icon;
+pub mod jump;
 pub mod keymap;
 pub mod menu;
 pub mod naming;

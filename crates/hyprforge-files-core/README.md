@@ -1,6 +1,6 @@
 # hyprforge-files-core
 
-The model layer of the Hyprforge file manager: the Browser update/view state shared with the portal's file dialog, preferences, clipboard, drag, undo and sidebar, over iced 0.14 widgets.
+The model layer of the Hyprforge file manager: the Browser update/view state shared with the portal's file dialog, the fuzzy path bar, preferences, clipboard, drag, undo and sidebar, over iced 0.14 widgets.
 
 The model layer of the Files app: what a directory listing is, how it
 is read, sorted and filtered, and what gets remembered between

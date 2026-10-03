@@ -204,10 +204,18 @@ pub fn format_origin(entry: &Entry, home: Option<&std::path::Path>) -> String {
     let Some(origin) = &entry.origin else {
         return String::new();
     };
-    match home.and_then(|h| origin.strip_prefix(h).ok()) {
+    tilde_path(origin, home)
+}
+
+/// `path` with the home directory written `~`, the way the path bar and
+/// the Trash's Original Location column both write it. One copy, so the
+/// field you type a path into and the column that shows one cannot come
+/// to disagree about what `~` means.
+pub fn tilde_path(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
+    match home.and_then(|h| path.strip_prefix(h).ok()) {
         Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
         Some(rest) => format!("~/{}", rest.display()),
-        None => origin.display().to_string(),
+        None => path.display().to_string(),
     }
 }
 

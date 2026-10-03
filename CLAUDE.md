@@ -719,7 +719,9 @@ rendered from the `//!` docs by `tools/crate-readme.py` and a hand edit to
 either side is drift — and "Docs name things that exist",
 which fails on a doc naming a source file that is gone or a repository count
 that no longer matches, on a Settings page the Settings README does not name
-or miscounts, and checks this paragraph's own tier count. The
+or miscounts, on a shared `hyprforge-ui` widget, size or mark that
+`crates/hyprforge-ui/DESIGN-SYSTEM.md` does not name, and checks this
+paragraph's own tier count. The
 judgement half of keeping docs true is the `keep-docs-current` skill in
 `.claude/skills/`; run it before committing anything that changes what a doc
 counts, names or calls unfinished.
@@ -814,6 +816,18 @@ is the exact failure this suite exists to prevent, occurring inside the suite.
 Do not resolve the accent from the catalogue default: `general:col:active_border`
 defaults to white, which is a checked claim about what Hyprland does, not a
 design choice.
+
+**A widget that is not about one app's subject goes in `hyprforge-ui`, the
+first time it is written.** The test is "would another app draw this the
+same way?", not "does another app use it yet": the second user arrives
+with a copy of its own otherwise. Media's path bar duplicates Files'
+breadcrumbs, and Settings' search palette is the same list-under-a-field
+that Files' path bar now takes from `widgets::anchored` and
+`widgets::suggestions`. Both copies were written before anyone asked.
+`crates/hyprforge-ui/DESIGN-SYSTEM.md` is the catalogue — every token
+with where it comes from (the accent and radii follow Hyprland; the
+surfaces and state colours do not), every size, mark, widget and pattern.
+Read it before writing a widget, and add to it when one lands.
 
 ## Writing code here
 
