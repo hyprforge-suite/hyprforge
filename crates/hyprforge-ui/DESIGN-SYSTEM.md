@@ -106,6 +106,8 @@ Each is `hyprforge_ui::widgets::<name>`.
 | Badges | `chip`, `keycap` |
 | Dialogs | `confirm_dialog` |
 | Time | `countdown_ring`, with `remaining_fraction` |
+| Progress | `progress_line` (with `progress_line_style`): a thin bar in the foreground colour on the `row` step, never the accent; drawn only when there is an honest fraction |
+| Floating | `popover_card`: the surface a popover opens on, the context menu's own (see Patterns) |
 
 ## Patterns
 
@@ -119,6 +121,10 @@ Not widgets, but decided once:
 - **A floating list is the context menu's surface.** `sidebar`, a 1px
   `card_border` outline, `inner_radius`. `suggestions` and Files' context
   menu agree.
+- **Progress is not selection.** A bar fills with the foreground colour,
+  because iced's default bar takes the palette's primary, which is the
+  accent. Unknown progress is said in words ("counting…"), never drawn
+  as a bar that fills at an invented rate.
 - **Overlays are opaque.** A click on a panel's own padding must not reach
   the listing beneath it.
 - **Check the pixels.** "Do these look the same" is settled by comparing a
