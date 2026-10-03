@@ -111,9 +111,28 @@ pub enum OpsError {
 
     /// Same reasoning as `DiskFull` — this is not "something went wrong",
     /// it is "you don't have permission to write there", a sentence a UI
-    /// can show as-is.
+    /// can show as-is. The *destination* side only: see `ReadDenied`.
     #[error("you don't have permission to write to {path}")]
     PermissionDenied { path: PathBuf },
+
+    /// The source side's half of `PermissionDenied`: a file that could not
+    /// be opened, or a folder that could not be listed, for want of
+    /// permission to read it.
+    ///
+    /// Its own variant because the two used to share one, and so a file
+    /// that could not be *read* was reported as "you don't have
+    /// permission to write to" the file being copied — a sentence about
+    /// the wrong file's wrong permission, sending someone to fix a folder
+    /// that was never the problem.
+    #[error("you don't have permission to read {path}")]
+    ReadDenied { path: PathBuf },
+
+    /// A same-filesystem move that `rename(2)` refused for permission.
+    /// Moving needs write access to both the folder an item leaves and the
+    /// one it goes to, and the kernel does not say which was missing — so
+    /// this names both rather than guessing and blaming the destination.
+    #[error("you don't have permission to move {from} to {to}: moving needs write access to the folder it leaves and the one it goes to")]
+    MoveDenied { from: PathBuf, to: PathBuf },
 
     #[error("could not read {path}: {source}")]
     Read {
@@ -150,7 +169,7 @@ pub enum OpsError {
 fn classify_read(path: &Path, source: io::Error) -> OpsError {
     match source.kind() {
         io::ErrorKind::NotFound => OpsError::SourceVanished { path: path.to_path_buf() },
-        io::ErrorKind::PermissionDenied => OpsError::PermissionDenied { path: path.to_path_buf() },
+        io::ErrorKind::PermissionDenied => OpsError::ReadDenied { path: path.to_path_buf() },
         _ => OpsError::Read { path: path.to_path_buf(), source },
     }
 }
@@ -538,6 +557,12 @@ impl<F: Filesystem> Operation<F> {
                         // the syscall and fall back, rather than fail an
                         // otherwise-legitimate move.
                     }
+                    Err(source) if source.kind() == io::ErrorKind::PermissionDenied => {
+                        let denied = OpsError::MoveDenied { from: self.source.clone(), to: self.dest.clone() };
+                        self.fail(self.source.clone(), denied);
+                        self.phase = Phase::Done;
+                        return self.step();
+                    }
                     Err(source) => {
                         self.fail(self.source.clone(), classify_write(&self.dest, source));
                         self.phase = Phase::Done;
@@ -591,11 +616,20 @@ impl<F: Filesystem> Operation<F> {
             self.phase = Phase::Copying;
             return self.step();
         };
-        let abs_dir = self.source.join(&rel_dir);
+        // The root itself, not `source.join("")`: that spells the folder
+        // with a trailing slash, and the path ends up in a sentence.
+        let abs_dir = if rel_dir.as_os_str().is_empty() { self.source.clone() } else { self.source.join(&rel_dir) };
         let read = match fs::read_dir(&abs_dir) {
             Ok(read) => read,
             Err(source) => {
-                self.fail(abs_dir.clone(), OpsError::ListDir { path: abs_dir.clone(), source });
+                // A folder that cannot be listed for want of permission is
+                // the same sentence as a file that cannot be opened for it.
+                let err = if source.kind() == io::ErrorKind::PermissionDenied {
+                    OpsError::ReadDenied { path: abs_dir.clone() }
+                } else {
+                    OpsError::ListDir { path: abs_dir.clone(), source }
+                };
+                self.fail(abs_dir.clone(), err);
                 return StepOutcome::Progress(self.progress_snapshot(abs_dir));
             }
         };
@@ -1165,6 +1199,99 @@ mod tests {
         assert!(dest.join("good1.txt").exists());
         assert!(dest.join("good2.txt").exists());
         assert!(!dest.join("bad.txt").exists());
+    }
+
+    /// Root ignores permission bits, so these say so rather than pass
+    /// having checked nothing — the `HYPRFORGE-SKIP` convention.
+    fn running_as_root() -> bool {
+        let root = std::fs::metadata("/proc/self").map(|m| m.uid() == 0).unwrap_or(false);
+        if root {
+            eprintln!("HYPRFORGE-SKIP: running as root, which ignores the permission bits this test needs");
+        }
+        root
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_said_to_be_unreadable_not_unwritable() {
+        if running_as_root() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("secret.txt");
+        write_file(&source, "x");
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let dest = dir.path().join("copy.txt");
+
+        let report = drive(&mut Operation::real(OpKind::Copy, &source, &dest), no_collisions);
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert_eq!(report.failed.len(), 1, "report: {report:?}");
+        let said = &report.failed[0].1;
+        assert_eq!(*said, format!("you don't have permission to read {}", source.display()));
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_listed_is_said_to_be_unreadable() {
+        if running_as_root() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("locked");
+        fs::create_dir(&source).unwrap();
+        write_file(&source.join("inside.txt"), "x");
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let report = drive(&mut Operation::real(OpKind::Copy, &source, dir.path().join("dst")), no_collisions);
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            report.failed.iter().any(|(_, said)| *said == format!("you don't have permission to read {}", source.display())),
+            "report: {report:?}"
+        );
+    }
+
+    #[test]
+    fn a_destination_that_cannot_be_written_is_still_said_to_be_unwritable() {
+        if running_as_root() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("a.txt");
+        write_file(&source, "x");
+        let shut = dir.path().join("shut");
+        fs::create_dir(&shut).unwrap();
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let dest = shut.join("a.txt");
+
+        let report = drive(&mut Operation::real(OpKind::Copy, &source, &dest), no_collisions);
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(report.failed.len(), 1, "report: {report:?}");
+        assert_eq!(report.failed[0].1, format!("you don't have permission to write to {}", dest.display()));
+    }
+
+    #[test]
+    fn a_refused_rename_names_both_folders_rather_than_blaming_one() {
+        if running_as_root() {
+            return;
+        }
+        // Same filesystem, so the move is a rename; the *source's* folder
+        // is the read-only one. Blaming the destination — what this said
+        // before — would send someone to fix a folder that is fine.
+        let dir = tempfile::tempdir().unwrap();
+        let from_dir = dir.path().join("from");
+        fs::create_dir(&from_dir).unwrap();
+        let source = from_dir.join("a.txt");
+        write_file(&source, "x");
+        std::fs::set_permissions(&from_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let dest = dir.path().join("a.txt");
+
+        let report = drive(&mut Operation::real(OpKind::Move, &source, &dest), no_collisions);
+        std::fs::set_permissions(&from_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(report.failed.len(), 1, "report: {report:?}");
+        assert!(report.failed[0].1.starts_with(&format!("you don't have permission to move {}", source.display())), "{report:?}");
+        assert!(source.exists(), "a refused move leaves the source where it was");
     }
 
     #[test]
