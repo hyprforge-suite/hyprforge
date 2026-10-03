@@ -11,6 +11,7 @@ mod badges;
 mod controls;
 mod field;
 mod layout;
+mod panel;
 mod ring;
 mod selection;
 mod suggestions;
@@ -26,6 +27,7 @@ pub use layout::{
     hero_card, hint_text, page_header, pending_bar, pending_label, setting_list, setting_row,
     setting_row_style, status_dot, SETTING_ROW_GAP,
 };
+pub use panel::{fact, fact_row, panel_tabs};
 pub use ring::{countdown_ring, remaining_fraction};
 pub use selection::{section_label, selectable_row_style, spaced_caps, Tint};
 pub use suggestions::{suggestions, Suggestion};

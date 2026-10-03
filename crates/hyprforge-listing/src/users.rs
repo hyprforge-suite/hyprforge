@@ -1,4 +1,5 @@
-//! Turning a numeric uid into the name a person recognises.
+//! Turning a numeric uid into the name a person recognises — and a gid,
+//! for the one place that shows a group (the file manager's Properties).
 //!
 //! `stat` answers with a uid and nothing else, and "1000" in an Owner
 //! column is not information — the whole point of the column is to tell
@@ -114,6 +115,86 @@ pub fn name_for_uid(uid: u32) -> Option<String> {
 /// `ERANGE`, the same value on every Linux ABI this suite targets.
 const ERANGE: c_int = 34;
 
+/// POSIX's `struct group`, declared by hand for the same reason
+/// [`Passwd`] is: the field order is fixed by POSIX and identical on
+/// glibc and musl, and every field has to be declared for the struct's
+/// size to match what `getgrgid_r` writes.
+#[repr(C)]
+struct Group {
+    gr_name: *const c_char,
+    /// Never read — the same reasoning as `Passwd::pw_passwd`.
+    gr_passwd: *const c_char,
+    gr_gid: u32,
+    gr_mem: *const *const c_char,
+}
+
+extern "C" {
+    fn getgrgid_r(
+        gid: u32,
+        grp: *mut Group,
+        buf: *mut c_char,
+        buflen: usize,
+        result: *mut *mut Group,
+    ) -> c_int;
+    fn geteuid() -> u32;
+}
+
+/// The name of the group `gid`, or `None` if the system has no entry
+/// for it — [`name_for_uid`]'s twin, for the file manager's Properties
+/// inspector (`ada:users`), and asked of the C library for the same
+/// reason: `/etc/group` is not where every machine keeps its groups.
+///
+/// `None` is as ordinary here as it is for a user — a file unpacked
+/// from another machine's archive keeps that machine's numbers — and
+/// the caller shows the number instead.
+pub fn name_for_gid(gid: u32) -> Option<String> {
+    let mut len = INITIAL_BUF;
+    loop {
+        let mut buf = vec![0 as c_char; len];
+        // SAFETY: all-zero bytes are a valid `Group` — null pointers and
+        // a zero gid — and nothing reads it until `getgrgid_r` has
+        // filled it and `result` is non-null.
+        let mut grp: Group = unsafe { std::mem::zeroed() };
+        let mut result: *mut Group = std::ptr::null_mut();
+        // SAFETY: `grp`, `result` and the `len` elements of `buf` are
+        // live for the whole call, which is everything `getgrgid_r`
+        // writes into. Being the reentrant form, it keeps no pointer
+        // past the call, and every pointer it writes into `grp` points
+        // into `buf`, which outlives the `CStr` read below.
+        let code = unsafe { getgrgid_r(gid, &mut grp, buf.as_mut_ptr(), len, &mut result) };
+        if code == ERANGE {
+            // A group with a long member list is the realistic way to
+            // need more room than a user entry ever does.
+            len = len.saturating_mul(2);
+            if len > MAX_BUF {
+                return None;
+            }
+            continue;
+        }
+        if code != 0 || result.is_null() || grp.gr_name.is_null() {
+            return None;
+        }
+        // SAFETY: non-null, NUL-terminated, and pointing into `buf`,
+        // which is still alive here.
+        let name = unsafe { CStr::from_ptr(grp.gr_name) };
+        return Some(name.to_string_lossy().into_owned());
+    }
+}
+
+/// This process's effective uid — whose permission the kernel checks
+/// when it is asked to change a file's mode.
+///
+/// Public because "may I change this file's permissions" has a cheap,
+/// exact answer (you own it, or you are root) that is better asked
+/// before offering the controls than learned from an `EPERM` after a
+/// click. The `chmod` itself stays the final word — a read-only mount
+/// says no to the owner too — and its caller reports that.
+pub fn effective_uid() -> u32 {
+    // SAFETY: `geteuid` takes no arguments, cannot fail (POSIX defines
+    // no errors for it) and touches no memory of ours.
+    unsafe { geteuid() }
+}
+
 /// A uid-to-name cache for the span of one directory listing.
 ///
 /// A directory of ten thousand files has, almost always, one or two
@@ -170,6 +251,26 @@ mod tests {
         // Deliberately absurd: inside the 32-bit range `getpwuid_r`
         // accepts, far outside any range a system allocates.
         assert_eq!(name_for_uid(4_294_967_294), None);
+    }
+
+    #[test]
+    fn the_root_group_is_root() {
+        // gid 0 is `root` on Linux — as for uid 0, the one name that can
+        // be asserted as a constant.
+        assert_eq!(name_for_gid(0).as_deref(), Some("root"));
+    }
+
+    #[test]
+    fn a_gid_nothing_knows_about_is_none_rather_than_a_guess() {
+        assert_eq!(name_for_gid(4_294_967_294), None);
+    }
+
+    /// A test runner is never setuid, so the uid the kernel checks a
+    /// `chmod` against is the one it was started as.
+    #[test]
+    fn the_effective_uid_is_this_processs_own() {
+        // SAFETY: `current_uid` has no preconditions; see its comment.
+        assert_eq!(effective_uid(), unsafe { super::current_uid() });
     }
 
     #[test]

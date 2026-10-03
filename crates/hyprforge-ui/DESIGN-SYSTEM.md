@@ -103,6 +103,7 @@ Each is `hyprforge_ui::widgets::<name>`.
 | Controls | `toggle` and `toggle_style`, `value_slider`, `stepped_slider` with `step_index`, `slider_style`, `segmented`, `segmented_choice`, `segment_style` with `SegmentLook`, `dropdown_style`, `dropdown_menu_style`, `tri_state` |
 | Buttons | `primary_button`, `secondary_button`, `danger_button` |
 | Layout | `section`, `divider`, `vertical_divider`, `row_field`, `page_header`, `setting_list`, `setting_row`, `setting_row_style`, `hero_card`, `status_dot`, `pending_bar`, `pending_label` |
+| Panels | `panel_tabs`: words across a docked panel's top, the chosen one over an accent underline. `fact_row` and `fact`: a dim label at a fixed width and its value beside it, so a panel's values line up (Files' Properties inspector) |
 | Badges | `chip`, `keycap` |
 | Dialogs | `confirm_dialog` |
 | Time | `countdown_ring`, with `remaining_fraction` |
