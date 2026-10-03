@@ -77,6 +77,14 @@ _bin() {
   install -Dm755 "$srcdir/target/release/$1" "$pkgdir/usr/bin/$1"
 }
 
+# The licence, where Arch expects it: an MIT package has to carry its
+# text, since there is no shared copy in /usr/share/licenses/common to
+# point at. notif keeps its own file — it came into the suite as a
+# project with its own licence — so its package passes that one.
+_license() {
+  install -Dm644 "$startdir/../../${1:-LICENSE}" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
+
 package_hyprforge-settings() {
   pkgdesc="Settings application for Hyprland"
   depends=(wayland libxkbcommon)
@@ -91,6 +99,7 @@ package_hyprforge-settings() {
   _bin hyprforge-settings
   install -Dm644 crates/hyprforge-settings/packaging/hyprforge-settings.desktop \
     "$pkgdir/usr/share/applications/hyprforge-settings.desktop"
+  _license
 }
 
 package_hyprforge-files() {
@@ -107,6 +116,7 @@ package_hyprforge-files() {
   _bin hyprforge-files
   install -Dm644 crates/hyprforge-files/packaging/hyprforge-files.desktop \
     "$pkgdir/usr/share/applications/hyprforge-files.desktop"
+  _license
 }
 
 package_hyprforge-media() {
@@ -128,6 +138,7 @@ package_hyprforge-media() {
   _bin hyprforge-media
   install -Dm644 crates/hyprforge-media/packaging/hyprforge-media.desktop \
     "$pkgdir/usr/share/applications/hyprforge-media.desktop"
+  _license
 }
 
 package_hyprforge-lock() {
@@ -140,6 +151,7 @@ package_hyprforge-lock() {
   # account stack and falls through to `account required pam_deny.so`.
   install -Dm644 crates/hyprforge-lock/pam/hyprforge-lock \
     "$pkgdir/etc/pam.d/hyprforge-lock"
+  _license
 }
 
 package_hyprforge-greet() {
@@ -147,6 +159,7 @@ package_hyprforge-greet() {
   depends=(wayland libxkbcommon pam greetd)
   cd "$startdir/../.."
   _bin hyprforge-greet
+  _license
 }
 
 package_hyprforge-displayd() {
@@ -157,6 +170,7 @@ package_hyprforge-displayd() {
   _bin hyprforge-displayctl
   install -Dm644 crates/hyprforge-displayd/packaging/hyprforge-displayd.service \
     "$pkgdir/usr/lib/systemd/user/hyprforge-displayd.service"
+  _license
 }
 
 package_hyprforge-tray() {
@@ -183,6 +197,7 @@ package_hyprforge-tray() {
   _bin hyprforge-traymenu
   install -Dm644 crates/hyprforge-tray/packaging/hyprforge-trayd.service \
     "$pkgdir/usr/lib/systemd/user/hyprforge-trayd.service"
+  _license
 }
 
 package_hyprforge-clipboard() {
@@ -193,6 +208,7 @@ package_hyprforge-clipboard() {
   _bin hyprforge-clipmenu
   install -Dm644 crates/hyprforge-clipboard/packaging/hyprforge-clipd.service \
     "$pkgdir/usr/lib/systemd/user/hyprforge-clipd.service"
+  _license
 }
 
 package_hyprforge-emojimenu() {
@@ -213,6 +229,7 @@ package_hyprforge-emojimenu() {
   optdepends=('noto-fonts-cjk: kaomoji that use Japanese characters, like the shrug')
   cd "$startdir/../.."
   _bin hyprforge-emojimenu
+  _license
 }
 
 package_hyprforge-notif() {
@@ -232,6 +249,7 @@ package_hyprforge-notif() {
   _bin notifctl
   install -Dm644 crates/hyprforge-notif/notifd.service \
     "$pkgdir/usr/lib/systemd/user/notifd.service"
+  _license crates/hyprforge-notif/LICENSE
 }
 
 package_hyprforge() {
@@ -252,4 +270,5 @@ package_hyprforge() {
   # the machine logs in on. Pulling it in with a metapackage would put it
   # one `systemctl enable` away from a machine that cannot log in.
   optdepends=('hyprforge-greet: replace your display manager')
+  _license
 }

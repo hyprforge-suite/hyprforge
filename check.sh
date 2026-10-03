@@ -531,6 +531,18 @@ for package in packages:
             f"prefix, so this package cannot become one repository"
         )
 
+# And every package — the metapackage too — installs a licence. None
+# did until 0.1.1: the suite shipped as MIT with the text in no package
+# at all, and notif-git, which it replaced, had carried its own.
+for package in packages:
+    body = re.search(
+        rf"^package_{re.escape(package)}\(\)\s*\{{(.*?)^\}}",
+        text,
+        re.S | re.M,
+    )
+    if body and not re.search(r"^\s*_license\b", body.group(1), re.M):
+        problems.append(f"{package}: installs no licence (call _license in package_{package})")
+
 print(f"CHECKED {checked}")
 for problem in problems:
     print(f"PROBLEM {problem}")
@@ -542,7 +554,7 @@ PYEOF
         bad "$(grep -c '^PROBLEM' <<<"$output") package(s) cannot become a repository as they stand"
         sed -n 's/^PROBLEM /    • /p' <<<"$output"
     else
-        ok "$(sed -n 's/^CHECKED //p' <<<"$output") package(s) each build from one crate directory"
+        ok "$(sed -n 's/^CHECKED //p' <<<"$output") package(s) each build from one crate directory, and every package carries its licence"
     fi
 fi
 
