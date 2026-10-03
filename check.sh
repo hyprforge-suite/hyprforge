@@ -647,8 +647,13 @@ problems = []
 # give a path inside it, so a path there passes if any crate has it —
 # which still catches a file deleted outright, the case that actually
 # happened.
+#
+# `--recurse-submodules`, because the components are submodules and a
+# plain `ls-files` lists nothing inside one: when they became submodules
+# this check went from 149 named paths to 98 and still passed, every
+# component's own README and DESIGN.md silently out of its reach.
 docs = subprocess.run(
-    ["git", "ls-files", "*.md"], capture_output=True, text=True, check=True
+    ["git", "ls-files", "--recurse-submodules", "*.md"], capture_output=True, text=True, check=True
 ).stdout.split()
 docs = [Path(d) for d in docs]
 crates = sorted(p for p in Path("crates").iterdir() if p.is_dir())
