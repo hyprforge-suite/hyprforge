@@ -604,6 +604,9 @@ pub enum Message {
     /// Type a character into the search box. The host decides a key
     /// press means this; see [`crate::keymap::Resolved::Text`].
     TypeToSearch(char),
+    /// A drag over the window is over this folder now, or over nothing
+    /// a drop could land in.
+    DropHover(Option<PathBuf>),
     /// Start typing a location into the path bar.
     EditPath,
     /// The path bar's text changed.
@@ -642,6 +645,8 @@ struct ViewModel<'a> {
     renaming: Option<&'a Renaming>,
     /// The path bar, while it is being typed into.
     path_edit: Option<&'a PathEdit>,
+    /// The folder a drag is over, if one is — see [`crate::drop`].
+    drop_hover: Option<&'a Path>,
     column_picker_open: bool,
     /// Whether the sidebar is collapsed right now — the resolved answer,
     /// not the preference, so `render` never has to ask twice.
@@ -769,6 +774,9 @@ pub struct Browser {
     renaming: Option<Renaming>,
     /// The path bar, while it is being typed into.
     path_edit: Option<PathEdit>,
+    /// The folder a drag over the window is over — told by the host,
+    /// which is the one that hears the compositor. See [`crate::drop`].
+    drop_hover: Option<PathBuf>,
     /// See [`Message::AfterListing`].
     after_listing: Option<(PathBuf, bool)>,
     /// How many of `entries` are dotfiles, counted when the listing
@@ -820,6 +828,7 @@ impl Browser {
             archive: None,
             renaming: None,
             path_edit: None,
+            drop_hover: None,
             after_listing: None,
             dotfiles: 0,
             // The shipped default, until `set_config` says otherwise.
@@ -1046,6 +1055,10 @@ impl Browser {
                 self.pinned = items;
                 Outcome::None
             }
+            Message::DropHover(over) => {
+                self.drop_hover = over;
+                Outcome::None
+            }
             Message::EditPath => self.begin_path_edit(),
             Message::PathInput(text) => {
                 let Some(edit) = &mut self.path_edit else { return Outcome::None };
@@ -1105,6 +1118,35 @@ impl Browser {
                 Outcome::None
             }
         }
+    }
+
+    /// Every folder a drop could land in right now, by the widget id its
+    /// container carries — for [`crate::drop::HitTest`].
+    ///
+    /// The folder in view, every folder in the listing, and every place
+    /// in the sidebar. Not the rows of the Trash: those are trashed
+    /// things, and a folder in the Trash is not somewhere to put files.
+    pub fn drop_targets(&self) -> HashMap<Id, PathBuf> {
+        let mut targets: HashMap<Id, PathBuf> = HashMap::new();
+        let mut add = |path: &Path| {
+            targets.insert(crate::drop::target_id(path), path.to_path_buf());
+        };
+        add(&self.current_dir);
+        if !self.in_trash() {
+            for entry in self.rows().into_iter().filter(|e| e.is_dir) {
+                add(&entry.path);
+            }
+        }
+        for item in &self.sidebar {
+            add(&item.path);
+        }
+        for item in &self.pinned {
+            add(&item.path);
+        }
+        if self.config.sidebar.show_trash {
+            add(&crate::sidebar::trash_path());
+        }
+        targets
     }
 
     /// Whether the path bar is being typed into — for a host deciding
@@ -2081,6 +2123,7 @@ impl Browser {
             archive: self.archive.as_deref(),
             renaming: self.renaming.as_ref(),
             path_edit: self.path_edit.as_ref(),
+            drop_hover: self.drop_hover.as_deref(),
             column_picker_open: self.column_picker_open,
             sidebar_collapsed,
             viewport_width,
@@ -2357,12 +2400,37 @@ fn listing_block<'a>(listing: &'a crate::preview::Listing, scale: FontScale) -> 
 /// The listing and its column headers — everything right of the sidebar
 /// and between the two bars.
 fn file_area<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
+    // The folder in view is a drop target too — the one a drop lands in
+    // when it is not on a folder of its own. Outlined while a drag is
+    // over it, in the dim text colour: the accent means *selected*.
+    let hovered = vm.drop_hover == Some(vm.current_dir);
     container(body_view(vm, scale))
+        .id(crate::drop::target_id(vm.current_dir))
         .padding(spacing::SM)
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(|_t: &iced::Theme| container::Style {
+        .style(move |_t: &iced::Theme| container::Style {
             background: Some(iced::Background::Color(hyprforge_ui::theme::surface::card())),
+            border: iced::Border {
+                color: hyprforge_ui::theme::text_dim(),
+                width: if hovered { 1.0 } else { 0.0 },
+                ..iced::Border::default()
+            },
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// A folder a drop can land in: its container carries the folder's
+/// [`crate::drop::target_id`], and takes the hover step while a drag is
+/// over it — the same fill a row takes under the pointer, never the
+/// accent, which means selected.
+fn drop_zone<'a>(inner: impl Into<Element<'a, Message>>, path: &Path, hovered: bool) -> Element<'a, Message> {
+    container(inner)
+        .id(crate::drop::target_id(path))
+        .style(move |_t: &iced::Theme| container::Style {
+            background: hovered.then(|| iced::Background::Color(hyprforge_ui::theme::surface::row())),
+            border: iced::Border { radius: density::nested_radius().into(), ..iced::Border::default() },
             ..container::Style::default()
         })
         .into()
@@ -2937,7 +3005,9 @@ fn sidebar_rail<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
             .padding(0)
             .on_press(Message::Navigate(row_item.path.clone()))
             .style(move |t: &iced::Theme, status| selectable_row_style(t, status, is_current));
-            rail = rail.push(sidebar_menu_area(button, row_item.path));
+            let hovered = vm.drop_hover == Some(row_item.path.as_path());
+            let zone = drop_zone(button, &row_item.path, hovered);
+            rail = rail.push(sidebar_menu_area(zone, row_item.path));
         }
     }
     container(scrollable(rail))
@@ -2998,7 +3068,9 @@ fn sidebar_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
                 .width(Length::Fill)
                 .on_press(Message::Navigate(row_item.path.clone()))
                 .style(move |t: &iced::Theme, status| selectable_row_style(t, status, is_current));
-            group = group.push(sidebar_menu_area(button, row_item.path));
+            let hovered = vm.drop_hover == Some(row_item.path.as_path());
+            let zone = drop_zone(button, &row_item.path, hovered);
+            group = group.push(sidebar_menu_area(zone, row_item.path));
         }
         list = list.push(group);
     }
@@ -3883,7 +3955,14 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         if !entry.is_dir {
             seen_file = true;
         }
-        list = list.push(entry_row(index, entry, vm.selection.is_selected(&entry.path), &ctx));
+        let row = entry_row(index, entry, vm.selection.is_selected(&entry.path), &ctx);
+        // A folder is somewhere a drop can go; a file is not, and nor is
+        // anything in the Trash.
+        list = list.push(if entry.is_dir && !vm.in_trash {
+            drop_zone(row, &entry.path, vm.drop_hover == Some(entry.path.as_path()))
+        } else {
+            row
+        });
     }
     // `.id(..)` is what lets a host restore this list's scroll position
     // across a tab switch — see `Browser::list_scrollable_id`'s own doc.
@@ -3953,6 +4032,7 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // which is most of why it read as squashed. This asks the layout how
     // much room there actually is and fills it.
     let renaming = vm.renaming;
+    let (drop_hover, in_trash) = (vm.drop_hover, vm.in_trash);
     iced::widget::responsive(move |size| {
         let gap = density::grid_gap(scale);
         // The width the layout actually handed us, which is the same
@@ -3968,7 +4048,12 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
                 grid = grid.push(current);
                 current = row![].spacing(gap);
             }
-            current = current.push(grid_cell(index, entry, selected, renaming, thumbnails.get(&entry.path), icons.for_entry(entry), scale));
+            let cell = grid_cell(index, entry, selected, renaming, thumbnails.get(&entry.path), icons.for_entry(entry), scale);
+            current = current.push(if entry.is_dir && !in_trash {
+                drop_zone(cell, &entry.path, drop_hover == Some(entry.path.as_path()))
+            } else {
+                cell
+            });
         }
         // The last row is padded out with empty space to a full set of
         // columns, so its cells keep the width the rows above gave them
@@ -5530,6 +5615,7 @@ mod tests {
             archive: None,
             renaming: None,
             path_edit: None,
+            drop_hover: None,
             column_picker_open: false,
             sidebar_collapsed: false,
             viewport_width: 1000.0,
@@ -6155,3 +6241,44 @@ mod path_bar_tests {
         assert!(browser.editing_path());
     }
 }
+
+#[cfg(test)]
+mod drop_target_tests {
+    //! Which folders a drop can land in, and how the browser shows the
+    //! one a drag is over. Where a point lands, and what a drop does, are
+    //! `drop`'s, and tested there.
+    use super::tests_support::loaded;
+    use super::*;
+    use crate::drop::target_id;
+
+    #[test]
+    fn folders_in_the_listing_are_drop_targets_and_files_are_not() {
+        let browser = loaded(&[("docs", true), ("notes.txt", false)]);
+        let targets = browser.drop_targets();
+        assert_eq!(targets.get(&target_id(Path::new("/dir/docs"))), Some(&PathBuf::from("/dir/docs")));
+        assert!(!targets.contains_key(&target_id(Path::new("/dir/notes.txt"))));
+        assert!(targets.contains_key(&target_id(Path::new("/dir"))), "the folder in view, for a drop on its background");
+    }
+
+    #[test]
+    fn a_row_in_the_trash_is_not_somewhere_to_drop() {
+        let trash = crate::sidebar::trash_path();
+        let (mut browser, _) = Browser::new(Mode::App, Prefs::default(), trash.clone(), vec![]);
+        let mut folder = crate::backend::mock::MockBackend::dir(&trash, "old");
+        folder.origin = Some(PathBuf::from("/home/a/old"));
+        browser.update(Message::DirLoaded(trash.clone(), Ok(vec![folder])));
+        let targets = browser.drop_targets();
+        assert!(!targets.contains_key(&target_id(&trash.join("old"))));
+        assert!(targets.contains_key(&target_id(&trash)), "the Trash itself is: a drop there trashes");
+    }
+
+    #[test]
+    fn the_hovered_folder_is_whatever_the_host_last_said() {
+        let mut browser = loaded(&[("docs", true)]);
+        browser.update(Message::DropHover(Some(PathBuf::from("/dir/docs"))));
+        assert_eq!(browser.view_model(1000.0).drop_hover, Some(Path::new("/dir/docs")));
+        browser.update(Message::DropHover(None));
+        assert_eq!(browser.view_model(1000.0).drop_hover, None);
+    }
+}
+

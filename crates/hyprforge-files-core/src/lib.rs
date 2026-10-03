@@ -28,6 +28,7 @@ pub mod clipboard;
 pub mod config;
 pub mod density;
 pub mod drag;
+pub mod drop;
 pub mod format;
 // The drawn marks moved to the shared UI crate when Settings adopted the
 // same design; re-exported so `crate::glyph` still names them here.
