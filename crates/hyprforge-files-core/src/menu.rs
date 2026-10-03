@@ -127,6 +127,8 @@ impl Default for MenuConfig {
                 A(SelectAll),
                 Sep,
                 A(Trash),
+                Sep,
+                A(Properties),
             ],
             archive: vec![
                 // Open goes *into* it — see `Browser::activate_path`.
@@ -144,6 +146,8 @@ impl Default for MenuConfig {
                 A(SelectAll),
                 Sep,
                 A(Trash),
+                Sep,
+                A(Properties),
             ],
             archive_member: vec![
                 A(Open),
@@ -159,6 +163,8 @@ impl Default for MenuConfig {
                 // Not Trash: a member removed from an archive is gone,
                 // and there is no trash inside a zip to file it in.
                 A(DeletePermanently),
+                Sep,
+                A(Properties),
             ],
             folder: vec![
                 A(Open),
@@ -174,6 +180,8 @@ impl Default for MenuConfig {
                 A(SelectAll),
                 Sep,
                 A(Trash),
+                Sep,
+                A(Properties),
             ],
             empty: vec![
                 A(Paste),
@@ -189,6 +197,8 @@ impl Default for MenuConfig {
                 Sep,
                 A(GoUp),
                 A(NewTab),
+                Sep,
+                A(Properties),
             ],
             place: vec![A(OpenInNewTab), Sep, A(Pin)],
             pinned: vec![A(OpenInNewTab), Sep, A(PinUp), A(PinDown), Sep, A(Unpin)],
@@ -203,6 +213,8 @@ impl Default for MenuConfig {
                 Sep,
                 A(DeletePermanently),
                 A(EmptyTrash),
+                Sep,
+                A(Properties),
             ],
         }
     }

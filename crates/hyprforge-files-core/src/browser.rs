@@ -655,6 +655,11 @@ pub enum Outcome {
     /// the host this way so a menu item for one travels the same road as
     /// every other action; a host without tabs ignores it.
     Window(Action),
+    /// Something the Properties inspector needs found out or changed —
+    /// see [`crate::properties::Request`]. Answers come back as
+    /// [`Message::Properties`]. Only a host that opened the inspector
+    /// (with [`Message::ToggleProperties`]) ever receives one.
+    Properties(crate::properties::Request),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -761,6 +766,20 @@ pub enum Message {
     /// for why this is a message rather than a `Browser::new` argument
     /// the way Places is.
     PinnedLoaded(Vec<PinnedItem>),
+    /// Open the Properties inspector on the selection, or close it.
+    ///
+    /// How a host carries out [`Action::Properties`], which is window
+    /// scope so that the open/save dialog — which ignores window actions
+    /// — never opens one. See that variant's doc.
+    ToggleProperties,
+    /// For the inspector: its own buttons, and the host's answers to
+    /// [`Outcome::Properties`].
+    Properties(Box<crate::properties::Message>),
+    /// The window's Preferences changed one of the listing's settings;
+    /// take it, in every tab alike. Not answered with
+    /// [`Outcome::PrefsChanged`]: the host saves the change once, rather
+    /// than once per tab.
+    Adopt(crate::preferences::Setting),
 }
 
 /// Exactly what `render` needs, and nothing `Browser` has that it
@@ -823,6 +842,17 @@ struct ViewModel<'a> {
     /// room for it. The setting alone is `prefs.preview_pane`; the two
     /// differ exactly when the status bar has to say why nothing shows.
     preview: Option<PreviewModel<'a>>,
+    /// The Properties inspector, when it is open — in the preview pane's
+    /// place, so at most one of the two is ever `Some`.
+    inspector: Option<InspectorModel<'a>>,
+}
+
+/// The inspector, its subject's icon, and how wide to draw it.
+#[derive(Debug, Clone, PartialEq)]
+struct InspectorModel<'a> {
+    inspector: &'a crate::properties::Inspector,
+    icon: Option<&'a Picture>,
+    width: f32,
 }
 
 /// One pane to the left of the folder in view.
@@ -948,6 +978,12 @@ pub struct Browser {
     /// meant allocating a `Vec`, sorting it with a `String` per
     /// comparison, and allocating the answer — per frame.
     hidden_key: Option<String>,
+    /// The Properties inspector, while it is open — see
+    /// [`crate::properties`]. It takes the preview pane's place.
+    inspector: Option<crate::properties::Inspector>,
+    /// How many inspectors this browser has opened, so each one's
+    /// answers carry a generation no earlier one shares.
+    inspections: u64,
 }
 
 impl Browser {
@@ -1002,6 +1038,8 @@ impl Browser {
                 .combos_for(Action::ToggleHidden)
                 .first()
                 .map(|combo| combo.to_string()),
+            inspector: None,
+            inspections: 0,
         };
         browser.folder_icons = folder_icon_keys(&browser.sidebar, &browser.config.sidebar);
         // Column view's panes are read alongside the listing, not after
@@ -1102,6 +1140,7 @@ impl Browser {
         let outcome = self.update_state(message);
         let outcome = self.with_columns(outcome);
         let outcome = self.with_reveal(outcome);
+        let outcome = self.with_properties(outcome);
         self.with_media(outcome)
     }
 
@@ -1225,6 +1264,13 @@ impl Browser {
             }
             Message::PinnedLoaded(items) => {
                 self.pinned = items;
+                Outcome::None
+            }
+            Message::ToggleProperties => self.toggle_properties(),
+            Message::Properties(message) => self.update_properties(*message),
+            Message::Adopt(setting) => {
+                setting.apply(&mut self.prefs);
+                self.refresh_view();
                 Outcome::None
             }
             Message::DropHover(over) => {
@@ -1638,6 +1684,7 @@ impl Browser {
         let outcome = self.perform_action(action);
         let outcome = self.with_columns(outcome);
         let outcome = self.with_reveal(outcome);
+        let outcome = self.with_properties(outcome);
         self.with_media(outcome)
     }
 
@@ -1853,7 +1900,9 @@ impl Browser {
     /// nothing. Not inside an archive: a member there has no path another
     /// program can open.
     fn preview_target(&self) -> Option<PathBuf> {
-        if !self.prefs.preview_pane || self.archive.is_some() {
+        // Not while the inspector has the pane's place: a picture nobody
+        // can see is a decode for nothing.
+        if !self.prefs.preview_pane || self.archive.is_some() || self.inspector.is_some() {
             return None;
         }
         let selected = self.selected_shown();
@@ -2060,6 +2109,17 @@ impl Browser {
                 Outcome::PrefsChanged(self.prefs.clone())
             }
             Action::TogglePreview => {
+                // With the inspector in the pane's place, asking for the
+                // preview means "show me the preview instead": the
+                // inspector steps aside, and the pane comes back on if
+                // it was off. Flipping the setting underneath an
+                // inspector would change nothing anyone could see.
+                if let Some(open) = self.inspector.take() {
+                    open.stop();
+                    if self.prefs.preview_pane {
+                        return Outcome::None;
+                    }
+                }
                 self.prefs.preview_pane = !self.prefs.preview_pane;
                 Outcome::PrefsChanged(self.prefs.clone())
             }
@@ -2109,7 +2169,9 @@ impl Browser {
             | Action::CloseTab
             | Action::NextTab
             | Action::PreviousTab
-            | Action::Tab(_) => Outcome::Window(action),
+            | Action::Tab(_)
+            | Action::Properties
+            | Action::Preferences => Outcome::Window(action),
         }
     }
 
@@ -2636,11 +2698,28 @@ impl Browser {
             can_go_forward: !self.forward_stack.is_empty(),
             thumbnails: &self.media.thumbnails,
             icons: IconSet { icons: &self.icons, folders: &self.folder_icons },
-            preview: preview_width.filter(|_| self.prefs.preview_pane).map(|width| PreviewModel {
-                selected: self.rows().into_iter().filter(|e| self.selection.is_selected(&e.path)).collect(),
-                found: self.media.preview.as_ref(),
-                width,
-                icons: IconSet { icons: &self.icons, folders: &self.folder_icons },
+            preview: preview_width.filter(|_| self.prefs.preview_pane && self.inspector.is_none()).map(|width| {
+                PreviewModel {
+                    selected: self.rows().into_iter().filter(|e| self.selection.is_selected(&e.path)).collect(),
+                    found: self.media.preview.as_ref(),
+                    width,
+                    icons: IconSet { icons: &self.icons, folders: &self.folder_icons },
+                }
+            }),
+            inspector: self.inspector.as_ref().map(|inspector| {
+                let icons = IconSet { icons: &self.icons, folders: &self.folder_icons };
+                let icon = match inspector.subjects() {
+                    [crate::properties::Subject { entry: Some(entry), .. }] => icons.for_entry(entry),
+                    [crate::properties::Subject { path, entry: None, .. }] => {
+                        icons.for_key(self.folder_icons.get(path).map_or(icon::FOLDER_KEY, String::as_str))
+                    }
+                    _ => None,
+                };
+                InspectorModel {
+                    inspector,
+                    icon,
+                    width: density::inspector_width(viewport_width, sidebar_collapsed),
+                }
             }),
         }
     }
@@ -2656,6 +2735,155 @@ impl Browser {
     /// answer to.
     pub fn view(&self, scale: FontScale, viewport_width: f32) -> Element<'_, Message> {
         render(self.view_model(viewport_width), scale)
+    }
+}
+
+/// The Properties inspector's half of the browser — see
+/// [`crate::properties`]. In a block of its own so the one seam it adds
+/// to `update` and `perform` (`with_properties`) is easy to
+/// find from here.
+impl Browser {
+    /// Whether the Properties inspector is open.
+    pub fn properties_open(&self) -> bool {
+        self.inspector.is_some()
+    }
+
+    /// The inspector, for a host or a test that wants to read it.
+    pub fn inspector(&self) -> Option<&crate::properties::Inspector> {
+        self.inspector.as_ref()
+    }
+
+    fn toggle_properties(&mut self) -> Outcome {
+        if let Some(open) = self.inspector.take() {
+            open.stop();
+            return Outcome::None;
+        }
+        self.menu = None;
+        self.open_inspector(crate::properties::Tab::General)
+    }
+
+    fn open_inspector(&mut self, tab: crate::properties::Tab) -> Outcome {
+        let (subjects, place) = self.inspected();
+        self.inspections += 1;
+        let (inspector, request) = crate::properties::Inspector::new(self.inspections, subjects, place, tab);
+        self.inspector = Some(inspector);
+        Outcome::Properties(request)
+    }
+
+    fn update_properties(&mut self, message: crate::properties::Message) -> Outcome {
+        use crate::properties::Effect;
+        let Some(inspector) = &mut self.inspector else { return Outcome::None };
+        match inspector.update(message) {
+            Effect::None => Outcome::None,
+            Effect::Ask(request) => Outcome::Properties(request),
+            Effect::Close => {
+                inspector.stop();
+                self.inspector = None;
+                Outcome::None
+            }
+            Effect::OpenWith(path) => Outcome::OpenWith(path),
+            Effect::Compress => self.perform_action(Action::Compress),
+            Effect::Refresh => self.perform_action(Action::Refresh),
+        }
+    }
+
+    /// What the inspector should describe: the selection, or — with
+    /// nothing selected — the folder in view, the way every file
+    /// manager's Properties describes the folder from its background.
+    fn inspected(&self) -> (Vec<crate::properties::Subject>, crate::properties::Place) {
+        use crate::properties::Subject;
+        let place = self.inspected_place();
+        let subjects: Vec<Subject> = self
+            .rows()
+            .into_iter()
+            .filter(|e| self.selection.is_selected(&e.path))
+            .map(|e| Subject { path: e.path.clone(), name: e.name.clone(), entry: Some(e.clone()) })
+            .collect();
+        if !subjects.is_empty() {
+            return (subjects, place);
+        }
+        let name = if place == crate::properties::Place::Trash {
+            crate::sidebar::place_name(&self.current_dir)
+        } else {
+            self.current_dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| self.current_dir.display().to_string())
+        };
+        (vec![Subject { path: self.current_dir.clone(), name, entry: None }], place)
+    }
+
+    /// Keeps an open inspector on what it should describe: run after
+    /// every update and action, like [`Self::with_media`], so no way of
+    /// moving the selection — a click, an arrow, a search hiding the
+    /// selected row, a navigation — leaves it describing something else.
+    ///
+    /// A new subject starts a new inspector, which trips the old one's
+    /// [`crate::properties::Cancel`]: a folder walk for a row the
+    /// selection has already left is stopped, not merely ignored.
+    fn with_properties(&mut self, outcome: Outcome) -> Outcome {
+        let Some(open) = &self.inspector else { return outcome };
+        if open.place() == self.inspected_place() && self.still_inspecting(open.subjects()) {
+            return outcome;
+        }
+        let tab = open.tab();
+        open.stop();
+        let request = self.open_inspector(tab);
+        many(vec![outcome, request])
+    }
+
+    fn inspected_place(&self) -> crate::properties::Place {
+        use crate::properties::Place;
+        if self.in_trash() {
+            Place::Trash
+        } else if self.archive.is_some() {
+            Place::Archive
+        } else {
+            Place::Folder
+        }
+    }
+
+    /// Whether `subjects` are still what [`Self::inspected`] would say,
+    /// asked without building that answer: this runs on every message,
+    /// thumbnails included, and a select-all of a large folder would
+    /// otherwise clone every selected row each time.
+    ///
+    /// By path, and — for a handful of rows — by what the listing says
+    /// about them, so a rename or a changed mode arriving in a re-read is
+    /// described afresh. A folder's own size is left out of that: its
+    /// item count arrives a moment after the listing does, and treating
+    /// that as a new subject would restart the walk measuring it.
+    fn still_inspecting(&self, subjects: &[crate::properties::Subject]) -> bool {
+        const COMPARED: usize = 64;
+        let compare = subjects.len() <= COMPARED;
+        let mut seen = 0;
+        let selected = self
+            .view
+            .iter()
+            .filter_map(|&i| self.entries.get(i))
+            .filter(|e| self.selection.is_selected(&e.path));
+        for entry in selected {
+            let Some(subject) = subjects.get(seen) else { return false };
+            if subject.path != entry.path {
+                return false;
+            }
+            if compare {
+                let same = match &subject.entry {
+                    Some(had) if had.is_dir && entry.is_dir => Entry { size: entry.size, ..had.clone() } == *entry,
+                    Some(had) => had == entry,
+                    None => false,
+                };
+                if !same {
+                    return false;
+                }
+            }
+            seen += 1;
+        }
+        match seen {
+            // Nothing selected: the folder in view, as itself.
+            0 => matches!(subjects, [only] if only.entry.is_none() && only.path == self.current_dir),
+            n => n == subjects.len(),
+        }
     }
 }
 
@@ -2750,6 +2978,10 @@ fn render<'a>(vm: ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     let mut middle = row![side, file_area(&vm, scale)].height(Length::Fill);
     if let Some(preview) = vm.preview.as_ref() {
         middle = middle.push(preview_pane(preview, scale));
+    }
+    if let Some(open) = vm.inspector.as_ref() {
+        let pane = crate::properties::view(open.inspector, open.icon, home_dir().as_deref(), open.width, scale);
+        middle = middle.push(pane.map(|m| Message::Properties(Box::new(m))));
     }
 
     column![
@@ -3275,7 +3507,10 @@ fn status_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> 
     // switch offering to hide a pane nobody can see reads as broken. That
     // case says why instead, and is not a button: pressing it would only
     // turn off a setting the user cannot see the effect of either way.
-    let preview_switch: Element<'a, Message> = if vm.prefs.preview_pane && vm.preview.is_none() {
+    // With Properties in the pane's place the width is not why, so it is
+    // the button again: "Show preview" gives the slot back.
+    let preview_switch: Element<'a, Message> =
+        if vm.prefs.preview_pane && vm.preview.is_none() && vm.inspector.is_none() {
         meta_text("Preview needs a wider window", density::META_TEXT_BASE, scale).into()
     } else {
         iced::widget::button(scaled_text(
@@ -6281,6 +6516,7 @@ mod tests {
             thumbnails: Box::leak(Box::default()),
             icons: IconSet { icons: Box::leak(Box::default()), folders: Box::leak(Box::default()) },
             preview: None,
+            inspector: None,
         }
     }
 
@@ -7324,5 +7560,176 @@ mod reveal_tests {
         let outcome = browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(rows)));
         assert_eq!(browser.selected_shown(), [PathBuf::from("/dir/sub")]);
         assert!(reveals(&outcome), "{outcome:?}");
+    }
+}
+
+/// The Properties inspector, as the browser keeps it — see
+/// [`crate::properties`] for the inspector's own tests.
+#[cfg(test)]
+mod properties_tests {
+    use super::tests_support::loaded;
+    use super::*;
+    use crate::properties::{Message as Inspector, Request, Tab};
+
+    fn click(browser: &mut Browser, index: usize) -> Outcome {
+        browser.update(Message::EntryClicked { index, ctrl: false, shift: false })
+    }
+
+    /// Every inspector request in `outcome`, in order.
+    fn inspections(outcome: &Outcome) -> Vec<Request> {
+        match outcome {
+            Outcome::Properties(request) => vec![request.clone()],
+            Outcome::Many(parts) => parts.iter().flat_map(inspections).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn subjects(browser: &Browser) -> Vec<PathBuf> {
+        browser.inspector().map(|i| i.subjects().iter().map(|s| s.path.clone()).collect()).unwrap_or_default()
+    }
+
+    #[test]
+    fn opening_properties_describes_the_selection_and_asks_the_host_once() {
+        let mut browser = loaded(&[("a.txt", false), ("sub", true)]);
+        // Folders sort first, so the file is the second row.
+        click(&mut browser, 1);
+        let outcome = browser.update(Message::ToggleProperties);
+        assert!(browser.properties_open());
+        assert_eq!(subjects(&browser), [PathBuf::from("/dir/a.txt")]);
+        assert_eq!(inspections(&outcome).len(), 1, "{outcome:?}");
+        browser.update(Message::ToggleProperties);
+        assert!(!browser.properties_open(), "the same key closes it");
+    }
+
+    /// With nothing selected, Properties is about the folder in view —
+    /// what a right click on the background means everywhere.
+    #[test]
+    fn with_nothing_selected_it_describes_the_folder_in_view() {
+        let mut browser = loaded(&[("a.txt", false)]);
+        browser.update(Message::ToggleProperties);
+        assert_eq!(subjects(&browser), [PathBuf::from("/dir")]);
+        let subject = &browser.inspector().unwrap().subjects()[0];
+        assert!(subject.entry.is_none() && subject.is_dir());
+    }
+
+    /// Arrowing down a column of folders runs one walk, not one per row
+    /// passed: each move stops the walk for the row it left.
+    #[test]
+    fn moving_the_selection_follows_it_and_stops_the_walk_left_behind() {
+        let mut browser = loaded(&[("one", true), ("two", true)]);
+        click(&mut browser, 0);
+        let first = browser.update(Message::ToggleProperties);
+        let asked = inspections(&first);
+        let [Request::Inspect { cancel: first_cancel, .. }] = asked.as_slice() else { panic!("{first:?}") };
+        let moved = browser.perform(Action::FocusDown);
+        assert_eq!(subjects(&browser), [PathBuf::from("/dir/two")]);
+        assert!(first_cancel.is_cancelled(), "the walk of `one` is no longer wanted");
+        let asked = inspections(&moved);
+        let [Request::Inspect { measure, .. }] = asked.as_slice() else { panic!("{moved:?}") };
+        assert_eq!(measure, &[PathBuf::from("/dir/two")]);
+    }
+
+    /// A folder's item count lands a moment after the listing; that is
+    /// not a new subject, and must not restart its walk.
+    #[test]
+    fn a_count_arriving_for_the_inspected_folder_does_not_start_again() {
+        let mut browser = loaded(&[("sub", true)]);
+        click(&mut browser, 0);
+        browser.update(Message::ToggleProperties);
+        let outcome = browser.update(Message::CountsLoaded(vec![(PathBuf::from("/dir/sub"), Some(4))]));
+        assert!(inspections(&outcome).is_empty(), "{outcome:?}");
+    }
+
+    #[test]
+    fn the_tab_stays_put_as_the_selection_moves() {
+        let mut browser = loaded(&[("a", false), ("b", false)]);
+        click(&mut browser, 0);
+        browser.update(Message::ToggleProperties);
+        browser.update(Message::Properties(Box::new(Inspector::ShowTab(Tab::Permissions))));
+        browser.perform(Action::FocusDown);
+        assert_eq!(browser.inspector().unwrap().tab(), Tab::Permissions);
+    }
+
+    /// One docked panel at a time: the inspector takes the preview's
+    /// place, and asking for the preview gives it back.
+    #[test]
+    fn the_inspector_and_the_preview_never_show_together() {
+        let mut browser = loaded(&[("a.txt", false)]);
+        click(&mut browser, 0);
+        assert!(browser.view_model(1400.0).preview.is_some());
+        browser.update(Message::ToggleProperties);
+        let vm = browser.view_model(1400.0);
+        assert!(vm.preview.is_none() && vm.inspector.is_some());
+        browser.perform(Action::TogglePreview);
+        let vm = browser.view_model(1400.0);
+        assert!(vm.preview.is_some() && vm.inspector.is_none());
+        assert!(browser.prefs().preview_pane, "the setting was never turned off");
+    }
+
+    /// With the preview off, asking for it over the inspector turns it on
+    /// — "show me the preview instead" — rather than doing nothing.
+    #[test]
+    fn asking_for_the_preview_over_the_inspector_turns_it_on_if_it_was_off() {
+        let mut prefs = Prefs::default();
+        prefs.preview_pane = false;
+        let (mut browser, _) = Browser::new(Mode::App, prefs, PathBuf::from("/dir"), vec![]);
+        browser.update(Message::ToggleProperties);
+        let outcome = browser.perform(Action::TogglePreview);
+        assert!(!browser.properties_open());
+        assert!(matches!(outcome, Outcome::PrefsChanged(ref p) if p.preview_pane), "{outcome:?}");
+    }
+
+    #[test]
+    fn no_picture_is_decoded_for_a_preview_the_inspector_is_covering() {
+        let mut browser = loaded(&[("a.png", false), ("b.png", false)]);
+        browser.update(Message::ToggleProperties);
+        let outcome = click(&mut browser, 0);
+        let decodes = match &outcome {
+            Outcome::LoadPreview(_) => true,
+            Outcome::Many(parts) => parts.iter().any(|p| matches!(p, Outcome::LoadPreview(_))),
+            _ => false,
+        };
+        assert!(!decodes, "{outcome:?}");
+    }
+
+    /// Window scope is what keeps Properties out of the file chooser:
+    /// the browser hands it back rather than opening anything, and the
+    /// dialog's host ignores window actions.
+    #[test]
+    fn properties_is_handed_to_the_window_and_never_opens_on_its_own() {
+        let (mut dialog, _) =
+            Browser::new(Mode::Dialog(DialogKind::Open), Prefs::default(), PathBuf::from("/dir"), vec![]);
+        assert_eq!(dialog.perform(Action::Properties), Outcome::Window(Action::Properties));
+        assert!(!dialog.properties_open());
+    }
+
+    /// A mode change comes back as a re-read, so the listing's
+    /// Permissions column shows what the inspector does.
+    #[test]
+    fn a_changed_mode_reads_the_folder_again() {
+        let mut browser = loaded(&[("a", false)]);
+        click(&mut browser, 0);
+        browser.update(Message::ToggleProperties);
+        let generation = browser.inspector().unwrap().generation();
+        let facts = crate::properties::Facts { mode: 0o600, can_change_mode: true, ..Default::default() };
+        browser.update(Message::Properties(Box::new(Inspector::Found { generation, facts: Some(Ok(facts.clone())), apps: None })));
+        let outcome = browser.update(Message::Properties(Box::new(Inspector::ModeSet { generation, result: Ok(facts) })));
+        assert!(outcome.navigates(), "{outcome:?}");
+    }
+
+    #[test]
+    fn in_the_trash_the_inspector_knows_where_it_is() {
+        let (mut browser, _) = Browser::new(Mode::App, Prefs::default(), crate::sidebar::trash_path(), vec![]);
+        browser.update(Message::ToggleProperties);
+        assert_eq!(browser.inspector().unwrap().place(), crate::properties::Place::Trash);
+    }
+
+    #[test]
+    fn a_preferences_setting_is_taken_without_a_save_of_its_own() {
+        let mut browser = loaded(&[(".hidden", false), ("shown", false)]);
+        assert_eq!(browser.rows().len(), 1);
+        let outcome = browser.update(Message::Adopt(crate::preferences::Setting::ShowHidden(true)));
+        assert_eq!(browser.rows().len(), 2);
+        assert!(!matches!(outcome, Outcome::PrefsChanged(_)), "the window saves it once: {outcome:?}");
     }
 }

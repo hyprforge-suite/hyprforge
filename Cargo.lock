@@ -2032,6 +2032,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "toml",
+ "toml_edit",
  "tracing",
 ]
 
@@ -5264,6 +5265,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 

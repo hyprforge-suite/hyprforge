@@ -3,9 +3,14 @@
 //! Not `files.toml`. That file is state the app rewrites whole on every
 //! save — sort order, window size, pinned folders — and a whole-struct
 //! rewrite drops comments and reorders tables. A person writing key
-//! bindings by hand needs a file the app only ever *reads*, or their
+//! bindings by hand needs a file the app never *rewrites*, or their
 //! notes vanish the next time they resize a window. See
 //! `hyprforge_paths::files_config_toml_path`.
+//!
+//! The Preferences sheet does write to it, but never the way `files.toml`
+//! is written: one entry at a time, through [`crate::config_edit`], which
+//! keeps every comment and line it was not asked to change and refuses a
+//! file it cannot parse. This module still only reads.
 //!
 //! Three states, and they stay distinct (CLAUDE.md's `hlconfig::storage`
 //! rule):
