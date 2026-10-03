@@ -56,6 +56,32 @@ jobs:
           have=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')
           [ "$want" = "$have" ] || { echo "tag says $want, Cargo.toml says $have"; exit 1; }
 
+      - name: Skip what this version already published
+        # crates.io allows a burst of 30 updates and then one a minute
+        # (PublishUpdate in its rate_limiter.rs), and this publishes 33.
+        # cargo waits for the index between dependency waves, which
+        # usually refills enough, but a 429 stops the run with some crates
+        # at the new version and some not. Re-running would then fail at
+        # once on the first crate that already exists. So every crate the
+        # index already lists at this version is excluded, and a re-run
+        # after a 429 finishes the job instead of repeating it.
+        #
+        # The sparse index, not the API: it is what cargo itself reads,
+        # and it needs no token and no user agent.
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          skip=""
+          for name in $(cargo metadata --no-deps --format-version 1 \
+              | python3 -c 'import json,sys; print(*(p["name"] for p in json.load(sys.stdin)["packages"]))'); do
+            path="${name:0:2}/${name:2:2}/$name"
+            if curl -sf "https://index.crates.io/$path" \
+                | python3 -c "import json,sys; sys.exit(0 if any(json.loads(l)['vers'] == '$version' for l in sys.stdin if l.strip()) else 1)"; then
+              echo "$name $version is already on crates.io; skipping it"
+              skip="$skip --exclude $name"
+            fi
+          done
+          echo "SKIP=$skip" >> "$GITHUB_ENV"
+
       - name: cargo publish --workspace
         env:
           # An organisation secret: a crates.io API token scoped to
@@ -67,4 +93,4 @@ jobs:
             --exclude hyprforge-lock --exclude hyprforge-greet \
             --exclude hyprforge-settings --exclude hyprforge-displayd \
             --exclude hyprforge-emojimenu --exclude hyprforge-files \
-            --exclude hyprforge-media
+            --exclude hyprforge-media $SKIP
