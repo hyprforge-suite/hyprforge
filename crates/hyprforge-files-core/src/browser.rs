@@ -3276,12 +3276,12 @@ fn status_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> 
         return plane(iced::widget::Space::new().into());
     }
 
-    let summary = crate::format::status_summary(
-        &vm.rows,
-        vm.selection.selected_paths(),
-        vm.hidden_count,
-        vm.archive,
-    );
+    // A search that found nothing has not found an empty folder.
+    let summary = if vm.search.active && vm.rows.is_empty() && vm.hidden_count == 0 {
+        "No matches".to_string()
+    } else {
+        crate::format::status_summary(&vm.rows, vm.selection.selected_paths(), vm.hidden_count, vm.archive)
+    };
 
     // Left: what is in here. Right: where "here" is on disk, which is
     // the other question a status bar is asked and the one the path bar
@@ -4016,6 +4016,7 @@ fn column_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message>
         columns: Vec::new(),
         renaming: vm.renaming,
         home: None,
+        results_root: vm.search.root,
         scale,
         now: chrono::Local::now(),
         icons: vm.icons,
@@ -4171,6 +4172,10 @@ struct RowContext<'a> {
     renaming: Option<&'a Renaming>,
     /// For shortening Original Location to `~/…`.
     home: Option<PathBuf>,
+    /// Where a search below a folder started, while its results are the
+    /// rows: the Folder column is written from there — see
+    /// `searching::found_in`.
+    results_root: Option<&'a Path>,
     scale: FontScale,
     /// One reading of the clock for the whole listing. Every row's
     /// Modified cell is relative to the same instant anyway, so asking
@@ -4242,7 +4247,7 @@ fn entry_row<'a>(
     selected: bool,
     ctx: &RowContext<'a>,
 ) -> Element<'a, Message> {
-    let RowContext { columns, renaming, home, scale, now, icons, thumbnails } = ctx;
+    let RowContext { columns, renaming, home, results_root, scale, now, icons, thumbnails } = ctx;
     let (renaming, scale, now) = (*renaming, *scale, *now);
     // The icon, then the name, then whichever optional columns are
     // switched on — in `Column::ALL` order, which is the same order
@@ -4291,7 +4296,10 @@ fn entry_row<'a>(
             // would be an `/etc/localtime` consultation per row per
             // frame, for a value every row in the listing shares.
             Column::Modified => format_modified_at(entry.modified, now),
-            Column::Origin => format_origin(entry, home.as_deref()),
+            Column::Origin => match results_root {
+                Some(root) => searching::found_in(entry, root),
+                None => format_origin(entry, home.as_deref()),
+            },
             Column::Packed => format_packed(entry),
         };
         // Dim metadata on the *unselected* row only. `text_dim` is
@@ -4674,6 +4682,7 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         columns: listing_columns(vm.prefs, vm.in_trash, vm.search.results, vm.archive.is_some()),
         renaming: vm.renaming,
         home: home_dir(),
+        results_root: vm.search.root,
         scale,
         now: chrono::Local::now(),
         icons: vm.icons,

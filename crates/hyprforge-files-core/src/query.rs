@@ -206,7 +206,7 @@ impl Problem {
     pub fn message(&self) -> String {
         match self {
             Problem::UnknownKey { key } => format!(
-                "\u{201c}{key}:\u{201d} isn't a filter, so it was searched as text. Filters: {}.",
+                "\u{201c}{key}:\u{201d} isn't a filter, so it was searched as text. Filters: {}",
                 KEYS.iter().map(|k| format!("{k}:")).collect::<Vec<_>>().join(" ")
             ),
             Problem::BadValue { key, value } => format!("\u{201c}{key}:{value}\u{201d} isn't applied \u{2014} {}", expected(key)),

@@ -58,6 +58,7 @@ impl SearchState {
 #[derive(Debug, Clone)]
 struct Run {
     id: u64,
+    root: PathBuf,
     results: Vec<Entry>,
     /// `None` while the walk is going.
     summary: Option<Summary>,
@@ -87,6 +88,8 @@ pub(super) struct SearchModel<'a> {
     status: Option<String>,
     running: bool,
     pub(super) results: bool,
+    /// Where the results on screen were searched from.
+    pub(super) root: Option<&'a Path>,
     naming: Option<(&'a str, Id)>,
     saved_as: Option<&'a str>,
     /// Which saved search is on screen, for its sidebar row.
@@ -107,6 +110,7 @@ impl SearchModel<'static> {
             status: None,
             running: false,
             results: false,
+            root: None,
             naming: None,
             saved_as: None,
             current: None,
@@ -189,7 +193,7 @@ impl Browser {
         self.search.runs += 1;
         let id = self.search.runs;
         let root = self.search_root();
-        self.search.run = Some(Run { id, results: Vec::new(), summary: None });
+        self.search.run = Some(Run { id, root: root.clone(), results: Vec::new(), summary: None });
         self.refresh_view();
         let skip = crate::sidebar::trash_path().parent().map(Path::to_path_buf).into_iter().collect();
         Outcome::Search(Ask::Run(Request {
@@ -409,6 +413,7 @@ impl Browser {
             status,
             running: self.search.run.as_ref().is_some_and(|r| r.summary.is_none()),
             results: self.in_results(),
+            root: self.search.run.as_ref().map(|r| r.root.as_path()),
             naming: self.search.naming.as_ref().map(|n| (n.text.as_str(), n.id.clone())),
             saved_as: self.current_smart().map(|i| self.prefs.searches[i].name.as_str()),
             current: self.current_smart(),
@@ -582,6 +587,21 @@ pub(super) fn empty_message(vm: &ViewModel<'_>) -> &'static str {
         (_, true) => "Searching\u{2026}",
         (Some(_), false) => "Nothing below here matches your search.",
         (None, _) => "No entries match your search.",
+    }
+}
+
+/// A result's Folder cell: where it was found, from the folder the
+/// search started in — `crates/src`, not `/home/a/projects/crates/src`,
+/// because the column is narrow and the part above the search's own
+/// folder is the same on every row. Starts with that folder's name, so a
+/// file found in the folder itself reads `crates` rather than nothing.
+pub(super) fn found_in(entry: &Entry, root: &Path) -> String {
+    let Some(origin) = &entry.origin else { return String::new() };
+    let base = root.file_name().map_or_else(|| root.display().to_string(), |n| n.to_string_lossy().into_owned());
+    match origin.strip_prefix(root) {
+        Ok(rest) if rest.as_os_str().is_empty() => base,
+        Ok(rest) => format!("{base}/{}", rest.display()),
+        Err(_) => origin.display().to_string(),
     }
 }
 
@@ -917,6 +937,16 @@ mod tests {
         let line = status_line(4, Some(&ended));
         assert!(line.contains("2 folders couldn't be read"), "{line}");
         assert!(line.contains("1 folder on other drives not searched"), "{line}");
+    }
+
+    #[test]
+    fn a_result_s_folder_is_written_from_where_the_search_started() {
+        let mut deep = file("/home/a/crates/src", "x.rs");
+        deep.origin = Some("/home/a/crates/src".into());
+        assert_eq!(found_in(&deep, Path::new("/home/a/crates")), "crates/src");
+        let mut here = file("/home/a/crates", "y.rs");
+        here.origin = Some("/home/a/crates".into());
+        assert_eq!(found_in(&here, Path::new("/home/a/crates")), "crates", "never an empty cell");
     }
 
     #[test]
