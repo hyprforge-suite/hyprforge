@@ -38,6 +38,14 @@ sleeps. `backend::InhibitBackend`'s doc comment explains how this
 shapes the trait; `logind::LogindBackend` is where the descriptor is
 actually held.
 
+Which process holds it decides how long keep awake lasts. Held by the
+Settings window it ended when the window closed, and held by the tray
+daemon it ended whenever the daemon restarted — "keep awake does
+nothing", with nothing anywhere saying why. `keep_awake` gives the
+descriptor a process of its own, found again through logind's own list
+of inhibitors, so it lasts until it is turned off and every program
+that shows it agrees whether it is on.
+
 # The one fact the battery and profile backends follow from
 
 A daemon that is not running is never allowed to look like a specific,

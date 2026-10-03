@@ -20,6 +20,9 @@ thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
+# The bounded wait for `kill` when keep awake is turned off — see
+# `keep_awake`. A leaf with no dependencies of its own.
+hyprforge-process.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
