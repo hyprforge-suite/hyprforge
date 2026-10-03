@@ -158,6 +158,8 @@ pub enum DropPlan {
     Paste { clip: FileClip, into: PathBuf },
     /// Move these to the Trash.
     Trash(Vec<PathBuf>),
+    /// Not done, and why — a sentence for the status bar.
+    Refused(String),
 }
 
 /// Where a drop lands, as far as deciding what it does needs to know.
@@ -187,6 +189,18 @@ pub fn plan(
     };
     if paths.is_empty() {
         return DropPlan::Nothing;
+    }
+    // Things already in the Trash come back with Restore, which puts each
+    // where it was and removes its record. Dropped anywhere — onto the
+    // Trash again, or onto a folder — they would be trashed a second time
+    // or moved out from under their record, and the record left behind
+    // would name a file that is not there. Found by review.
+    if paths.iter().any(|p| p.starts_with(trash)) {
+        return if into == trash {
+            DropPlan::Nothing
+        } else {
+            DropPlan::Refused("To take something out of the Trash, use Restore.".to_string())
+        };
     }
     if into == trash {
         return DropPlan::Trash(paths);
@@ -274,6 +288,13 @@ mod tests {
     fn a_drop_on_the_trash_trashes() {
         let plan = planned(DropFrom::Inside(vec![p("/home/a/x.txt")]), TRASH, Held::default(), true);
         assert_eq!(plan, DropPlan::Trash(vec![p("/home/a/x.txt")]));
+    }
+
+    #[test]
+    fn something_already_in_the_trash_is_restored_not_dropped() {
+        let trashed = || DropFrom::Inside(vec![PathBuf::from(TRASH).join("old.txt")]);
+        assert_eq!(planned(trashed(), TRASH, Held::default(), true), DropPlan::Nothing, "not trashed twice");
+        assert!(matches!(planned(trashed(), "/home/a", Held::default(), true), DropPlan::Refused(_)));
     }
 
     #[test]

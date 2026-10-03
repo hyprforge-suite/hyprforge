@@ -1261,6 +1261,15 @@ impl Browser {
         }
         // A file: its folder, with it selected when the listing arrives.
         let Some(parent) = chosen.path.parent().map(Path::to_path_buf) else { return Outcome::None };
+        // Already there: select it in place. Going "to" the folder in view
+        // would reload it and leave it on the Back stack as if it were
+        // somewhere else — found by review.
+        if parent == self.current_dir {
+            if let Some(index) = self.rows().iter().position(|e| e.path == chosen.path) {
+                self.with_rows(|selection, rows| selection.click_with(rows, index, false, false));
+                return Outcome::None;
+            }
+        }
         let outcome = self.go_to(parent);
         self.after_listing = Some((chosen.path, false));
         outcome
@@ -6234,6 +6243,15 @@ mod path_bar_tests {
         let mut entry = crate::backend::mock::MockBackend::file(Path::new("/dir"), name, 1);
         entry.owner = None;
         entry
+    }
+
+    #[test]
+    fn choosing_a_file_in_the_folder_on_screen_selects_it_without_going_anywhere() {
+        let mut browser = answered("b", vec![file("/dir/b.txt")]);
+        let outcome = browser.update(Message::PathChose(0));
+        assert!(!flat(outcome).iter().any(|o| matches!(o, Outcome::ReadDir(_))), "no reload");
+        assert_eq!(browser.selection().focused(), Some(Path::new("/dir/b.txt")));
+        assert!(browser.back_stack.is_empty(), "the folder in view is not somewhere to go back to");
     }
 
     #[test]

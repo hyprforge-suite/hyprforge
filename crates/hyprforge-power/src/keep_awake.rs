@@ -77,6 +77,39 @@ pub fn others(inhibitors: Vec<InhibitorInfo>, uid: u32) -> Vec<InhibitorInfo> {
     inhibitors.into_iter().filter(|i| !(i.who == HOLDER_WHO && i.uid == uid)).collect()
 }
 
+/// How a holder is started: in a transient systemd scope of its own when
+/// the user has a systemd manager, directly otherwise.
+///
+/// A scope, because a child stays in its parent's cgroup, and the tray
+/// runs as a systemd user service with the default
+/// `KillMode=control-group`: restarting the tray — which
+/// `./hyprforge --install` does whenever its binary changes — killed every
+/// process in that cgroup, the holder with it. A new process group does
+/// not leave the cgroup; `systemd-run --scope` does. `--collect` so a
+/// holder that is stopped leaves no unit behind.
+fn holder_command(program: &std::path::Path) -> std::process::Command {
+    if std::path::Path::new("/run/systemd/system").exists() && which("systemd-run") {
+        let mut command = std::process::Command::new("systemd-run");
+        command
+            .args(["--user", "--scope", "--quiet", "--collect", "--unit"])
+            .arg(format!("hyprforge-keep-awake-{}", std::process::id()))
+            .arg("--")
+            .arg(program)
+            .arg(HOLDER_ARG);
+        command
+    } else {
+        let mut command = std::process::Command::new(program);
+        command.arg(HOLDER_ARG);
+        command
+    }
+}
+
+/// Whether `name` is a program on `$PATH`.
+fn which(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(name).is_file()))
+}
+
 fn our_uid() -> u32 {
     std::fs::metadata("/proc/self").map(|m| m.uid()).unwrap_or(u32::MAX)
 }
@@ -141,8 +174,7 @@ impl InhibitBackend for DetachedBackend {
         if self.held().await?.is_some() {
             return Ok(());
         }
-        let mut child = std::process::Command::new(&self.program)
-            .arg(HOLDER_ARG)
+        let mut child = holder_command(&self.program)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
