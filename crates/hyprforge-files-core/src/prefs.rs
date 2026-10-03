@@ -25,6 +25,9 @@ use crate::sort::{SortColumn, SortDirection};
 pub enum ViewMode {
     List,
     Grid,
+    /// Each folder above the one in view as a pane to its left — see
+    /// [`crate::columns`].
+    Columns,
 }
 
 /// Whether the sidebar is showing.

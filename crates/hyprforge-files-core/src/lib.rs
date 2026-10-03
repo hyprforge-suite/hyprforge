@@ -25,6 +25,7 @@ pub mod archive;
 pub mod browser;
 pub mod click;
 pub mod clipboard;
+pub mod columns;
 pub mod config;
 pub mod density;
 pub mod drag;

@@ -102,7 +102,7 @@ Each is `hyprforge_ui::widgets::<name>`.
 | Under a field | `anchored` (an `Anchored`): hangs one element under another, at its width, as an overlay; placed from the anchor's own layout, because a window cannot ask where a widget landed. `suggestions` (of `Suggestion` rows): the list that hangs there, with a heading line, an empty message and the shared row look |
 | Controls | `toggle` and `toggle_style`, `value_slider`, `stepped_slider` with `step_index`, `slider_style`, `segmented`, `segmented_choice`, `segment_style` with `SegmentLook`, `dropdown_style`, `dropdown_menu_style`, `tri_state` |
 | Buttons | `primary_button`, `secondary_button`, `danger_button` |
-| Layout | `section`, `divider`, `row_field`, `page_header`, `setting_list`, `setting_row`, `setting_row_style`, `hero_card`, `status_dot`, `pending_bar`, `pending_label` |
+| Layout | `section`, `divider`, `vertical_divider`, `row_field`, `page_header`, `setting_list`, `setting_row`, `setting_row_style`, `hero_card`, `status_dot`, `pending_bar`, `pending_label` |
 | Badges | `chip`, `keycap` |
 | Dialogs | `confirm_dialog` |
 | Time | `countdown_ring`, with `remaining_fraction` |

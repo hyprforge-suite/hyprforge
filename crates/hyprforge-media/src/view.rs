@@ -115,9 +115,9 @@ impl App {
             glyph_button("⟲", photo.then_some(Message::Perform(Action::RotateLeft)), false, scale),
             // Edit (mockup `1d`) is not built: it writes to somebody's
             // original, which `media-plan.md` keeps as a separate
-            // decision. Drawn disabled rather than left out, the way the
-            // file manager shows its Columns view — a control that is
-            // visibly waiting is a smaller surprise than one that appears.
+            // decision. Drawn disabled rather than left out — a control
+            // that is visibly waiting is a smaller surprise than one that
+            // appears.
             glyph_button("✎", None, false, scale),
             glyph_button("i", Some(Message::Perform(Action::ToggleInfo)), self.info_on(), scale),
             glyph_button("⋯", Some(Message::ToggleMenu), self.menu_open, scale),

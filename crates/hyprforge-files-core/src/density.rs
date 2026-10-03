@@ -155,6 +155,18 @@ pub fn list_min_width(shown_columns: usize, scale: FontScale) -> f32 {
         + gaps
 }
 
+/// One folder's pane in column view, to the left of the folder in view.
+///
+/// Room for the icon and a name of twenty-odd characters — most names
+/// whole, the rest cut at the pane's edge as the list cuts them — so a
+/// 1400-pixel window shows home and three levels below it beside the
+/// preview pane. Scaled, because it is a width measured in text.
+pub fn column_pane_width(scale: FontScale) -> f32 {
+    scale.apply(COLUMN_PANE_WIDTH)
+}
+
+const COLUMN_PANE_WIDTH: f32 = 220.0;
+
 /// The icon lane at the head of every list row.
 pub const ROW_ICON: f32 = 20.0;
 

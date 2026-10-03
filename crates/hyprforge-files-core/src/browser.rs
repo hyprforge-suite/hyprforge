@@ -23,6 +23,7 @@
 //! pins the property that matters: two browsers differing only in `Mode`
 //! feed `render` the exact same data.
 
+use crate::columns;
 use crate::density;
 use crate::filter::{is_hidden, matches_query};
 use crate::format::{format_kind, format_modified_at, format_origin, format_owner, format_packed, format_permissions, format_size};
@@ -44,7 +45,7 @@ use crate::types::{Entry, EntrySize, FilesError, ItemCount};
 use hyprforge_ui::theme::{spacing, FontScale, BASE_TEXT_SIZE};
 use hyprforge_ui::widgets::{
     divider, inset_field_style, meta_text, scaled_text, segment_style, segmented, spaced_caps,
-    SegmentLook,
+    vertical_divider, SegmentLook,
 };
 use iced::widget::{column, container, row, scrollable, text_input, Id};
 use iced::{Element, Length};
@@ -64,6 +65,66 @@ const MAX_THUMBNAILS: usize = 600;
 /// pane's picture for. How wide it is actually drawn depends on the
 /// window: see [`density::preview_width`].
 pub const PREVIEW_WIDTH: f32 = density::PREVIEW_MAX_WIDTH;
+
+/// A folder to the left of the one in view, in column view — see
+/// [`crate::columns`].
+#[derive(Debug, Clone)]
+struct Ancestor {
+    dir: PathBuf,
+    /// `None` while the host is reading it.
+    listing: Option<Result<Vec<Entry>, DirError>>,
+    /// Which of the listing's entries show, in order — the same filters
+    /// and sort as the folder in view, worked out when either changes
+    /// rather than on every frame. Never the search: that is a question
+    /// about the folder in view.
+    order: Vec<usize>,
+}
+
+impl Outcome {
+    /// Whether this goes somewhere — a [`Outcome::ReadDir`], alone or
+    /// among others. What a host asks to know that the rows under the
+    /// pointer are about to change: in column view a navigation reads
+    /// the panes as well, so it is never a bare `ReadDir` there.
+    pub fn navigates(&self) -> bool {
+        match self {
+            Outcome::ReadDir(_) => true,
+            Outcome::Many(parts) => parts.iter().any(Outcome::navigates),
+            _ => false,
+        }
+    }
+}
+
+/// `parts` as one outcome, leaving out the ones that do nothing.
+fn many(parts: Vec<Outcome>) -> Outcome {
+    let mut parts: Vec<Outcome> = parts.into_iter().filter(|p| *p != Outcome::None).collect();
+    match parts.len() {
+        0 => Outcome::None,
+        1 => parts.remove(0),
+        _ => Outcome::Many(parts),
+    }
+}
+
+/// Which of `entries` show, in the order they show in: the dotfile
+/// switch, `query`, the dialog's filter, then the sort. Indices, not
+/// copies — see [`Browser::refresh_view`].
+fn shown_order(entries: &[Entry], query: &str, prefs: &Prefs, filter: Option<&EntryFilter>) -> Vec<usize> {
+    let mut order: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| prefs.show_hidden || !is_hidden(e))
+        .filter(|(_, e)| matches_query(e, query))
+        .filter(|(_, e)| filter.is_none_or(|f| f.shows(e)))
+        .map(|(i, _)| i)
+        .collect();
+    sort_indices(&mut order, entries, prefs.sort_column(), prefs.sort_direction(), prefs.directories_first);
+    order
+}
+
+/// The scrollable holding `dir`'s pane in column view. From the path, so
+/// the pane keeps one id however the panes beside it come and go.
+fn column_scroll_id(dir: &Path) -> Id {
+    Id::from(format!("hyprforge-column:{}", dir.display()))
+}
 
 /// Pictures the host has decoded for this browser: grid thumbnails, and
 /// the one picture the preview pane shows.
@@ -526,6 +587,15 @@ pub enum Outcome {
     /// has just opened, so typing replaces where you are, or with the
     /// cursor at the end after a completion, so typing carries on.
     FocusPath { id: Id, select_all: bool },
+    /// Read each of these folders for column view's panes, through the
+    /// same backend as [`Outcome::ReadDir`], and hand each back as
+    /// [`Message::ColumnLoaded`]. Separate from `ReadDir` because that
+    /// one is *the* listing: a host drops every answer but the newest
+    /// read it issued, and these arrive alongside it.
+    ReadColumns(Vec<PathBuf>),
+    /// Scroll the scrollable `id` to `y`, a fraction of its range — how a
+    /// pane in column view brings the folder you came from into sight.
+    SnapTo { id: Id, y: f32 },
     /// Tell the person something, in the status bar.
     Notice(String),
     /// Several things to do, in order.
@@ -579,6 +649,10 @@ pub enum Outcome {
 pub enum Message {
     Navigate(PathBuf),
     DirLoaded(PathBuf, Result<Vec<Entry>, DirError>),
+    /// A pane's folder, read — the answer to [`Outcome::ReadColumns`].
+    ColumnLoaded(PathBuf, Result<Vec<Entry>, DirError>),
+    /// A row in one of column view's panes was clicked: go there.
+    ColumnChose(PathBuf),
     /// Answers to [`Outcome::CountFolders`]. `None` for a directory that
     /// could not be read — never `Some(0)`, which would claim it is
     /// empty.
@@ -715,6 +789,9 @@ struct ViewModel<'a> {
     /// The rows to draw, in order — borrowed out of the one owned
     /// listing rather than a second copy of it.
     rows: Vec<&'a Entry>,
+    /// Column view's panes to the left of the folder in view, outermost
+    /// first. Empty in the other views.
+    columns: Vec<ColumnModel<'a>>,
     selection: &'a Selection,
     search_query: &'a str,
     load_state: &'a LoadState,
@@ -734,6 +811,16 @@ struct ViewModel<'a> {
     /// room for it. The setting alone is `prefs.preview_pane`; the two
     /// differ exactly when the status bar has to say why nothing shows.
     preview: Option<PreviewModel<'a>>,
+}
+
+/// One pane to the left of the folder in view.
+#[derive(Debug, Clone, PartialEq)]
+struct ColumnModel<'a> {
+    dir: &'a Path,
+    /// `None` while it is being read.
+    rows: Option<Result<Vec<&'a Entry>, &'a DirError>>,
+    /// The row that leads toward the folder in view.
+    trail: Option<PathBuf>,
 }
 
 /// The preview pane's content: what is selected, and the picture for it
@@ -831,6 +918,11 @@ pub struct Browser {
     drop_hover: Option<PathBuf>,
     /// See [`Message::AfterListing`].
     after_listing: Option<(PathBuf, bool)>,
+    /// Select the first row when the listing arrives — Right in column
+    /// view, which goes into a folder and carries on from its top.
+    select_first: bool,
+    /// Column view's panes, outermost first. Empty in the other views.
+    ancestors: Vec<Ancestor>,
     /// How many of `entries` are dotfiles, counted when the listing
     /// arrives rather than in `view` — iced runs `view` every frame,
     /// and a directory with 100,000 entries was being walked on each of
@@ -847,7 +939,8 @@ impl Browser {
     /// Builds a browser starting at `start_dir`, with a sidebar the host
     /// already built (via [`crate::sidebar::build`], off the UI thread —
     /// see that function's own doc). Returns the [`Outcome::ReadDir`]
-    /// the host must fulfil to show anything at all.
+    /// the host must fulfil to show anything at all — with column view's
+    /// [`Outcome::ReadColumns`] beside it when that is the view.
     pub fn new(mode: Mode, prefs: Prefs, start_dir: PathBuf, sidebar: Vec<SidebarItem>) -> (Browser, Outcome) {
         let mut browser = Browser {
             column_picker_open: false,
@@ -884,6 +977,8 @@ impl Browser {
             palette: None,
             drop_hover: None,
             after_listing: None,
+            select_first: false,
+            ancestors: Vec::new(),
             dotfiles: 0,
             // The shipped default, until `set_config` says otherwise.
             hidden_key: Config::default()
@@ -893,7 +988,10 @@ impl Browser {
                 .map(|combo| combo.to_string()),
         };
         browser.folder_icons = folder_icon_keys(&browser.sidebar, &browser.config.sidebar);
-        (browser, Outcome::ReadDir(start_dir))
+        // Column view's panes are read alongside the listing, not after
+        // it: nothing about them waits on what the folder holds.
+        let first = browser.with_columns(Outcome::ReadDir(start_dir));
+        (browser, first)
     }
 
     pub fn mode(&self) -> Mode {
@@ -986,6 +1084,7 @@ impl Browser {
 
     pub fn update(&mut self, message: Message) -> Outcome {
         let outcome = self.update_state(message);
+        let outcome = self.with_columns(outcome);
         self.with_media(outcome)
     }
 
@@ -1011,6 +1110,8 @@ impl Browser {
             }
             Message::Navigate(path) => self.go_to(path),
             Message::DirLoaded(path, result) => self.apply_dir_loaded(path, result),
+            Message::ColumnLoaded(dir, result) => self.apply_column_loaded(dir, result),
+            Message::ColumnChose(path) => self.choose_in_column(path),
             Message::CountsLoaded(counts) => self.apply_counts(counts),
             Message::GoBack => self.go_back(),
             Message::GoForward => self.go_forward(),
@@ -1205,6 +1306,15 @@ impl Browser {
         if !self.in_trash() {
             for entry in self.rows().into_iter().filter(|e| e.is_dir) {
                 add(&entry.path);
+            }
+        }
+        // Column view's panes: every folder showing in one is somewhere
+        // a drop could land, the same as in the listing.
+        for ancestor in &self.ancestors {
+            if let Some(Ok(entries)) = &ancestor.listing {
+                for entry in ancestor.order.iter().filter_map(|&i| entries.get(i)).filter(|e| e.is_dir) {
+                    add(&entry.path);
+                }
             }
         }
         for item in &self.sidebar {
@@ -1509,7 +1619,98 @@ impl Browser {
     /// so the two cannot disagree.
     pub fn perform(&mut self, action: Action) -> Outcome {
         let outcome = self.perform_action(action);
+        let outcome = self.with_columns(outcome);
         self.with_media(outcome)
+    }
+
+    /// Brings column view's panes in line with where the browser is, and
+    /// adds to `outcome` a read for each pane not yet asked for.
+    ///
+    /// Run after every update and action, like [`Self::with_media`], so
+    /// no way of arriving somewhere — a click, a key, the path bar, Back —
+    /// can forget its panes. A pane already read is kept when the folders
+    /// change around it: going one level deeper reads one folder, not
+    /// every folder back to home.
+    fn with_columns(&mut self, outcome: Outcome) -> Outcome {
+        let wanted = if self.prefs.view_mode == ViewMode::Columns && !self.in_trash() {
+            columns::ancestors(&self.current_dir, home_dir().as_deref())
+        } else {
+            Vec::new()
+        };
+        if self.ancestors.len() == wanted.len() && self.ancestors.iter().zip(&wanted).all(|(a, w)| &a.dir == w) {
+            return outcome;
+        }
+        let mut kept: HashMap<PathBuf, Ancestor> =
+            std::mem::take(&mut self.ancestors).into_iter().map(|a| (a.dir.clone(), a)).collect();
+        let mut asks = Vec::new();
+        let mut reveal = Vec::new();
+        for dir in wanted {
+            match kept.remove(&dir) {
+                Some(ancestor) => {
+                    // Its trail may have changed — Back from a sibling —
+                    // so it is brought into sight again.
+                    reveal.push(dir.clone());
+                    self.ancestors.push(ancestor);
+                }
+                None => {
+                    asks.push(dir.clone());
+                    self.ancestors.push(Ancestor { dir, listing: None, order: Vec::new() });
+                }
+            }
+        }
+        let mut parts = vec![outcome];
+        if !asks.is_empty() {
+            parts.push(Outcome::ReadColumns(asks));
+        }
+        parts.extend(reveal.iter().filter_map(|dir| self.reveal_trail(dir)));
+        many(parts)
+    }
+
+    /// Scrolls `dir`'s pane to the row leading toward the folder in view.
+    fn reveal_trail(&self, dir: &Path) -> Option<Outcome> {
+        let ancestor = self.ancestors.iter().find(|a| a.dir == dir)?;
+        let Some(Ok(entries)) = &ancestor.listing else { return None };
+        let trail = columns::trail(dir, &self.current_dir)?;
+        let index = ancestor.order.iter().position(|&i| entries.get(i).is_some_and(|e| e.path == trail))?;
+        Some(Outcome::SnapTo { id: column_scroll_id(dir), y: columns::reveal(index, ancestor.order.len()) })
+    }
+
+    /// A pane's folder arrived. Dropped unless the pane is still wanted.
+    fn apply_column_loaded(&mut self, dir: PathBuf, result: Result<Vec<Entry>, DirError>) -> Outcome {
+        let Some(ancestor) = self.ancestors.iter_mut().find(|a| a.dir == dir) else {
+            return Outcome::None;
+        };
+        ancestor.listing = Some(result);
+        self.refresh_view();
+        self.reveal_trail(&dir).unwrap_or(Outcome::None)
+    }
+
+    /// A row in a pane was clicked. A folder — or an archive, which this
+    /// browser goes into — becomes the folder in view; a file shows its
+    /// folder with it selected, as the path bar does.
+    fn choose_in_column(&mut self, path: PathBuf) -> Outcome {
+        let Some(entry) = self
+            .ancestors
+            .iter()
+            .filter_map(|a| a.listing.as_ref()?.as_ref().ok())
+            .flatten()
+            .find(|e| e.path == path)
+        else {
+            return Outcome::None;
+        };
+        let name = entry.name.clone();
+        if entry.is_dir || crate::archive::looks_browsable(&name) {
+            return self.go_to(path);
+        }
+        let Some(folder) = path.parent().map(Path::to_path_buf) else { return Outcome::None };
+        let outcome = if folder == self.current_dir { Outcome::None } else { self.go_to(folder) };
+        self.after_listing = Some((path, false));
+        // Already here: the listing will not arrive again to select it.
+        if let Some(index) = self.rows().iter().position(|e| Some(&e.path) == self.after_listing.as_ref().map(|(p, _)| p)) {
+            self.after_listing = None;
+            self.with_rows(|selection, rows| selection.click_with(rows, index, false, false));
+        }
+        outcome
     }
 
     /// Adds whatever pictures this state now wants to `outcome`: the
@@ -1567,10 +1768,17 @@ impl Browser {
         // all is asked for before it — a rule the navigation tests pin.
         if matches!(self.load_state, LoadState::Loaded) {
             let set = IconSet { icons: &self.icons, folders: &self.folder_icons };
+            let panes = self
+                .ancestors
+                .iter()
+                .filter_map(|a| a.listing.as_ref()?.as_ref().ok())
+                .flatten()
+                .map(|entry| set.key_of(entry));
             let wanted = self
                 .rows()
                 .into_iter()
                 .map(|entry| set.key_of(entry))
+                .chain(panes)
                 .chain(self.folder_icons.values().map(String::as_str))
                 .chain(std::iter::once(icon::FOLDER_KEY));
             let mut keys: Vec<String> = Vec::new();
@@ -1768,6 +1976,24 @@ impl Browser {
             Action::GoUp => self.go_up(),
             Action::GoBack => self.go_back(),
             Action::GoForward => self.go_forward(),
+            // Column view's panes run left to right, so Left and Right
+            // move between them: out to the folder this one is in, and
+            // into the folder under the cursor.
+            Action::FocusLeft if self.prefs.view_mode == ViewMode::Columns => match self.current_dir.parent() {
+                Some(parent) if !self.ancestors.is_empty() => self.go_to(parent.to_path_buf()),
+                _ => Outcome::None,
+            },
+            Action::FocusRight if self.prefs.view_mode == ViewMode::Columns => {
+                let Some(entry) = self.selection.focused().and_then(|f| self.entries.iter().find(|e| e.path == f)) else {
+                    return Outcome::None;
+                };
+                if !entry.is_dir {
+                    return Outcome::None;
+                }
+                let outcome = self.go_to(entry.path.clone());
+                self.select_first = true;
+                outcome
+            }
             Action::FocusUp | Action::FocusLeft => {
                 self.with_rows(|selection, rows| selection.move_focus(rows, -1));
                 Outcome::None
@@ -1830,7 +2056,17 @@ impl Browser {
             }
             // A re-read, not a navigation: history, search and the
             // selection all stay.
-            Action::Refresh => Outcome::ReadDir(self.current_dir.clone()),
+            // In column view the panes are read again too: F5 is how a
+            // person says "what I am looking at is out of date", and they
+            // are looking at those as well.
+            Action::Refresh => {
+                let read = Outcome::ReadDir(self.current_dir.clone());
+                if self.ancestors.is_empty() {
+                    read
+                } else {
+                    Outcome::Many(vec![read, Outcome::ReadColumns(self.ancestors.iter().map(|a| a.dir.clone()).collect())])
+                }
+            }
             // Handled above; listed so a new window action is a compile
             // error here rather than a silent fall-through.
             Action::Undo
@@ -2110,6 +2346,9 @@ impl Browser {
         // Something the host asked to have selected once it showed up —
         // a folder just made, a file just renamed. If it is not here yet
         // the request waits for the next listing.
+        if std::mem::take(&mut self.select_first) && self.after_listing.is_none() && !self.view.is_empty() {
+            self.with_rows(|selection, rows| selection.click_with(rows, 0, false, false));
+        }
         let arrived = match &self.after_listing {
             Some((path, _)) => self.rows().iter().position(|e| &e.path == path),
             None => None,
@@ -2134,26 +2373,17 @@ impl Browser {
         // 50k-entry directory as a supported case; that was 50k string
         // allocations per character typed, to show a handful of rows.
         // CLAUDE.md's "test the resource, not just the result".
-        let show_hidden = self.prefs.show_hidden;
         let query = self.search_query.to_lowercase();
-        let mut view: Vec<usize> = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| show_hidden || !is_hidden(e))
-            .filter(|(_, e)| matches_query(e, &query))
-            .filter(|(_, e)| self.entry_filter.as_ref().is_none_or(|f| f.shows(e)))
-            .map(|(i, _)| i)
-            .collect();
-        let entries = &self.entries;
-        sort_indices(
-            &mut view,
-            entries,
-            self.prefs.sort_column(),
-            self.prefs.sort_direction(),
-            self.prefs.directories_first,
-        );
-        self.view = view;
+        self.view = shown_order(&self.entries, &query, &self.prefs, self.entry_filter.as_ref());
+        // Column view's panes take the same filters and the same order,
+        // so a folder sorts the same way in its pane as when it was the
+        // one in view. Not the search, which is about the folder in view.
+        for ancestor in &mut self.ancestors {
+            ancestor.order = match &ancestor.listing {
+                Some(Ok(entries)) => shown_order(entries, "", &self.prefs, self.entry_filter.as_ref()),
+                _ => Vec::new(),
+            };
+        }
     }
 
     /// Folds a round of folder counts into the entries they belong to.
@@ -2196,6 +2426,7 @@ impl Browser {
         self.renaming = None;
         self.path_edit = None;
         self.after_listing = None;
+        self.select_first = false;
         self.current_dir = path.clone();
         self.selection.clear();
         self.search_query.clear();
@@ -2205,11 +2436,20 @@ impl Browser {
     }
 
     fn go_to(&mut self, path: PathBuf) -> Outcome {
+        let left = self.current_dir.clone();
         self.back_stack.push(self.current_dir.clone());
         // A fresh navigation abandons whatever "forward" pointed to —
         // pinned by `tests::navigating_somewhere_new_truncates_the_forward_stack`.
         self.forward_stack.clear();
-        self.arrive_at(path)
+        let outcome = self.arrive_at(path.clone());
+        // Going up selects the folder you came out of, so the next step —
+        // into a sibling, or back down — starts where you were. Column
+        // view leans on this for Left, and every other view gets the same
+        // courtesy from Up, a breadcrumb or a pane.
+        if let Some(child) = columns::trail(&path, &left) {
+            self.after_listing = Some((child, false));
+        }
+        outcome
     }
 
     fn go_up(&mut self) -> Outcome {
@@ -2338,6 +2578,18 @@ impl Browser {
             hidden_key: self.hidden_key.clone(),
             show_trash: self.config.sidebar.show_trash,
             rows: self.rows(),
+            columns: self
+                .ancestors
+                .iter()
+                .map(|a| ColumnModel {
+                    dir: &a.dir,
+                    rows: a.listing.as_ref().map(|listing| match listing {
+                        Ok(entries) => Ok(a.order.iter().filter_map(|&i| entries.get(i)).collect()),
+                        Err(e) => Err(e),
+                    }),
+                    trail: columns::trail(&a.dir, &self.current_dir),
+                })
+                .collect(),
             selection: &self.selection,
             search_query: &self.search_query,
             load_state: &self.load_state,
@@ -2876,9 +3128,6 @@ fn search_field<'a>(query: &str, current_dir: &Path, scale: FontScale) -> Elemen
 /// other glyph, which is exactly what the file-type badges could not do
 /// and why those had to be drawn instead.
 ///
-/// Columns has no `on_press`, which iced renders as disabled — column
-/// view is a later phase, and a control that appears from nowhere later
-/// is a worse surprise than one that was visibly waiting.
 fn view_mode_toggle<'a>(prefs: &Prefs, scale: FontScale) -> Element<'a, Message> {
     let seg_w = density::glyph_button(scale) * 0.92;
     let seg_h = density::glyph_button(scale) * 0.77;
@@ -2912,7 +3161,7 @@ fn view_mode_toggle<'a>(prefs: &Prefs, scale: FontScale) -> Element<'a, Message>
     segmented([
         segment(glyph::View::List, Some(ViewMode::List)),
         segment(glyph::View::Grid, Some(ViewMode::Grid)),
-        segment(glyph::View::Columns, None),
+        segment(glyph::View::Columns, Some(ViewMode::Columns)),
     ])
 }
 
@@ -3577,6 +3826,12 @@ fn body_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
 }
 
 fn body_content<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
+    // Column view draws its panes whatever state the folder in view is
+    // in — an empty folder is still somewhere, with folders to its left —
+    // so it takes the state message into its own last pane.
+    if vm.prefs.view_mode == ViewMode::Columns {
+        return column_view(vm, scale);
+    }
     match vm.load_state {
         LoadState::Loading => container(meta_text("Loading\u{2026}", BASE_TEXT_SIZE, scale))
             .center_x(Length::Fill)
@@ -3605,8 +3860,136 @@ fn body_content<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
         LoadState::Loaded => match vm.prefs.view_mode {
             crate::prefs::ViewMode::List => list_view(vm, scale),
             crate::prefs::ViewMode::Grid => grid_view(vm, scale),
+            crate::prefs::ViewMode::Columns => column_view(vm, scale),
         },
     }
+}
+
+/// Column view: a pane for each folder on the way here, then the folder
+/// in view — see [`crate::columns`].
+///
+/// As many panes as fit, nearest first: the path bar above already
+/// names every level, so a pane scrolled off the left is never the only
+/// way back to it. The folder in view takes what the panes leave.
+fn column_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
+    let pane_width = density::column_pane_width(scale);
+    let room = density::list_pane_width(vm.viewport_width, vm.sidebar_collapsed)
+        - vm.preview.as_ref().map_or(0.0, |p| p.width);
+    // One pane's width is kept for the folder in view.
+    let fit = ((room / (pane_width + 1.0)).floor() as usize).saturating_sub(1);
+    let skip = vm.columns.len().saturating_sub(fit);
+
+    let ctx = RowContext {
+        columns: Vec::new(),
+        renaming: vm.renaming,
+        home: None,
+        scale,
+        now: chrono::Local::now(),
+        icons: vm.icons,
+        thumbnails: vm.thumbnails,
+    };
+    let mut panes = row![].height(Length::Fill);
+    for pane in &vm.columns[skip..] {
+        panes = panes
+            .push(container(column_pane(pane, vm, &ctx)).width(Length::Fixed(pane_width)).height(Length::Fill))
+            .push(vertical_divider());
+    }
+    let current: Element<'a, Message> = match vm.load_state {
+        LoadState::Loaded if !vm.rows.is_empty() => {
+            let mut list = column![].spacing(1.0);
+            for (index, entry) in vm.rows.iter().copied().enumerate() {
+                let row = entry_row(index, entry, vm.selection.is_selected(&entry.path), &ctx);
+                list = list.push(if entry.is_dir && !vm.in_trash {
+                    drop_zone(row, &entry.path, vm.drop_hover == Some(entry.path.as_path()))
+                } else {
+                    row
+                });
+            }
+            scrollable(container(list).padding([0, spacing::XS as u16]))
+                .height(Length::Fill)
+                .id(vm.list_scrollable_id.clone())
+                .into()
+        }
+        LoadState::Loaded if vm.search_query.is_empty() => pane_message("This folder is empty.", scale),
+        LoadState::Loaded => pane_message("No entries match your search.", scale),
+        LoadState::Loading => pane_message("Loading\u{2026}", scale),
+        LoadState::Error(err) => container(
+            column![
+                scaled_text("Couldn't open this folder", 16.0, scale).color(hyprforge_ui::theme::warning()),
+                meta_text(err.message.clone(), BASE_TEXT_SIZE, scale),
+            ]
+            .spacing(spacing::SM),
+        )
+        .padding(spacing::LG)
+        .into(),
+    };
+    panes.push(container(current).width(Length::Fill).height(Length::Fill)).into()
+}
+
+/// A quiet line in the middle of a pane that has no rows to show.
+fn pane_message<'a>(message: &'a str, scale: FontScale) -> Element<'a, Message> {
+    container(meta_text(message, BASE_TEXT_SIZE, scale)).center_x(Length::Fill).padding(spacing::LG).into()
+}
+
+/// One folder's pane to the left of the folder in view.
+///
+/// Its rows are drawn like the listing's — the same icon, name and
+/// height — so the eye reads one list continuing to the right. They are
+/// not the listing's rows, though: no selection, no rename, no drag and
+/// no menu, because a pane is the way here, not something to act on. A
+/// click goes there instead.
+fn column_pane<'a>(pane: &ColumnModel<'a>, vm: &ViewModel<'a>, ctx: &RowContext<'a>) -> Element<'a, Message> {
+    let scale = ctx.scale;
+    let rows = match &pane.rows {
+        None => return pane_message("Loading\u{2026}", scale),
+        Some(Err(err)) => {
+            return container(meta_text(err.message.clone(), BASE_TEXT_SIZE, scale)).padding(spacing::LG).into();
+        }
+        Some(Ok(rows)) if rows.is_empty() => return pane_message("This folder is empty.", scale),
+        Some(Ok(rows)) => rows,
+    };
+    let mut list = column![].spacing(1.0);
+    for &entry in rows {
+        let on_trail = pane.trail.as_deref() == Some(entry.path.as_path());
+        let content = row![
+            entry_icon(entry.kind, ctx.icons.for_entry(entry), 20.0, scale),
+            list_cell(scaled_text(&entry.name, density::ROW_TEXT_BASE, scale), NAME_PORTION),
+        ]
+        .spacing(spacing::SM)
+        .align_y(iced::Alignment::Center);
+        let button = iced::widget::button(content)
+            .on_press(Message::ColumnChose(entry.path.clone()))
+            .width(Length::Fill)
+            .height(Length::Fixed(density::row_height(scale)))
+            .style(move |t: &iced::Theme, status| trail_row_style(t, status, on_trail));
+        list = list.push(if entry.is_dir {
+            drop_zone(button, &entry.path, vm.drop_hover == Some(entry.path.as_path()))
+        } else {
+            button.into()
+        });
+    }
+    // A right press in a pane would otherwise reach the listing's own
+    // background and open the menu of the folder in view, about a place
+    // the pointer is not over.
+    iced::widget::mouse_area(
+        scrollable(container(list).padding([0, spacing::XS as u16]))
+            .height(Length::Fill)
+            .id(column_scroll_id(pane.dir)),
+    )
+    .on_right_press(Message::CloseMenu)
+    .into()
+}
+
+/// A pane's row: the row on the way to the folder in view sits on the
+/// raised row surface, never the accent. The accent means *selected*,
+/// and these are not — a highlighted folder in a pane that Delete would
+/// not touch would be a lie about what the next key does.
+fn trail_row_style(theme: &iced::Theme, status: iced::widget::button::Status, on_trail: bool) -> iced::widget::button::Style {
+    let mut style = selectable_row_style(theme, status, false);
+    if on_trail {
+        style.background = Some(iced::Background::Color(hyprforge_ui::theme::surface::row()));
+    }
+    style
 }
 
 /// One cell of a list row: a single line, clipped to its column.
@@ -5830,6 +6213,7 @@ mod tests {
             hidden_key: Some("Ctrl+H".to_string()),
             show_trash: true,
             rows: Vec::new(),
+            columns: Vec::new(),
             selection,
             search_query: "",
             load_state,
@@ -6593,5 +6977,257 @@ mod palette_tests {
         let offered = browser.palette_matches();
         assert!(!offered.is_empty());
         assert!(offered.iter().all(|a| crate::menu::DIALOG_ACTIONS.contains(a)), "{offered:?}");
+    }
+}
+
+/// Column view — see [`crate::columns`]. Outside home throughout, so the
+/// panes start at `/` whoever runs the tests.
+#[cfg(test)]
+mod column_tests {
+    use super::*;
+    use crate::types::EntryKind;
+    use std::time::SystemTime;
+
+    fn entries(dir: &str, rows: &[(&str, bool)]) -> Vec<Entry> {
+        rows.iter()
+            .map(|(name, is_dir)| Entry {
+                name: name.to_string(),
+                path: Path::new(dir).join(name),
+                is_dir: *is_dir,
+                size: if *is_dir { EntrySize::UNCOUNTED } else { EntrySize::Bytes(10) },
+                modified: Some(SystemTime::UNIX_EPOCH),
+                is_symlink: false,
+                link_broken: false,
+                hidden: name.starts_with('.'),
+                kind: EntryKind::classify(*is_dir, name),
+                mode: 0o644,
+                uid: 1000,
+                owner: Some("alex".to_string()),
+                origin: None,
+                packed: None,
+            })
+            .collect()
+    }
+
+    fn parts(outcome: Outcome) -> Vec<Outcome> {
+        match outcome {
+            Outcome::Many(parts) => parts.into_iter().flat_map(parts_of).collect(),
+            other => vec![other],
+        }
+    }
+
+    fn parts_of(outcome: Outcome) -> Vec<Outcome> {
+        parts(outcome)
+    }
+
+    fn panes_asked(outcome: Outcome) -> Vec<PathBuf> {
+        parts(outcome)
+            .into_iter()
+            .filter_map(|o| match o {
+                Outcome::ReadColumns(dirs) => Some(dirs),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    fn columns_prefs() -> Prefs {
+        let mut prefs = Prefs::default();
+        prefs.view_mode = ViewMode::Columns;
+        prefs
+    }
+
+    /// A browser in column view at `/srv/a/b`, its listing and every
+    /// pane loaded.
+    fn at_b() -> Browser {
+        let (mut browser, _) = Browser::new(Mode::App, columns_prefs(), PathBuf::from("/srv/a/b"), vec![]);
+        browser.update(Message::DirLoaded(PathBuf::from("/srv/a/b"), Ok(entries("/srv/a/b", &[("c", true), ("notes.txt", false)]))));
+        browser.update(Message::ColumnLoaded(PathBuf::from("/"), Ok(entries("/", &[("srv", true), ("usr", true)]))));
+        browser.update(Message::ColumnLoaded(PathBuf::from("/srv"), Ok(entries("/srv", &[("a", true), ("z", true)]))));
+        browser.update(Message::ColumnLoaded(
+            PathBuf::from("/srv/a"),
+            Ok(entries("/srv/a", &[("b", true), (".cache", true), ("readme.md", false)])),
+        ));
+        browser
+    }
+
+    fn selected(browser: &Browser) -> Vec<PathBuf> {
+        browser.selected_shown()
+    }
+
+    #[test]
+    fn column_view_reads_each_folder_on_the_way_here_alongside_the_listing() {
+        let (_, first) = Browser::new(Mode::App, columns_prefs(), PathBuf::from("/srv/a/b"), vec![]);
+        assert!(first.navigates(), "the listing itself is still read: {first:?}");
+        assert_eq!(panes_asked(first), [PathBuf::from("/"), PathBuf::from("/srv"), PathBuf::from("/srv/a")]);
+    }
+
+    #[test]
+    fn the_other_views_read_no_panes() {
+        let (_, first) = Browser::new(Mode::App, Prefs::default(), PathBuf::from("/srv/a/b"), vec![]);
+        assert_eq!(first, Outcome::ReadDir(PathBuf::from("/srv/a/b")));
+    }
+
+    #[test]
+    fn switching_to_column_view_reads_the_panes_and_switching_away_forgets_them() {
+        let (mut browser, _) = Browser::new(Mode::App, Prefs::default(), PathBuf::from("/srv/a"), vec![]);
+        let asked = browser.update(Message::SetViewMode(ViewMode::Columns));
+        assert_eq!(panes_asked(asked), [PathBuf::from("/"), PathBuf::from("/srv")]);
+        browser.update(Message::SetViewMode(ViewMode::List));
+        assert!(browser.view_model(1400.0).columns.is_empty());
+    }
+
+    #[test]
+    fn going_one_level_deeper_reads_one_folder_not_every_folder_back_to_the_root() {
+        let mut browser = at_b();
+        let outcome = browser.update(Message::EntryActivated(0));
+        assert_eq!(panes_asked(outcome), [PathBuf::from("/srv/a/b")]);
+    }
+
+    #[test]
+    fn an_answer_for_a_pane_no_longer_shown_lands_nowhere() {
+        let mut browser = at_b();
+        browser.update(Message::Navigate(PathBuf::from("/usr")));
+        browser.update(Message::ColumnLoaded(PathBuf::from("/srv/a"), Ok(entries("/srv/a", &[("b", true)]))));
+        let vm = browser.view_model(1400.0);
+        assert_eq!(vm.columns.iter().map(|c| c.dir).collect::<Vec<_>>(), [Path::new("/")]);
+    }
+
+    #[test]
+    fn each_pane_marks_the_folder_that_leads_here() {
+        let browser = at_b();
+        let vm = browser.view_model(1400.0);
+        let trails: Vec<Option<PathBuf>> = vm.columns.iter().map(|c| c.trail.clone()).collect();
+        assert_eq!(
+            trails,
+            [Some(PathBuf::from("/srv")), Some(PathBuf::from("/srv/a")), Some(PathBuf::from("/srv/a/b"))],
+        );
+    }
+
+    #[test]
+    fn a_pane_takes_the_dotfile_switch_and_the_sort_but_never_the_search() {
+        let mut browser = at_b();
+        browser.update(Message::SearchChanged("notes".into()));
+        let vm = browser.view_model(1400.0);
+        let Some(Ok(rows)) = &vm.columns[2].rows else { panic!("the pane is loaded") };
+        let names: Vec<&str> = rows.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["b", "readme.md"], "no .cache with dotfiles hidden, and the search left it alone");
+    }
+
+    #[test]
+    fn a_pane_that_arrives_scrolls_to_the_folder_you_came_from() {
+        let (mut browser, _) = Browser::new(Mode::App, columns_prefs(), PathBuf::from("/srv/a/m"), vec![]);
+        // Forty folders, then the one this browser is in, in the middle
+        // of the sort: `m` lands at row 20 of 41.
+        let names: Vec<String> = (0..20).map(|i| format!("a{i:02}")).chain((0..20).map(|i| format!("z{i:02}"))).collect();
+        let rows: Vec<(&str, bool)> = names.iter().map(|n| (n.as_str(), true)).chain([("m", true)]).collect();
+        let outcome = browser.update(Message::ColumnLoaded(PathBuf::from("/srv/a"), Ok(entries("/srv/a", &rows))));
+        assert_eq!(outcome, Outcome::SnapTo { id: column_scroll_id(Path::new("/srv/a")), y: 0.5 });
+    }
+
+    #[test]
+    fn left_goes_out_to_the_folder_this_one_is_in_with_it_selected() {
+        let mut browser = at_b();
+        let outcome = browser.perform(Action::FocusLeft);
+        assert!(outcome.navigates());
+        assert_eq!(browser.current_dir(), Path::new("/srv/a"));
+        browser.update(Message::DirLoaded(PathBuf::from("/srv/a"), Ok(entries("/srv/a", &[("b", true), ("readme.md", false)]))));
+        assert_eq!(selected(&browser), [PathBuf::from("/srv/a/b")]);
+    }
+
+    #[test]
+    fn right_goes_into_the_focused_folder_and_carries_on_from_its_top() {
+        let mut browser = at_b();
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+        browser.perform(Action::FocusRight);
+        assert_eq!(browser.current_dir(), Path::new("/srv/a/b/c"));
+        browser.update(Message::DirLoaded(PathBuf::from("/srv/a/b/c"), Ok(entries("/srv/a/b/c", &[("one", false), ("two", false)]))));
+        assert_eq!(selected(&browser), [PathBuf::from("/srv/a/b/c/one")]);
+    }
+
+    #[test]
+    fn right_on_a_file_goes_nowhere() {
+        let mut browser = at_b();
+        browser.update(Message::EntryClicked { index: 1, ctrl: false, shift: false });
+        assert_eq!(browser.perform(Action::FocusRight), Outcome::None);
+        assert_eq!(browser.current_dir(), Path::new("/srv/a/b"));
+    }
+
+    #[test]
+    fn up_and_down_still_move_through_the_folder_in_view() {
+        let mut browser = at_b();
+        browser.perform(Action::FocusDown);
+        browser.perform(Action::FocusDown);
+        assert_eq!(browser.current_dir(), Path::new("/srv/a/b"));
+        assert_eq!(selected(&browser).len(), 1);
+    }
+
+    #[test]
+    fn clicking_a_folder_in_a_pane_goes_there_with_the_way_back_selected() {
+        let mut browser = at_b();
+        browser.update(Message::ColumnChose(PathBuf::from("/srv/a")));
+        assert_eq!(browser.current_dir(), Path::new("/srv/a"));
+        browser.update(Message::DirLoaded(PathBuf::from("/srv/a"), Ok(entries("/srv/a", &[("b", true)]))));
+        assert_eq!(selected(&browser), [PathBuf::from("/srv/a/b")]);
+    }
+
+    #[test]
+    fn clicking_a_file_in_a_pane_shows_its_folder_with_it_selected() {
+        let mut browser = at_b();
+        browser.update(Message::ColumnChose(PathBuf::from("/srv/a/readme.md")));
+        assert_eq!(browser.current_dir(), Path::new("/srv/a"));
+        browser.update(Message::DirLoaded(
+            PathBuf::from("/srv/a"),
+            Ok(entries("/srv/a", &[("b", true), ("readme.md", false)])),
+        ));
+        assert_eq!(selected(&browser), [PathBuf::from("/srv/a/readme.md")]);
+    }
+
+    #[test]
+    fn a_path_no_pane_shows_is_not_somewhere_to_go() {
+        let mut browser = at_b();
+        assert_eq!(browser.update(Message::ColumnChose(PathBuf::from("/etc/passwd"))), Outcome::None);
+        assert_eq!(browser.current_dir(), Path::new("/srv/a/b"));
+    }
+
+    #[test]
+    fn refresh_reads_the_panes_again_as_well_as_the_listing() {
+        let mut browser = at_b();
+        let outcome = browser.perform(Action::Refresh);
+        assert!(outcome.navigates());
+        assert_eq!(panes_asked(outcome), [PathBuf::from("/"), PathBuf::from("/srv"), PathBuf::from("/srv/a")]);
+    }
+
+    #[test]
+    fn every_folder_in_a_pane_is_somewhere_a_drop_can_land() {
+        let browser = at_b();
+        let targets: HashSet<PathBuf> = browser.drop_targets().into_values().collect();
+        assert!(targets.contains(Path::new("/srv/z")));
+        assert!(targets.contains(Path::new("/usr")));
+        assert!(!targets.contains(Path::new("/srv/a/readme.md")), "a file is not a folder");
+    }
+
+    #[test]
+    fn going_up_in_any_view_selects_the_folder_you_came_out_of() {
+        let (mut browser, _) = Browser::new(Mode::App, Prefs::default(), PathBuf::from("/srv/a/b"), vec![]);
+        browser.update(Message::GoUp);
+        browser.update(Message::DirLoaded(PathBuf::from("/srv/a"), Ok(entries("/srv/a", &[("b", true), ("x", true)]))));
+        assert_eq!(selected(&browser), [PathBuf::from("/srv/a/b")]);
+    }
+
+    #[test]
+    fn column_view_draws_in_every_state_its_panes_can_be_in() {
+        let (mut browser, _) = Browser::new(Mode::App, columns_prefs(), PathBuf::from("/srv/a/b"), vec![]);
+        // Loading everywhere.
+        let _ = browser.view(FontScale::default(), 1400.0);
+        browser.update(Message::ColumnLoaded(
+            PathBuf::from("/srv"),
+            Err(DirError { kind: DirErrorKind::PermissionDenied, message: "Permission denied".into() }),
+        ));
+        browser.update(Message::ColumnLoaded(PathBuf::from("/srv/a"), Ok(Vec::new())));
+        browser.update(Message::DirLoaded(PathBuf::from("/srv/a/b"), Ok(Vec::new())));
+        let _ = browser.view(FontScale::default(), 1400.0);
+        // A window too narrow for any pane still draws the folder in view.
+        let _ = browser.view(FontScale::default(), 300.0);
     }
 }

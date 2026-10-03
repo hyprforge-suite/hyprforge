@@ -106,6 +106,20 @@ pub fn divider<'a, Message: 'a>() -> Element<'a, Message> {
         .into()
 }
 
+/// [`divider`] standing up: the same hairline in the same colour, between
+/// panes that sit side by side — Files' column view draws one between
+/// each folder's pane.
+pub fn vertical_divider<'a, Message: 'a>() -> Element<'a, Message> {
+    container(column![])
+        .width(Length::Fixed(1.0))
+        .height(Length::Fill)
+        .style(|_theme: &Theme| container::Style {
+            background: Some(Background::Color(surface::card_border())),
+            ..container::Style::default()
+        })
+        .into()
+}
+
 /// Widest a settings control grows before it stops tracking the row.
 ///
 /// Without a cap, a text input in an 880px content column stretches to
