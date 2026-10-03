@@ -17,9 +17,10 @@
 //!
 //! Actions come in two scopes. Most are about the listing and belong to
 //! [`crate::browser::Browser`], which the open/save dialog also renders.
-//! A few — tabs — are about the *window*, which the dialog does not
-//! have. [`Scope`] says which, so a host can ignore what it has no
-//! notion of rather than every host re-deriving the split.
+//! A few — tabs, undo, the Properties inspector and Preferences — are
+//! about the *window*, which the dialog does not have. [`Scope`] says
+//! which, so a host can ignore what it has no notion of rather than
+//! every host re-deriving the split.
 
 /// One thing a person can ask for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -120,6 +121,20 @@ pub enum Action {
     /// Jump to tab `n`, counted from 1 the way the keys are labelled.
     /// Only 1 to 9 exist, because those are the keys there are.
     Tab(u8),
+    /// Show or hide the Properties inspector beside the listing — see
+    /// [`crate::properties`].
+    ///
+    /// Window scope even though the inspector is drawn by the browser,
+    /// because it is the dialog's *absence* that matters here: a file
+    /// chooser that let you chmod or reassign a type's default
+    /// application would be a file manager wearing a dialog's title. The
+    /// window's host carries it out by asking the browser to toggle it
+    /// (`Browser::toggle_properties`); the dialog's host ignores window
+    /// actions, which is exactly "cleanly absent".
+    Properties,
+    /// Open the Preferences sheet: behaviour and key bindings. Window
+    /// scope because the sheet is the window's, and the dialog has none.
+    Preferences,
 }
 
 /// Whether an action is about the listing or about the window around it.
@@ -181,6 +196,7 @@ impl Action {
             Action::PreviousTab,
         ];
         all.extend((1..=9).map(Action::Tab));
+        all.extend([Action::Properties, Action::Preferences]);
         all
     }
 
@@ -244,6 +260,8 @@ impl Action {
                 // panic in a key handler.
                 _ => "tab-9",
             },
+            Action::Properties => "properties",
+            Action::Preferences => "preferences",
         }
     }
 
@@ -309,6 +327,8 @@ impl Action {
                 8 => "Tab 8",
                 _ => "Tab 9",
             },
+            Action::Properties => "Properties",
+            Action::Preferences => "Preferences\u{2026}",
         }
     }
 
@@ -319,7 +339,9 @@ impl Action {
             | Action::CloseTab
             | Action::NextTab
             | Action::PreviousTab
-            | Action::Tab(_) => Scope::Window,
+            | Action::Tab(_)
+            | Action::Properties
+            | Action::Preferences => Scope::Window,
             _ => Scope::Browser,
         }
     }
@@ -408,6 +430,11 @@ impl Action {
                 8 => &["Ctrl+8"],
                 _ => &["Ctrl+9"],
             },
+            // Alt+Enter is Properties in Explorer, Nautilus and Dolphin
+            // alike — the one key here every file manager agrees on.
+            Action::Properties => &["Alt+Enter"],
+            // Ctrl+Comma is GNOME's and every editor's "preferences".
+            Action::Preferences => &["Ctrl+,"],
         }
     }
 }
@@ -555,12 +582,17 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         // mean unpacking it to make a second archive inside the first,
         // which is a thing nobody has ever wanted.
         Action::Compress => ctx.selected > 0 && !ctx.in_trash && !ctx.in_archive,
+        // Properties is always on: with nothing selected it describes
+        // the folder in view, which is what every file manager's
+        // Properties does from the background.
         Action::Undo
         | Action::NewTab
         | Action::CloseTab
         | Action::NextTab
         | Action::PreviousTab
-        | Action::Tab(_) => true,
+        | Action::Tab(_)
+        | Action::Properties
+        | Action::Preferences => true,
     }
 }
 
@@ -643,10 +675,12 @@ mod tests {
         assert!(Action::DeletePermanently.default_keys().is_empty());
     }
 
-    /// The window's own actions are the tab strip and undo, whose
-    /// history spans every tab. The open/save dialog has neither.
+    /// The window's own actions are the tab strip, undo (whose history
+    /// spans every tab), the Properties inspector and Preferences. The
+    /// open/save dialog has none of them, and ignores what is listed
+    /// here — which is how Properties stays out of a file chooser.
     #[test]
-    fn only_tabs_and_undo_belong_to_the_window() {
+    fn only_tabs_undo_properties_and_preferences_belong_to_the_window() {
         for action in Action::all() {
             let is_window = matches!(
                 action,
@@ -656,6 +690,8 @@ mod tests {
                     | Action::NextTab
                     | Action::PreviousTab
                     | Action::Tab(_)
+                    | Action::Properties
+                    | Action::Preferences
             );
             assert_eq!(action.scope() == Scope::Window, is_window, "{action:?}");
         }

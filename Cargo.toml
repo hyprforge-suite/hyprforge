@@ -220,7 +220,12 @@ tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "ti
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1.1"
-clap = { version = "4.6", features = ["derive"] }
+# Editing a file a person wrote by hand without losing their comments,
+# their order or their spacing — Files' Preferences rebinding one key in
+# `files-config.toml`. `toml` round-trips values, not documents. Already
+# in the tree (zbus's macros parse Cargo.toml with it), at this version.
+toml_edit = "0.25"
+clap ={ version = "4.6", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"

@@ -132,6 +132,26 @@ pub fn preview_width(viewport_width: f32, sidebar_collapsed: bool) -> Option<f32
     (spare >= PREVIEW_MIN_WIDTH).then(|| spare.min(PREVIEW_MAX_WIDTH))
 }
 
+/// The Properties inspector at its widest — a little wider than the
+/// preview pane, because its lines are a label *and* a value side by
+/// side where the pane stacks them. The mockup's is 352.
+pub const INSPECTOR_MAX_WIDTH: f32 = 340.0;
+
+/// Narrower than this "Accessed" and its date no longer share a line.
+pub const INSPECTOR_MIN_WIDTH: f32 = 260.0;
+
+/// How wide the inspector is drawn, in the preview pane's slot.
+///
+/// Never `None`, unlike [`preview_width`]: the pane is on by default and
+/// may quietly give way, but the inspector is only ever there because
+/// someone just asked for it, and asking for something that then does
+/// not appear reads as the key not working. So in a narrow window it is
+/// the listing that gives way, down to the inspector's own floor.
+pub fn inspector_width(viewport_width: f32, sidebar_collapsed: bool) -> f32 {
+    let spare = list_pane_width(viewport_width, sidebar_collapsed) - LISTING_MIN_BESIDE_PREVIEW;
+    spare.clamp(INSPECTOR_MIN_WIDTH, INSPECTOR_MAX_WIDTH)
+}
+
 /// The narrowest a list row can be drawn before its columns stop being
 /// readable and start being a puzzle.
 ///
@@ -295,6 +315,16 @@ const STATUS_HEIGHT_BASE: f32 = 30.0;
 #[cfg(test)]
 mod grid_tests {
     use super::*;
+
+    /// Where the preview pane would step aside, the inspector narrows
+    /// instead — it was asked for — and a wide window never stretches it
+    /// past its widest.
+    #[test]
+    fn the_inspector_never_steps_aside_and_never_sprawls() {
+        assert_eq!(preview_width(480.0, true), None);
+        assert_eq!(inspector_width(480.0, true), INSPECTOR_MIN_WIDTH);
+        assert_eq!(inspector_width(3000.0, false), INSPECTOR_MAX_WIDTH);
+    }
 
     /// The fixed five-column grid never got wider *or* more numerous as
     /// the window grew — it sat at one size with an expanding margin
