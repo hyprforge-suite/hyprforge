@@ -24,6 +24,7 @@ use super::{many, quiet_link_style, Browser, Message, Outcome, ViewModel};
 use crate::action::Action;
 use crate::menu::MenuItem;
 use crate::query::{self, Filter, Query};
+use crate::content::ContentReport;
 use crate::search::{Ask, Budget, End, Request, Scope, SearchMessage, SmartChange, SmartFolder, Summary};
 use crate::types::Entry;
 use hyprforge_ui::theme::{spacing, FontScale};
@@ -76,7 +77,7 @@ struct Naming {
 pub(super) struct SearchModel<'a> {
     /// Something is typed: the rail shows.
     pub(super) active: bool,
-    scope: Scope,
+    pub(super) scope: Scope,
     /// Searching below is not offered in the Trash — see
     /// [`Browser::walk_offered`].
     walks: bool,
@@ -183,8 +184,13 @@ impl Browser {
     ///
     /// One request per change, never per result: each keystroke is "look
     /// again", and the host keeps one walk per tab running.
+    ///
+    /// A `content:` filter walks even in "This folder", one level deep:
+    /// the listing in memory holds names, not what the files say, and
+    /// reading them is I/O the browser never does.
     pub(super) fn search_again(&mut self) -> Outcome {
-        let walk = self.search.scope.walks() && self.walk_offered() && self.searching();
+        let reads = self.query().reads_contents();
+        let walk = (self.search.scope.walks() || reads) && self.walk_offered() && self.searching();
         if !walk {
             let stop = self.search.run.take().is_some();
             self.refresh_view();
@@ -202,7 +208,7 @@ impl Browser {
             matcher: self.query().matcher(chrono::Local::now()),
             show_hidden: self.prefs.show_hidden,
             skip,
-            budget: Budget::default(),
+            budget: Budget { depth: if self.search.scope.walks() { Budget::default().depth } else { 1 }, ..Budget::default() },
         }))
     }
 
@@ -328,6 +334,32 @@ impl Browser {
         }
     }
 
+    /// The scopes the rail offers here, in its order — see
+    /// [`Self::walk_offered`] and the rail's own Home rule.
+    fn offered_scopes(&self) -> Vec<Scope> {
+        let mut scopes = vec![Scope::Folder];
+        if self.walk_offered() {
+            scopes.push(Scope::Below);
+            if super::home_dir().is_some_and(|home| home != self.current_dir) {
+                scopes.push(Scope::Home);
+            }
+        }
+        scopes
+    }
+
+    /// The rail's next scope, from the keyboard: This folder, Subfolders,
+    /// Home, and round again — the buttons in the order they are drawn,
+    /// skipping any the rail is not showing.
+    pub(super) fn next_scope(&mut self) -> Outcome {
+        let offered = self.offered_scopes();
+        let at = offered.iter().position(|s| *s == self.search.scope);
+        let next = offered[at.map_or(0, |i| (i + 1) % offered.len())];
+        if next == self.search.scope {
+            return Outcome::None;
+        }
+        self.update_search(SearchMessage::Scope(next))
+    }
+
     /// The query as a saved search stores it.
     fn query_text(&self) -> String {
         self.query().to_text(&self.search_query)
@@ -401,7 +433,14 @@ impl Browser {
     }
 
     pub(super) fn search_model(&self) -> SearchModel<'_> {
-        let problems = self.query().problems.iter().map(|p| p.message()).collect();
+        let query = self.query();
+        let mut problems: Vec<String> = query.problems.iter().map(|p| p.message()).collect();
+        if query.reads_contents() && !self.walk_offered() {
+            // The one place a content filter cannot run: the Trash's
+            // files are stored under names that are not theirs. Said,
+            // rather than quietly matching on the name alone.
+            problems.push("Contents aren\u{2019}t searched in the Trash, so content: isn\u{2019}t applied.".to_string());
+        }
         let status = self.search.run.as_ref().map(|run| status_line(run.results.len(), run.summary.as_ref()));
         SearchModel {
             active: self.searching(),
@@ -459,12 +498,45 @@ pub(super) fn status_line(found: usize, summary: Option<&Summary>) -> String {
             plural(found, "match", "matches")
         ),
         End::FoundLimit => format!("Showing the first {} \u{2014} narrow the search to see the rest", grouped(found)),
+        End::ReadLimit => format!(
+            "Stopped after reading {} \u{00b7} {} \u{2014} narrow the search to see the rest",
+            crate::format::human_readable_size(summary.contents.bytes),
+            plural(found, "match", "matches")
+        ),
     };
+    line.push_str(&contents_line(&summary.contents));
     if summary.unreadable > 0 {
         line.push_str(&format!(" \u{00b7} {} couldn't be read", plural(summary.unreadable, "folder", "folders")));
     }
     if summary.elsewhere > 0 {
         line.push_str(&format!(" \u{00b7} {} on other drives not searched", plural(summary.elsewhere, "folder", "folders")));
+    }
+    line
+}
+
+/// What a content search read and what it did not, for the rail — every
+/// file it skipped is counted with its reason, never left out of the
+/// total quietly. Empty when nothing was read or skipped.
+fn contents_line(report: &ContentReport) -> String {
+    if report.read == 0 && report.skipped() == 0 {
+        return String::new();
+    }
+    // "0 files read" says nothing the reasons after it do not.
+    let mut line = if report.read > 0 { format!(" \u{00b7} {} read", plural(report.read, "file", "files")) } else { String::new() };
+    let reasons: Vec<String> = [
+        (report.too_large, "too large", "too large"),
+        (report.binary, "binary", "binary"),
+        (report.unreadable, "unreadable", "unreadable"),
+        (report.archives, "archive", "archives"),
+        (report.packed, "inside an archive", "inside an archive"),
+        (report.links, "link", "links"),
+    ]
+    .into_iter()
+    .filter(|(n, _, _)| *n > 0)
+    .map(|(n, one, many)| plural(n, one, many))
+    .collect();
+    if !reasons.is_empty() {
+        line.push_str(&format!(" \u{00b7} not read: {}", reasons.join(", ")));
     }
     line
 }
@@ -585,6 +657,8 @@ pub(super) fn search_rail<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Option<El
 pub(super) fn empty_message(vm: &ViewModel<'_>) -> &'static str {
     match (&vm.search.status, vm.search.running) {
         (_, true) => "Searching\u{2026}",
+        // A content search of this folder alone also walks, one level.
+        (Some(_), false) if vm.search.scope == Scope::Folder => "No entries match your search.",
         (Some(_), false) => "Nothing below here matches your search.",
         (None, _) => "No entries match your search.",
     }
@@ -603,6 +677,38 @@ pub(super) fn found_in(entry: &Entry, root: &Path) -> String {
         Ok(rest) => format!("{base}/{}", rest.display()),
         Err(_) => origin.display().to_string(),
     }
+}
+
+/// [`found_in`] cut to `max` characters for a grid cell, keeping the end:
+/// the folder a result is *in* says more than the one the search started
+/// from, which every result shares. Whole folder names are dropped from
+/// the front behind an ellipsis — `…/files/src` — and only a last name
+/// too long on its own is cut mid-name.
+///
+/// Counted in characters, not measured: iced 0.14 has no text ellipsis
+/// and the grid has no layout pass to ask, so the cell's width in
+/// average characters is the honest estimate ([`super::density`]), and
+/// the cell clips whatever overruns it.
+pub(super) fn elide_folder(folder: &str, max: usize) -> String {
+    if folder.chars().count() <= max {
+        return folder.to_string();
+    }
+    let parts: Vec<&str> = folder.split('/').collect();
+    let mut kept = String::new();
+    for part in parts.iter().rev() {
+        let candidate = if kept.is_empty() { (*part).to_string() } else { format!("{part}/{kept}") };
+        // Room for the "…/" in front.
+        if candidate.chars().count() + 2 > max {
+            break;
+        }
+        kept = candidate;
+    }
+    if kept.is_empty() {
+        let last = parts.last().copied().unwrap_or(folder);
+        let tail: String = last.chars().rev().take(max.saturating_sub(1)).collect::<Vec<_>>().into_iter().rev().collect();
+        return format!("\u{2026}{tail}");
+    }
+    format!("\u{2026}/{kept}")
 }
 
 /// The icon key a saved search's sidebar row asks the theme for — the
@@ -661,7 +767,7 @@ mod tests {
     }
 
     fn summary(end: End) -> Summary {
-        Summary { end, folders: 3, unreadable: 0, elsewhere: 0, found: 0, elapsed: Duration::from_secs(1) }
+        Summary { end, folders: 3, found: 0, elapsed: Duration::from_secs(1), ..Summary::stopped() }
     }
 
     /// The brief's first rule: a bare word in this folder is the search
@@ -947,6 +1053,109 @@ mod tests {
         let mut here = file("/home/a/crates", "y.rs");
         here.origin = Some("/home/a/crates".into());
         assert_eq!(found_in(&here, Path::new("/home/a/crates")), "crates", "never an empty cell");
+    }
+
+    // --- content ----------------------------------------------------------
+
+    /// The listing cannot answer `content:`, so even "This folder" asks
+    /// the host — for the folder alone, one level deep.
+    #[test]
+    fn a_content_filter_in_this_folder_walks_one_level() {
+        let mut browser = browser_at("/d", vec![file("/d", "a.txt")]);
+        let outcome = type_text(&mut browser, "content:todo ");
+        let asked = requests(&outcome);
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].budget.depth, 1);
+        assert_eq!(asked[0].root, PathBuf::from("/d"));
+        assert!(browser.rows().is_empty(), "nothing is shown as a match before it is read");
+        let outcome = browser.update(Message::Search(SearchMessage::RemoveChip(0)));
+        assert!(stops(&outcome), "and taking the chip away goes back to the listing");
+        assert_eq!(names(&browser), ["a.txt"]);
+    }
+
+    #[test]
+    fn a_content_filter_below_walks_the_usual_depth() {
+        let mut browser = browser_at("/d", vec![]);
+        type_text(&mut browser, "content:todo ");
+        let outcome = browser.update(Message::Search(SearchMessage::Scope(Scope::Below)));
+        assert_eq!(requests(&outcome)[0].budget.depth, Budget::default().depth);
+    }
+
+    #[test]
+    fn the_trash_says_it_cannot_search_contents() {
+        let trash = crate::sidebar::trash_path();
+        let (mut browser, _) = Browser::new(Mode::App, Prefs::default(), trash.clone(), Vec::new());
+        browser.update(Message::DirLoaded(trash, Ok(vec![])));
+        let outcome = type_text(&mut browser, "content:x ");
+        assert!(requests(&outcome).is_empty());
+        assert!(browser.search_model().problems.iter().any(|p| p.contains("Trash")));
+    }
+
+    /// Every file a content search did not read is counted with why.
+    #[test]
+    fn the_status_line_says_what_a_content_search_skipped_and_why() {
+        let mut ended = summary(End::Complete);
+        ended.contents = ContentReport { read: 1_200, bytes: 9_000, too_large: 12, binary: 340, ..ContentReport::default() };
+        let line = status_line(3, Some(&ended));
+        assert!(line.contains("1,200 files read"), "{line}");
+        assert!(line.contains("not read: 12 too large, 340 binary"), "{line}");
+        assert!(!line.contains("unreadable"), "{line}");
+        ended.contents = ContentReport { archives: 1, links: 2, ..ContentReport::default() };
+        let line = status_line(3, Some(&ended));
+        assert!(line.contains("not read: 1 archive, 2 links"), "{line}");
+        assert!(!status_line(3, Some(&summary(End::Complete))).contains("read"), "nothing about reading without content:");
+        let mut spent = summary(End::ReadLimit);
+        spent.contents.bytes = 1 << 30;
+        assert!(status_line(3, Some(&spent)).starts_with("Stopped after reading 1.0 GiB"), "{}", status_line(3, Some(&spent)));
+    }
+
+    // --- scope from the keyboard ------------------------------------------
+
+    #[test]
+    fn the_scope_key_goes_round_the_rail_s_buttons_in_order() {
+        let mut browser = browser_at("/somewhere/else", vec![]);
+        type_text(&mut browser, "x");
+        let outcome = browser.perform(Action::NextSearchScope);
+        assert_eq!(browser.search.scope, Scope::Below);
+        assert_eq!(requests(&outcome).len(), 1, "a new scope searches at once");
+        browser.perform(Action::NextSearchScope);
+        let expected = if super::super::home_dir().is_some() { Scope::Home } else { Scope::Folder };
+        assert_eq!(browser.search.scope, expected);
+        browser.perform(Action::NextSearchScope);
+        if expected == Scope::Home {
+            assert_eq!(browser.search.scope, Scope::Folder, "and round again");
+        }
+    }
+
+    #[test]
+    fn the_scope_key_does_nothing_without_a_search_or_in_the_trash() {
+        let mut browser = browser_at("/d", vec![]);
+        assert_eq!(browser.perform(Action::NextSearchScope), Outcome::None);
+        assert_eq!(browser.search.scope, Scope::Folder, "no search, no hidden scope change");
+        let trash = crate::sidebar::trash_path();
+        let (mut browser, _) = Browser::new(Mode::App, Prefs::default(), trash.clone(), Vec::new());
+        browser.update(Message::DirLoaded(trash, Ok(vec![])));
+        type_text(&mut browser, "x");
+        assert_eq!(browser.perform(Action::NextSearchScope), Outcome::None);
+        assert_eq!(browser.search.scope, Scope::Folder);
+    }
+
+    // --- the grid's folder line --------------------------------------------
+
+    #[test]
+    fn a_short_folder_is_left_whole() {
+        assert_eq!(elide_folder("crates/src", 15), "crates/src");
+    }
+
+    /// The end is kept: where a result is matters more than where the
+    /// search began, which every result shares.
+    #[test]
+    fn a_long_folder_keeps_whole_names_from_the_end() {
+        assert_eq!(elide_folder("hyprforge/crates/hyprforge-files/src", 15), "\u{2026}/src");
+        assert_eq!(elide_folder("proj/crates/files/src", 15), "\u{2026}/files/src");
+        let cut = elide_folder("proj/an-extremely-long-folder-name", 15);
+        assert_eq!(cut.chars().count(), 15);
+        assert!(cut.starts_with('\u{2026}') && cut.ends_with("folder-name"), "{cut}");
     }
 
     #[test]

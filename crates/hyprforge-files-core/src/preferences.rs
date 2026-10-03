@@ -125,7 +125,7 @@ pub fn group(action: Action) -> &'static str {
             "Going places"
         }
         FocusUp | FocusDown | FocusLeft | FocusRight | ExtendUp | ExtendDown | SelectAll | ClearSearch
-        | ContextMenu => "Selecting",
+        | NextSearchScope | ContextMenu => "Selecting",
         Trash | DeletePermanently | Restore | EmptyTrash | Copy | Cut | Paste | CopyPath | Rename | NewFolder
         | OpenWith | Extract | ExtractTo | Compress | Undo => "Files",
         ToggleHidden | TogglePreview | Properties | Preferences => "The window",

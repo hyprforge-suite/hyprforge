@@ -128,6 +128,11 @@ hyprforge-icons = { path = "crates/hyprforge-icons", version = "0.1.0" }
 hyprforge-thumbnails = { path = "crates/hyprforge-thumbnails", version = "0.1.0" }
 hyprforge-files = { path = "crates/hyprforge-files", version = "0.1.0" }
 
+# The file manager's content search: finding text in a stream without
+# lowercasing a copy of it. Already in the lockfile through several
+# dependencies; named here so files-core asks for it directly.
+memchr = "2"
+
 # Only hyprforge-lua-import depends on this — evaluating a user's own
 # hyprland.lua (with hl.* stubbed to record calls) to import hand-written
 # rules/binds/monitor config, rather than text-parsing it, which breaks on

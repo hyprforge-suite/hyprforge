@@ -244,6 +244,37 @@ pub fn grid_icon_size(scale: FontScale) -> f32 {
     scale.apply(GRID_ICON)
 }
 
+/// The icon inside a grid cell among a search's results, which also
+/// carry a line saying where each result is.
+///
+/// Smaller rather than the cell taller or the name shorter. A taller
+/// cell would make the same folder's grid change shape when a search
+/// starts; a name cut to one line would cost the one thing a grid is
+/// for, recognising what you are looking at; eight pixels of icon is
+/// the cheapest of the three, and still leaves the icon the largest
+/// thing in the cell. `grid_tests` sums it and asserts it fits.
+pub fn grid_result_icon_size(scale: FontScale) -> f32 {
+    scale.apply(GRID_RESULT_ICON)
+}
+
+/// The room a result's folder line takes: one line of meta text.
+pub fn grid_folder_height(scale: FontScale) -> f32 {
+    scale.apply(META_TEXT_BASE) * GRID_NAME_LINE_HEIGHT
+}
+
+/// How many characters of a result's folder fit across a grid cell —
+/// see `searching::elide_folder`, which keeps the end of it.
+///
+/// An estimate, because iced 0.14 cannot be asked how wide a string
+/// will be before layout: the cell's inner width over an average
+/// proportional character (a little over half the text size). The ratio
+/// is the same at every font scale, since the cell and the text grow
+/// together — so it is one number, not a function of `FontScale`. The
+/// cell clips what an unusually wide name overruns by.
+pub const GRID_FOLDER_CHARS: usize = 15;
+
+const GRID_RESULT_ICON: f32 = 48.0;
+
 /// How many whole cells fit across a grid pane `pane_width` logical
 /// pixels wide.
 ///
@@ -476,6 +507,28 @@ mod grid_tests {
             );
         }
         assert!(grid_cell_width(FontScale::default()) > grid_icon_size(FontScale::default()));
+    }
+
+    /// A result's cell is the same height as any other, and holds its
+    /// smaller icon, the two-line name and the folder line under it.
+    #[test]
+    fn a_result_cell_holds_its_folder_line_at_the_same_height() {
+        for scale in [FontScale::default(), FontScale(1.25), FontScale(1.6)] {
+            let padding = scale.apply(hyprforge_ui::theme::spacing::SM) * 2.0;
+            let gap = scale.apply(hyprforge_ui::theme::spacing::SM);
+            let needed = padding + grid_result_icon_size(scale) + gap + grid_name_height(scale) + grid_folder_height(scale);
+            assert!(grid_cell_height(scale) >= needed, "needs {needed} at scale {scale:?}");
+        }
+        assert!(grid_result_icon_size(FontScale::default()) < grid_icon_size(FontScale::default()));
+    }
+
+    /// The character estimate leaves the folder line inside the cell at
+    /// an average character width of 0.55em.
+    #[test]
+    fn the_folder_line_s_characters_fit_the_cell() {
+        let scale = FontScale::default();
+        let inner = grid_cell_width(scale) - scale.apply(hyprforge_ui::theme::spacing::SM) * 2.0;
+        assert!(GRID_FOLDER_CHARS as f32 * scale.apply(META_TEXT_BASE) * 0.55 <= inner);
     }
 
     /// Two lines, not one and not three — a grid whose rows are

@@ -2136,6 +2136,7 @@ impl Browser {
                 many(vec![Outcome::PrefsChanged(self.prefs.clone()), self.search_after_refresh()])
             }
             Action::ShowInFolder => self.show_in_folder(),
+            Action::NextSearchScope => self.next_scope(),
             Action::TogglePreview => {
                 // With the inspector in the pane's place, asking for the
                 // preview means "show me the preview instead": the
@@ -5018,6 +5019,9 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         .collect();
     let thumbnails = vm.thumbnails;
     let icons = vm.icons;
+    // Among a search's results, the list's Folder column becomes a line
+    // under each cell's name.
+    let results_root = vm.search.root.filter(|_| vm.search.results);
 
     // `responsive` and not a fixed column count. Five fixed columns meant
     // the cells never got wider *or* more numerous as the window grew —
@@ -5045,7 +5049,10 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
                 grid = grid.push(current);
                 current = row![].spacing(gap);
             }
-            let cell = grid_cell(index, entry, selected, renaming, thumbnails.get(&entry.path), icons.for_entry(entry), scale);
+            let folder = results_root
+                .map(|root| searching::elide_folder(&searching::found_in(entry, root), density::GRID_FOLDER_CHARS));
+            let cell =
+                grid_cell(index, entry, selected, renaming, thumbnails.get(&entry.path), icons.for_entry(entry), folder, scale);
             let cell = if entry.is_dir && !in_trash {
                 drop_zone(cell, &entry.path, drop_hover == Some(entry.path.as_path()))
             } else {
@@ -5138,7 +5145,13 @@ fn rename_field_style(
     }
 }
 
-/// One cell of the grid: a big icon over a centred name.
+/// One cell of the grid: a big icon over a centred name — and, among a
+/// search's results, the folder the result is in under that.
+///
+/// Eight arguments, each a different fact about one cell; a struct
+/// built only to carry them across this one call would be the same
+/// list with more ceremony.
+#[allow(clippy::too_many_arguments)]
 fn grid_cell<'a>(
     index: usize,
     entry: &'a Entry,
@@ -5146,6 +5159,7 @@ fn grid_cell<'a>(
     renaming: Option<&'a Renaming>,
     thumbnail: Option<&Picture>,
     icon: Option<&Picture>,
+    folder: Option<String>,
     scale: FontScale,
 ) -> Element<'a, Message> {
     let editing = renaming.filter(|r| r.path == entry.path);
@@ -5157,10 +5171,28 @@ fn grid_cell<'a>(
     };
     // The picture itself where the host has decoded one, in the same box
     // the icon would take, so a row of thumbnails and icons lines up.
-    let size = density::grid_icon_size(scale);
+    let size = if folder.is_some() { density::grid_result_icon_size(scale) } else { density::grid_icon_size(scale) };
     let picture: Element<'a, Message> = match thumbnail {
         Some(picture) => picture.view(size),
         None => entry_icon(entry.kind, icon, size, scale),
+    };
+    // Among a search's results, where each one is, directly under the
+    // name's two-line box with no gap: the cell has room for the line
+    // and not for a gap as well — see `density::grid_result_icon_size`.
+    let name: Element<'a, Message> = match folder {
+        Some(folder) => column![
+            name,
+            container(
+                meta_text(folder, density::META_TEXT_BASE, scale)
+                    .align_x(iced::Alignment::Center)
+                    .wrapping(iced::widget::text::Wrapping::None)
+                    .width(Length::Fill),
+            )
+            .height(Length::Fixed(density::grid_folder_height(scale)))
+            .clip(true),
+        ]
+        .into(),
+        None => name,
     };
     let content = column![
         picture,

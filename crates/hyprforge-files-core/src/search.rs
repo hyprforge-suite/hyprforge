@@ -43,8 +43,19 @@
 //!   blocked on one cannot be cancelled from here.
 //! - **The Trash's storage.** A trashed file is not where anything lives,
 //!   and its stored name is not its name — see [`crate::trash`].
+//!
+//! # Reading what files say
+//!
+//! A query with `content:` in it is answered here too, file by file, for
+//! whatever the name, size and date filters let through — see
+//! [`crate::content`] for its own bounds. It needs no fifth way of
+//! ending to be safe: the walk's clock and the cancel flag are checked
+//! before every file it reads, not only before every folder, so one
+//! folder of large text files cannot hold a cancelled search open. Its
+//! one ending of its own is [`End::ReadLimit`].
 
 use crate::backend::FsBackend;
+use crate::content::{ContentBudget, ContentReport, Opener, Scanner, Verdict};
 use crate::query::{Filter, Matcher};
 use crate::types::Entry;
 use serde::{Deserialize, Serialize};
@@ -88,8 +99,11 @@ pub struct Budget {
     /// is not one anybody reads, and every result is an [`Entry`] held
     /// in memory.
     pub found: usize,
-    /// Levels below the root.
+    /// Levels below the root. 1 reads the root alone — what a
+    /// `content:` search of "This folder" asks for.
     pub depth: usize,
+    /// How much reading a `content:` filter may do.
+    pub content: ContentBudget,
 }
 
 impl Default for Budget {
@@ -101,7 +115,7 @@ impl Default for Budget {
     /// folders and a million entries, and stops at the folder limit
     /// after about ten seconds with the walk's peak memory under 20MB.
     fn default() -> Self {
-        Budget { time: Duration::from_secs(15), folders: 100_000, found: 5_000, depth: 48 }
+        Budget { time: Duration::from_secs(15), folders: 100_000, found: 5_000, depth: 48, content: ContentBudget::default() }
     }
 }
 
@@ -133,6 +147,8 @@ pub enum End {
     FolderLimit,
     /// [`Budget::found`] results were kept.
     FoundLimit,
+    /// [`ContentBudget::total`] bytes were read.
+    ReadLimit,
 }
 
 /// What a finished walk reports, beside its results.
@@ -147,13 +163,24 @@ pub struct Summary {
     pub elsewhere: usize,
     pub found: usize,
     pub elapsed: Duration,
+    /// What reading contents came to — all zero unless the query has a
+    /// `content:` filter.
+    pub contents: ContentReport,
 }
 
 impl Summary {
     /// A walk that never started — what a host reports for one it could
     /// not run at all, so the view still leaves "Searching…".
     pub fn stopped() -> Summary {
-        Summary { end: End::Stopped, folders: 0, unreadable: 0, elsewhere: 0, found: 0, elapsed: Duration::ZERO }
+        Summary {
+            end: End::Stopped,
+            folders: 0,
+            unreadable: 0,
+            elsewhere: 0,
+            found: 0,
+            elapsed: Duration::ZERO,
+            contents: ContentReport::default(),
+        }
     }
 }
 
@@ -174,13 +201,19 @@ pub const BATCH_SIZE: usize = 250;
 /// listing already draws that field as a column of folders, and it is
 /// the same fact the Trash puts there — where this thing is.
 ///
+/// `open` hands over a file's bytes for a `content:` filter — the host's
+/// [`crate::content::open_regular`], or [`crate::content::in_archive`]
+/// for a walk inside one. Never called for a query without one.
+///
 /// `emit` returning `false` means nobody is listening any more, and the
-/// walk stops. `cancel` is checked before every folder.
+/// walk stops. `cancel` is checked before every folder, and before every
+/// file whose contents are read.
 pub fn walk<B: FsBackend + ?Sized>(
     backend: &B,
     request: &Request,
     cancel: &AtomicBool,
     elsewhere: &dyn Fn(&Path) -> bool,
+    open: Opener<'_>,
     emit: &mut dyn FnMut(Vec<Entry>) -> bool,
 ) -> Summary {
     let started = Instant::now();
@@ -190,6 +223,8 @@ pub fn walk<B: FsBackend + ?Sized>(
     let mut queue: VecDeque<(PathBuf, usize)> = VecDeque::from([(request.root.clone(), 0)]);
     let mut batch: Vec<Entry> = Vec::new();
     let mut last_sent = started;
+    let needles = request.matcher.contents();
+    let mut scanner = (!needles.is_empty()).then(|| Scanner::new(budget.content));
 
     'walk: while let Some((dir, depth)) = queue.pop_front() {
         if cancel.load(Ordering::Relaxed) {
@@ -224,6 +259,27 @@ pub fn walk<B: FsBackend + ?Sized>(
                 }
             }
             if request.matcher.matches(&entry) {
+                if let Some(scanner) = scanner.as_mut() {
+                    // Reading a file is the slow part of a content
+                    // search, so the walk's own limits are asked again
+                    // before each one rather than once a folder.
+                    if cancel.load(Ordering::Relaxed) {
+                        summary.end = End::Stopped;
+                        break 'walk;
+                    }
+                    if started.elapsed() >= budget.time {
+                        summary.end = End::TimeLimit;
+                        break 'walk;
+                    }
+                    match scanner.check(&entry, needles, open) {
+                        Verdict::Holds => {}
+                        Verdict::Fails | Verdict::Unknown => continue,
+                        Verdict::Spent => {
+                            summary.end = End::ReadLimit;
+                            break 'walk;
+                        }
+                    }
+                }
                 entry.origin = Some(dir.clone());
                 batch.push(entry);
                 summary.found += 1;
@@ -243,6 +299,9 @@ pub fn walk<B: FsBackend + ?Sized>(
     }
     if !batch.is_empty() {
         emit(batch);
+    }
+    if let Some(scanner) = scanner {
+        summary.contents = scanner.report;
     }
     summary.elapsed = started.elapsed();
     summary
@@ -379,9 +438,15 @@ mod tests {
         backend
     }
 
+    /// For a query with no `content:` filter, which must never open a
+    /// file.
+    fn never(_: &Path) -> Result<crate::content::Opened, crate::content::Refused> {
+        panic!("a walk without content: opened a file")
+    }
+
     fn run(backend: &MockBackend, request: &Request) -> (Vec<Entry>, Summary) {
         let mut found = Vec::new();
-        let summary = walk(backend, request, &AtomicBool::new(false), &|_| false, &mut |batch| {
+        let summary = walk(backend, request, &AtomicBool::new(false), &|_| false, &never, &mut |batch| {
             found.extend(batch);
             true
         });
@@ -456,14 +521,14 @@ mod tests {
         backend.make_unreadable("/r/sub/deep");
         let request = request("/r", "ext:rs");
         let mut found = Vec::new();
-        let summary = walk(&backend, &request, &AtomicBool::new(false), &|_| false, &mut |b| {
+        let summary = walk(&backend, &request, &AtomicBool::new(false), &|_| false, &never, &mut |b| {
             found.extend(b);
             true
         });
         assert_eq!(summary.unreadable, 1);
         assert_eq!(summary.end, End::Complete);
 
-        let summary = walk(&tree(), &request, &AtomicBool::new(false), &|p| p.ends_with("sub"), &mut |_| true);
+        let summary = walk(&tree(), &request, &AtomicBool::new(false), &|p| p.ends_with("sub"), &never, &mut |_| true);
         assert_eq!(summary.elsewhere, 1);
         assert_eq!(summary.folders, 1, "the other filesystem was not entered");
     }
@@ -478,7 +543,7 @@ mod tests {
 
     #[test]
     fn cancelling_stops_before_the_next_folder() {
-        let summary = walk(&tree(), &request("/r", "ext:rs"), &AtomicBool::new(true), &|_| false, &mut |_| true);
+        let summary = walk(&tree(), &request("/r", "ext:rs"), &AtomicBool::new(true), &|_| false, &never, &mut |_| true);
         assert_eq!(summary.end, End::Stopped);
         assert_eq!(summary.folders, 0);
     }
@@ -489,7 +554,7 @@ mod tests {
         backend.seed_many("/big", BATCH_SIZE + 1);
         let mut request = request("/big", "");
         request.root = PathBuf::from("/big");
-        let summary = walk(&backend, &request, &AtomicBool::new(false), &|_| false, &mut |_| false);
+        let summary = walk(&backend, &request, &AtomicBool::new(false), &|_| false, &never, &mut |_| false);
         assert_eq!(summary.end, End::Stopped);
     }
 
@@ -527,7 +592,7 @@ mod tests {
         backend.seed("/wide", (0..500).map(|i| MockBackend::dir(root, &format!("d{i}"))).collect());
         let mut request = request("/wide", "nothing-matches-this");
         request.budget.folders = 10;
-        let summary = walk(&backend, &request, &AtomicBool::new(false), &|_| false, &mut |_| true);
+        let summary = walk(&backend, &request, &AtomicBool::new(false), &|_| false, &never, &mut |_| true);
         assert_eq!(summary.end, End::FolderLimit);
         assert_eq!(summary.folders, 10);
     }
@@ -539,13 +604,89 @@ mod tests {
         let request = request("/big", "");
         let mut batches = 0;
         let mut total = 0;
-        walk(&backend, &request, &AtomicBool::new(false), &|_| false, &mut |b| {
+        walk(&backend, &request, &AtomicBool::new(false), &|_| false, &never, &mut |b| {
             batches += 1;
             total += b.len();
             true
         });
         assert_eq!(total, BATCH_SIZE * 3);
         assert!(batches <= 2, "one folder is one batch at most, plus the remainder: {batches}");
+    }
+
+    // --- content ----------------------------------------------------------
+
+    /// The tree's files say what their names say, except `c.rs`.
+    fn says(path: &Path) -> Result<crate::content::Opened, crate::content::Refused> {
+        let text: &'static [u8] = match path.file_name().and_then(|n| n.to_str()) {
+            Some("a.rs") => b"fn main() { // TODO }",
+            Some("c.rs") => b"\0\0\0 binary TODO",
+            Some(_) => b"nothing to see",
+            None => b"",
+        };
+        Ok(crate::content::Opened { len: text.len() as u64, reader: Box::new(text) })
+    }
+
+    fn run_reading(request: &Request) -> (Vec<Entry>, Summary) {
+        let mut found = Vec::new();
+        let summary = walk(&tree(), request, &AtomicBool::new(false), &|_| false, &says, &mut |b| {
+            found.extend(b);
+            true
+        });
+        (found, summary)
+    }
+
+    #[test]
+    fn content_finds_the_files_that_say_it_and_counts_what_it_could_not_read() {
+        let (found, summary) = run_reading(&request("/r", "content:todo"));
+        assert_eq!(names(&found), ["a.rs"]);
+        let report = summary.contents;
+        assert_eq!(report.binary, 1, "c.rs is a binary that happens to say it");
+        assert_eq!(report.read, 3, "a.rs, b.txt, d.rs");
+        assert_eq!(summary.end, End::Complete);
+    }
+
+    /// The cheap filters go first: a file `ext:` has already turned away
+    /// is never opened.
+    #[test]
+    fn content_is_only_read_for_what_the_other_filters_let_through() {
+        let (found, summary) = run_reading(&request("/r", "content:nothing ext:txt"));
+        assert_eq!(names(&found), ["b.txt"]);
+        assert_eq!(summary.contents.read, 1);
+    }
+
+    /// "This folder" with a content filter is a walk one level deep.
+    #[test]
+    fn a_depth_of_one_reads_only_the_root() {
+        let mut request = request("/r", "content:nothing");
+        request.budget.depth = 1;
+        let (found, summary) = run_reading(&request);
+        assert_eq!(names(&found), ["b.txt"]);
+        assert_eq!(summary.folders, 1);
+    }
+
+    #[test]
+    fn spending_the_reading_budget_ends_the_walk_with_its_own_reason() {
+        let mut request = request("/r", "content:todo");
+        request.budget.content.total = 5;
+        let (_, summary) = run_reading(&request);
+        assert_eq!(summary.end, End::ReadLimit);
+        assert!(summary.contents.bytes <= 5);
+    }
+
+    /// A cancel arriving while a folder's files are being read stops the
+    /// walk before the next file, not after the folder.
+    #[test]
+    fn a_cancel_stops_a_content_search_between_files() {
+        let cancel = AtomicBool::new(false);
+        let opened = std::cell::Cell::new(0);
+        let open = |path: &Path| {
+            opened.set(opened.get() + 1);
+            cancel.store(true, Ordering::Relaxed);
+            says(path)
+        };
+        let summary = walk(&tree(), &request("/r", "content:x"), &cancel, &|_| false, &open, &mut |_| true);
+        assert_eq!(summary.end, End::Stopped);
+        assert_eq!(opened.get(), 1);
     }
 
     // --- saved searches --------------------------------------------------

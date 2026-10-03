@@ -5,7 +5,13 @@
 //! report ext:pdf modified:<30d          a PDF called *report*, from this month
 //! kind:image size:>5M                   big pictures
 //! -kind:folder name:*.tar.*             files only, named like a tarball
+//! ext:rs content:TODO                   Rust files that say TODO
 //! ```
+//!
+//! `content:` is the one filter decided somewhere else: whether a file
+//! says something is a read, and this module does none. It is parsed
+//! and chipped like the rest, and handed to the search walk as a
+//! [`crate::content::Needle`] — see [`Test::Content`].
 //!
 //! Pure, like [`crate::jump`]: no clock, no filesystem. Parsing is
 //! [`parse`]; deciding whether an entry matches is a [`Matcher`], which is
@@ -50,7 +56,7 @@ use crate::types::{Entry, EntryKind, EntrySize};
 use std::time::{Duration, SystemTime};
 
 /// Every key this module understands, in the order a hint lists them.
-pub const KEYS: [&str; 6] = ["ext", "kind", "size", "modified", "name", "is"];
+pub const KEYS: [&str; 7] = ["ext", "kind", "size", "modified", "name", "is", "content"];
 
 /// What was typed into the search box, understood.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -96,6 +102,11 @@ pub enum Test {
     Hidden,
     /// A symbolic link.
     Link,
+    /// The file's contents hold this text, ASCII case ignored — see
+    /// [`crate::content`]. Never decided here: no I/O happens in this
+    /// module, so a [`Matcher`] passes it over and the search walk
+    /// answers it, last, for whatever the other filters let through.
+    Content(String),
 }
 
 /// `kind:` — [`EntryKind`] as a person names it, plus `file`, which is
@@ -222,6 +233,7 @@ fn expected(key: &str) -> &'static str {
         "size" => "write a comparison, like size:>10M or size:<500k.",
         "modified" => "write an age, like modified:<7d or modified:>1y, or modified:today.",
         "name" => "write part of a name, or a pattern like name:*.rs.",
+        "content" => "write the text to look for, like content:TODO or content:\"to do\".",
         _ => "is takes hidden or link.",
     }
 }
@@ -235,6 +247,12 @@ impl Query {
     /// Whether this asks for dotfiles by name — `is:hidden`, not negated.
     pub fn wants_hidden(&self) -> bool {
         self.filters.iter().any(|f| !f.negated && f.test == Test::Hidden)
+    }
+
+    /// Whether this asks what files *say* — a `content:` filter, which
+    /// only the search walk can answer.
+    pub fn reads_contents(&self) -> bool {
+        self.filters.iter().any(|f| matches!(f.test, Test::Content(_)))
     }
 
     /// The query written back out the way it would be typed: filters
@@ -261,7 +279,15 @@ impl Query {
             filters: self
                 .filters
                 .iter()
-                .map(|f| (f.negated, Pinned::of(&f.test, now)))
+                .filter_map(|f| Pinned::of(&f.test, now).map(|p| (f.negated, p)))
+                .collect(),
+            content: self
+                .filters
+                .iter()
+                .filter_map(|f| match &f.test {
+                    Test::Content(text) => Some(crate::content::Needle::new(text, f.negated)),
+                    _ => None,
+                })
                 .collect(),
         }
     }
@@ -418,6 +444,7 @@ fn read_token(token: &str) -> Read {
             "link" | "symlink" => Some(Test::Link),
             _ => None,
         },
+        "content" | "contains" => (!value.is_empty()).then(|| Test::Content(value.to_string())),
         _ => return Read::Unknown(Problem::UnknownKey { key }),
     };
     match test {
@@ -514,6 +541,9 @@ pub struct Matcher {
     text: String,
     hidden: bool,
     filters: Vec<(bool, Pinned)>,
+    /// `content:` filters, which [`Matcher::matches`] does not decide —
+    /// see [`Test::Content`].
+    content: Vec<crate::content::Needle>,
 }
 
 /// A [`Test`] with its times resolved.
@@ -536,7 +566,9 @@ enum NamePattern {
 }
 
 impl Pinned {
-    fn of(test: &Test, now: chrono::DateTime<chrono::Local>) -> Pinned {
+    /// `None` for a test that is not decided from the listing at all —
+    /// [`Test::Content`].
+    fn of(test: &Test, now: chrono::DateTime<chrono::Local>) -> Option<Pinned> {
         use chrono::{Days, TimeZone};
         let instant: SystemTime = now.into();
         let midnight = |date: chrono::NaiveDate| -> Option<SystemTime> {
@@ -545,7 +577,7 @@ impl Pinned {
             // cannot place, where the bound is dropped rather than wrong.
             chrono::Local.from_local_datetime(&date.and_hms_opt(0, 0, 0)?).earliest().map(Into::into)
         };
-        match test {
+        Some(match test {
             Test::Ext(exts) => Pinned::Ext(exts.clone()),
             Test::Kind(kinds) => Pinned::Kind(kinds.clone()),
             Test::Size(size) => Pinned::Size(*size),
@@ -560,7 +592,8 @@ impl Pinned {
             Test::Name(pattern) => Pinned::Name(NamePattern::Contains(pattern.clone())),
             Test::Hidden => Pinned::Hidden,
             Test::Link => Pinned::Link,
-        }
+            Test::Content(_) => return None,
+        })
     }
 
     fn holds(&self, entry: &Entry, name: &str) -> bool {
@@ -598,7 +631,9 @@ impl Pinned {
 }
 
 impl Matcher {
-    /// Whether `entry` is something this query is looking for.
+    /// Whether `entry` is something this query is looking for, as far
+    /// as the listing can say — everything but `content:`, which the
+    /// search walk asks of what this lets through ([`Self::contents`]).
     pub fn matches(&self, entry: &Entry) -> bool {
         if self.text.is_empty() && self.filters.is_empty() {
             return true;
@@ -611,7 +646,12 @@ impl Matcher {
 
     /// Nothing asked: every entry matches.
     pub fn is_empty(&self) -> bool {
-        self.text.is_empty() && self.filters.is_empty()
+        self.text.is_empty() && self.filters.is_empty() && self.content.is_empty()
+    }
+
+    /// The `content:` filters, for the search walk to answer.
+    pub fn contents(&self) -> &[crate::content::Needle] {
+        &self.content
     }
 
     /// Whether the query asks for dotfiles — see [`Test::Hidden`].
@@ -829,6 +869,31 @@ mod tests {
         let mut link = file("l", 1);
         link.is_symlink = true;
         assert!(matches("is:link", &link));
+    }
+
+    // --- content ----------------------------------------------------------
+
+    /// The listing cannot read a file, so a matcher passes `content:`
+    /// over and hands it to the walk — it neither matches everything
+    /// nor nothing on its own.
+    #[test]
+    fn content_is_left_to_the_walk_and_handed_over_as_a_needle() {
+        let query = parse("content:\"To Do\" ext:md");
+        assert!(query.reads_contents());
+        let matcher = query.matcher(now());
+        assert!(matcher.matches(&file("notes.md", 1)), "the name half still decides");
+        assert!(!matcher.matches(&file("notes.rs", 1)));
+        assert_eq!(matcher.contents(), [crate::content::Needle { negated: false, bytes: b"to do".to_vec() }]);
+        let negated = parse("-contains:TODO").matcher(now());
+        assert!(negated.contents()[0].negated);
+        assert!(!negated.is_empty());
+    }
+
+    #[test]
+    fn an_empty_content_value_is_reported_not_applied() {
+        let query = parse("content:\"\"");
+        assert!(!query.reads_contents());
+        assert!(matches!(&query.problems[..], [Problem::BadValue { key, .. }] if key == "content"));
     }
 
     // --- what is not understood is said -----------------------------------

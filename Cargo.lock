@@ -2028,6 +2028,7 @@ dependencies = [
  "hyprforge-paths",
  "hyprforge-ui",
  "iced",
+ "memchr",
  "serde",
  "tempfile",
  "thiserror 2.0.19",

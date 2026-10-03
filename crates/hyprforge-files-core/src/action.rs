@@ -52,6 +52,10 @@ pub enum Action {
     ExtendDown,
     SelectAll,
     ClearSearch,
+    /// Move the search to the rail's next scope — This folder,
+    /// Subfolders, Home, and round — see [`crate::search::Scope`]. Only
+    /// while searching, when the rail is on screen to show where it went.
+    NextSearchScope,
     /// Show or hide dotfiles. Remembered.
     ToggleHidden,
     /// Show or hide the preview pane beside the listing. Remembered.
@@ -172,6 +176,7 @@ impl Action {
             Action::ExtendDown,
             Action::SelectAll,
             Action::ClearSearch,
+            Action::NextSearchScope,
             Action::ToggleHidden,
             Action::TogglePreview,
             Action::Trash,
@@ -224,6 +229,7 @@ impl Action {
             Action::ExtendDown => "extend-down",
             Action::SelectAll => "select-all",
             Action::ClearSearch => "clear-search",
+            Action::NextSearchScope => "next-search-scope",
             Action::ToggleHidden => "show-hidden",
             Action::TogglePreview => "preview-pane",
             Action::Trash => "trash",
@@ -296,6 +302,7 @@ impl Action {
             Action::ExtendDown => "Extend Selection Down",
             Action::SelectAll => "Select All",
             Action::ClearSearch => "Clear Search",
+            Action::NextSearchScope => "Search Next Scope",
             Action::ToggleHidden => "Show Hidden Files",
             Action::TogglePreview => "Preview Pane",
             Action::Trash => "Move to Trash",
@@ -386,6 +393,12 @@ impl Action {
             Action::ExtendDown => &["Shift+Down"],
             Action::SelectAll => &["Ctrl+A"],
             Action::ClearSearch => &["Escape"],
+            // The editors' "find in files" key, for "look further than
+            // this folder". With Ctrl held a letter types nothing, so it
+            // reaches the keymap even while the search field has focus —
+            // which an Alt+letter would not: iced's field takes Alt's
+            // text as typing.
+            Action::NextSearchScope => &["Ctrl+Shift+F"],
             Action::ToggleHidden => &["Ctrl+H"],
             // Alt+P is Windows Explorer's, the one file manager whose
             // preview pane has a key people already know.
@@ -541,7 +554,7 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         | Action::ExtendUp
         | Action::ExtendDown
         | Action::SelectAll => ctx.shown > 0,
-        Action::ClearSearch => ctx.searching,
+        Action::ClearSearch | Action::NextSearchScope => ctx.searching,
         Action::ToggleHidden | Action::TogglePreview | Action::ContextMenu => true,
         // Not inside an archive: there is no trash in a zip, and a
         // member removed from one is gone. `DeletePermanently` is the

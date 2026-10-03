@@ -62,6 +62,10 @@ toml_edit.workspace = true
 # `Entry::modified: Option<SystemTime>` into a calendar date needs a
 # calendar, which `std` deliberately does not carry.
 chrono.workspace = true
+# `content:` searches a file's bytes as they stream past — see
+# `content.rs`. `memchr2` finds a needle's first letter in either case
+# without making a lowercased copy of every chunk.
+memchr.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

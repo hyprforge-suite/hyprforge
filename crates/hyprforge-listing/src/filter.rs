@@ -38,9 +38,10 @@ pub fn filter_hidden(entries: Vec<Entry>, show_hidden: bool) -> Vec<Entry> {
 /// searching file *contents*. All three are reasonable things to want
 /// from a file browser's search box; none of them belongs in a predicate
 /// this cheap to call on every entry in a large directory on every
-/// keystroke, and content search in particular is a different, far more
-/// expensive feature (an index, not a predicate) that phase 2 has not
-/// been asked for.
+/// keystroke. Content search in particular is far more expensive, and
+/// the file manager answers it in its bounded search walk
+/// (`hyprforge-files-core`'s `content` module), off the UI thread —
+/// never here.
 /// `query` must already be lowercased — see [`filter_query`], which is
 /// what does it. Taking it pre-folded rather than folding it here is the
 /// difference between lowercasing the search box's contents once and
