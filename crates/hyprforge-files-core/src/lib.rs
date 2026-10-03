@@ -38,6 +38,7 @@ pub mod jump;
 pub mod keymap;
 pub mod menu;
 pub mod naming;
+pub mod palette;
 pub mod prefs;
 pub mod preview;
 pub mod sidebar;

@@ -34,6 +34,8 @@ pub enum Action {
     GoForward,
     /// Type where to go, in the path bar — see [`crate::jump`].
     EditLocation,
+    /// Find any action by typing its name — see [`crate::palette`].
+    CommandPalette,
     /// Move the keyboard focus one row, collapsing the selection onto it.
     FocusUp,
     FocusDown,
@@ -141,6 +143,7 @@ impl Action {
             Action::GoBack,
             Action::GoForward,
             Action::EditLocation,
+            Action::CommandPalette,
             Action::FocusUp,
             Action::FocusDown,
             Action::FocusLeft,
@@ -190,6 +193,7 @@ impl Action {
             Action::GoBack => "go-back",
             Action::GoForward => "go-forward",
             Action::EditLocation => "edit-location",
+            Action::CommandPalette => "command-palette",
             Action::FocusUp => "focus-up",
             Action::FocusDown => "focus-down",
             Action::FocusLeft => "focus-left",
@@ -258,6 +262,7 @@ impl Action {
             Action::GoBack => "Back",
             Action::GoForward => "Forward",
             Action::EditLocation => "Go to Location…",
+            Action::CommandPalette => "Command Palette",
             Action::FocusUp => "Previous Item",
             Action::FocusDown => "Next Item",
             Action::FocusLeft => "Item to the Left",
@@ -338,6 +343,8 @@ impl Action {
             // What every browser and GTK's own file chooser use for
             // "type a location".
             Action::EditLocation => &["Ctrl+L"],
+            // The key every editor and launcher with a palette uses.
+            Action::CommandPalette => &["Ctrl+K"],
             Action::FocusUp => &["Up"],
             Action::FocusDown => &["Down"],
             Action::FocusLeft => &["Left"],
@@ -484,7 +491,7 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         Action::GoUp => ctx.has_parent,
         Action::GoBack => ctx.can_go_back,
         Action::GoForward => ctx.can_go_forward,
-        Action::EditLocation => true,
+        Action::EditLocation | Action::CommandPalette => true,
         Action::FocusUp
         | Action::FocusDown
         | Action::FocusLeft

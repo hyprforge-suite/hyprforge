@@ -421,6 +421,16 @@ struct PathEdit {
     id: Id,
 }
 
+/// The command palette, while it is open — see [`crate::palette`].
+#[derive(Debug, Clone, PartialEq)]
+struct PaletteState {
+    query: String,
+    /// Which match Enter runs.
+    highlighted: usize,
+    /// Fresh per opening, like [`Renaming::id`].
+    id: Id,
+}
+
 /// A context menu that is showing.
 #[derive(Debug, Clone, PartialEq)]
 struct OpenMenu {
@@ -637,6 +647,14 @@ pub enum Message {
     /// A drag over the window is over this folder now, or over nothing
     /// a drop could land in.
     DropHover(Option<PathBuf>),
+    /// The command palette's text changed.
+    PaletteInput(String),
+    /// Enter in the command palette: run the highlighted match.
+    PaletteSubmit,
+    /// A match in the command palette was clicked, by position.
+    PaletteChose(usize),
+    /// Close the command palette without running anything.
+    PaletteCancel,
     /// Start typing a location into the path bar.
     EditPath,
     /// The path bar's text changed.
@@ -806,6 +824,8 @@ pub struct Browser {
     path_edit: Option<PathEdit>,
     /// Which files show — see [`EntryFilter`]. `None` shows everything.
     entry_filter: Option<EntryFilter>,
+    /// The command palette, while it is open.
+    palette: Option<PaletteState>,
     /// The folder a drag over the window is over — told by the host,
     /// which is the one that hears the compositor. See [`crate::drop`].
     drop_hover: Option<PathBuf>,
@@ -861,6 +881,7 @@ impl Browser {
             renaming: None,
             path_edit: None,
             entry_filter: None,
+            palette: None,
             drop_hover: None,
             after_listing: None,
             dotfiles: 0,
@@ -1092,6 +1113,22 @@ impl Browser {
                 self.drop_hover = over;
                 Outcome::None
             }
+            Message::PaletteInput(query) => {
+                if let Some(palette) = &mut self.palette {
+                    palette.query = query;
+                    palette.highlighted = 0;
+                }
+                Outcome::None
+            }
+            Message::PaletteSubmit => {
+                let index = self.palette.as_ref().map_or(0, |p| p.highlighted);
+                self.run_palette(index)
+            }
+            Message::PaletteChose(index) => self.run_palette(index),
+            Message::PaletteCancel => {
+                self.palette = None;
+                Outcome::None
+            }
             Message::EditPath => self.begin_path_edit(),
             Message::PathInput(text) => {
                 let Some(edit) = &mut self.path_edit else { return Outcome::None };
@@ -1188,6 +1225,37 @@ impl Browser {
     pub fn set_entry_filter(&mut self, filter: Option<EntryFilter>) {
         self.entry_filter = filter;
         self.refresh_view();
+    }
+
+    /// What the command palette offers for what has been typed — only
+    /// what would do something here and now, and in the open/save dialog
+    /// only what the dialog does ([`crate::menu::DIALOG_ACTIONS`]).
+    fn palette_matches(&self) -> Vec<Action> {
+        let Some(palette) = &self.palette else { return Vec::new() };
+        let context = self.action_context();
+        let allowed = matches!(self.mode, Mode::Dialog(_)).then_some(crate::menu::DIALOG_ACTIONS);
+        crate::palette::matches(&palette.query, |a| action::enabled(a, &context), allowed)
+    }
+
+    fn open_palette(&mut self) -> Outcome {
+        self.menu = None;
+        self.renaming = None;
+        self.path_edit = None;
+        let id = Id::unique();
+        self.palette = Some(PaletteState { query: String::new(), highlighted: 0, id: id.clone() });
+        Outcome::FocusPath { id, select_all: true }
+    }
+
+    /// Closes the palette and does what was chosen, exactly as a key or a
+    /// menu would — the palette is one more way of asking, not a second
+    /// implementation of anything.
+    fn run_palette(&mut self, index: usize) -> Outcome {
+        let chosen = self.palette_matches().get(index).copied();
+        self.palette = None;
+        match chosen {
+            Some(action) => self.perform(action),
+            None => Outcome::None,
+        }
     }
 
     /// Whether the path bar is being typed into — for a host deciding
@@ -1565,6 +1633,29 @@ impl Browser {
         // keyboard while it is focused, so a key reaching here was not
         // typed into it.
         self.renaming = None;
+        // The palette keeps the arrows while it is open, as the path bar
+        // does below.
+        if let Some(palette) = &mut self.palette {
+            match action {
+                Action::FocusUp | Action::ExtendUp => {
+                    palette.highlighted = palette.highlighted.saturating_sub(1);
+                    return Outcome::None;
+                }
+                Action::FocusDown | Action::ExtendDown => {
+                    palette.highlighted += 1;
+                    let count = self.palette_matches().len();
+                    if let Some(palette) = &mut self.palette {
+                        palette.highlighted = palette.highlighted.min(count.saturating_sub(1));
+                    }
+                    return Outcome::None;
+                }
+                Action::ClearSearch => {
+                    self.palette = None;
+                    return Outcome::None;
+                }
+                _ => {}
+            }
+        }
         // The path bar keeps the arrows: they move through its answers,
         // not the listing behind it. A text field does not take Up and
         // Down, so they arrive here as the listing's own actions.
@@ -1622,6 +1713,7 @@ impl Browser {
             // the focus was set.
             Action::Open => self.activate_focused(),
             Action::EditLocation => self.begin_path_edit(),
+            Action::CommandPalette => self.open_palette(),
             // The focused row, like `Open` beside it — and like the
             // check that enables it, which reads `focused_is_dir`.
             // Taking the selection here instead meant the two halves
@@ -1893,6 +1985,9 @@ impl Browser {
     /// asked for, flipped away from any edge it would run off
     /// ([`menus::place`]).
     pub fn menu_overlay(&self, scale: FontScale, window: (f32, f32)) -> Option<Element<'_, Message>> {
+        if let Some(palette) = &self.palette {
+            return Some(self.palette_overlay(palette, scale, window));
+        }
         let menu = self.menu.as_ref()?;
         let size = density::menu_size(&menu.items, scale);
         let (x, y) = menus::place(menu.at, size, window);
@@ -1907,6 +2002,66 @@ impl Browser {
             .width(Length::Fill)
             .height(Length::Fill);
         Some(iced::widget::stack![away, placed].width(Length::Fill).height(Length::Fill).into())
+    }
+
+    /// The command palette: a field near the top of the window with the
+    /// matches under it, over everything, and a click anywhere else
+    /// closing it — the context menu's arrangement, drawn with the shared
+    /// suggestion panel so it reads as the path bar's sibling.
+    fn palette_overlay<'a>(&'a self, palette: &'a PaletteState, scale: FontScale, window: (f32, f32)) -> Element<'a, Message> {
+        const MOST: usize = 10;
+        let width = (window.0 - 2.0 * spacing::LG).clamp(240.0, scale.apply(560.0));
+        let matches = self.palette_matches();
+        let rows: Vec<hyprforge_ui::widgets::Suggestion> = matches
+            .iter()
+            .take(MOST)
+            .map(|action| hyprforge_ui::widgets::Suggestion {
+                label: crate::palette::label(*action).to_string(),
+                hint: self.config.keymap.combos_for(*action).first().map(|c| c.to_string()),
+            })
+            .collect();
+        let field = text_input("Type a command", &palette.query)
+            .id(palette.id.clone())
+            .on_input(Message::PaletteInput)
+            .on_submit(Message::PaletteSubmit)
+            .size(scale.apply(density::ROW_TEXT_BASE))
+            .padding([spacing::XS as u16, spacing::SM as u16])
+            .style(hyprforge_ui::widgets::inset_input_style);
+        let empty = (!palette.query.trim().is_empty())
+            .then(|| format!("No command matches \u{201c}{}\u{201d}", palette.query.trim()));
+        let panel = hyprforge_ui::widgets::suggestions(
+            None,
+            &rows,
+            Some(palette.highlighted.min(rows.len().saturating_sub(1))),
+            Message::PaletteChose,
+            empty,
+            false,
+            scale,
+        );
+        let card = container(hyprforge_ui::widgets::anchored(field, panel, spacing::XS))
+            .padding(spacing::XS)
+            .width(Length::Fixed(width))
+            .style(|_t: &iced::Theme| container::Style {
+                background: Some(iced::Background::Color(hyprforge_ui::theme::surface::sidebar())),
+                border: iced::Border {
+                    color: hyprforge_ui::theme::surface::card_border(),
+                    width: 1.0,
+                    radius: density::inner_radius().into(),
+                },
+                ..container::Style::default()
+            });
+        let away = iced::widget::mouse_area(iced::widget::Space::new().width(Length::Fill).height(Length::Fill))
+            .on_press(Message::PaletteCancel)
+            .on_right_press(Message::PaletteCancel);
+        let placed = iced::widget::pin(iced::widget::opaque(card))
+            .x((window.0 - width) / 2.0)
+            // Below the window's chrome — a tab strip and a header in Files,
+            // the header alone in the dialog — rather than over the path bar
+            // it would otherwise hide, which the first screenshot did.
+            .y((window.1 * 0.15).max(2.5 * density::bar_height(scale)))
+            .width(Length::Fill)
+            .height(Length::Fill);
+        iced::widget::stack![away, placed].width(Length::Fill).height(Length::Fill).into()
     }
 
     fn apply_dir_loaded(&mut self, path: PathBuf, result: Result<Vec<Entry>, DirError>) -> Outcome {
@@ -6379,5 +6534,64 @@ mod entry_filter_tests {
         ];
         browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(fresh)));
         assert_eq!(names(&browser), ["b.png"]);
+    }
+}
+
+#[cfg(test)]
+mod palette_tests {
+    //! The command palette as the browser runs it. What it ranks, and in
+    //! what order, is `palette`'s and tested there.
+    use super::tests_support::loaded;
+    use super::*;
+
+    #[test]
+    fn ctrl_k_opens_the_palette_with_its_field_focused() {
+        let mut browser = loaded(&[("a.txt", false)]);
+        assert!(matches!(browser.perform(Action::CommandPalette), Outcome::FocusPath { .. }));
+        assert!(browser.palette.is_some());
+        let keys = Config::default().keymap.combos_for(Action::CommandPalette);
+        assert!(keys.iter().any(|k| k.to_string() == "Ctrl+K"), "{keys:?}");
+    }
+
+    #[test]
+    fn running_a_command_does_exactly_what_its_key_does() {
+        let mut browser = loaded(&[]);
+        browser.perform(Action::CommandPalette);
+        browser.update(Message::PaletteInput("nf".to_string()));
+        let outcome = browser.update(Message::PaletteSubmit);
+        assert!(matches!(outcome, Outcome::CreateFolder(_)), "{outcome:?}");
+        assert!(browser.palette.is_none(), "closed once something ran");
+    }
+
+    #[test]
+    fn the_arrows_choose_among_matches_while_the_palette_is_open() {
+        let mut browser = loaded(&[("a.txt", false)]);
+        browser.perform(Action::CommandPalette);
+        let before = browser.selection().focused().map(Path::to_path_buf);
+        browser.perform(Action::FocusDown);
+        browser.perform(Action::FocusDown);
+        assert_eq!(browser.palette.as_ref().unwrap().highlighted, 2);
+        browser.perform(Action::FocusUp);
+        assert_eq!(browser.palette.as_ref().unwrap().highlighted, 1);
+        assert_eq!(browser.selection().focused().map(Path::to_path_buf), before, "the listing did not move");
+    }
+
+    #[test]
+    fn escape_closes_the_palette_and_runs_nothing() {
+        let mut browser = loaded(&[]);
+        browser.perform(Action::CommandPalette);
+        assert_eq!(browser.update(Message::PaletteCancel), Outcome::None);
+        assert!(browser.palette.is_none());
+    }
+
+    #[test]
+    fn the_dialogs_palette_offers_only_what_the_dialog_does() {
+        let (mut browser, _) =
+            Browser::new(Mode::Dialog(DialogKind::Open), Prefs::default(), PathBuf::from("/dir"), vec![]);
+        browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(vec![])));
+        browser.perform(Action::CommandPalette);
+        let offered = browser.palette_matches();
+        assert!(!offered.is_empty());
+        assert!(offered.iter().all(|a| crate::menu::DIALOG_ACTIONS.contains(a)), "{offered:?}");
     }
 }

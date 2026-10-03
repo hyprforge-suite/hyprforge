@@ -208,6 +208,25 @@ impl Default for MenuConfig {
     }
 }
 
+/// Every action the open/save dialog's host carries out (`portal_main.rs`
+/// in `hyprforge-files`). Anything else it declines, so its menus and its
+/// command palette offer these and nothing more — one list, so the two
+/// cannot come to disagree.
+pub const DIALOG_ACTIONS: &[Action] = &[
+    Action::Open,
+    Action::CopyPath,
+    Action::Rename,
+    Action::SelectAll,
+    Action::NewFolder,
+    Action::ToggleHidden,
+    Action::TogglePreview,
+    Action::Refresh,
+    Action::GoUp,
+    Action::GoBack,
+    Action::GoForward,
+    Action::EditLocation,
+];
+
 impl MenuConfig {
     /// The open/save dialog's menus: only what a dialog does.
     ///
@@ -368,11 +387,8 @@ mod tests {
 
     #[test]
     fn the_dialog_menus_offer_only_what_a_dialog_does() {
-        use Action::*;
-        // What the open/save dialog's host carries out (`portal_main.rs`
-        // in `hyprforge-files`). Anything else it declines with a sentence,
-        // and a menu row that only declines is a row that should not exist.
-        let does = [Open, CopyPath, Rename, SelectAll, NewFolder, ToggleHidden, TogglePreview, Refresh, GoUp];
+        // A menu row that only declines is a row that should not exist.
+        let does = DIALOG_ACTIONS;
         let menus = MenuConfig::dialog();
         for kind in [
             MenuKind::Entry,

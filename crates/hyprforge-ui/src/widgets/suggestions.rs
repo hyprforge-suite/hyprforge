@@ -66,7 +66,11 @@ pub fn suggestions<'a, Message: Clone + 'a>(
         .align_y(iced::Alignment::Center)
         .spacing(spacing::MD);
         if let Some(hint) = &item.hint {
-            content = content.push(meta_text(hint.clone(), density::META_TEXT_BASE, scale));
+            // The full text colour on the selected row: dim text on the
+            // accent fill cannot be read — the rule Files' own list keeps,
+            // seen here as an unreadable "Ctrl+L" in the first screenshot.
+            let hint = meta_text(hint.clone(), density::META_TEXT_BASE, scale);
+            content = content.push(if selected { hint.color(theme::text()) } else { hint });
         }
         list = list.push(
             button(content)
