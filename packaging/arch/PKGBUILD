@@ -116,6 +116,14 @@ package_hyprforge-files() {
   _bin hyprforge-files
   install -Dm644 crates/hyprforge-files/packaging/hyprforge-files.desktop \
     "$pkgdir/usr/share/applications/hyprforge-files.desktop"
+  # The open/save dialog: registered with xdg-desktop-portal and started
+  # by D-Bus when asked for, and chosen for nothing until the user says
+  # so in their own portals.conf — see the .portal file's comment.
+  _bin hyprforge-files-portal
+  install -Dm644 crates/hyprforge-files/packaging/hyprforge.portal \
+    "$pkgdir/usr/share/xdg-desktop-portal/portals/hyprforge.portal"
+  install -Dm644 crates/hyprforge-files/packaging/org.freedesktop.impl.portal.desktop.hyprforge.service \
+    "$pkgdir/usr/share/dbus-1/services/org.freedesktop.impl.portal.desktop.hyprforge.service"
   _license
 }
 

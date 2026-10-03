@@ -227,7 +227,11 @@ Apps
                             shared browsing view, plus what a dialog
                             deliberately does not have — launching what
                             you double-click, file operations, and drag
-                            and drop with other applications.
+                            and drop with other applications. And a
+                            second binary, hyprforge-files-portal: the
+                            desktop's open/save dialog, served to
+                            xdg-desktop-portal and opted into, never
+                            switched on by installing it.
   hyprforge-media/        the photo, video and 3D model viewer, in the
                             file manager's shell: a Places sidebar, and
                             Photo, Grid and Library as modes of one window.

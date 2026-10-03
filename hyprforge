@@ -1013,6 +1013,9 @@ uninstall_files() {
     step "File manager: removing"
     remove_file "$PREFIX/hyprforge-files"
     remove_file "$DESKTOP_DIR/hyprforge-files.desktop"
+    remove_file "$PREFIX/hyprforge-files-portal"
+    remove_file "$PORTAL_DIR/hyprforge.portal"
+    remove_file "$DBUS_SERVICES_DIR/$PORTAL_BUS_NAME.service"
     # Nothing else to undo: no service, no config written by the
     # installer. The user's own files.toml is deliberately left alone —
     # uninstalling a program is not a reason to throw away the
@@ -1196,9 +1199,16 @@ uninstall_displayd() {
 # and a per-user install is the honest description of what this is.
 readonly DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 
+# Where xdg-desktop-portal finds backends (compiled into it; there is no
+# per-user directory), and where the session bus finds a user's services.
+readonly PORTAL_DIR=/usr/share/xdg-desktop-portal/portals
+readonly DBUS_SERVICES_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/dbus-1/services"
+readonly PORTAL_BUS_NAME=org.freedesktop.impl.portal.desktop.hyprforge
+
 install_files() {
     COMPONENT_CHANGED=false
-    build hyprforge-files
+    # One crate, two binaries: the window and the open/save dialog.
+    build hyprforge-files hyprforge-files hyprforge-files-portal
     step "File manager"
     install_file target/release/hyprforge-files "$PREFIX/hyprforge-files" 755
 
@@ -1222,8 +1232,31 @@ install_files() {
     fi
     flush_current
 
+    # The open/save dialog. The descriptor can only go where the portal
+    # looks — /usr/share/xdg-desktop-portal/portals is compiled into it,
+    # with no per-user directory — and registers the backend for nothing:
+    # see that file's comment. The D-Bus activation file is the user's
+    # own, pointing at this install's binary rather than /usr/bin's.
+    install_file target/release/hyprforge-files-portal "$PREFIX/hyprforge-files-portal" 755
+    install_file crates/hyprforge-files/packaging/hyprforge.portal \
+        "$PORTAL_DIR/hyprforge.portal" 644
+    local activation="$DBUS_SERVICES_DIR/$PORTAL_BUS_NAME.service"
+    local wanted
+    wanted=$(printf '[D-BUS Service]\nName=%s\nExec=%s\n' "$PORTAL_BUS_NAME" "$PREFIX/hyprforge-files-portal")
+    if $DRY_RUN; then
+        skip "would install $activation"
+    elif [[ -e $activation ]] && [[ $(cat "$activation") == "$wanted" ]]; then
+        mark_current
+    else
+        mkdir -p "$DBUS_SERVICES_DIR"
+        printf '%s\n' "$wanted" > "$activation"
+        ok "installed $activation"
+    fi
+    flush_current
+
     # No service and no daemon: a window that opens when asked and exits
-    # when closed. Unlike the Settings app it takes no single-instance
+    # when closed. (The dialog's service above is started by D-Bus when an
+    # application asks for a dialog, and by nothing else.) Unlike the Settings app it takes no single-instance
     # lock either — two file manager windows onto two directories is how
     # people move files, and every file manager anyone has used allows
     # it.
@@ -1231,6 +1264,17 @@ install_files() {
   ${D}It should appear in rofi as "Hyprforge Files". To make it the
   handler other applications use for "open containing folder":
       xdg-mime default hyprforge-files.desktop inode/directory
+
+  To make Files every application's Open and Save dialog — opt-in, and
+  undone by removing the last line — put this in
+  ~/.config/xdg-desktop-portal/hyprland-portals.conf:
+      [preferred]
+      default=hyprland;gtk
+      org.freedesktop.impl.portal.FileChooser=hyprforge
+  Keep the default= line: the portal reads only the first portals.conf
+  it finds, so a file holding just the last line would drop the system's
+  choices for screenshots and screen sharing. Then:
+      systemctl --user restart xdg-desktop-portal
 
   Connecting to an SMB share needs one more package. Without it the app
   runs fine and says so where the share would be, rather than failing in
@@ -1479,6 +1523,7 @@ show_status() {
     status_binary notifctl
     status_binary hyprforge-emojimenu
     status_binary hyprforge-files
+    status_binary hyprforge-files-portal
     status_binary hyprforge-media
     status_binary hyprforge-mimetype
     status_binary hyprforge-mimeopen

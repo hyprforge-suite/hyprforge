@@ -1234,6 +1234,29 @@ else
         fi
     fi
 
+    step "The open/save dialog against the portal's interface"
+    # Gated on the interface XML xdg-desktop-portal installs, and on a
+    # dbus-daemon to serve on — the test starts its own bus and kills it,
+    # so no portal or session bus has to be running, and nothing here can
+    # answer a real application's dialog request.
+    if [[ ! -r /usr/share/dbus-1/interfaces/org.freedesktop.impl.portal.FileChooser.xml ]]; then
+        skip "portal interface test" "xdg-desktop-portal's FileChooser interface XML is not installed"
+    elif ! command -v dbus-daemon >/dev/null; then
+        skip "portal interface test" "dbus-daemon is not installed"
+    else
+        output=$(cargo test -p hyprforge-files --test live_portal_interface \
+            -- --ignored --test-threads=1 --nocapture 2>&1)
+        if grep -q "test result: FAILED" <<<"$output"; then
+            bad "the dialog's D-Bus interface no longer matches the one the portal calls"
+            grep -E '^test .* FAILED|left:|right:' <<<"$output" | head -10
+        else
+            ok "$(count_tests <<<"$output") portal interface test(s) passed"
+            while IFS= read -r reason; do
+                [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
+            done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^(]*\).*/\1/p' <<<"$output" | sort -u)
+        fi
+    fi
+
     step "Live tests against a tray host"
     if ! command -v busctl >/dev/null; then
         skip "tray tests" "busctl not available to ask"

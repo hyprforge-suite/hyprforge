@@ -104,6 +104,36 @@ pub enum DialogKind {
     Save,
 }
 
+/// Which files a listing shows — an open dialog's "Images" or "Text
+/// files", applied the way the search box is: as an input to the listing,
+/// never as a mode, so the view still cannot tell which host it is in.
+///
+/// A predicate the host supplies, because deciding a file's type is the
+/// MIME database's job and this crate does not load one. It runs on every
+/// refresh of the listing — every keystroke in the search box — so it
+/// must not touch the disk: types by *name*, never by sniffing contents.
+///
+/// Folders are never filtered: a dialog that hid them could not be
+/// navigated.
+#[derive(Clone)]
+pub struct EntryFilter(std::sync::Arc<dyn Fn(&Entry) -> bool + Send + Sync>);
+
+impl EntryFilter {
+    pub fn new(accepts: impl Fn(&Entry) -> bool + Send + Sync + 'static) -> EntryFilter {
+        EntryFilter(std::sync::Arc::new(accepts))
+    }
+
+    fn shows(&self, entry: &Entry) -> bool {
+        entry.is_dir || (self.0)(entry)
+    }
+}
+
+impl std::fmt::Debug for EntryFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EntryFilter")
+    }
+}
+
 /// A directory-read failure, reduced to what the view needs: an
 /// actionable sentence (pillar 3 — never a blank list standing in for a
 /// reason) and which kind it was, so "this folder is empty" and "you
@@ -774,6 +804,8 @@ pub struct Browser {
     renaming: Option<Renaming>,
     /// The path bar, while it is being typed into.
     path_edit: Option<PathEdit>,
+    /// Which files show — see [`EntryFilter`]. `None` shows everything.
+    entry_filter: Option<EntryFilter>,
     /// The folder a drag over the window is over — told by the host,
     /// which is the one that hears the compositor. See [`crate::drop`].
     drop_hover: Option<PathBuf>,
@@ -828,6 +860,7 @@ impl Browser {
             archive: None,
             renaming: None,
             path_edit: None,
+            entry_filter: None,
             drop_hover: None,
             after_listing: None,
             dotfiles: 0,
@@ -1147,6 +1180,14 @@ impl Browser {
             add(&crate::sidebar::trash_path());
         }
         targets
+    }
+
+    /// Shows only the files `filter` accepts, or everything for `None`.
+    /// Folders always show — see [`EntryFilter`]. What the filter hides
+    /// counts toward the status bar's "N hidden", like a search does.
+    pub fn set_entry_filter(&mut self, filter: Option<EntryFilter>) {
+        self.entry_filter = filter;
+        self.refresh_view();
     }
 
     /// Whether the path bar is being typed into — for a host deciding
@@ -1937,6 +1978,7 @@ impl Browser {
             .enumerate()
             .filter(|(_, e)| show_hidden || !is_hidden(e))
             .filter(|(_, e)| matches_query(e, &query))
+            .filter(|(_, e)| self.entry_filter.as_ref().is_none_or(|f| f.shows(e)))
             .map(|(i, _)| i)
             .collect();
         let entries = &self.entries;
@@ -6282,3 +6324,42 @@ mod drop_target_tests {
     }
 }
 
+#[cfg(test)]
+mod entry_filter_tests {
+    use super::tests_support::loaded;
+    use super::*;
+
+    fn names(browser: &Browser) -> Vec<String> {
+        browser.rows().into_iter().map(|e| e.name.clone()).collect()
+    }
+
+    #[test]
+    fn a_filter_hides_the_files_it_refuses_and_never_a_folder() {
+        let mut browser = loaded(&[("pics", true), ("a.png", false), ("notes.txt", false)]);
+        browser.set_entry_filter(Some(EntryFilter::new(|e| e.name.ends_with(".png"))));
+        assert_eq!(names(&browser), ["pics", "a.png"]);
+        assert_eq!(browser.hidden_count(), 1, "said, like a search would");
+        browser.set_entry_filter(None);
+        assert_eq!(names(&browser).len(), 3);
+    }
+
+    #[test]
+    fn a_filter_and_a_search_both_apply() {
+        let mut browser = loaded(&[("a.png", false), ("b.png", false), ("a.txt", false)]);
+        browser.set_entry_filter(Some(EntryFilter::new(|e| e.name.ends_with(".png"))));
+        browser.update(Message::SearchChanged("a".to_string()));
+        assert_eq!(names(&browser), ["a.png"]);
+    }
+
+    #[test]
+    fn a_filter_survives_a_new_listing() {
+        let mut browser = loaded(&[("a.png", false)]);
+        browser.set_entry_filter(Some(EntryFilter::new(|e| e.name.ends_with(".png"))));
+        let fresh = vec![
+            crate::backend::mock::MockBackend::file(Path::new("/dir"), "b.png", 1),
+            crate::backend::mock::MockBackend::file(Path::new("/dir"), "c.txt", 1),
+        ];
+        browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(fresh)));
+        assert_eq!(names(&browser), ["b.png"]);
+    }
+}

@@ -696,13 +696,14 @@ belongs in the design — not in a user's surprise.
 ./check.sh --quick  # tier 1 only: clippy + unit tests, no compositor
 ```
 
-Clippy must be silent and every test must pass before a commit. Sixteen
+Clippy must be silent and every test must pass before a commit. Seventeen
 gated tiers beyond tier 1 now, each answering a different "does the system
 I'm talking to actually agree" question — Hyprland itself, the ecosystem
 daemons' parse tests, the system's own `unzip`/`tar`/`7z`, NetworkManager,
 BlueZ, hyprsunset, systemd-logind, trash entries written by another
 implementation, UPower, power-profiles-daemon, fprintd, the Wayland clipboard, icon
-names against the installed theme, the installed shared MIME database, a
+names against the installed theme, the installed shared MIME database, the
+open/save dialog's D-Bus interface against the one xdg-desktop-portal calls, a
 tray host, and cargo's own packager (does every library crate `publish
 --dry-run` cleanly, which builds each one over again and so cannot live in
 the pre-commit hook) — and each gates on the thing it actually asks rather

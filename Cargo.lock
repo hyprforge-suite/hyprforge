@@ -2009,6 +2009,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wayland-client",
+ "zbus",
  "zip",
 ]
 

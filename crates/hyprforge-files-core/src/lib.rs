@@ -52,7 +52,7 @@ pub use backend::{FsBackend, StdBackend};
 pub use click::{Click, ClickTracker};
 pub use archive::ArchiveFsBackend;
 pub use trash::{RoutingBackend, TrashBackend};
-pub use browser::{Browser, DialogKind, DirError, DirErrorKind, LoadState, Message, Mode, Outcome, Selection};
+pub use browser::{Browser, DialogKind, DirError, DirErrorKind, EntryFilter, LoadState, Message, Mode, Outcome, Selection};
 pub use format::{format_size, human_readable_size};
 pub use prefs::Prefs;
 pub use sidebar::{build as build_sidebar, build_pinned, trash_path, PinnedItem, SidebarItem};
