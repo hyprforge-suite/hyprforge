@@ -225,6 +225,9 @@ pub const DIALOG_ACTIONS: &[Action] = &[
     Action::GoBack,
     Action::GoForward,
     Action::EditLocation,
+    // Searching below a folder works in the dialog too, and a result is
+    // most useful there once you are standing beside it.
+    Action::ShowInFolder,
 ];
 
 impl MenuConfig {

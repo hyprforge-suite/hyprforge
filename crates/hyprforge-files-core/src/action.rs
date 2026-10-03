@@ -29,6 +29,10 @@ pub enum Action {
     Open,
     /// Open the focused folder in a new tab.
     OpenInNewTab,
+    /// Go to the folder a search result is in, with it selected — see
+    /// [`crate::search`]. Only among the results of a search below a
+    /// folder, which are the one listing whose rows live elsewhere.
+    ShowInFolder,
     GoUp,
     GoBack,
     GoForward,
@@ -139,6 +143,7 @@ impl Action {
         let mut all = vec![
             Action::Open,
             Action::OpenInNewTab,
+            Action::ShowInFolder,
             Action::GoUp,
             Action::GoBack,
             Action::GoForward,
@@ -189,6 +194,7 @@ impl Action {
         match self {
             Action::Open => "open",
             Action::OpenInNewTab => "open-in-new-tab",
+            Action::ShowInFolder => "show-in-folder",
             Action::GoUp => "go-up",
             Action::GoBack => "go-back",
             Action::GoForward => "go-forward",
@@ -258,6 +264,7 @@ impl Action {
         match self {
             Action::Open => "Open",
             Action::OpenInNewTab => "Open in New Tab",
+            Action::ShowInFolder => "Show in Folder",
             Action::GoUp => "Go Up",
             Action::GoBack => "Back",
             Action::GoForward => "Forward",
@@ -334,6 +341,10 @@ impl Action {
         match self {
             Action::Open => &["Enter"],
             Action::OpenInNewTab => &["Ctrl+Enter"],
+            // Nautilus's "Open Item Location". It also heads a result's
+            // menu, added there rather than to every configured menu,
+            // where it would sit greyed out outside a search.
+            Action::ShowInFolder => &["Ctrl+Alt+O"],
             // Backspace goes up a level and Alt+Left goes back in
             // history: two different navigations, kept distinct the way
             // Explorer, Nautilus and Dolphin all keep them.
@@ -465,6 +476,9 @@ pub struct ActionContext {
     /// The folder the pin actions would act on, and where it sits in the
     /// pinned list.
     pub pin: PinTarget,
+    /// Whether the rows are a search's results from below this folder
+    /// rather than the folder's own listing — see [`crate::search`].
+    pub in_results: bool,
 }
 
 /// What the pin actions would act on — see
@@ -488,6 +502,7 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
     match action {
         Action::Open => ctx.focused_is_dir.is_some(),
         Action::OpenInNewTab => ctx.focused_is_dir == Some(true),
+        Action::ShowInFolder => ctx.in_results && ctx.focused_is_dir.is_some(),
         Action::GoUp => ctx.has_parent,
         Action::GoBack => ctx.can_go_back,
         Action::GoForward => ctx.can_go_forward,

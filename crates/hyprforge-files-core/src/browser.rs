@@ -23,9 +23,12 @@
 //! pins the property that matters: two browsers differing only in `Mode`
 //! feed `render` the exact same data.
 
+mod searching;
+
 use crate::columns;
 use crate::density;
-use crate::filter::{is_hidden, matches_query};
+use crate::filter::is_hidden;
+use crate::query::Matcher;
 use crate::format::{format_kind, format_modified_at, format_origin, format_owner, format_packed, format_permissions, format_size};
 use crate::glyph;
 use crate::icon::{self, entry_icon};
@@ -113,14 +116,18 @@ fn many(parts: Vec<Outcome>) -> Outcome {
 }
 
 /// Which of `entries` show, in the order they show in: the dotfile
-/// switch, `query`, the dialog's filter, then the sort. Indices, not
+/// switch, the search, the dialog's filter, then the sort. Indices, not
 /// copies — see [`Browser::refresh_view`].
-fn shown_order(entries: &[Entry], query: &str, prefs: &Prefs, filter: Option<&EntryFilter>) -> Vec<usize> {
+///
+/// A search that asks for dotfiles (`is:hidden`) shows them whatever the
+/// switch says: hiding every answer to the question just asked would be
+/// a search that cannot succeed.
+fn shown_order(entries: &[Entry], search: &Matcher, prefs: &Prefs, filter: Option<&EntryFilter>) -> Vec<usize> {
     let mut order: Vec<usize> = entries
         .iter()
         .enumerate()
-        .filter(|(_, e)| prefs.show_hidden || !is_hidden(e))
-        .filter(|(_, e)| matches_query(e, query))
+        .filter(|(_, e)| prefs.show_hidden || search.wants_hidden() || !is_hidden(e))
+        .filter(|(_, e)| search.matches(e))
         .filter(|(_, e)| filter.is_none_or(|f| f.shows(e)))
         .map(|(i, _)| i)
         .collect();
@@ -655,6 +662,10 @@ pub enum Outcome {
     /// the host this way so a menu item for one travels the same road as
     /// every other action; a host without tabs ignores it.
     Window(Action),
+    /// Run a search below a folder, stop one, or change the saved
+    /// searches — see [`crate::search`]. Results come back as
+    /// [`Message::Search`].
+    Search(crate::search::Ask),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -761,6 +772,9 @@ pub enum Message {
     /// for why this is a message rather than a `Browser::new` argument
     /// the way Places is.
     PinnedLoaded(Vec<PinnedItem>),
+    /// Anything about searching: the scope rail, chips, a walk's results
+    /// and saved searches — see `browser/searching.rs`.
+    Search(crate::search::SearchMessage),
 }
 
 /// Exactly what `render` needs, and nothing `Browser` has that it
@@ -806,6 +820,9 @@ struct ViewModel<'a> {
     columns: Vec<ColumnModel<'a>>,
     selection: &'a Selection,
     search_query: &'a str,
+    /// The chips, the scope rail and saved searches — see
+    /// `browser/searching.rs`.
+    search: searching::SearchModel<'a>,
     load_state: &'a LoadState,
     prefs: &'a Prefs,
     sidebar: &'a [SidebarItem],
@@ -873,6 +890,8 @@ pub struct Browser {
     view: Vec<usize>,
     selection: Selection,
     search_query: String,
+    /// Everything else about searching — see `browser/searching.rs`.
+    search: searching::SearchState,
     back_stack: Vec<PathBuf>,
     forward_stack: Vec<PathBuf>,
     load_state: LoadState,
@@ -965,6 +984,7 @@ impl Browser {
             view: Vec::new(),
             selection: Selection::default(),
             search_query: String::new(),
+            search: searching::SearchState::default(),
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
             load_state: LoadState::Loading,
@@ -1068,7 +1088,8 @@ impl Browser {
     /// [`Selection`] stores, and what survives the list being re-sorted
     /// underneath it.
     pub fn rows(&self) -> Vec<&Entry> {
-        self.view.iter().filter_map(|&i| self.entries.get(i)).collect()
+        let listed = self.listed();
+        self.view.iter().filter_map(|&i| listed.get(i)).collect()
     }
 
     /// How many of this directory's entries the current filters are
@@ -1081,7 +1102,7 @@ impl Browser {
     /// and is not, which is exactly when a user would otherwise conclude
     /// the folder has nothing in it.
     fn hidden_count(&self) -> usize {
-        self.entries.len() - self.view.len()
+        self.listed().len() - self.view.len()
     }
 
     /// Hands the selection the rows it needs to resolve a click or a
@@ -1093,8 +1114,9 @@ impl Browser {
     /// separately is what tells the compiler they are disjoint — and it
     /// is also an accurate statement of what these operations touch.
     fn with_rows(&mut self, f: impl FnOnce(&mut Selection, &[&Entry])) {
-        let Browser { entries, view, selection, .. } = self;
-        let rows: Vec<&Entry> = view.iter().filter_map(|&i| entries.get(i)).collect();
+        let Browser { entries, view, selection, search, .. } = self;
+        let listed: &[Entry] = search.results().unwrap_or(entries);
+        let rows: Vec<&Entry> = view.iter().filter_map(|&i| listed.get(i)).collect();
         f(selection, &rows);
     }
 
@@ -1165,14 +1187,14 @@ impl Browser {
             Message::DragStarted(index) => self.start_drag(index),
             Message::SearchChanged(query) => {
                 self.search_query = query;
-                self.refresh_view();
-                Outcome::None
+                self.search_typed()
             }
             Message::SearchCleared => {
-                self.search_query.clear();
+                let stop = self.end_search();
                 self.refresh_view();
-                Outcome::None
+                stop
             }
+            Message::Search(message) => self.update_search(message),
             Message::SortBy(column) => {
                 if self.prefs.sort_column() == column {
                     self.prefs.set_sort_direction(match self.prefs.sort_direction() {
@@ -1211,8 +1233,7 @@ impl Browser {
                 // it was aimed at.
                 self.menu = None;
                 self.search_query.push(c);
-                self.refresh_view();
-                Outcome::None
+                self.search_typed()
             }
             Message::OpenContextMenu { spot, at } => {
                 self.open_menu(spot, at);
@@ -1523,7 +1544,8 @@ impl Browser {
             can_go_back: !self.back_stack.is_empty(),
             can_go_forward: !self.forward_stack.is_empty(),
             has_parent: self.current_dir.parent().is_some(),
-            searching: !self.search_query.is_empty(),
+            searching: self.searching(),
+            in_results: self.in_results(),
             in_trash: self.in_trash(),
             in_archive: self.in_archive(),
             // Every selected row is a file whose name this suite can
@@ -1561,7 +1583,7 @@ impl Browser {
         }
         let selected = self.selected_shown();
         if let [one] = selected.as_slice() {
-            if self.entries.iter().any(|e| &e.path == one && e.is_dir) {
+            if self.listed().iter().any(|e| &e.path == one && e.is_dir) {
                 return Some(one.clone());
             }
         }
@@ -1802,6 +1824,7 @@ impl Browser {
         // that arrives within milliseconds of the window, and nothing at
         // all is asked for before it — a rule the navigation tests pin.
         if matches!(self.load_state, LoadState::Loaded) {
+            let saved_icon = searching::saved_search_icon();
             let set = IconSet { icons: &self.icons, folders: &self.folder_icons };
             let panes = self
                 .ancestors
@@ -1815,7 +1838,8 @@ impl Browser {
                 .map(|entry| set.key_of(entry))
                 .chain(panes)
                 .chain(self.folder_icons.values().map(String::as_str))
-                .chain(std::iter::once(icon::FOLDER_KEY));
+                .chain(std::iter::once(icon::FOLDER_KEY))
+                .chain((!self.prefs.searches.is_empty()).then_some(saved_icon.as_str()));
             let mut keys: Vec<String> = Vec::new();
             for key in wanted {
                 if !self.icons.contains_key(key) && !self.icons_asked.contains(key) && !keys.iter().any(|k| k == key) {
@@ -1858,7 +1882,7 @@ impl Browser {
         }
         let selected = self.selected_shown();
         let [only] = selected.as_slice() else { return None };
-        self.entries.iter().any(|e| &e.path == only).then(|| only.clone())
+        self.listed().iter().any(|e| &e.path == only).then(|| only.clone())
     }
 
     fn perform_action(&mut self, action: Action) -> Outcome {
@@ -2019,7 +2043,7 @@ impl Browser {
                 _ => Outcome::None,
             },
             Action::FocusRight if self.prefs.view_mode == ViewMode::Columns => {
-                let Some(entry) = self.selection.focused().and_then(|f| self.entries.iter().find(|e| e.path == f)) else {
+                let Some(entry) = self.selection.focused().and_then(|f| self.listed().iter().find(|e| e.path == f)) else {
                     return Outcome::None;
                 };
                 if !entry.is_dir {
@@ -2050,15 +2074,19 @@ impl Browser {
                 Outcome::None
             }
             Action::ClearSearch => {
-                self.search_query.clear();
+                let stop = self.end_search();
                 self.refresh_view();
-                Outcome::None
+                stop
             }
             Action::ToggleHidden => {
                 self.prefs.show_hidden = !self.prefs.show_hidden;
                 self.refresh_view();
-                Outcome::PrefsChanged(self.prefs.clone())
+                // A walk decided which folders to enter by the switch as
+                // it was; showing dotfiles now means walking the hidden
+                // folders it skipped.
+                many(vec![Outcome::PrefsChanged(self.prefs.clone()), self.search_after_refresh()])
             }
+            Action::ShowInFolder => self.show_in_folder(),
             Action::TogglePreview => {
                 self.prefs.preview_pane = !self.prefs.preview_pane;
                 Outcome::PrefsChanged(self.prefs.clone())
@@ -2119,7 +2147,7 @@ impl Browser {
         let [path] = selected.as_slice() else {
             return Outcome::None;
         };
-        let Some(entry) = self.entries.iter().find(|e| &e.path == path) else {
+        let Some(entry) = self.listed().iter().find(|e| &e.path == path) else {
             return Outcome::None;
         };
         let id = Id::unique();
@@ -2135,7 +2163,12 @@ impl Browser {
             return Outcome::None;
         };
         let old = renaming.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let siblings = self.entries.iter().map(|e| e.name.as_str());
+        // The names beside it in its own folder — which, for a search
+        // result, is not the folder in view, and the results hold only
+        // the ones that matched. The host's rename refuses to replace
+        // anything, so a clash this misses is still caught there.
+        let folder = renaming.path.parent();
+        let siblings = self.listed().iter().filter(|e| e.path.parent() == folder).map(|e| e.name.as_str());
         match crate::naming::check_rename(&old, &renaming.text, siblings) {
             crate::naming::RenameCheck::Unchanged => {
                 self.renaming = None;
@@ -2144,7 +2177,10 @@ impl Browser {
             crate::naming::RenameCheck::Refused(why) => Outcome::Notice(why),
             crate::naming::RenameCheck::To(name) => {
                 let from = renaming.path.clone();
-                let to = self.current_dir.join(name);
+                // Beside itself, not in the folder in view: a search
+                // result lives somewhere below it, and joining the name
+                // onto the folder in view would have *moved* it.
+                let to = from.with_file_name(name);
                 self.renaming = None;
                 Outcome::Rename { from, to }
             }
@@ -2184,6 +2220,7 @@ impl Browser {
             }
         };
         let row_entry = row.and_then(|i| self.rows().get(i).map(|e| (i, e.path.clone(), e.is_dir)));
+        let on_row = row_entry.is_some();
         let kind = match &row_entry {
             Some((index, path, is_dir)) => {
                 if !self.selection.is_selected(path) {
@@ -2218,7 +2255,10 @@ impl Browser {
                 }
             }
         };
-        let items = menus::build(self.config.menus.get(kind), &self.action_context(), &self.config.keymap);
+        let mut items = menus::build(self.config.menus.get(kind), &self.action_context(), &self.config.keymap);
+        if on_row {
+            items = self.with_result_items(items);
+        }
         self.menu = (!items.is_empty()).then_some(OpenMenu { items, at, highlighted: None, target: None });
     }
 
@@ -2351,6 +2391,9 @@ impl Browser {
             let back = self.unwind_navigation();
             return Outcome::Many(vec![back, Outcome::Activated(path)]);
         }
+        // A listing that arrives over one already shown is a re-read —
+        // a paste, a rename, F5 — rather than an arrival.
+        let refresh = self.load_state == LoadState::Loaded;
         match result {
             Ok(entries) => {
                 self.entries = entries;
@@ -2368,15 +2411,19 @@ impl Browser {
         // selection is a *refresh* of the same folder — after a paste, a
         // rename, or F5 — and there the selection should survive. Paths
         // that are gone are dropped so nothing can act on them.
-        let still_here: HashSet<PathBuf> = self.entries.iter().map(|e| e.path.clone()).collect();
+        // What the rows are drawn from: a search's results keep their own
+        // selection through a re-read of the folder behind them.
+        let still_here: HashSet<PathBuf> = self.listed().iter().map(|e| e.path.clone()).collect();
         self.selection.retain(&still_here);
         self.refresh_view();
+        let research = if refresh { self.search_after_refresh() } else { Outcome::None };
 
         // No counts to clear: a folder's count now lives on the folder's
         // own `Entry`, and the entries were just replaced wholesale.
         let folders: Vec<PathBuf> =
             self.entries.iter().filter(|e| e.is_dir).map(|e| e.path.clone()).collect();
         let counts = if folders.is_empty() { Outcome::None } else { Outcome::CountFolders(folders) };
+        let counts = many(vec![counts, research]);
 
         // Something the host asked to have selected once it showed up —
         // a folder just made, a file just renamed. If it is not here yet
@@ -2408,14 +2455,18 @@ impl Browser {
         // 50k-entry directory as a supported case; that was 50k string
         // allocations per character typed, to show a handful of rows.
         // CLAUDE.md's "test the resource, not just the result".
-        let query = self.search_query.to_lowercase();
-        self.view = shown_order(&self.entries, &query, &self.prefs, self.entry_filter.as_ref());
+        //
+        // The search is pinned to one "now" for the whole pass, so
+        // `modified:today` cannot draw its line between two rows.
+        let search = self.query().matcher(chrono::Local::now());
+        self.view = shown_order(self.listed(), &search, &self.prefs, self.entry_filter.as_ref());
         // Column view's panes take the same filters and the same order,
         // so a folder sorts the same way in its pane as when it was the
         // one in view. Not the search, which is about the folder in view.
+        let none = Matcher::default();
         for ancestor in &mut self.ancestors {
             ancestor.order = match &ancestor.listing {
-                Some(Ok(entries)) => shown_order(entries, "", &self.prefs, self.entry_filter.as_ref()),
+                Some(Ok(entries)) => shown_order(entries, &none, &self.prefs, self.entry_filter.as_ref()),
                 _ => Vec::new(),
             };
         }
@@ -2464,10 +2515,10 @@ impl Browser {
         self.select_first = false;
         self.current_dir = path.clone();
         self.selection.clear();
-        self.search_query.clear();
+        let stop = self.end_search();
         self.view.clear();
         self.load_state = LoadState::Loading;
-        Outcome::ReadDir(path)
+        many(vec![Outcome::ReadDir(path), stop])
     }
 
     fn go_to(&mut self, path: PathBuf) -> Outcome {
@@ -2553,7 +2604,7 @@ impl Browser {
         let Some(entry) = self
             .selection
             .focused()
-            .and_then(|f| self.entries.iter().find(|e| e.path == f))
+            .and_then(|f| self.listed().iter().find(|e| e.path == f))
         else {
             return Outcome::None;
         };
@@ -2627,6 +2678,7 @@ impl Browser {
                 .collect(),
             selection: &self.selection,
             search_query: &self.search_query,
+            search: self.search_model(),
             load_state: &self.load_state,
             prefs: &self.prefs,
             sidebar: &self.sidebar,
@@ -2752,16 +2804,19 @@ fn render<'a>(vm: ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         middle = middle.push(preview_pane(preview, scale));
     }
 
-    column![
-        header_bar(&vm, scale),
-        plane_edge(),
-        middle,
-        plane_edge(),
-        status_bar(&vm, scale),
-    ]
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+    let mut page = column![header_bar(&vm, scale), plane_edge()];
+    // The scope rail, only while a search is in force: chrome that is
+    // there all the time for a feature used now and then would be a strip
+    // of controls that mostly do nothing.
+    if let Some(rail) = searching::search_rail(&vm, scale) {
+        page = page.push(rail).push(plane_edge());
+    }
+    page.push(middle)
+        .push(plane_edge())
+        .push(status_bar(&vm, scale))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 /// The preview pane: the selected picture, and what the listing already
@@ -3031,7 +3086,7 @@ fn header_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> 
         row![
             nav,
             path_bar(vm, scale),
-            search_field(vm.search_query, vm.current_dir, scale),
+            searching::search_box(vm, scale),
             view_mode_toggle(vm.prefs, scale),
             preview_toggle(vm.prefs.preview_pane, scale),
         ]
@@ -3131,23 +3186,9 @@ fn nav_button<'a>(
     .into()
 }
 
-/// The search field: a fixed-width sibling of the path bar.
-///
-/// Deliberately the same recipe as the path bar — same fill, same
-/// border, same radius, same height — because both are text inputs and
-/// they should look like siblings. Fixed width, so it never competes
-/// with the path for space: the path is the only thing on this bar that
-/// flexes.
-///
-/// The placeholder names the scope — "Search crates", not "Search" —
-/// so what it will search is stated before anything is typed, rather
-/// than discovered afterwards.
-fn search_field<'a>(query: &str, current_dir: &Path, scale: FontScale) -> Element<'a, Message> {
-    let placeholder = format!("Search {}", crate::sidebar::place_name(current_dir));
-    hyprforge_ui::widgets::search_field(&placeholder, query, Message::SearchChanged, None, None, scale)
-        .width(Length::Fixed(scale.apply(density::SEARCH_FIELD_WIDTH)))
-        .into()
-}
+// The search field — the same recipe as the path bar, at a fixed width
+// so the path stays the one thing on this bar that flexes — is drawn by
+// `searching::search_box`, because it holds the search's chips.
 
 
 
@@ -3357,6 +3398,10 @@ struct SidebarRow {
     missing: bool,
     /// Its icon key — the folder's own, or an ordinary folder's.
     icon: String,
+    /// A saved search rather than a place: which one. A click runs it
+    /// instead of going to `path`, and it is no drop target and has no
+    /// folder's menu — it is a question, not somewhere files live.
+    search: Option<usize>,
 }
 
 impl SidebarRow {
@@ -3395,6 +3440,7 @@ fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
                 tint: item.tint,
                 missing: false,
                 icon: row_icon(vm, &item.path),
+                search: None,
             })
             .collect(),
     };
@@ -3422,6 +3468,7 @@ fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
                 tint: sidebar::Tint::Accent,
                 missing: item.item_count.is_none(),
                 icon: row_icon(vm, &item.path),
+                search: None,
             })
             .collect(),
     };
@@ -3437,9 +3484,34 @@ fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
             tint: sidebar::Tint::Dim,
             missing: false,
             icon: row_icon(vm, &sidebar::trash_path()),
+            search: None,
         }],
     });
-    [Some(places), Some(pinned), trash].into_iter().flatten().filter(|s| !s.rows.is_empty()).collect()
+    // After Pinned, which it is the sibling of — both are lists the user
+    // built — and before Trash, which stays last. Absent with none saved,
+    // like Pinned, by the filter below.
+    let searches = SidebarSection {
+        title: "Saved Searches",
+        rows: vm
+            .prefs
+            .searches
+            .iter()
+            .enumerate()
+            .map(|(index, saved)| SidebarRow {
+                label: saved.name.clone(),
+                path: saved.folder.clone(),
+                meta: None,
+                // Info, "somewhere else": a saved search is a view onto
+                // files that live elsewhere, and the colour keeps it
+                // from reading as one more pinned folder.
+                tint: sidebar::Tint::Info,
+                missing: false,
+                icon: searching::saved_search_icon(),
+                search: Some(index),
+            })
+            .collect(),
+    };
+    [Some(places), Some(pinned), Some(searches), trash].into_iter().flatten().filter(|s| !s.rows.is_empty()).collect()
 }
 
 /// A sidebar row's icon key: its folder's own, or an ordinary folder's.
@@ -3485,7 +3557,8 @@ fn sidebar_rail<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
             rail = rail.push(container(divider()).padding([spacing::XS as u16, 0]));
         }
         for row_item in section.rows {
-            let is_current = row_item.path == vm.current_dir;
+            let (press, is_current) = sidebar_press(&row_item, vm);
+            let place = row_item.search.is_none().then(|| row_item.path.clone());
             let mark = sidebar_mark(&row_item, vm.icons, scale);
             let button = iced::widget::button(
                 container(mark).center_x(Length::Fill).center_y(Length::Fill),
@@ -3493,11 +3566,9 @@ fn sidebar_rail<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
             .width(Length::Fill)
             .height(Length::Fixed(density::row_height(scale)))
             .padding(0)
-            .on_press(Message::Navigate(row_item.path.clone()))
+            .on_press(press)
             .style(move |t: &iced::Theme, status| selectable_row_style(t, status, is_current));
-            let hovered = vm.drop_hover == Some(row_item.path.as_path());
-            let zone = drop_zone(button, &row_item.path, hovered);
-            rail = rail.push(sidebar_menu_area(zone, row_item.path));
+            rail = rail.push(sidebar_place(button, place, vm));
         }
     }
     container(scrollable(rail))
@@ -3527,7 +3598,8 @@ fn sidebar_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
         .padding([spacing::XS as u16, spacing::SM as u16]);
         let mut group = column![heading].spacing(1.0);
         for row_item in section.rows {
-            let is_current = row_item.path == vm.current_dir;
+            let (press, is_current) = sidebar_press(&row_item, vm);
+            let place = row_item.search.is_none().then(|| row_item.path.clone());
             let mark = sidebar_mark(&row_item, vm.icons, scale);
             let label = if row_item.missing {
                 meta_text(row_item.label, density::ROW_TEXT_BASE, scale)
@@ -3556,11 +3628,9 @@ fn sidebar_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
             // instead of wrapping one of the two helpers.
             let button = iced::widget::button(content)
                 .width(Length::Fill)
-                .on_press(Message::Navigate(row_item.path.clone()))
+                .on_press(press)
                 .style(move |t: &iced::Theme, status| selectable_row_style(t, status, is_current));
-            let hovered = vm.drop_hover == Some(row_item.path.as_path());
-            let zone = drop_zone(button, &row_item.path, hovered);
-            group = group.push(sidebar_menu_area(zone, row_item.path));
+            group = group.push(sidebar_place(button, place, vm));
         }
         list = list.push(group);
     }
@@ -3573,6 +3643,38 @@ fn sidebar_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
             ..container::Style::default()
         })
         .into()
+}
+
+/// What a sidebar row does when clicked, and whether it is the one on
+/// screen. A saved search runs; a place is gone to. While a saved search
+/// is showing, *it* is the current row — not also the folder it searches
+/// from, which would light two rows for one view.
+fn sidebar_press(row_item: &SidebarRow, vm: &ViewModel<'_>) -> (Message, bool) {
+    match row_item.search {
+        Some(index) => (
+            Message::Search(crate::search::SearchMessage::Open(index)),
+            vm.search.current == Some(index),
+        ),
+        None => (
+            Message::Navigate(row_item.path.clone()),
+            row_item.path == vm.current_dir && vm.search.current.is_none(),
+        ),
+    }
+}
+
+/// A sidebar row's button, made a drop target with a folder's menu when
+/// it is a place — `place` is its folder, `None` for a saved search. A
+/// saved search is neither: dropping files onto a question has no
+/// meaning, and Unpin is not how one is removed.
+fn sidebar_place<'a>(
+    button: iced::widget::Button<'a, Message>,
+    place: Option<PathBuf>,
+    vm: &ViewModel<'a>,
+) -> Element<'a, Message> {
+    let Some(path) = place else { return button.into() };
+    let hovered = vm.drop_hover == Some(path.as_path());
+    let zone = drop_zone(button, &path, hovered);
+    sidebar_menu_area(zone, path)
 }
 
 /// A sidebar row that opens its own menu on a right-click. The button
@@ -3882,11 +3984,7 @@ fn body_content<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
         .padding(spacing::LG)
         .into(),
         LoadState::Loaded if vm.rows.is_empty() => {
-            let message = if vm.search_query.is_empty() {
-                "This folder is empty."
-            } else {
-                "No entries match your search."
-            };
+            let message = if vm.search.active { searching::empty_message(vm) } else { "This folder is empty." };
             container(meta_text(message, BASE_TEXT_SIZE, scale))
                 .center_x(Length::Fill)
                 .padding(spacing::LG)
@@ -3947,8 +4045,8 @@ fn column_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message>
                 .id(vm.list_scrollable_id.clone())
                 .into()
         }
-        LoadState::Loaded if vm.search_query.is_empty() => pane_message("This folder is empty.", scale),
-        LoadState::Loaded => pane_message("No entries match your search.", scale),
+        LoadState::Loaded if !vm.search.active => pane_message("This folder is empty.", scale),
+        LoadState::Loaded => pane_message(searching::empty_message(vm), scale),
         LoadState::Loading => pane_message("Loading\u{2026}", scale),
         LoadState::Error(err) => container(
             column![
@@ -4380,9 +4478,13 @@ fn column_portion(column: Column) -> u16 {
 ///
 /// The configured ones — and, in the Trash, Original Location first,
 /// because "where did this come from" is the question the Trash is for.
-fn listing_columns(prefs: &Prefs, in_trash: bool, in_archive: bool) -> Vec<Column> {
+/// A search's results from below the folder take the same column, as
+/// Folder: where each one is, the question a list of things from all
+/// over has to answer. The walk fills [`Entry::origin`] with exactly
+/// that, so the cell, its sort and its width are the Trash's.
+fn listing_columns(prefs: &Prefs, in_trash: bool, in_results: bool, in_archive: bool) -> Vec<Column> {
     let mut columns = Vec::with_capacity(Column::ALL.len() + 1);
-    if in_trash {
+    if in_trash || in_results {
         columns.push(Column::Origin);
     }
     columns.extend(prefs.columns.shown());
@@ -4402,9 +4504,10 @@ fn listing_columns(prefs: &Prefs, in_trash: bool, in_archive: bool) -> Vec<Colum
 /// A column's heading. In the Trash, the date is when something was
 /// deleted — `TrashBackend` puts the deletion date there — so the
 /// heading says so.
-fn column_heading(column: Column, in_trash: bool) -> &'static str {
+fn column_heading(column: Column, in_trash: bool, in_results: bool) -> &'static str {
     match column {
         Column::Modified if in_trash => "Deleted",
+        Column::Origin if in_results => "Folder",
         other => other.label(),
     }
 }
@@ -4437,6 +4540,7 @@ fn column_sort(column: Column) -> SortColumn {
 fn list_header<'a>(
     prefs: &Prefs,
     in_trash: bool,
+    in_results: bool,
     in_archive: bool,
     picker_open: bool,
     scale: FontScale,
@@ -4478,8 +4582,8 @@ fn list_header<'a>(
 
     // `Column::ALL` order, the same walk `entry_row` makes — one list,
     // so a heading cannot end up over the wrong cells.
-    for column in listing_columns(prefs, in_trash, in_archive) {
-        header = header.push(heading(column_heading(column, in_trash), column_sort(column), column_portion(column)));
+    for column in listing_columns(prefs, in_trash, in_results, in_archive) {
+        header = header.push(heading(column_heading(column, in_trash, in_results), column_sort(column), column_portion(column)));
     }
 
     // The picker's handle, at the far right where the columns run out.
@@ -4567,7 +4671,7 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     let mut list = column![].spacing(1.0);
     let mut seen_file = false;
     let ctx = RowContext {
-        columns: listing_columns(vm.prefs, vm.in_trash, vm.archive.is_some()),
+        columns: listing_columns(vm.prefs, vm.in_trash, vm.search.results, vm.archive.is_some()),
         renaming: vm.renaming,
         home: home_dir(),
         scale,
@@ -4612,7 +4716,7 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // still horizontally would be worse than no header at all: every
     // label over the wrong column.
     let stack = column![
-        list_header(vm.prefs, vm.in_trash, vm.archive.is_some(), vm.column_picker_open, scale),
+        list_header(vm.prefs, vm.in_trash, vm.search.results, vm.archive.is_some(), vm.column_picker_open, scale),
         divider(),
         scrollable(list).height(Length::Fill).id(vm.list_scrollable_id.clone()),
     ]
@@ -4632,7 +4736,7 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     let pane = density::list_pane_width(vm.viewport_width, vm.sidebar_collapsed)
         - vm.preview.as_ref().map_or(0.0, |p| p.width);
     let min_width =
-        density::list_min_width(listing_columns(vm.prefs, vm.in_trash, vm.archive.is_some()).len(), scale);
+        density::list_min_width(listing_columns(vm.prefs, vm.in_trash, vm.search.results, vm.archive.is_some()).len(), scale);
     if pane >= min_width {
         return stack.into();
     }
@@ -5664,11 +5768,11 @@ mod tests {
     #[test]
     fn the_trash_listing_shows_original_location_and_deleted() {
         let prefs = Prefs::default();
-        let columns = listing_columns(&prefs, true, false);
+        let columns = listing_columns(&prefs, true, false, false);
         assert_eq!(columns.first(), Some(&Column::Origin));
-        assert_eq!(column_heading(Column::Modified, true), "Deleted");
-        assert!(!listing_columns(&prefs, false, false).contains(&Column::Origin), "only in the Trash");
-        assert_eq!(column_heading(Column::Modified, false), "Modified");
+        assert_eq!(column_heading(Column::Modified, true, false), "Deleted");
+        assert!(!listing_columns(&prefs, false, false, false).contains(&Column::Origin), "only in the Trash");
+        assert_eq!(column_heading(Column::Modified, false, false), "Modified");
     }
 
     #[test]
@@ -6268,6 +6372,7 @@ mod tests {
             columns: Vec::new(),
             selection,
             search_query: "",
+            search: searching::SearchModel::idle(),
             load_state,
             prefs,
             sidebar,
@@ -6299,6 +6404,34 @@ mod tests {
         assert!(!sections.iter().any(|s| s.title == "Pinned"), "an empty section must render nothing at all");
         assert!(sections.iter().any(|s| s.title == "Places"));
         assert!(sections.iter().any(|s| s.title == "Trash"), "Trash is fixed and always present");
+    }
+
+    /// Saved searches sit after Pinned and before Trash, are absent with
+    /// none saved, and run rather than navigate when clicked.
+    #[test]
+    fn saved_searches_get_their_own_section_only_when_there_are_some() {
+        let places =
+            vec![SidebarItem { label: "Home".to_string(), path: PathBuf::from("/home/alex"), tint: sidebar::Tint::Accent, place: None }];
+        let (selection, load_state) = (Selection::default(), LoadState::Loaded);
+        let none = Prefs::default();
+        let vm = view_model_with(&places, &[], Path::new("/home/alex"), &selection, &none, &load_state);
+        assert!(!sidebar_sections(&vm).iter().any(|s| s.title == "Saved Searches"));
+
+        let mut prefs = Prefs::default();
+        prefs.searches = vec![crate::search::SmartFolder {
+            name: "Rust".into(),
+            query: "ext:rs".into(),
+            folder: "/home/alex".into(),
+            subfolders: true,
+        }];
+        let vm = view_model_with(&places, &[], Path::new("/home/alex"), &selection, &prefs, &load_state);
+        let sections = sidebar_sections(&vm);
+        let titles: Vec<&str> = sections.iter().map(|s| s.title).collect();
+        assert_eq!(titles, ["Places", "Saved Searches", "Trash"]);
+        let row = &sections[1].rows[0];
+        let (press, current) = sidebar_press(row, &vm);
+        assert_eq!(press, Message::Search(crate::search::SearchMessage::Open(0)));
+        assert!(!current, "not the view on screen");
     }
 
     #[test]
@@ -6513,8 +6646,8 @@ mod archive_tests {
     #[test]
     fn the_packed_column_appears_only_inside_an_archive() {
         let prefs = Prefs::default();
-        let inside = listing_columns(&prefs, false, true);
-        let outside = listing_columns(&prefs, false, false);
+        let inside = listing_columns(&prefs, false, false, true);
+        let outside = listing_columns(&prefs, false, false, false);
 
         assert!(inside.contains(&Column::Packed));
         assert!(!outside.contains(&Column::Packed), "not in an ordinary folder");
@@ -6531,14 +6664,14 @@ mod archive_tests {
     #[test]
     fn packed_sits_immediately_after_size_and_not_without_it() {
         let prefs = Prefs::default();
-        let columns = listing_columns(&prefs, false, true);
+        let columns = listing_columns(&prefs, false, false, true);
         let size = columns.iter().position(|c| *c == Column::Size).unwrap();
         assert_eq!(columns[size + 1], Column::Packed);
 
         let mut hidden = Prefs::default();
         hidden.columns.set(Column::Size, false);
         assert!(
-            !listing_columns(&hidden, false, true).contains(&Column::Packed),
+            !listing_columns(&hidden, false, false, true).contains(&Column::Packed),
             "with Size off there is nothing for Packed to be beside"
         );
     }

@@ -201,6 +201,11 @@ pub struct Prefs {
     /// own default *is* the right first-run value, so `#[serde(default)]`
     /// alone is enough here.
     pub pinned: Vec<PathBuf>,
+    /// Searches saved to the sidebar — see [`crate::search::SmartFolder`].
+    /// Like `pinned`, the window's one list rather than a tab's, and an
+    /// empty `Vec` is the first-run value; `#[serde(default)]` on the
+    /// struct is what lets a file written before this existed parse.
+    pub searches: Vec<crate::search::SmartFolder>,
     // Per-directory overrides (vision pillar 6: "auto-remember beats
     // onboarding" — a directory sorted by size once should stay sorted
     // by size) are deliberately **not implemented** in this struct. The
@@ -231,6 +236,7 @@ impl Default for Prefs {
             window_width: 900,
             window_height: 600,
             pinned: Vec::new(),
+            searches: Vec::new(),
         }
     }
 }
@@ -520,6 +526,33 @@ mod tests {
         };
         save_to(&path, &prefs).unwrap();
         assert_eq!(load_from(&path).unwrap().pinned, prefs.pinned);
+    }
+
+    /// The same shape again for saved searches: a file from before they
+    /// existed parses, with none.
+    #[test]
+    fn a_file_written_before_saved_searches_existed_still_parses_with_none() {
+        let older = "show_hidden = true\npinned = [\"/home/alex/Projects\"]\n";
+        let prefs: Prefs = toml::from_str(older).expect("an older file still parses");
+        assert!(prefs.searches.is_empty());
+        assert_eq!(prefs.pinned.len(), 1, "and nothing else moved");
+    }
+
+    #[test]
+    fn saved_searches_round_trip_through_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("files.toml");
+        let prefs = Prefs {
+            searches: vec![crate::search::SmartFolder {
+                name: "Recent PDFs".into(),
+                query: "ext:pdf modified:<30d".into(),
+                folder: PathBuf::from("/home/alex"),
+                subfolders: true,
+            }],
+            ..Prefs::default()
+        };
+        save_to(&path, &prefs).unwrap();
+        assert_eq!(load_from(&path).unwrap().searches, prefs.searches);
     }
 
     // --- `update`: the read-modify-write every writer shares -------------
