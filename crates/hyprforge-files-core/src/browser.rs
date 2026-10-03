@@ -94,9 +94,17 @@ impl Outcome {
     }
 }
 
-/// `parts` as one outcome, leaving out the ones that do nothing.
+/// `parts` as one outcome, one level deep, leaving out the ones that do
+/// nothing.
 fn many(parts: Vec<Outcome>) -> Outcome {
-    let mut parts: Vec<Outcome> = parts.into_iter().filter(|p| *p != Outcome::None).collect();
+    let mut parts: Vec<Outcome> = parts
+        .into_iter()
+        .flat_map(|p| match p {
+            Outcome::Many(inner) => inner,
+            other => vec![other],
+        })
+        .filter(|p| *p != Outcome::None)
+        .collect();
     match parts.len() {
         0 => Outcome::None,
         1 => parts.remove(0),
@@ -596,6 +604,10 @@ pub enum Outcome {
     /// Scroll the scrollable `id` to `y`, a fraction of its range — how a
     /// pane in column view brings the folder you came from into sight.
     SnapTo { id: Id, y: f32 },
+    /// Scroll the listing so the row the keyboard is on is in sight —
+    /// run [`crate::reveal::Reveal`]. Only as far as it takes, and not at
+    /// all when the row already shows.
+    RevealFocused,
     /// Tell the person something, in the status bar.
     Notice(String),
     /// Several things to do, in order.
@@ -923,6 +935,9 @@ pub struct Browser {
     select_first: bool,
     /// Column view's panes, outermost first. Empty in the other views.
     ancestors: Vec<Ancestor>,
+    /// The focused row last brought into sight, so moving the keyboard
+    /// asks for [`Outcome::RevealFocused`] once per move.
+    revealed: Option<PathBuf>,
     /// How many of `entries` are dotfiles, counted when the listing
     /// arrives rather than in `view` — iced runs `view` every frame,
     /// and a directory with 100,000 entries was being walked on each of
@@ -979,6 +994,7 @@ impl Browser {
             after_listing: None,
             select_first: false,
             ancestors: Vec::new(),
+            revealed: None,
             dotfiles: 0,
             // The shipped default, until `set_config` says otherwise.
             hidden_key: Config::default()
@@ -1085,6 +1101,7 @@ impl Browser {
     pub fn update(&mut self, message: Message) -> Outcome {
         let outcome = self.update_state(message);
         let outcome = self.with_columns(outcome);
+        let outcome = self.with_reveal(outcome);
         self.with_media(outcome)
     }
 
@@ -1620,7 +1637,25 @@ impl Browser {
     pub fn perform(&mut self, action: Action) -> Outcome {
         let outcome = self.perform_action(action);
         let outcome = self.with_columns(outcome);
+        let outcome = self.with_reveal(outcome);
         self.with_media(outcome)
+    }
+
+    /// Adds [`Outcome::RevealFocused`] when the keyboard's row has
+    /// changed — by an arrow, a click, or a listing arriving with
+    /// something to select. Run after every update and action, like
+    /// [`Self::with_media`], so no way of moving the focus forgets to
+    /// keep it on screen.
+    fn with_reveal(&mut self, outcome: Outcome) -> Outcome {
+        let focused = self.selection.focused().map(Path::to_path_buf);
+        if focused == self.revealed {
+            return outcome;
+        }
+        self.revealed = focused;
+        if self.revealed.is_none() {
+            return outcome;
+        }
+        many(vec![outcome, Outcome::RevealFocused])
     }
 
     /// Brings column view's panes in line with where the browser is, and
@@ -3897,13 +3932,15 @@ fn column_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message>
     let current: Element<'a, Message> = match vm.load_state {
         LoadState::Loaded if !vm.rows.is_empty() => {
             let mut list = column![].spacing(1.0);
+            let focused = vm.selection.focused();
             for (index, entry) in vm.rows.iter().copied().enumerate() {
                 let row = entry_row(index, entry, vm.selection.is_selected(&entry.path), &ctx);
-                list = list.push(if entry.is_dir && !vm.in_trash {
+                let row = if entry.is_dir && !vm.in_trash {
                     drop_zone(row, &entry.path, vm.drop_hover == Some(entry.path.as_path()))
                 } else {
                     row
-                });
+                };
+                list = list.push(reveal_tag(row, focused == Some(entry.path.as_path())));
             }
             scrollable(container(list).padding([0, spacing::XS as u16]))
                 .height(Length::Fill)
@@ -3924,6 +3961,15 @@ fn column_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message>
         .into(),
     };
     panes.push(container(current).width(Length::Fill).height(Length::Fill)).into()
+}
+
+/// `row` in a container that carries [`crate::reveal::focused_row`] when
+/// it is the keyboard's row. Every row gets the container, focused or
+/// not, so moving the focus changes an id rather than the shape of the
+/// widget tree — which would reset the state of every row after it.
+fn reveal_tag<'a>(row: Element<'a, Message>, focused: bool) -> Element<'a, Message> {
+    let tagged = container(row);
+    if focused { tagged.id(crate::reveal::focused_row()) } else { tagged }.into()
 }
 
 /// A quiet line in the middle of a pane that has no rows to show.
@@ -4547,11 +4593,12 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         let row = entry_row(index, entry, vm.selection.is_selected(&entry.path), &ctx);
         // A folder is somewhere a drop can go; a file is not, and nor is
         // anything in the Trash.
-        list = list.push(if entry.is_dir && !vm.in_trash {
+        let row = if entry.is_dir && !vm.in_trash {
             drop_zone(row, &entry.path, vm.drop_hover == Some(entry.path.as_path()))
         } else {
             row
-        });
+        };
+        list = list.push(reveal_tag(row, vm.selection.focused() == Some(entry.path.as_path())));
     }
     // `.id(..)` is what lets a host restore this list's scroll position
     // across a tab switch — see `Browser::list_scrollable_id`'s own doc.
@@ -4622,6 +4669,10 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // much room there actually is and fills it.
     let renaming = vm.renaming;
     let (drop_hover, in_trash) = (vm.drop_hover, vm.in_trash);
+    let focused = vm.selection.focused();
+    // The listing's id, as the list's: one of the two is ever drawn, and
+    // it is what `Reveal` scrolls.
+    let scroll_id = vm.list_scrollable_id.clone();
     iced::widget::responsive(move |size| {
         let gap = density::grid_gap(scale);
         // The width the layout actually handed us, which is the same
@@ -4638,11 +4689,12 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
                 current = row![].spacing(gap);
             }
             let cell = grid_cell(index, entry, selected, renaming, thumbnails.get(&entry.path), icons.for_entry(entry), scale);
-            current = current.push(if entry.is_dir && !in_trash {
+            let cell = if entry.is_dir && !in_trash {
                 drop_zone(cell, &entry.path, drop_hover == Some(entry.path.as_path()))
             } else {
                 cell
-            });
+            };
+            current = current.push(reveal_tag(cell, focused == Some(entry.path.as_path())));
         }
         // The last row is padded out with empty space to a full set of
         // columns, so its cells keep the width the rows above gave them
@@ -4656,7 +4708,7 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
             }
         }
         grid = grid.push(current);
-        scrollable(container(grid).padding(gap)).height(Length::Fill).into()
+        scrollable(container(grid).padding(gap)).height(Length::Fill).id(scroll_id.clone()).into()
     })
     .into()
 }
@@ -7229,5 +7281,48 @@ mod column_tests {
         let _ = browser.view(FontScale::default(), 1400.0);
         // A window too narrow for any pane still draws the folder in view.
         let _ = browser.view(FontScale::default(), 300.0);
+    }
+}
+
+#[cfg(test)]
+mod reveal_tests {
+    use super::tests_support::loaded;
+    use super::*;
+
+    fn reveals(outcome: &Outcome) -> bool {
+        match outcome {
+            Outcome::RevealFocused => true,
+            Outcome::Many(parts) => parts.iter().any(reveals),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn moving_the_keyboard_asks_for_its_row_to_be_shown_once_per_move() {
+        let mut browser = loaded(&[("a", false), ("b", false), ("c", false)]);
+        assert!(reveals(&browser.perform(Action::FocusDown)));
+        assert!(reveals(&browser.perform(Action::FocusDown)));
+        // Already at the last row: the focus does not move, so nothing
+        // is asked of the layout.
+        browser.perform(Action::FocusDown);
+        assert!(!reveals(&browser.perform(Action::FocusDown)));
+    }
+
+    #[test]
+    fn a_listing_that_arrives_with_something_to_select_shows_it() {
+        let (mut browser, _) = Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir/sub"), vec![]);
+        browser.update(Message::GoUp);
+        let rows: Vec<Entry> = (0..60)
+            .map(|i| format!("f{i:02}"))
+            .chain(["sub".to_string()])
+            .map(|name| {
+                let mut entry = super::tests_support::loaded(&[(name.as_str(), true)]).entries.remove(0);
+                entry.path = PathBuf::from("/dir").join(&name);
+                entry
+            })
+            .collect();
+        let outcome = browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(rows)));
+        assert_eq!(browser.selected_shown(), [PathBuf::from("/dir/sub")]);
+        assert!(reveals(&outcome), "{outcome:?}");
     }
 }

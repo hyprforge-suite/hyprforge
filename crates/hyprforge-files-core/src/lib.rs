@@ -42,6 +42,7 @@ pub mod naming;
 pub mod palette;
 pub mod prefs;
 pub mod preview;
+pub mod reveal;
 pub mod sidebar;
 pub mod trash;
 pub mod undo;
