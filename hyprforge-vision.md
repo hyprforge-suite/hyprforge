@@ -339,12 +339,10 @@ freedesktop cache (`hyprforge-thumbnails`), theme icons for its entries
 and places, and dragging files out into other applications.
 `media-plan.md` records how the viewer got there.
 
-The suite also gained tooling to extract a component into its own
-repository while keeping it a workspace member here: `split.sh` (via
-`git subtree ... --rejoin`) and `sync.sh`, which checks whether a
-split-out repository has drifted from what this monorepo would produce.
-Ten components have been split and pushed with their own green CI
-(as of 2026-10-01): clipboard, lock, greet, tray, settings, displayd,
+Each component lives in a repository of its own, with its own green CI,
+and is a git submodule of this one at `crates/<component>` (since
+2026-10-03, issue #2 — before that they were `git subtree` copies kept in
+step by `split.sh` and `sync.sh`, both now retired). The ten: clipboard, lock, greet, tray, settings, displayd,
 emojimenu, files, media and notif — all public, under the `hyprforge-suite`
 organisation since 2026-09-27. `repo-plan.md` is the
 authority on this work — the reasoning behind it, the dependency-layer
@@ -352,7 +350,7 @@ order, and what was learned doing it (a dangling `LICENSE` symlink, a
 missing README, and the two-spellings-of-one-git-URL trap once `settings`
 depends on an already-split `tray`) — read it rather than this summary.
 Every library crate is published to crates.io (0.1.0 on 2026-09-28; all
-at 0.1.1 since 2026-10-03, the first release through `publish.yml`), and
-the split repositories depend on those versions; inside this
+0.1.1 on 2026-10-03, the first release through `publish.yml`; 0.1.5 the
+same day), and the component repositories depend on those versions; inside this
 workspace a `[patch.crates-io]` section points each name back at
 `crates/`.

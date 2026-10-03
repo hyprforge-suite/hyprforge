@@ -145,8 +145,10 @@ histories`. Outbound works, inbound does not, and nothing says so until the
 first outside pull request — the exact event the split exists to enable.
 `--rejoin` leaves a merge commit here (`Split 'crates/<crate>/' into commit
 '<sha>'`) recording which commit the split produced, so a later pull has an
-ancestor to find. `split.sh` does this; the rule exists because a hand-run
-`git subtree split` does not.
+ancestor to find. `split.sh` did this; the rule existed because a hand-run
+`git subtree split` does not. History now: since 2026-10-03 the components
+are submodules (see "Working with the components" below) and nothing is
+split any more.
 
 **A `LICENSE` symlink dangles in a split repository.** The foundation crates
 symlink `LICENSE` to the repo root, and that is correct for them — `cargo
@@ -154,7 +156,8 @@ package` dereferences a symlink into the tarball. Git carries a symlink as a
 symlink, so the moment a crate becomes a repository root, `../../LICENSE`
 points above it and resolves to nothing. The first split produced an MIT
 project with an unreadable licence. A crate that will become a repository
-needs a real file; `split.sh` refuses to split one that is still a symlink.
+needs a real file; `check.sh`'s "Every package is a repository" step checks
+that every package carries its licence.
 
 **Cargo keys a git source on the URL string, so every manifest must spell it
 identically.** A standalone crate that depends on another standalone crate
@@ -164,8 +167,7 @@ as two different sources, and the second one gets fetched over the network.
 `hyprforge-settings` depending on `hyprforge-tray`, which named the URL in
 its own manifest, was the first pair with this shape. No manifest names a
 git URL now — siblings come from crates.io — but the rule returns with the
-first git dependency, so `split.sh` still refuses to split while more than
-one spelling exists.
+first git dependency.
 
 **A sibling missing from the root `[patch.crates-io]` table builds from
 the published copy, not from this checkout — and nothing fails.** Cargo
@@ -333,7 +335,10 @@ monorepo, so that ordering stopped guarding anything — the same failure
 arrives through crates.io, whenever a component uses a library change
 that has not been released. `sync.sh --push` now builds each component
 outside the workspace against the published crates, the way its CI will,
-and refuses to push one that fails. When a mechanism changes, the guard
+and refuses to push one that fails. (It moved once more when the
+components became submodules and there was no push from here left to
+guard: `check.sh`'s "Components build against published crates" asks it
+before a pin bump goes out.) When a mechanism changes, the guard
 that depended on it has to move with it; this one kept running and
 passing for three days after it stopped meaning anything.
 
@@ -483,8 +488,9 @@ a `.gz`'s one member is named after its file — extraction briefly wrote
 the real one separately; only the bytes come from the pin.
 
 **A library can be fetched; a binary cannot — so a package's binaries
-must all live in one crate directory.** `git subtree split --prefix=`
-takes one directory, so that directory *is* the published repository.
+must all live in one crate directory.** A component's repository is one
+directory — a submodule here now, a `git subtree split --prefix=` then —
+so that directory *is* the published repository.
 `hyprforge-tray` was split without `hyprforge-traymenu` and
 `hyprforge-clipboard` without `hyprforge-clipmenu`, publishing a tray
 daemon whose right-click spawns a program the repository does not
@@ -696,7 +702,7 @@ belongs in the design — not in a user's surprise.
 ./check.sh --quick  # tier 1 only: clippy + unit tests, no compositor
 ```
 
-Clippy must be silent and every test must pass before a commit. Seventeen
+Clippy must be silent and every test must pass before a commit. Nineteen
 gated tiers beyond tier 1 now, each answering a different "does the system
 I'm talking to actually agree" question — Hyprland itself, the ecosystem
 daemons' parse tests, the system's own `unzip`/`tar`/`7z`, NetworkManager,
@@ -704,12 +710,17 @@ BlueZ, hyprsunset, systemd-logind, trash entries written by another
 implementation, UPower, power-profiles-daemon, fprintd, the Wayland clipboard, icon
 names against the installed theme, the installed shared MIME database, the
 open/save dialog's D-Bus interface against the one xdg-desktop-portal calls, a
-tray host, and cargo's own packager (does every library crate `publish
+tray host, cargo's own packager (does every library crate `publish
 --dry-run` cleanly, which builds each one over again and so cannot live in
-the pre-commit hook) — and each gates on the thing it actually asks rather
+the pre-commit hook), the component repositories (is every submodule pin a
+commit on its repository's `main`), and crates.io itself (does every
+component build on its own against the published libraries, the way its CI
+will) — and each gates on the thing it actually asks rather
 than riding another tier's `--ignored` run, for the reason in the
 rule above about a check that silently never runs. Tier 1 now also includes
-the "Standalone crate dependency pins" step, which compares every split-ready
+"Components are submodules", which runs first and stops everything with
+the command that fixes it when a component's submodule is empty, and fails
+on a standalone crate left as a plain directory — the "Standalone crate dependency pins" step, which compares every split-ready
 crate's hand-copied dependency versions against the workspace table — see the
 rule above about drift with no symptom — "Siblings build from this
 checkout", which fails on a sibling named by git that `[patch]` does not
@@ -745,13 +756,37 @@ the files now and the restart later; it never touches greetd, which
 `crates/hyprforge-greet/INSTALL.md` covers committing to deliberately, from
 a spare VT.
 
-`./split.sh <crate-name>` extracts one component into a branch that can
-become its own repository, history intact, and refuses to run until the
-crate is actually ready to leave (see the rules above about the manifest,
-the `LICENSE` symlink, and the git URL). `./sync.sh` reports whether each
-already-split component's published repository still matches what this
-monorepo would produce, and `./sync.sh --push` brings the ones that have
-drifted back into sync — see repo-plan.md for both.
+### Working with the components
+
+The ten components are **git submodules** at `crates/<component>`, each
+the real home of its code (issue #2; `repo-plan.md` has the mechanism and
+the history). Clone with `--recurse-submodules`, or run `git submodule
+update --init` — `check.sh` says so first when one is empty, and so does
+the installer. A new git worktree starts with them empty too, so run that
+command in it before building.
+
+A change to a component is two commits, and the order is the rule:
+
+1. Commit **inside** the submodule (`git -C crates/<component> ...`) and
+   push it to that component's repository's `main`.
+2. Commit the pin bump here (`git add crates/<component>`).
+
+Never the other way round: a pin naming a commit that is not on its
+repository's `main` is a monorepo nobody else can clone, and `check.sh`'s
+"Submodule pins are on their repositories" refuses it. And a component
+commit that calls a library change not yet on crates.io builds here (the
+`[patch]` table) and fails its own CI; "Components build against published
+crates" catches that, so a library-and-component change is the library,
+a release, then the component and its pin.
+
+"Stage the paths you actually wrote" applies inside a submodule as well:
+`git -C crates/<component> add <paths>`, never `-A`. Here, `git add
+crates/<component>` stages only the pin — whatever is uncommitted inside
+the submodule is not part of it, and `git status` shows that as
+`modified content`, which is the cue that step 1 is not done.
+
+`split.sh` and `sync.sh` are retired. The rules above that mention them
+are kept as history of what went wrong under the subtree arrangement.
 
 ## What the layering is for
 

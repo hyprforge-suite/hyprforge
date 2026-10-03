@@ -42,7 +42,11 @@ jobs:
     name: clippy + unit tests
     runs-on: ubuntu-latest
     steps:
+      # The components are submodules: without them every
+      # crates/<component> is empty and the workspace will not load.
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       # The runner image ships Android, .NET, GHC and a stack of
       # preinstalled toolchains this build never touches, and they are

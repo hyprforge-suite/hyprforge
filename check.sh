@@ -93,6 +93,50 @@ else
     ok "${avail_gb}GB free"
 fi
 
+# The components are git submodules (issue #2): each one's own repository
+# is where its code lives, and crates/<component> is a pinned reference
+# to it. A clone made without --recurse-submodules has those directories
+# empty, and cargo then fails with "failed to load manifest for workspace
+# member" — a sentence about cargo, not about the clone. Asked here,
+# before anything builds, so the failure names its own fix.
+#
+# Also the other half of the arrangement: a component left as a plain
+# directory — never converted, or added beside the others without
+# becoming a repository of its own — is the copy-and-sync shape this
+# replaced, and nothing would push it anywhere. Every crate whose
+# manifest stands alone (no `.workspace = true` anywhere in it, which is
+# what makes it buildable as a repository root) must be a submodule.
+step "Components are submodules"
+submodules=$(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null | awk '{print $2}')
+uninitialised=()
+for path in $submodules; do
+    [[ -f "$path/Cargo.toml" ]] || uninitialised+=("$path")
+done
+if [[ ${#uninitialised[@]} -gt 0 ]]; then
+    bad "${#uninitialised[@]} component submodule(s) are empty (${uninitialised[*]}) — run: git submodule update --init"
+    # Nothing below can build without them, and every step would fail
+    # for this one reason under some other name.
+    printf '\n%s==> Summary%s\n  %s1 check(s) failed:%s\n    • components not checked out\n' "$BOLD" "$OFF" "$RED" "$OFF"
+    exit 1
+fi
+plain=()
+for manifest in crates/*/Cargo.toml; do
+    dir=${manifest%/Cargo.toml}
+    grep -q '\.workspace *= *true\|workspace *= *true' "$manifest" && continue
+    grep -qx "$dir" <<<"$submodules" || plain+=("$dir")
+done
+moved=$(git submodule status 2>/dev/null | grep -c '^+' || true)
+if [[ ${#plain[@]} -gt 0 ]]; then
+    bad "standalone crate(s) that are plain directories, not submodules: ${plain[*]} — give each its own repository and add it with git submodule add"
+else
+    count=$(wc -w <<<"$submodules")
+    if [[ "$moved" -gt 0 ]]; then
+        ok "$count components, each a submodule; $moved checked out past its pin — commit the pin bump here once that work is pushed"
+    else
+        ok "$count components, each a submodule at its pinned commit"
+    fi
+fi
+
 # Counts the tests reported across every binary in a `cargo test` run.
 count_tests() { grep 'test result' | awk -F'[.;] ' '{s+=$2} END {print s+0}'; }
 
@@ -527,8 +571,8 @@ for package in packages:
     if len(directories) > 1:
         problems.append(
             f"{package}: installs {', '.join(binaries)} from {len(directories)} crate "
-            f"directories ({', '.join(directories)}) — a subtree split takes one "
-            f"prefix, so this package cannot become one repository"
+            f"directories ({', '.join(directories)}) — a component's repository is "
+            f"one directory (one submodule), so this package cannot be one repository"
         )
 
 # And every package — the metapackage too — installs a licence. None
@@ -1296,7 +1340,70 @@ else
         ok "$(grep -c '^\s*Packaged ' <<<"$output") library crate(s) package cleanly"
     else
         bad "a library crate does not package — run: cargo publish --workspace --dry-run ${exclude[*]}"
-        grep -E '^(error|warning)' <<<"$output" | head -10
+        # The reason, not the warnings: an unbumped version prints one
+        # "already exists" warning per crate ahead of the error that
+        # matters, and ten of those filled this space before.
+        grep -E '^error' -A8 <<<"$output" | head -16
+    fi
+
+    # Every submodule pin must name a commit its repository actually has
+    # on main. A pin is a promise that the code exists somewhere anyone
+    # can fetch it; a pin to a commit made in the submodule and never
+    # pushed is a monorepo nobody else can clone — `git submodule update`
+    # fails on it, and it fails for everyone except the person who made
+    # it. Network-gated: it fetches each repository's main.
+    step "Submodule pins are on their repositories"
+    unpushed=(); unreachable=()
+    for path in $submodules; do
+        pin=$(git rev-parse "HEAD:$path" 2>/dev/null) || continue
+        if ! git -C "$path" fetch -q origin main 2>/dev/null; then
+            unreachable+=("$path"); continue
+        fi
+        git -C "$path" merge-base --is-ancestor "$pin" origin/main 2>/dev/null || unpushed+=("$path")
+    done
+    if [[ ${#unpushed[@]} -gt 0 ]]; then
+        bad "pinned commit(s) not on their repository's main: ${unpushed[*]} — push the component first (git -C <path> push origin HEAD:main), then this"
+    elif [[ ${#unreachable[@]} -eq $(wc -w <<<"$submodules") ]]; then
+        skip "submodule pins" "no component repository could be reached"
+    else
+        ok "every pinned commit is on its repository's main${unreachable:+ (${#unreachable[@]} unreachable, not checked)}"
+    fi
+
+    # Each component the way its own CI is about to build it: outside
+    # this workspace, where the root [patch.crates-io] table does not
+    # reach, against the libraries as crates.io has them. Everything
+    # above proves a component builds against *this checkout's*
+    # libraries, and says nothing about the published ones — a component
+    # calling a library function added since the last release passes all
+    # of it and fails its own CI with `cannot find function`. sync.sh
+    # asked this before every push; with the components as submodules
+    # there is no push from here to guard, so it is asked here instead,
+    # before a pin bump goes out naming a commit that cannot build alone.
+    #
+    # `git archive` of the submodule's checked-out commit, extracted with
+    # `-m` so every file is dated now: cargo leaves a package's directory
+    # out of its fingerprint, and an extraction dated older than the last
+    # one in the shared target would be judged fresh and never compiled.
+    # One shared target, so ten components cost one build of iced.
+    step "Components build against published crates"
+    standalone_target="$PWD/target/standalone"
+    broken=()
+    for path in $submodules; do
+        dir=$(mktemp -d "${TMPDIR:-/tmp}/hyprforge-standalone.XXXXXX")
+        log="$dir.log"
+        if git -C "$path" archive HEAD | tar -x -m -C "$dir" \
+            && (cd "$dir" && CARGO_TARGET_DIR="$standalone_target" cargo check --all-targets --quiet) >"$log" 2>&1; then
+            :
+        else
+            broken+=("$path")
+            { grep -q '^error' "$log" && grep '^error' -A8 "$log" || tail -n 15 "$log"; } | head -n 20 | sed 's/^/     /'
+        fi
+        rm -rf "$dir" "$log"
+    done
+    if [[ ${#broken[@]} -gt 0 ]]; then
+        bad "component(s) that do not build on their own against crates.io: ${broken[*]} — a Hyprforge library named above needs a release first (see repo-plan.md)"
+    else
+        ok "all $(wc -w <<<"$submodules") components build against the published libraries"
     fi
 fi
 

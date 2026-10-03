@@ -10,8 +10,8 @@
 # copy" through a different door.
 #
 # It lives here, not inside crates/hyprforge-notif/, because that
-# directory is what `git subtree split` publishes: these paths would point
-# at nothing in the split repository, which builds from crates.io and is
+# directory is a submodule — notif's own repository: these paths would point
+# at nothing in that repository, which builds from crates.io and is
 # meant to. Cargo reads `.cargo/config.toml` from the directory it is run
 # in and every parent, so a build anywhere under crates/ sees this file;
 # for the suite's own crates it repeats what the root [patch] already

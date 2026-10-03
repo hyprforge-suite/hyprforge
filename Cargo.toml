@@ -240,7 +240,8 @@ async-trait = "0.1"
 # Every component names its Hyprforge siblings by version, as crates.io
 # dependencies — `hyprforge-core = "0.1"` — because those manifests have to
 # build unchanged both in here and as the root of their own repository
-# after `git subtree split` pulls them out, and a clone of one component
+# (each component is a submodule here, and its own repository there),
+# and a clone of one component
 # should fetch published crates, not this whole repository. Left alone,
 # that would make every build here use the published copies of crates
 # that are sitting right there in `crates/`, so a fix to a library would

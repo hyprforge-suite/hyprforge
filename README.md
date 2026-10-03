@@ -284,10 +284,11 @@ an export rather than a shared path.
 
 The suite lives in the [hyprforge-suite](https://github.com/hyprforge-suite)
 GitHub organisation (`hyprforge` itself was already taken by an unrelated
-project), and every repository in it is public. Ten components have been
-split out of `crates/` into their own repositories with `git subtree`,
-pushed, and have green CI; this repository is where the libraries they
-share live, and the only place that says how the eleven fit together.
+project), and every repository in it is public. Ten components have
+repositories of their own, each with green CI, and each appears here as a
+git submodule at `crates/<component>`; this repository is where the
+libraries they share live, and the only place that says how the eleven fit
+together.
 
 | Repository | What it is |
 |---|---|
@@ -323,29 +324,34 @@ are published together; see `repo-plan.md`.
 
 ### Where development happens
 
-This repository is the source of truth. A commit here can cross a component
-boundary in one commit, and `./check.sh` tests the whole suite together —
-neither is true once something exists only as a separate clone. `./split.sh`
-produces each component repository from `crates/` with `git subtree split
---rejoin`, and `git subtree pull` brings a change made in a component
-repository back here, so opening a pull request against a component repository
-directly — `hyprforge-lock`, say — is welcome and works: the maintainer pulls
-it back into this repository the same way changes flow out. `repo-plan.md` has
-the mechanism in full, including why `--rejoin` is not optional.
+Each component's own repository is where its code lives. This repository
+**references** each one as a git submodule at `crates/<component>`, pinned to
+a commit, so clone it with its components:
 
-That branch still has to be pushed, and until now that was a manual `git
-push` typed by hand once per component, with nothing recording that it
-happened or checking it stayed true. `./sync.sh` is the day-2 counterpart:
-run alone, it reports — read-only — whether each published component
-repository still matches what this monorepo would produce right now.
-`./sync.sh --push` re-splits and pushes only the ones that have drifted; it
-refuses on a dirty tree, refuses if `./check.sh --quick` fails, refuses a
-component that does not build on its own against the libraries published
-on crates.io (one that needs an unreleased library change — release
-first), and never force-pushes. A component whose published history is not an ancestor of the
-new split has diverged — meaning something was pushed to it directly — and
-that's `git subtree pull` and a human decision, not something this script
-will guess at.
+```
+git clone --recurse-submodules https://github.com/hyprforge-suite/hyprforge
+# or, in a clone made without them:
+git submodule update --init
+```
+
+`./check.sh` says so before anything else when one is missing, rather than
+letting cargo fail to load the workspace.
+
+A pull request against a component repository — `hyprforge-lock`, say — is a
+pull request against the code; there is no second copy for it to be carried
+back into. A change here to a component is two commits: one inside
+`crates/<component>`, pushed to that component's repository, and one here
+moving the pin. `./check.sh` refuses a pin that names a commit its repository
+does not have on `main` (nobody else could clone it), and builds every
+component on its own against the libraries on crates.io, the way the
+component's CI is about to — so a component that needs a library change not
+yet released is caught here rather than on GitHub. A change to a library and
+a component together is the library here, a release, then the component and
+the pin; `repo-plan.md` has the order.
+
+Until October 2026 the components were copies instead, written here and
+pushed out with `git subtree split` by `split.sh` and kept in step by
+`sync.sh`; both are retired, and `repo-plan.md` keeps the history of why.
 
 If you only care about one component, you don't need any of the above: clone
 its repository and `cargo test`.

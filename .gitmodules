@@ -1,0 +1,30 @@
+[submodule "crates/hyprforge-clipboard"]
+	path = crates/hyprforge-clipboard
+	url = https://github.com/hyprforge-suite/hyprforge-clipboard.git
+[submodule "crates/hyprforge-displayd"]
+	path = crates/hyprforge-displayd
+	url = https://github.com/hyprforge-suite/hyprforge-displayd.git
+[submodule "crates/hyprforge-emojimenu"]
+	path = crates/hyprforge-emojimenu
+	url = https://github.com/hyprforge-suite/hyprforge-emojimenu.git
+[submodule "crates/hyprforge-files"]
+	path = crates/hyprforge-files
+	url = https://github.com/hyprforge-suite/hyprforge-files.git
+[submodule "crates/hyprforge-greet"]
+	path = crates/hyprforge-greet
+	url = https://github.com/hyprforge-suite/hyprforge-greet.git
+[submodule "crates/hyprforge-lock"]
+	path = crates/hyprforge-lock
+	url = https://github.com/hyprforge-suite/hyprforge-lock.git
+[submodule "crates/hyprforge-media"]
+	path = crates/hyprforge-media
+	url = https://github.com/hyprforge-suite/hyprforge-media.git
+[submodule "crates/hyprforge-notif"]
+	path = crates/hyprforge-notif
+	url = https://github.com/hyprforge-suite/hyprforge-notif.git
+[submodule "crates/hyprforge-settings"]
+	path = crates/hyprforge-settings
+	url = https://github.com/hyprforge-suite/hyprforge-settings.git
+[submodule "crates/hyprforge-tray"]
+	path = crates/hyprforge-tray
+	url = https://github.com/hyprforge-suite/hyprforge-tray.git

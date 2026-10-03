@@ -44,6 +44,10 @@ source=()
 
 prepare() {
   cd "$startdir/../.."
+  # The components are submodules of this repository; a checkout made
+  # without --recurse-submodules has their directories empty, and the
+  # workspace below would not load.
+  git submodule update --init
   export RUSTUP_TOOLCHAIN=stable
   cargo fetch --locked
   # notif is a workspace of its own with its own Cargo.lock — see

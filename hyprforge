@@ -501,6 +501,13 @@ build() {
     # catch. `-p` takes a *package*, and naming a binary inside one
     # instead fails only at the real install. One `test -f` closes that
     # gap without a cargo invocation.
+    #
+    # The components are submodules, and one checked out without them is
+    # an empty directory — a different mistake with a different fix.
+    if [[ -d crates/$package && ! -f crates/$package/Cargo.toml ]] &&
+        git config -f .gitmodules --get "submodule.crates/$package.path" >/dev/null 2>&1; then
+        die "crates/$package is a submodule that is not checked out — run: git submodule update --init"
+    fi
     [[ -f crates/$package/Cargo.toml ]] ||
         die "no crate at crates/$package — 'cargo build -p' takes a package name, not a binary name"
     if $DRY_RUN; then

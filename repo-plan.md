@@ -22,7 +22,55 @@ What repositories add on top of that is **identity**: a project someone
 can star, file an issue against, and clone without the other
 thirty-nine crates. That is a real thing to want, and it is what this plan is for.
 
-## The mechanism
+## The mechanism now: submodules (since 2026-10-03, issue #2)
+
+Each component's own repository is the real home of its code, and this
+repository **references** it as a git submodule at `crates/<component>`,
+pinned to a commit. There is one copy, so there is nothing to keep in step:
+`split.sh`, `sync.sh` and the `--rejoin` merge commits are gone, and a pull
+request against a component repository is a pull request against the code.
+
+What did not change: the libraries live here and are published to
+crates.io; components depend on them by version; and the root
+`[patch.crates-io]` table (and `crates/.cargo/config.toml` for notif) still
+points every one back at `crates/`, so a build here uses the local
+libraries whether a component is a submodule or not. Cargo is content with
+workspace members inside submodules.
+
+Working in it:
+
+```
+git clone --recurse-submodules https://github.com/hyprforge-suite/hyprforge
+git submodule update --init            # a clone made without them
+
+# a change to a component: commit inside it, push it, then move the pin
+git -C crates/hyprforge-files commit ...
+git -C crates/hyprforge-files push origin HEAD:main
+git add crates/hyprforge-files && git commit -m "..."   # the pin bump
+```
+
+The order matters and `check.sh` holds it. A pin naming a commit its
+repository does not have on `main` is a monorepo nobody else can clone, so
+"Submodule pins are on their repositories" refuses one. And a component
+whose commit calls a library change not yet on crates.io builds here (the
+`[patch]` table) and fails its own CI, so "Components build against
+published crates" builds each one outside the workspace the way its CI
+will — the guard `sync.sh --push` used to apply before pushing, moved to
+where the pin is decided. A change to a library and a component together
+is therefore: the library here, a release (`vX.Y.Z`, see Status), then the
+component's commit, then the pin.
+
+The migration was mechanical because the copies were exact: after
+`sync.sh` reported all ten in step, each `crates/<component>` was replaced
+by a submodule at its repository's `main`, and each submodule's tree hash
+was compared against the tree the monorepo had held — all ten identical,
+so not a byte of component code changed in the move. History before it
+stays where it was: a component's commits up to the move are in both
+repositories, and from the move on, only in its own.
+
+## The mechanism until October 2026: `git subtree`
+
+Kept as history — none of this is how the repository works now.
 
 `git subtree`, in both directions — and `./split.sh` wraps the outbound
 half, because the incantation has one non-obvious flag in it:
@@ -412,8 +460,20 @@ async-io and panic — and three things follow from that shape:
       a minute per remaining crate skipped the 30 already on the index
       and published the last three; all 33 are at 0.1.1. Expect the same
       on every release while there are more than 30 crates
+- [x] Components are submodules (2026-10-03, issue #2): after v0.1.5 was
+      published and `sync.sh` reported all ten in step, each
+      `crates/<component>` became a submodule of its repository at the
+      same tree. `split.sh` and `sync.sh` retired; `check.sh` asks that
+      every standalone crate is an initialised submodule, that every pin
+      is on its repository's `main`, and that every component builds
+      against the published libraries; CI and the PKGBUILD check out
+      the submodules
 
-## Staying in sync after the push
+## Staying in sync after the push (retired with `sync.sh`)
+
+History: this is the problem submodules removed. There is no second copy
+to fall behind now, and the one guard here worth keeping — building each
+component against crates.io before it goes out — moved into `check.sh`.
 
 Publishing with `split.sh` and a hand-typed `git push` was step 3's
 answer to *getting a component out the door once*. It has no opinion on

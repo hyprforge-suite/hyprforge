@@ -66,7 +66,7 @@ a gap for the person you are working with, or a check for step 6.
 | `repo-plan.md` | the Status checklist | A split, a new check, a finished step |
 | `CLAUDE.md` | rules, the tier count in "Checking your work", the layering diagram | Add a rule only for a mistake that was not obvious in advance |
 | `//!` module docs of every file touched | what the module does and does not do | Lists of items, backends and "the four …" live here too |
-| Comments and messages in `check.sh`, `sync.sh`, `split.sh`, `hyprforge` | why a step exists, why it runs in this order | These explain the mechanism they guard, and print it to whoever runs them — a stale reason here is believed |
+| Comments and messages in `check.sh`, `hyprforge`, `.gitmodules` | why a step exists, why it runs in this order | These explain the mechanism they guard, and print it to whoever runs them — a stale reason here is believed |
 | `.github/workflows/*.yml`, and each component's own CI | what is built from where, which secret, which crates are excluded | Comments here state the build and release model outright |
 | A component README's build and install sections | where siblings come from, what a clone fetches | The first thing an outside contributor follows |
 | `packaging/arch/` (`PKGBUILD` and its comments) | which package ships which binaries, from which source | Packaging granularity is a claim about the suite's shape |

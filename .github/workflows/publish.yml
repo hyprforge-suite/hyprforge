@@ -35,6 +35,11 @@ jobs:
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The clipboard and the tray are published from here and are
+          # submodules, and the workspace will not load without every
+          # component checked out.
+          submodules: true
 
       - name: Install the pinned Rust toolchain (rust-toolchain.toml)
         run: rustup show
