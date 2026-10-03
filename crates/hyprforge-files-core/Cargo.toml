@@ -62,6 +62,8 @@ toml_edit.workspace = true
 # `Entry::modified: Option<SystemTime>` into a calendar date needs a
 # calendar, which `std` deliberately does not carry.
 chrono.workspace = true
+# Bulk rename's "regular expression" switch — see `bulk_rename.rs`.
+regex.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

@@ -23,6 +23,7 @@ pub use hyprforge_listing::{backend, filter, sort, types, users};
 pub mod action;
 pub mod archive;
 pub mod browser;
+pub mod bulk_rename;
 pub mod click;
 pub mod clipboard;
 pub mod columns;
