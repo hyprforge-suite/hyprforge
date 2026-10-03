@@ -209,6 +209,39 @@ impl Default for MenuConfig {
 }
 
 impl MenuConfig {
+    /// The open/save dialog's menus: only what a dialog does.
+    ///
+    /// The window's menus offer Trash, Cut, Extract and the rest, and a
+    /// dialog declines every one of them — a file chooser is not where a
+    /// file is deleted. A menu row that only says "not here" is worse than
+    /// no row, so the dialog gets menus of its own instead of the window's
+    /// with half of them refused. `tests::the_dialog_menus_offer_only_what_a_dialog_does`
+    /// holds the list to what the dialog's host carries out.
+    pub fn dialog() -> Self {
+        use Action::*;
+        use MenuEntry::{Action as A, Separator as Sep};
+        MenuConfig {
+            entry: vec![A(Open), Sep, A(CopyPath), A(Rename), Sep, A(SelectAll)],
+            folder: vec![A(Open), Sep, A(CopyPath), A(Rename)],
+            archive: vec![A(Open), Sep, A(CopyPath)],
+            archive_member: vec![A(CopyPath)],
+            empty: vec![
+                A(NewFolder),
+                Sep,
+                A(SelectAll),
+                A(ToggleHidden),
+                A(TogglePreview),
+                A(Refresh),
+                Sep,
+                A(GoUp),
+            ],
+            trash: vec![A(Open), A(CopyPath), Sep, A(SelectAll)],
+            // Pins are the window's: a dialog does not rearrange them.
+            place: Vec::new(),
+            pinned: Vec::new(),
+        }
+    }
+
     pub fn get(&self, kind: MenuKind) -> &[MenuEntry] {
         match kind {
             MenuKind::Entry => &self.entry,
@@ -332,6 +365,32 @@ pub fn place(at: (f32, f32), menu: (f32, f32), window: (f32, f32)) -> (f32, f32)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_dialog_menus_offer_only_what_a_dialog_does() {
+        use Action::*;
+        // What the open/save dialog's host carries out (`portal_main.rs`
+        // in `hyprforge-files`). Anything else it declines with a sentence,
+        // and a menu row that only declines is a row that should not exist.
+        let does = [Open, CopyPath, Rename, SelectAll, NewFolder, ToggleHidden, TogglePreview, Refresh, GoUp];
+        let menus = MenuConfig::dialog();
+        for kind in [
+            MenuKind::Entry,
+            MenuKind::Folder,
+            MenuKind::Archive,
+            MenuKind::ArchiveMember,
+            MenuKind::Empty,
+            MenuKind::Trash,
+            MenuKind::Place,
+            MenuKind::Pinned,
+        ] {
+            for entry in menus.get(kind) {
+                if let MenuEntry::Action(action) = entry {
+                    assert!(does.contains(action), "{kind:?} offers {action:?}, which the dialog declines");
+                }
+            }
+        }
+    }
 
     fn ctx_with_selection() -> ActionContext {
         ActionContext {
