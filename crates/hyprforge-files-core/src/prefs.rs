@@ -276,6 +276,11 @@ impl Zoom {
         (preset.view, true)
     }
 
+    /// Puts the listing on `preset`: its view's step set to the preset's.
+    pub fn take(&mut self, preset: &Preset) {
+        *self.step_mut(preset.view) = preset.step;
+    }
+
     /// Back to the size it has always been. Whether anything changed.
     pub fn reset(&mut self, view: ViewMode) -> bool {
         let step = self.step_mut(view);
@@ -294,6 +299,12 @@ pub struct Preset {
     /// vocabulary people already have for this.
     pub name: &'static str,
 }
+
+/// The toolbar's view buttons, besides Columns: Explorer's own two
+/// status-bar buttons, Details and Large icons — the presets people use
+/// most. Every other rung is a Ctrl+wheel away.
+pub const DETAILS: Preset = LADDER[1];
+pub const LARGE_ICONS: Preset = LADDER[4];
 
 /// Ctrl+wheel's ladder, smallest first: Explorer's, across both views.
 /// Scrolling down from Small icons is Details, and up from Details is

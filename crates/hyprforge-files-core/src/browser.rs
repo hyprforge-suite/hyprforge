@@ -756,6 +756,9 @@ pub enum Message {
     /// to find it still down would read as a bug.
     ToggleColumnPicker,
     SetViewMode(crate::prefs::ViewMode),
+    /// A view button: show this preset — its view at its size. See
+    /// [`crate::prefs::DETAILS`] and [`crate::prefs::LARGE_ICONS`].
+    ShowPreset(crate::prefs::Preset),
     /// Carry out an action — from a menu, a button, or a key the host
     /// resolved through [`crate::keymap::Keymap`].
     Perform(Action),
@@ -1354,6 +1357,11 @@ impl Browser {
             }
             Message::SetViewMode(mode) => {
                 self.prefs.view_mode = mode;
+                Outcome::PrefsChanged(self.prefs.clone())
+            }
+            Message::ShowPreset(preset) => {
+                self.prefs.zoom.take(&preset);
+                self.prefs.view_mode = preset.view;
                 Outcome::PrefsChanged(self.prefs.clone())
             }
             Message::Perform(action) => self.perform(action),
@@ -3614,7 +3622,14 @@ fn nav_button<'a>(
 
 
 
-/// List / Grid / Columns, at the right end of the toolbar.
+/// Details / Large icons / Columns, at the right end of the toolbar.
+///
+/// The first two are presets, not bare views — Explorer's own two
+/// status-bar buttons, the sizes people use most — so the grid button
+/// opens Large icons whatever size the grid was last at, and Details
+/// the list at its own size. Each lights while its view is showing,
+/// whichever rung Ctrl+wheel has it on: the button says which view you
+/// are in, the status bar which size.
 ///
 /// Icons in one grouped strip, not three text buttons. The design shows
 /// a compact segmented control, and the reason is width: "List Grid
@@ -3629,8 +3644,8 @@ fn nav_button<'a>(
 fn view_mode_toggle<'a>(prefs: &Prefs, scale: FontScale) -> Element<'a, Message> {
     let seg_w = density::glyph_button(scale) * 0.92;
     let seg_h = density::glyph_button(scale) * 0.77;
-    let segment = |glyph_kind: glyph::View, mode: Option<ViewMode>| -> Element<'a, Message> {
-        let active = mode.is_some_and(|m| prefs.view_mode == m);
+    let segment = |glyph_kind: glyph::View, mode: ViewMode, press: Message| -> Element<'a, Message> {
+        let active = prefs.view_mode == mode;
         let color = if active {
             hyprforge_ui::theme::text()
         } else {
@@ -3646,20 +3661,18 @@ fn view_mode_toggle<'a>(prefs: &Prefs, scale: FontScale) -> Element<'a, Message>
         // Same reason as `nav_button`: the default padding would shrink
         // the mark inside its own segment and push it off centre.
         .padding(0)
-        .on_press_maybe(mode.map(Message::SetViewMode))
+        .on_press(press)
         // `Quiet`, not `Choice`: the view mode is a mode of the window,
         // and lighting it in the accent would put a second purple on the
-        // bar competing with the one that means selection. The disabled
-        // segment is told apart by `on_press_maybe(None)`, not by a third
-        // colour.
+        // bar competing with the one that means selection.
         .style(segment_style(SegmentLook::Quiet, active))
         .into()
     };
 
     segmented([
-        segment(glyph::View::List, Some(ViewMode::List)),
-        segment(glyph::View::Grid, Some(ViewMode::Grid)),
-        segment(glyph::View::Columns, Some(ViewMode::Columns)),
+        segment(glyph::View::List, ViewMode::List, Message::ShowPreset(crate::prefs::DETAILS)),
+        segment(glyph::View::Grid, ViewMode::Grid, Message::ShowPreset(crate::prefs::LARGE_ICONS)),
+        segment(glyph::View::Columns, ViewMode::Columns, Message::SetViewMode(ViewMode::Columns)),
     ])
 }
 
@@ -8278,5 +8291,16 @@ mod zoom_tests {
         assert_eq!(size_label(browser.prefs()), "", "column view at its own size says nothing");
         browser.update(Message::Zoom(1));
         assert_eq!(size_label(browser.prefs()), "125%");
+    }
+
+    #[test]
+    fn the_grid_button_opens_large_icons_whatever_size_the_grid_was_at() {
+        let mut browser = loaded(&[("a", false)]);
+        browser.update(Message::Zoom(1)); // Details → Small icons
+        browser.update(Message::ShowPreset(crate::prefs::DETAILS));
+        assert_eq!(size_label(browser.prefs()), "Details");
+        browser.update(Message::ShowPreset(crate::prefs::LARGE_ICONS));
+        assert_eq!(browser.prefs().view_mode, ViewMode::Grid);
+        assert_eq!(size_label(browser.prefs()), "Large icons");
     }
 }
