@@ -92,6 +92,18 @@ pub fn files_toml_path() -> PathBuf {
     hyprforge_config_dir().join("files.toml")
 }
 
+/// The tabs the file browser had open when it last closed, and which
+/// one was in front — what it reopens on next time.
+///
+/// Not a field of [`files_toml_path`]: that file is shared with the
+/// open/save dialog, a separate process with no tabs, and every writer of
+/// it reads, changes and rewrites the whole thing. A session written on
+/// every navigation would turn each of those into a race with the dialog
+/// for nothing the dialog needs.
+pub fn files_session_toml_path() -> PathBuf {
+    hyprforge_config_dir().join("files-session.toml")
+}
+
 /// The file browser's *hand-written* configuration — key bindings, and
 /// later menus and behaviour switches.
 ///

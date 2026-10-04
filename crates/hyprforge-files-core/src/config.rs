@@ -142,6 +142,19 @@ pub struct Behaviour {
     /// How long "Moved 3 items to the Trash · Undo" stays in the status
     /// bar. `0` turns the notice off; Ctrl+Z still works.
     pub undo_notice_seconds: u64,
+    /// Whether a folder on screen re-reads itself when something else
+    /// changes it — a download finishing, a file saved from an editor.
+    /// On by default: a listing that is quietly out of date is the thing
+    /// a file manager must not be. Off is for someone who would rather
+    /// press F5 than have rows move under the pointer.
+    pub watch: bool,
+    /// How often, in seconds, a folder on a network share is looked at
+    /// again while it is shown. A share sends no change notices — the
+    /// kernel only hears about changes made through this machine — so
+    /// the only way to notice someone else's is to ask. Also what a
+    /// local folder falls back to when the kernel's watch limit is
+    /// spent.
+    pub watch_network_every: u64,
 }
 
 impl Default for Behaviour {
@@ -153,6 +166,8 @@ impl Default for Behaviour {
             progress_after_ms: 500,
             undo_depth: 20,
             undo_notice_seconds: 6,
+            watch: true,
+            watch_network_every: 3,
         }
     }
 }
@@ -250,6 +265,8 @@ struct RawBehaviour {
     progress_after_ms: Option<toml::Value>,
     undo_depth: Option<toml::Value>,
     undo_notice_seconds: Option<toml::Value>,
+    watch: Option<toml::Value>,
+    watch_network_every: Option<toml::Value>,
 }
 
 /// A number within `range`, or a problem naming it. `name` includes
@@ -395,6 +412,19 @@ pub fn parse(text: &str, path: &Path) -> (Config, Vec<ConfigProblem>) {
         &raw.behaviour.undo_notice_seconds,
         0..=600,
         behaviour.undo_notice_seconds,
+        "seconds",
+        &mut problems,
+    );
+    behaviour.watch = switch("[behaviour] watch", &raw.behaviour.watch, behaviour.watch, &mut problems);
+    // Not below a second: every look at a share is a whole listing over
+    // the network, and a faster one would be the polling costing more
+    // than the folder is worth. Not above ten minutes, which is no
+    // longer "live" in any sense.
+    behaviour.watch_network_every = number(
+        "[behaviour] watch-network-every",
+        &raw.behaviour.watch_network_every,
+        1..=600,
+        behaviour.watch_network_every,
         "seconds",
         &mut problems,
     );
@@ -840,6 +870,26 @@ mod tests {
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(config.behaviour.undo_depth, 0);
         assert_eq!(config.behaviour.undo_notice_seconds, 0);
+    }
+
+    #[test]
+    fn live_updates_are_on_by_default_and_a_share_is_looked_at_every_three_seconds() {
+        let defaults = Config::default().behaviour;
+        assert!(defaults.watch);
+        assert_eq!(defaults.watch_network_every, 3);
+        let (config, problems) = parsed("[behaviour]\nwatch = false\nwatch-network-every = 10\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(!config.behaviour.watch);
+        assert_eq!(config.behaviour.watch_network_every, 10);
+    }
+
+    /// Zero would be a share listed as fast as the loop can go.
+    #[test]
+    fn a_network_poll_interval_of_zero_is_refused_and_the_default_kept() {
+        let (config, problems) = parsed("[behaviour]\nwatch-network-every = 0\n");
+        assert_eq!(config.behaviour.watch_network_every, 3);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].message.contains("watch-network-every"), "{problems:?}");
     }
 
     /// The config is read, never written — this module has no function

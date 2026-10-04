@@ -359,6 +359,14 @@ pub struct Prefs {
     pub searches: Vec<crate::search::SmartFolder>,
     /// How big the listing is drawn in each view — see [`Zoom`].
     pub zoom: Zoom,
+    /// Whether the window opens on the tabs it had when it last closed.
+    /// On by default — the tabs someone had open are where they were
+    /// working. Only the setting is here: the tabs themselves are kept in
+    /// `files-session.toml`, because this file is shared with the
+    /// open/save dialog, which has no tabs, and is rewritten whole on
+    /// every save. Like `preview_pane`, a `bool` whose default is not
+    /// `bool`'s zero, so the [`Default`] impl below says it.
+    pub restore_tabs: bool,
     // Per-directory overrides (vision pillar 6: "auto-remember beats
     // onboarding" — a directory sorted by size once should stay sorted
     // by size) are deliberately **not implemented** in this struct. The
@@ -391,6 +399,7 @@ impl Default for Prefs {
             pinned: Vec::new(),
             searches: Vec::new(),
             zoom: Zoom::default(),
+            restore_tabs: true,
         }
     }
 }
@@ -587,6 +596,17 @@ mod tests {
         let back: Prefs = toml::from_str(&text).unwrap();
         assert!(!back.columns.shows(Column::Permissions));
         assert!(back.columns.shows(Column::Owner), "the others are untouched");
+    }
+
+    /// A `files.toml` from before the setting existed still parses — and
+    /// gets the setting on, which is `Default`'s choice and not `bool`'s.
+    #[test]
+    fn restoring_tabs_is_on_for_a_file_written_before_it_existed() {
+        let prefs: Prefs = toml::from_str("show_hidden = true\n").unwrap();
+        assert!(prefs.restore_tabs);
+        let back: Prefs =
+            toml::from_str(&toml::to_string_pretty(&Prefs { restore_tabs: false, ..prefs }).unwrap()).unwrap();
+        assert!(!back.restore_tabs);
     }
 
     /// Hidden until asked for — see the field's doc.

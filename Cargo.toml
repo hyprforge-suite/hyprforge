@@ -253,6 +253,12 @@ futures-util = "0.3"
 # `NetworkBackend` can be used behind `Arc<dyn _>`, the same shape
 # displayd's `OutputBackend` uses to make its daemon testable.
 async-trait = "0.1"
+# Files' live folder updates. No default features here: the `stream`
+# feature brings tokio's reactor in, which the one crate that wants it
+# (Files, whose subscription reads the watch) adds for itself —
+# hyprforge-notif, in its own workspace, takes the same pin without it
+# and polls the descriptor through async-io.
+inotify = { version = "0.11", default-features = false }
 
 # Every component names its Hyprforge siblings by version, as crates.io
 # dependencies — `hyprforge-core = "0.1"` — because those manifests have to

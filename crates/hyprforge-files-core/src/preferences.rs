@@ -41,6 +41,8 @@ pub enum Setting {
     PreviewPane(bool),
     View(ViewMode),
     Sidebar(SidebarPref),
+    /// Open on last time's tabs — see [`Prefs::restore_tabs`].
+    RestoreTabs(bool),
 }
 
 impl Setting {
@@ -53,6 +55,7 @@ impl Setting {
             Setting::PreviewPane(on) => prefs.preview_pane = on,
             Setting::View(mode) => prefs.view_mode = mode,
             Setting::Sidebar(pref) => prefs.sidebar = pref,
+            Setting::RestoreTabs(on) => prefs.restore_tabs = on,
         }
     }
 }
@@ -69,6 +72,12 @@ pub enum BehaviourSetting {
     OnConflict(OnConflict),
     ConfirmTrash(bool),
     ConfirmDelete(bool),
+    /// `[behaviour] watch`: whether a folder on screen updates itself.
+    Watch(bool),
+    /// `[behaviour] watch-network-every`, in seconds — one of
+    /// [`WATCH_NETWORK_EVERY`] from the sheet; the file takes any whole
+    /// number the loader allows.
+    WatchNetworkEvery(u64),
 }
 
 impl BehaviourSetting {
@@ -78,6 +87,10 @@ impl BehaviourSetting {
             BehaviourSetting::OnConflict(policy) => Edit::Behaviour("on-conflict", BehaviourValue::Word(conflict_id(policy))),
             BehaviourSetting::ConfirmTrash(on) => Edit::Behaviour("confirm-trash", BehaviourValue::Switch(on)),
             BehaviourSetting::ConfirmDelete(on) => Edit::Behaviour("confirm-delete", BehaviourValue::Switch(on)),
+            BehaviourSetting::Watch(on) => Edit::Behaviour("watch", BehaviourValue::Switch(on)),
+            BehaviourSetting::WatchNetworkEvery(seconds) => {
+                Edit::Behaviour("watch-network-every", BehaviourValue::Number(seconds as i64))
+            }
         }
     }
 
@@ -88,6 +101,8 @@ impl BehaviourSetting {
             BehaviourSetting::OnConflict(policy) => behaviour.on_conflict == policy,
             BehaviourSetting::ConfirmTrash(on) => behaviour.confirm_trash == on,
             BehaviourSetting::ConfirmDelete(on) => behaviour.confirm_delete == on,
+            BehaviourSetting::Watch(on) => behaviour.watch == on,
+            BehaviourSetting::WatchNetworkEvery(seconds) => behaviour.watch_network_every == seconds,
         }
     }
 }
@@ -110,6 +125,29 @@ pub fn conflict_label(policy: OnConflict) -> &'static str {
         OnConflict::Skip => "Skip",
         OnConflict::Replace => "Replace",
     }
+}
+
+/// The network poll intervals the sheet offers, in seconds. Three, not a
+/// slider: "every second" for someone watching a build land on a share,
+/// "every ten" for a slow link, and the default between them. Anything
+/// else is a line in the file, which the sheet then shows as written.
+pub const WATCH_NETWORK_EVERY: [u64; 3] = [1, 3, 10];
+
+/// The intervals the sheet shows: the three it offers, plus whatever the
+/// file says when that is none of them — a hand-written `30` is shown as
+/// chosen, rather than as a row where nothing is.
+pub fn watch_network_choices(current: u64) -> Vec<u64> {
+    let mut choices = WATCH_NETWORK_EVERY.to_vec();
+    if !choices.contains(&current) {
+        choices.push(current);
+        choices.sort_unstable();
+    }
+    choices
+}
+
+/// What the sheet calls an interval.
+pub fn seconds_label(seconds: u64) -> String {
+    format!("{seconds} s")
 }
 
 pub const CONFLICT_POLICIES: [OnConflict; 4] =
@@ -361,6 +399,50 @@ mod tests {
         Setting::View(ViewMode::Grid).apply(&mut prefs);
         assert!(prefs.show_hidden && !prefs.directories_first);
         assert_eq!(prefs.view_mode, ViewMode::Grid);
+    }
+
+    /// Each control writes exactly its own line and nothing else, and
+    /// what it writes is what the loader then reads back — the sheet and
+    /// the file cannot come to disagree about what a switch means.
+    #[test]
+    fn each_live_update_control_writes_exactly_its_line() {
+        let cases = [
+            (BehaviourSetting::Watch(false), "watch = false"),
+            (BehaviourSetting::Watch(true), "watch = true"),
+            (BehaviourSetting::WatchNetworkEvery(10), "watch-network-every = 10"),
+            (BehaviourSetting::WatchNetworkEvery(1), "watch-network-every = 1"),
+        ];
+        for (setting, line) in cases {
+            let text = crate::config_edit::apply("", &[setting.edit()], std::path::Path::new("x")).unwrap();
+            assert_eq!(text, format!("[behaviour]\n{line}\n"), "{setting:?}");
+            let (config, problems) = crate::config::parse(&text, std::path::Path::new("x"));
+            assert!(problems.is_empty(), "{problems:?}");
+            assert!(setting.holds_in(&config.behaviour), "{setting:?} reads back");
+        }
+    }
+
+    /// A line written by hand is what the sheet shows — including an
+    /// interval it does not itself offer, which no segment then claims.
+    #[test]
+    fn a_hand_written_live_update_line_is_what_the_sheet_shows() {
+        let (config, problems) = crate::config::parse(
+            "[behaviour]\n# my slow VPN\nwatch-network-every = 30\nwatch = false\n",
+            std::path::Path::new("x"),
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(BehaviourSetting::Watch(false).holds_in(&config.behaviour));
+        assert!(BehaviourSetting::WatchNetworkEvery(30).holds_in(&config.behaviour));
+        assert!(WATCH_NETWORK_EVERY.iter().all(|s| !BehaviourSetting::WatchNetworkEvery(*s).holds_in(&config.behaviour)));
+        assert_eq!(watch_network_choices(config.behaviour.watch_network_every), vec![1, 3, 10, 30], "shown, and chosen");
+        assert_eq!(watch_network_choices(3), WATCH_NETWORK_EVERY.to_vec(), "no extra segment for an offered one");
+    }
+
+    #[test]
+    fn restoring_tabs_is_a_files_toml_setting_like_the_toolbars() {
+        let mut prefs = Prefs::default();
+        assert!(prefs.restore_tabs);
+        Setting::RestoreTabs(false).apply(&mut prefs);
+        assert!(!prefs.restore_tabs);
     }
 
     #[test]

@@ -61,6 +61,9 @@ pub enum Edit {
 pub enum BehaviourValue {
     Switch(bool),
     Word(&'static str),
+    /// A whole number, written bare — `watch-network-every = 3`, not
+    /// `"3"`, which the loader would refuse as not a number.
+    Number(i64),
 }
 
 /// `text` with `edits` applied, or why not. `path` is only for messages.
@@ -85,6 +88,7 @@ pub fn apply(text: &str, edits: &[Edit], path: &Path) -> Result<String, EditErro
                 let value = match value {
                     BehaviourValue::Switch(on) => Value::from(*on),
                     BehaviourValue::Word(word) => Value::from(*word),
+                    BehaviourValue::Number(n) => Value::from(*n),
                 };
                 set(table, key, value);
             }
