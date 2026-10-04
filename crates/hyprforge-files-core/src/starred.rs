@@ -39,11 +39,20 @@ impl Collection {
         }
     }
 
-    /// The freedesktop icon name for the sidebar row.
+    /// The freedesktop icon names for the sidebar row, best first, as one
+    /// [`crate::icon::themed_key`] name list.
+    ///
+    /// The folder-shaped ones first, so the row is drawn in the same
+    /// style as the places under it. And a list rather than one name,
+    /// because the lookup tries every name in a theme before it moves on
+    /// to the next one, and the host's last resort is `folder`: asked for
+    /// `starred` alone, a theme such as Dracula — which has no `starred`
+    /// but does have `folder` — answered with its plain folder before the
+    /// star its parent theme has was ever reached.
     pub fn icon_name(self) -> &'static str {
         match self {
-            Collection::Recent => "document-open-recent",
-            Collection::Starred => "starred",
+            Collection::Recent => "folder-recent,document-open-recent",
+            Collection::Starred => "folder-favorites,starred,emblem-favorite",
         }
     }
 }

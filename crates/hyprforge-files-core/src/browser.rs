@@ -2161,6 +2161,13 @@ impl Browser {
         if matches!(self.load_state, LoadState::Loaded) {
             let saved_icon = searching::saved_search_icon();
             let drive_icons = self.device_icon_keys();
+            // Recent's and Starred's rows head Places, and are drawn from
+            // the theme like any place — asked for here, or they would be
+            // the tint's plain block forever.
+            let collection_icons: Vec<String> = [crate::starred::Collection::Recent, crate::starred::Collection::Starred]
+                .into_iter()
+                .map(collections::icon)
+                .collect();
             let set = IconSet { icons: &self.icons, folders: &self.folder_icons };
             let panes = self
                 .ancestors
@@ -2176,7 +2183,8 @@ impl Browser {
                 .chain(self.folder_icons.values().map(String::as_str))
                 .chain(std::iter::once(icon::FOLDER_KEY))
                 .chain((!self.prefs.searches.is_empty()).then_some(saved_icon.as_str()))
-                .chain(drive_icons.iter().map(String::as_str));
+                .chain(drive_icons.iter().map(String::as_str))
+                .chain(collection_icons.iter().map(String::as_str));
             let mut keys: Vec<String> = Vec::new();
             for key in wanted {
                 if !self.icons.contains_key(key) && !self.icons_asked.contains(key) && !keys.iter().any(|k| k == key) {
@@ -4698,8 +4706,11 @@ fn body_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // rows, icons, names and cells all follow `FontScale`, so one
     // multiplication zooms them together, and nothing else in the window
     // (header, sidebar, status bar) is given it.
+    //
+    // Except the grid, which is handed the window's own scale and zooms
+    // only its icons — Explorer's way; see `density::GridScale`.
     let zoomed = match vm.prefs.view_mode {
-        ViewMode::Grid => grid_draw_scale(vm, scale).0,
+        ViewMode::Grid => scale,
         ViewMode::List | ViewMode::Columns => FontScale(scale.0 * vm.prefs.zoom.factor(vm.prefs.view_mode)),
     };
     // Right-clicking anywhere the rows are not opens the folder's own
@@ -4725,9 +4736,9 @@ fn listing_width(vm: &ViewModel<'_>) -> f32 {
 /// The scale the grid is drawn at, and whether the zoom had to give way
 /// for it — see [`density::grid_scale`]. Never below the smallest zoom
 /// step: a pane narrower than that is narrower than the window allows.
-fn grid_draw_scale(vm: &ViewModel<'_>, scale: FontScale) -> (FontScale, bool) {
-    let zoomed = FontScale(scale.0 * vm.prefs.zoom.factor(ViewMode::Grid));
-    density::grid_scale(zoomed, listing_width(vm), scale.0 * crate::prefs::Zoom::FACTORS[0])
+fn grid_draw_scale(vm: &ViewModel<'_>, scale: FontScale) -> (density::GridScale, bool) {
+    let asked = density::GridScale::zoomed(scale, vm.prefs.zoom.factor(ViewMode::Grid));
+    density::grid_scale(asked, listing_width(vm), scale.0 * crate::prefs::Zoom::FACTORS[0])
 }
 
 fn body_content<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
@@ -5581,7 +5592,10 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         .into()
 }
 
-fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
+fn grid_view<'a>(vm: &ViewModel<'a>, text: FontScale) -> Element<'a, Message> {
+    // The names at the window's size, the icons at the zoom — capped so
+    // one cell always fits the pane.
+    let scale = grid_draw_scale(vm, text).0;
     // The cells that will be laid out, built once outside the
     // `responsive` closure — that closure runs on every layout pass, and
     // rebuilding a whole directory's worth of widget inside it would
@@ -5639,7 +5653,7 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
             let look = CellLook::of(selected, focused == Some(entry.path.as_path()), lines);
             let cell =
                 grid_cell(index, entry, look, renaming, thumbnails.get(&entry.path), icons.for_entry(entry), folder, scale);
-            let cell = collections::starred_cell(cell, stars.contains(&entry.path), selected, scale);
+            let cell = collections::starred_cell(cell, stars.contains(&entry.path), selected, scale.text);
             let cell = if entry.is_dir && !in_trash {
                 drop_zone(cell, &entry.path, drop_hover == Some(entry.path.as_path()))
             } else {
@@ -5782,7 +5796,7 @@ fn grid_cell<'a>(
     thumbnail: Option<&Picture>,
     icon: Option<&Picture>,
     folder: Option<String>,
-    scale: FontScale,
+    scale: density::GridScale,
 ) -> Element<'a, Message> {
     let CellLook { selected, whole, lines } = look;
     let editing = renaming.filter(|r| r.path == entry.path);
@@ -5790,15 +5804,23 @@ fn grid_cell<'a>(
     let selected = selected && editing.is_none();
     let whole = whole && editing.is_none();
     let name: Element<'a, Message> = match editing {
-        Some(r) => rename_field(r, scale),
-        None => grid_name(entry, lines, whole, scale),
+        Some(r) => rename_field(r, scale.text),
+        None => grid_name(entry, lines, whole, scale.text),
     };
     // The picture itself where the host has decoded one, in the same box
     // the icon would take, so a row of thumbnails and icons lines up.
     let size = if folder.is_some() { density::grid_result_icon_size(scale) } else { density::grid_icon_size(scale) };
+    // `entry_icon` scales the size it is given itself, like every other
+    // caller's, so it takes the *unscaled* base. Handing it `size` —
+    // already scaled — drew a theme icon at the scale squared: at Extra
+    // large (2.0) an icon four times its base, so tall it pushed the
+    // name out of the bottom of its cell, which is how "names get cut
+    // off at the largest size" first reached us. Only a picture with a
+    // thumbnail looked right, since `Picture::view` takes `size` as is.
+    let base = if folder.is_some() { density::GRID_RESULT_ICON } else { density::GRID_ICON };
     let picture: Element<'a, Message> = match thumbnail {
         Some(picture) => picture.view(size),
-        None => entry_icon(entry.kind, icon, size, scale),
+        None => entry_icon(entry.kind, icon, base, scale.icon),
     };
     // Among a search's results, where each one is, directly under the
     // name's two-line box with no gap: the cell has room for the line
@@ -5807,7 +5829,7 @@ fn grid_cell<'a>(
         Some(folder) => column![
             name,
             container(
-                meta_text(folder, density::META_TEXT_BASE, scale)
+                meta_text(folder, density::META_TEXT_BASE, scale.text)
                     .align_x(iced::Alignment::Center)
                     .wrapping(iced::widget::text::Wrapping::None)
                     .width(Length::Fill),
@@ -5860,16 +5882,17 @@ mod grid_name_tests {
     use iced::advanced::text::{Paragraph as _, Text};
 
     const LONG: &str = "Hyprforge design review — every screen, annotated, second pass (final) v3.pdf";
-    const UNBROKEN: &str = "IntradaScreenConnectInstallerForTheWholeOfficeVersion2026.msi";
+    const UNBROKEN: &str = "IntradaScreenConnectInstallerForTheWholeOfficeVersion2026WithEveryOptionalPart.msi";
 
     /// What a cell's name box holds at `scale`: the text as the cell
     /// draws it, at the cell's inner width.
-    fn name_text(content: &str, scale: FontScale) -> Text<&str, iced::Font> {
+    fn name_text(content: &str, scale: impl Into<density::GridScale>) -> Text<&str, iced::Font> {
+        let scale = scale.into();
         let inner = density::grid_cell_width(scale) - 2.0 * density::grid_padding(scale);
         Text {
             content,
             bounds: iced::Size::new(inner, f32::INFINITY),
-            size: iced::Pixels(scale.apply(density::ROW_TEXT_BASE)),
+            size: iced::Pixels(scale.text.apply(density::ROW_TEXT_BASE)),
             line_height: iced::widget::text::LineHeight::default(),
             font: iced::Font::default(),
             align_x: iced::widget::text::Alignment::Center,
@@ -5879,7 +5902,7 @@ mod grid_name_tests {
         }
     }
 
-    fn height(content: &str, scale: FontScale) -> f32 {
+    fn height(content: &str, scale: impl Into<density::GridScale>) -> f32 {
         Shaped::with_text(name_text(content, scale)).min_bounds().height
     }
 
@@ -5892,7 +5915,7 @@ mod grid_name_tests {
     fn names_at_extra_large_are_never_cut_mid_glyph() {
         for font in [1.0, 1.25, 1.5, 1.6] {
             for pane in [300.0, 480.0, 900.0, 1600.0] {
-                let zoomed = FontScale(font * 2.0);
+                let zoomed = density::GridScale::zoomed(FontScale(font), 2.0);
                 let (scale, _) = density::grid_scale(zoomed, pane, font * crate::prefs::Zoom::FACTORS[0]);
                 for lines in 1..=3u8 {
                     let budget = density::grid_name_height(scale, lines) + 0.5;

@@ -216,8 +216,46 @@ const COLUMN_MIN_WIDTH: f32 = 80.0;
 /// Wide enough here that a typical name fits on one line with air
 /// either side, and the column *count* comes from the available width
 /// instead — see `grid_columns`.
-pub fn grid_cell_width(scale: FontScale) -> f32 {
-    scale.apply(GRID_CELL_WIDTH)
+pub fn grid_cell_width(scale: impl Into<GridScale>) -> f32 {
+    let GridScale { text, icon } = scale.into();
+    text.apply(GRID_CELL_WIDTH - GRID_ICON) + icon.apply(GRID_ICON)
+}
+
+/// The two scales a grid cell is drawn at: one for its text, one for its
+/// icon.
+///
+/// They are the same except while zoomed, and the difference is
+/// Explorer's: Small to Extra large icons change the *icon*, and the name
+/// under it stays the size every other name in the window is. Zooming the
+/// text with it (the first version) drew names at twice the window's font
+/// at Extra large — 30-pixel letters in cells that then had room for half
+/// a name — when the reason to pick a bigger icon is to see the picture,
+/// not to read the name from across the room.
+///
+/// So a cell's dimensions are a text part (padding, gaps, lines of name,
+/// the margin either side of the name) at `text` plus the icon's own at
+/// `icon`. At no zoom the two coincide and every dimension is what it
+/// always was.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GridScale {
+    /// The window's font scale.
+    pub text: FontScale,
+    /// The font scale times the grid's zoom.
+    pub icon: FontScale,
+}
+
+impl GridScale {
+    /// The window's font scale, with the icons zoomed by `zoom`.
+    pub fn zoomed(text: FontScale, zoom: f32) -> GridScale {
+        GridScale { text, icon: FontScale(text.0 * zoom) }
+    }
+}
+
+/// No zoom: text and icon at the same scale.
+impl From<FontScale> for GridScale {
+    fn from(scale: FontScale) -> GridScale {
+        GridScale { text: scale, icon: scale }
+    }
 }
 
 /// A grid cell's total height: icon, gap, and `lines` lines of name —
@@ -226,9 +264,10 @@ pub fn grid_cell_width(scale: FontScale) -> f32 {
 /// The two-line cell is the design's 132; each line more or fewer is one
 /// line of row text more or less, so the slack the result cell's folder
 /// line lives in is the same at every setting.
-pub fn grid_cell_height(scale: FontScale, lines: u8) -> f32 {
+pub fn grid_cell_height(scale: impl Into<GridScale>, lines: u8) -> f32 {
+    let GridScale { text, icon } = scale.into();
     let line = ROW_TEXT_BASE * GRID_NAME_LINE_HEIGHT;
-    scale.apply(GRID_CELL_HEIGHT + (lines as f32 - DEFAULT_NAME_LINES) * line)
+    text.apply(GRID_CELL_HEIGHT - GRID_ICON + (lines as f32 - DEFAULT_NAME_LINES) * line) + icon.apply(GRID_ICON)
 }
 
 /// The room a grid cell gives a name: `lines` lines of row text.
@@ -240,8 +279,8 @@ pub fn grid_cell_height(scale: FontScale, lines: u8) -> f32 {
 /// is cut with "…" by `hyprforge_ui::widgets::clamped_text` — never
 /// clipped through its letters — and shown whole when its cell is the
 /// one selected.
-pub fn grid_name_height(scale: FontScale, lines: u8) -> f32 {
-    scale.apply(ROW_TEXT_BASE) * GRID_NAME_LINE_HEIGHT * lines as f32
+pub fn grid_name_height(scale: impl Into<GridScale>, lines: u8) -> f32 {
+    scale.into().text.apply(ROW_TEXT_BASE) * GRID_NAME_LINE_HEIGHT * lines as f32
 }
 
 /// iced's default line height is 1.3x the text size.
@@ -254,38 +293,41 @@ const DEFAULT_NAME_LINES: f32 = 2.0;
 /// Extra large had the same eight pixels of air as one at Small, and the
 /// sum the cell's height is checked against was a different sum from
 /// the one drawn.
-pub fn grid_padding(scale: FontScale) -> f32 {
-    scale.apply(hyprforge_ui::theme::spacing::SM)
+pub fn grid_padding(scale: impl Into<GridScale>) -> f32 {
+    scale.into().text.apply(hyprforge_ui::theme::spacing::SM)
 }
 
-/// The largest scale at which one grid cell, with the grid's padding and
-/// the scrollbar's lane, fits across `pane_width`.
+/// The largest icon scale at which one grid cell, with the grid's
+/// padding and the scrollbar's lane, fits across `pane_width` at text
+/// scale `text`.
 ///
-/// Every term of that sum is linear in the scale, so it is one division.
-/// Past it a lone cell would overrun the pane, and a row that overruns
-/// is squeezed — the name wraps into a column narrower than its cell and
-/// is cut where it would have fitted.
-pub fn grid_scale_cap(pane_width: f32) -> f32 {
-    pane_width / (GRID_CELL_WIDTH + 2.0 * GRID_GAP + SCROLLBAR_LANE)
+/// Every term of that sum is linear in the icon scale, so it is one
+/// division. Past it a lone cell would overrun the pane, and a row that
+/// overruns is squeezed — the name wraps into a column narrower than its
+/// cell and is cut where it would have fitted.
+pub fn grid_scale_cap(pane_width: f32, text: FontScale) -> f32 {
+    let around = text.apply(GRID_CELL_WIDTH - GRID_ICON + 2.0 * GRID_GAP + SCROLLBAR_LANE);
+    (pane_width - around) / GRID_ICON
 }
 
-/// The scale the grid is drawn at: `zoomed`, unless not even one cell
-/// would fit across `pane_width` at it — then the largest that does,
-/// though never below `floor`. Whether it was capped is the second half,
-/// for the status bar to say so: a zoom that silently does less than it
-/// says reads as the zoom being broken.
-pub fn grid_scale(zoomed: FontScale, pane_width: f32, floor: f32) -> (FontScale, bool) {
-    let cap = grid_scale_cap(pane_width).max(floor);
-    if zoomed.0 > cap {
-        (FontScale(cap), true)
+/// The scales the grid is drawn at: `asked`, unless not even one cell
+/// would fit across `pane_width` with its icon that big — then the
+/// largest icon that does, though never below `floor` (an icon scale).
+/// Only the icon gives way; the names stay the window's size. Whether it
+/// was capped is the second half, for the status bar to say so: a zoom
+/// that silently does less than it says reads as the zoom being broken.
+pub fn grid_scale(asked: GridScale, pane_width: f32, floor: f32) -> (GridScale, bool) {
+    let cap = grid_scale_cap(pane_width, asked.text).max(floor);
+    if asked.icon.0 > cap {
+        (GridScale { icon: FontScale(cap), ..asked }, true)
     } else {
-        (zoomed, false)
+        (asked, false)
     }
 }
 
 /// The icon inside a grid cell.
-pub fn grid_icon_size(scale: FontScale) -> f32 {
-    scale.apply(GRID_ICON)
+pub fn grid_icon_size(scale: impl Into<GridScale>) -> f32 {
+    scale.into().icon.apply(GRID_ICON)
 }
 
 /// The icon inside a grid cell among a search's results, which also
@@ -297,13 +339,18 @@ pub fn grid_icon_size(scale: FontScale) -> f32 {
 /// for, recognising what you are looking at; eight pixels of icon is
 /// the cheapest of the three, and still leaves the icon the largest
 /// thing in the cell. `grid_tests` sums it and asserts it fits.
-pub fn grid_result_icon_size(scale: FontScale) -> f32 {
-    scale.apply(GRID_RESULT_ICON)
+///
+/// Smaller by a text-sized amount, since the folder line it makes room
+/// for is text: the icon and the line come out of the same cell at
+/// different scales once zoomed.
+pub fn grid_result_icon_size(scale: impl Into<GridScale>) -> f32 {
+    let GridScale { text, icon } = scale.into();
+    icon.apply(GRID_ICON) - text.apply(GRID_ICON - GRID_RESULT_ICON)
 }
 
 /// The room a result's folder line takes: one line of meta text.
-pub fn grid_folder_height(scale: FontScale) -> f32 {
-    scale.apply(META_TEXT_BASE) * GRID_NAME_LINE_HEIGHT
+pub fn grid_folder_height(scale: impl Into<GridScale>) -> f32 {
+    scale.into().text.apply(META_TEXT_BASE) * GRID_NAME_LINE_HEIGHT
 }
 
 /// How many characters of a result's folder fit across a grid cell —
@@ -317,7 +364,7 @@ pub fn grid_folder_height(scale: FontScale) -> f32 {
 /// cell clips what an unusually wide name overruns by.
 pub const GRID_FOLDER_CHARS: usize = 15;
 
-const GRID_RESULT_ICON: f32 = 48.0;
+pub(crate) const GRID_RESULT_ICON: f32 = 48.0;
 
 /// How many whole cells fit across a grid pane `pane_width` logical
 /// pixels wide.
@@ -339,17 +386,18 @@ const GRID_RESULT_ICON: f32 = 48.0;
 /// At least one, always: a pane too narrow for one whole cell should
 /// show one cell rather than an empty pane, which is what a zero would
 /// draw.
-pub fn grid_columns(pane_width: f32, scale: FontScale) -> usize {
+pub fn grid_columns(pane_width: f32, scale: impl Into<GridScale>) -> usize {
+    let scale = scale.into();
     let cell = grid_cell_width(scale);
-    let gap = scale.apply(GRID_GAP);
-    let usable = pane_width - 2.0 * gap - scale.apply(SCROLLBAR_LANE);
+    let gap = grid_gap(scale);
+    let usable = pane_width - 2.0 * gap - scale.text.apply(SCROLLBAR_LANE);
     // n cells and n-1 gaps fit in `usable`, so solve for n.
     (((usable + gap) / (cell + gap)).floor() as usize).max(1)
 }
 
 /// The gap between grid cells, both directions.
-pub fn grid_gap(scale: FontScale) -> f32 {
-    scale.apply(GRID_GAP)
+pub fn grid_gap(scale: impl Into<GridScale>) -> f32 {
+    scale.into().text.apply(GRID_GAP)
 }
 
 const GRID_CELL_WIDTH: f32 = 132.0;
@@ -358,7 +406,7 @@ const GRID_CELL_WIDTH: f32 = 132.0;
 /// that sum and asserts this covers it, so changing the icon or the
 /// name budget fails the test rather than silently clipping.
 const GRID_CELL_HEIGHT: f32 = 132.0;
-const GRID_ICON: f32 = 56.0;
+pub(crate) const GRID_ICON: f32 = 56.0;
 const GRID_GAP: f32 = 14.0;
 
 /// Width kept clear down the right-hand side of a scrollable pane for
@@ -539,7 +587,10 @@ mod grid_tests {
     fn a_cell_holds_its_icon_and_its_lines_of_name_without_squeezing() {
         // Up to Extra large at the largest font scale the suite offers —
         // where the names were being cut.
-        for scale in [1.0, 1.25, 1.6, 2.0, 3.2].map(FontScale) {
+        let mixed = [1.0, 1.25, 1.6].into_iter().flat_map(|font| {
+            crate::prefs::Zoom::FACTORS.into_iter().map(move |zoom| GridScale::zoomed(FontScale(font), zoom))
+        });
+        for scale in [1.0, 1.25, 1.6, 2.0, 3.2].map(FontScale).map(GridScale::from).into_iter().chain(mixed) {
             for lines in 1..=3 {
                 // `grid_cell`'s own layout: `grid_padding` all round,
                 // then a column of [icon, name] spaced the same.
@@ -565,13 +616,14 @@ mod grid_tests {
                 let mut width = 140.0_f32;
                 while width < 2000.0 {
                     let floor = font * crate::prefs::Zoom::FACTORS[0];
-                    let (scale, capped) = grid_scale(FontScale(font * zoom), width, floor);
-                    let used = grid_cell_width(scale) + 2.0 * grid_gap(scale) + scale.apply(SCROLLBAR_LANE);
+                    let (scale, capped) = grid_scale(GridScale::zoomed(FontScale(font), zoom), width, floor);
+                    let used = grid_cell_width(scale) + 2.0 * grid_gap(scale) + scale.text.apply(SCROLLBAR_LANE);
                     assert!(
-                        used <= width + 0.01 || scale.0 <= floor,
+                        used <= width + 0.01 || scale.icon.0 <= floor,
                         "{used} in {width} at font {font} zoom {zoom}"
                     );
-                    assert_eq!(capped, scale.0 < font * zoom);
+                    assert_eq!(capped, scale.icon.0 < font * zoom);
+                    assert_eq!(scale.text, FontScale(font), "only the icon gives way");
                     width += 3.0;
                 }
             }
@@ -582,16 +634,20 @@ mod grid_tests {
     /// takes away what does not fit.
     #[test]
     fn a_pane_wide_enough_keeps_the_zoom_it_was_given() {
-        assert_eq!(grid_scale(FontScale(2.0), 1200.0, 0.75), (FontScale(2.0), false));
-        let (scale, capped) = grid_scale(FontScale(3.2), 400.0, 0.75);
-        assert!(capped && scale.0 < 3.2);
+        let extra_large = GridScale::zoomed(FontScale(1.0), 2.0);
+        assert_eq!(grid_scale(extra_large, 1200.0, 0.75), (extra_large, false));
+        let (scale, capped) = grid_scale(GridScale::zoomed(FontScale(1.6), 2.0), 250.0, 0.75);
+        assert!(capped && scale.icon.0 < 3.2);
     }
 
     /// A result's cell is the same height as any other, and holds its
     /// smaller icon, the two-line name and the folder line under it.
     #[test]
     fn a_result_cell_holds_its_folder_line_at_the_same_height() {
-        for scale in [1.0, 1.25, 1.6, 3.2].map(FontScale) {
+        let mixed = [1.0, 1.25, 1.6].into_iter().flat_map(|font| {
+            crate::prefs::Zoom::FACTORS.into_iter().map(move |zoom| GridScale::zoomed(FontScale(font), zoom))
+        });
+        for scale in [1.0, 1.25, 1.6, 3.2].map(FontScale).map(GridScale::from).into_iter().chain(mixed) {
             for lines in 1..=3 {
                 let needed = 3.0 * grid_padding(scale)
                     + grid_result_icon_size(scale)
@@ -634,5 +690,20 @@ mod grid_tests {
         assert!(grid_icon_size(big) > grid_icon_size(FontScale::default()));
         // And a bigger font means fewer cells across the same pane.
         assert!(grid_columns(1200.0, big) < grid_columns(1200.0, FontScale::default()));
+    }
+
+    /// Explorer's zoom: Extra large draws the icon twice the size and the
+    /// name at the window's own size, so the cell widens by what the icon
+    /// gained and no more — and at no zoom nothing moved.
+    #[test]
+    fn zooming_the_grid_grows_the_icon_and_not_the_name() {
+        let plain = GridScale::from(FontScale(1.0));
+        let extra_large = GridScale::zoomed(FontScale(1.0), 2.0);
+        assert_eq!(grid_name_height(extra_large, 2), grid_name_height(plain, 2));
+        assert_eq!(grid_padding(extra_large), grid_padding(plain));
+        assert_eq!(grid_icon_size(extra_large), 2.0 * grid_icon_size(plain));
+        assert_eq!(grid_cell_width(extra_large) - grid_cell_width(plain), grid_icon_size(plain));
+        assert_eq!(grid_cell_width(plain), 132.0);
+        assert_eq!(grid_cell_height(plain, 2), 132.0);
     }
 }

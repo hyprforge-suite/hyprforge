@@ -85,7 +85,9 @@ pub fn choice_key(choice: &crate::config::IconChoice) -> String {
 /// What a key asks the host to find.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IconSource<'a> {
-    /// An icon theme name, for a folder with an icon of its own.
+    /// An icon theme name, for a folder with an icon of its own — or
+    /// several, comma-separated and best first (no icon name has a comma
+    /// in it); see [`IconSource::names`].
     Themed(&'a str),
     /// An image of the user's own.
     File(&'a Path),
@@ -96,6 +98,11 @@ pub enum IconSource<'a> {
 }
 
 impl<'a> IconSource<'a> {
+    /// The names a [`IconSource::Themed`] key lists, best first.
+    pub fn names(themed: &'a str) -> impl Iterator<Item = &'a str> {
+        themed.split(',').map(str::trim).filter(|n| !n.is_empty())
+    }
+
     pub fn of(key: &'a str) -> IconSource<'a> {
         if key == FOLDER_KEY {
             IconSource::Folder
@@ -258,6 +265,17 @@ mod tests {
     /// A folder's own icon is never mistaken for a file's type, whatever
     /// the file is called — the prefix starts with a slash no file name
     /// can hold.
+    /// A themed key may list fallbacks, best first, and each is asked for
+    /// in that order — the one that exists in the configured theme wins
+    /// over a parent theme's better match, which is why the list exists.
+    #[test]
+    fn a_themed_key_lists_its_names_best_first() {
+        let key = themed_key(crate::starred::Collection::Starred.icon_name());
+        let IconSource::Themed(names) = IconSource::of(&key) else { panic!("themed: {key}") };
+        assert_eq!(IconSource::names(names).collect::<Vec<_>>(), ["folder-favorites", "starred", "emblem-favorite"]);
+        assert_eq!(IconSource::names("folder").collect::<Vec<_>>(), ["folder"], "one name is a list of one");
+    }
+
     #[test]
     fn a_file_named_like_an_icon_key_is_still_a_file() {
         let odd = entry("icon:folder-cloud", false);
