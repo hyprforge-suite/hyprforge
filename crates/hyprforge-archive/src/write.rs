@@ -562,6 +562,32 @@ mod tests {
         names
     }
 
+    #[test]
+    fn an_edited_archive_keeps_its_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("shared.zip");
+        zip_of(&archive, &[("a.txt", "a"), ("b.txt", "b")]);
+        std::fs::set_permissions(&archive, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let scratch = tempfile::tempdir_in(dir.path()).unwrap();
+
+        let pin = Pinned::open(&archive).unwrap();
+        pin.read(|source| {
+            edit_from(
+                source,
+                &archive,
+                scratch.path(),
+                &[Edit::Remove("b.txt".into())],
+                &Unlock::none(),
+                &mut NoProgress,
+            )
+        })
+        .unwrap();
+
+        let mode = std::fs::metadata(&archive).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "an edit must not make the archive private");
+    }
+
     /// The race, put exactly where it has to land instead of waited for.
     ///
     /// Another writer renames a different archive over this one after

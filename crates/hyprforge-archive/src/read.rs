@@ -787,6 +787,21 @@ pub(crate) fn rewrite_in_place(
     // which the hand-rolled remove-on-error could not promise.
     write(&temporary)?;
 
+    // The archive keeps its own permissions. `tempfile` creates the
+    // temporary owner-only (0600), and the rename puts *that* file at
+    // the archive's name — so an in-place edit quietly made a shared,
+    // 0644 archive private, which nothing reported and the next person
+    // to read it found out. Best effort, like the copy's own permission
+    // preservation in hyprforge-fileops: a filesystem that cannot hold
+    // the bits (FAT) is not a reason to lose the edit.
+    if let Ok(meta) = std::fs::metadata(archive) {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode() & 0o7777;
+        if let Err(e) = std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(mode)) {
+            tracing::warn!(error = %e, "could not keep an archive's permissions across its rewrite");
+        }
+    }
+
     holder
         .persist(archive)
         .map_err(|e| ArchiveError::io(archive, e.error))?;
