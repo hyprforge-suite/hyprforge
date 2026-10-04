@@ -86,6 +86,21 @@ pub enum Action {
     Paste,
     /// Put the selected paths on the clipboard as text.
     CopyPath,
+    /// Copy the selection into the folder the other pane of a split tab
+    /// shows — see `Self::ToggleSplit`. Through the same paste a Ctrl+V
+    /// would make, so a clash asks, the transfer queue shows it and
+    /// Ctrl+Z takes it back; the clipboard itself is left alone, because
+    /// a gesture between two panes is not a request to replace what was
+    /// copied for somewhere else.
+    ///
+    /// Browser scope, though only a window has panes: whether there *is*
+    /// another pane is told to the browser
+    /// ([`ActionContext::other_pane`]), like `can_paste`, so the menu
+    /// greys it out on a tab that is not split and the open/save dialog
+    /// — which never says there is one — never offers it.
+    CopyToOtherPane,
+    /// The same, moving rather than copying.
+    MoveToOtherPane,
     /// Read this folder again.
     Refresh,
     /// Edit the selected name in place.
@@ -185,6 +200,15 @@ pub enum Action {
     /// scope: the dialog it opens is the window's, and a file chooser
     /// has no business changing the session's mounts.
     ConnectToServer,
+    /// Split the tab into two listings side by side, both at the folder
+    /// in view — or, already split, close the pane the keyboard is *not*
+    /// in. Per tab, the way the person asked for it: a split is a way of
+    /// working on two folders, and the tab is the unit a person works in.
+    /// Window scope: the panes are the window's, and a file chooser has
+    /// one listing.
+    ToggleSplit,
+    /// Move the keyboard to the other pane of a split tab.
+    OtherPane,
 }
 
 /// Whether an action is about the listing or about the window around it.
@@ -233,6 +257,8 @@ impl Action {
             Action::Cut,
             Action::Paste,
             Action::CopyPath,
+            Action::CopyToOtherPane,
+            Action::MoveToOtherPane,
             Action::Refresh,
             Action::OpenWith,
             Action::OpenTerminal,
@@ -258,7 +284,15 @@ impl Action {
             Action::PreviousTab,
         ];
         all.extend((1..=9).map(Action::Tab));
-        all.extend([Action::Properties, Action::Preferences, Action::Transfers, Action::TransferQueue, Action::ConnectToServer]);
+        all.extend([
+            Action::Properties,
+            Action::Preferences,
+            Action::Transfers,
+            Action::TransferQueue,
+            Action::ConnectToServer,
+            Action::ToggleSplit,
+            Action::OtherPane,
+        ]);
         all
     }
 
@@ -296,6 +330,8 @@ impl Action {
             Action::Cut => "cut",
             Action::Paste => "paste",
             Action::CopyPath => "copy-path",
+            Action::CopyToOtherPane => "copy-to-other-pane",
+            Action::MoveToOtherPane => "move-to-other-pane",
             Action::Refresh => "refresh",
             Action::OpenWith => "open-with",
             Action::OpenTerminal => "open-terminal",
@@ -339,6 +375,8 @@ impl Action {
             Action::Transfers => "transfers",
             Action::TransferQueue => "transfer-queue",
             Action::ConnectToServer => "connect-to-server",
+            Action::ToggleSplit => "toggle-split",
+            Action::OtherPane => "other-pane",
         }
     }
 
@@ -382,6 +420,8 @@ impl Action {
             Action::Cut => "Cut",
             Action::Paste => "Paste",
             Action::CopyPath => "Copy Path",
+            Action::CopyToOtherPane => "Copy to Other Pane",
+            Action::MoveToOtherPane => "Move to Other Pane",
             Action::Refresh => "Refresh",
             Action::OpenWith => "Open With\u{2026}",
             Action::OpenTerminal => "Open Terminal Here",
@@ -421,6 +461,8 @@ impl Action {
             Action::Transfers => "Transfers",
             Action::TransferQueue => "Transfer Queue",
             Action::ConnectToServer => "Connect to Server\u{2026}",
+            Action::ToggleSplit => "Split View",
+            Action::OtherPane => "Other Pane",
         }
     }
 
@@ -436,7 +478,9 @@ impl Action {
             | Action::Preferences
             | Action::Transfers
             | Action::TransferQueue
-            | Action::ConnectToServer => Scope::Window,
+            | Action::ConnectToServer
+            | Action::ToggleSplit
+            | Action::OtherPane => Scope::Window,
             _ => Scope::Browser,
         }
     }
@@ -508,6 +552,11 @@ impl Action {
             Action::Cut => &["Ctrl+X"],
             Action::Paste => &["Ctrl+V"],
             Action::CopyPath => &["Ctrl+Shift+C"],
+            // Menu and palette only. F5 and F6 are what two-pane file
+            // managers use, and F5 is Refresh here — every browser's and
+            // every other file manager's — so neither is taken from it.
+            Action::CopyToOtherPane => &[],
+            Action::MoveToOtherPane => &[],
             Action::Refresh => &["F5", "Ctrl+R"],
             // No default key: it opens a chooser, which is a thing you
             // go looking for rather than reach for.
@@ -579,6 +628,13 @@ impl Action {
             // The sidebar's Remote section offers it, and so does the
             // palette; GNOME's file chooser has no key for it either.
             Action::ConnectToServer => &[],
+            // Dolphin's key for its split, and free here.
+            Action::ToggleSplit => &["F3"],
+            // Bare Tab: a text field does not take it, and nowhere else in
+            // the window is it bound — the path bar's completion is
+            // decided before the keymap is asked (see the window's
+            // `KeyPressed`), so typing a path still completes.
+            Action::OtherPane => &["Tab"],
         }
     }
 }
@@ -645,6 +701,10 @@ pub struct ActionContext {
     /// Whether everything selected is starred already — which turns
     /// [`Action::ToggleStar`]'s "Star" into "Unstar". See [`label_in`].
     pub starred: bool,
+    /// Whether this listing is one pane of a split tab, so there is a
+    /// folder beside it to copy to. Told by the host, which owns the
+    /// panes — the same way `can_paste` arrives.
+    pub other_pane: bool,
 }
 
 /// What a menu calls `action` here: its [`Action::label`], except where
@@ -652,6 +712,7 @@ pub struct ActionContext {
 pub fn label_in(action: Action, ctx: &ActionContext) -> &'static str {
     match action {
         Action::ToggleStar if ctx.starred => "Unstar",
+        Action::ToggleSplit if ctx.other_pane => "Close Split View",
         _ => action.label(),
     }
 }
@@ -713,6 +774,12 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         // across a whole-file rewrite.
         Action::Cut => ctx.selected > 0 && !ctx.in_trash,
         Action::Paste => ctx.can_paste && !ctx.in_trash,
+        // Not out of an archive: a member's path is nothing a copy can
+        // read, and Copy and Extract already say how to get one out. A
+        // move out of the Trash would leave its record behind, as a cut
+        // would.
+        Action::CopyToOtherPane => ctx.other_pane && ctx.selected > 0 && !ctx.in_archive,
+        Action::MoveToOtherPane => ctx.other_pane && ctx.selected > 0 && !ctx.in_archive && !ctx.in_trash,
         Action::Refresh => true,
         // One file at a time: "open these five in different
         // applications" is not a question the chooser can ask, and a
@@ -776,7 +843,9 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         | Action::Preferences
         | Action::Transfers
         | Action::TransferQueue
-        | Action::ConnectToServer => true,
+        | Action::ConnectToServer
+        | Action::ToggleSplit
+        | Action::OtherPane => true,
     }
 }
 
@@ -865,7 +934,7 @@ mod tests {
     /// has none of them, and ignores what is listed here — which is how
     /// Properties stays out of a file chooser.
     #[test]
-    fn only_tabs_undo_properties_preferences_transfers_and_connecting_belong_to_the_window() {
+    fn only_tabs_panes_undo_properties_preferences_transfers_and_connecting_belong_to_the_window() {
         for action in Action::all() {
             let is_window = matches!(
                 action,
@@ -880,6 +949,8 @@ mod tests {
                     | Action::Transfers
                     | Action::TransferQueue
                     | Action::ConnectToServer
+                    | Action::ToggleSplit
+                    | Action::OtherPane
             );
             assert_eq!(action.scope() == Scope::Window, is_window, "{action:?}");
         }
@@ -1014,5 +1085,25 @@ mod tests {
         assert!(!enabled(Action::OpenTerminal, &ActionContext { in_trash: true, ..ctx }));
         assert_eq!(Action::OpenTerminal.scope(), Scope::Browser);
         assert_eq!(Action::OpenTerminal.default_keys(), &["F4"]);
+    }
+
+    /// The other pane is somewhere to copy only when there is one, and
+    /// never out of an archive; a move is not offered out of the Trash.
+    #[test]
+    fn copying_to_the_other_pane_needs_a_split_and_a_selection() {
+        let ctx = ActionContext { selected: 1, ..ActionContext::default() };
+        assert!(!enabled(Action::CopyToOtherPane, &ctx), "not split");
+        let split = ActionContext { other_pane: true, ..ctx };
+        assert!(enabled(Action::CopyToOtherPane, &split));
+        assert!(enabled(Action::MoveToOtherPane, &split));
+        assert!(!enabled(Action::CopyToOtherPane, &ActionContext { selected: 0, ..split }), "nothing selected");
+        assert!(!enabled(Action::CopyToOtherPane, &ActionContext { in_archive: true, ..split }));
+        let trash = ActionContext { in_trash: true, ..split };
+        assert!(enabled(Action::CopyToOtherPane, &trash), "copying out of the Trash is fine");
+        assert!(!enabled(Action::MoveToOtherPane, &trash), "moving is not");
+        assert!(Action::CopyToOtherPane.default_keys().is_empty(), "menu and palette only");
+        assert_eq!(Action::ToggleSplit.default_keys(), &["F3"]);
+        assert_eq!(label_in(Action::ToggleSplit, &ActionContext::default()), "Split View");
+        assert_eq!(label_in(Action::ToggleSplit, &split), "Close Split View");
     }
 }

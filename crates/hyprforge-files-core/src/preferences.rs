@@ -43,6 +43,8 @@ pub enum Setting {
     Sidebar(SidebarPref),
     /// Open on last time's tabs — see [`Prefs::restore_tabs`].
     RestoreTabs(bool),
+    /// Open every new tab already split — see [`Prefs::split_new_tabs`].
+    SplitNewTabs(bool),
 }
 
 impl Setting {
@@ -56,6 +58,7 @@ impl Setting {
             Setting::View(mode) => prefs.view_mode = mode,
             Setting::Sidebar(pref) => prefs.sidebar = pref,
             Setting::RestoreTabs(on) => prefs.restore_tabs = on,
+            Setting::SplitNewTabs(on) => prefs.split_new_tabs = on,
         }
     }
 }
@@ -273,11 +276,11 @@ pub fn group(action: Action) -> &'static str {
         FocusUp | FocusDown | FocusLeft | FocusRight | ExtendUp | ExtendDown | SelectAll | ClearSearch
         | NextSearchScope | ContextMenu => "Selecting",
         Trash | DeletePermanently | Restore | EmptyTrash | Copy | Cut | Paste | CopyPath | Rename | NewFolder
-        | OpenWith | Extract | ExtractTo | Compress | Undo => "Files",
+        | OpenWith | Extract | ExtractTo | Compress | Undo | CopyToOtherPane | MoveToOtherPane => "Files",
         ToggleHidden | TogglePreview | ZoomIn | ZoomOut | ZoomReset | QuickLook | Properties | Preferences | Transfers
         | TransferQueue | OpenTerminal => "The window",
         Pin | Unpin | PinUp | PinDown | ToggleStar | Mount | Unmount | Eject | Disconnect | ConnectToServer => "Sidebar",
-        NewTab | CloseTab | NextTab | PreviousTab | Tab(_) => "Tabs",
+        NewTab | CloseTab | NextTab | PreviousTab | Tab(_) | ToggleSplit | OtherPane => "Tabs",
     }
 }
 
@@ -542,6 +545,25 @@ mod tests {
         assert!(WATCH_NETWORK_EVERY.iter().all(|s| !BehaviourSetting::WatchNetworkEvery(*s).holds_in(&config.behaviour)));
         assert_eq!(watch_network_choices(config.behaviour.watch_network_every), vec![1, 3, 10, 30], "shown, and chosen");
         assert_eq!(watch_network_choices(3), WATCH_NETWORK_EVERY.to_vec(), "no extra segment for an offered one");
+    }
+
+    /// `files.toml` is rewritten whole, so "exactly its line" is asked of
+    /// the file as written: switching new tabs to open split changes the
+    /// one line that names it, and nothing else in the file.
+    #[test]
+    fn opening_new_tabs_split_writes_exactly_its_line_of_files_toml() {
+        let before = Prefs::default();
+        assert!(!before.split_new_tabs, "off until asked for");
+        let mut after = before.clone();
+        Setting::SplitNewTabs(true).apply(&mut after);
+        let (before, after) = (toml::to_string_pretty(&before).unwrap(), toml::to_string_pretty(&after).unwrap());
+        let changed: Vec<(&str, &str)> =
+            before.lines().zip(after.lines()).filter(|(b, a)| b != a).collect();
+        assert_eq!(before.lines().count(), after.lines().count());
+        assert_eq!(changed, vec![("split_new_tabs = false", "split_new_tabs = true")]);
+        // And a line written by hand is what the switch shows.
+        let prefs: Prefs = toml::from_str("split_new_tabs = true\n").unwrap();
+        assert!(prefs.split_new_tabs);
     }
 
     #[test]

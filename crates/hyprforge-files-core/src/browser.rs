@@ -157,10 +157,31 @@ fn shown_order(entries: &[Entry], search: &Matcher, prefs: &Prefs, filter: Optio
     order
 }
 
-/// The scrollable holding `dir`'s pane in column view. From the path, so
-/// the pane keeps one id however the panes beside it come and go.
-fn column_scroll_id(dir: &Path) -> Id {
-    Id::from(format!("hyprforge-column:{}", dir.display()))
+/// The scrollable holding `dir`'s pane in column view, in browser
+/// `instance`'s view. From the path, so the pane keeps one id however the
+/// panes beside it come and go — and from the browser, so two panes of a
+/// split tab both in column view at the same folder scroll apart.
+fn column_scroll_id(instance: u64, dir: &Path) -> Id {
+    Id::from(format!("hyprforge-column:{instance}:{}", dir.display()))
+}
+
+/// Hands out [`Browser::instance`] numbers: process-wide, from 1, never
+/// reused — a number freed by a closed pane and handed to a new one
+/// could catch a widget operation still aimed at the old one.
+static NEXT_INSTANCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// How much of its chrome a browser draws — see [`Browser::view_as`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Chrome {
+    /// Everything: the header toolbar, the sidebar, the status bar.
+    #[default]
+    Full,
+    /// The second pane of a split tab: its own path bar over the listing
+    /// and its own status bar, and no sidebar or toolbar. One sidebar and
+    /// one toolbar per window is the design; a second of each, half as
+    /// wide, would be two windows squeezed into one rather than one window
+    /// showing two folders.
+    Bare,
 }
 
 /// Pictures the host has decoded for this browser: grid thumbnails, and
@@ -671,9 +692,10 @@ pub enum Outcome {
     /// pane in column view brings the folder you came from into sight.
     SnapTo { id: Id, y: f32 },
     /// Scroll the listing so the row the keyboard is on is in sight —
-    /// run [`crate::reveal::Reveal`]. Only as far as it takes, and not at
-    /// all when the row already shows.
-    RevealFocused,
+    /// run [`crate::reveal::Reveal`] for this row id, which is this
+    /// browser's own [`crate::reveal::focused_row`]. Only as far as it
+    /// takes, and not at all when the row already shows.
+    RevealFocused(Id),
     /// Tell the person something, in the status bar.
     Notice(String),
     /// Several things to do, in order.
@@ -751,6 +773,12 @@ pub enum Outcome {
     /// Change the starred list. The window owns it, as it owns the
     /// pinned list — see [`crate::starred`].
     Stars(crate::starred::StarChange),
+    /// Copy or move these into the folder the other pane of a split tab
+    /// shows — [`Action::CopyToOtherPane`] and its move. The browser
+    /// does not know where that is; the host, which holds both panes,
+    /// does. Only a host that said there is another pane
+    /// ([`Browser::set_other_pane`]) ever receives one.
+    ToOtherPane(crate::clipboard::FileClip),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -918,6 +946,11 @@ pub enum Message {
 /// convention someone has to remember.
 #[derive(Debug, Clone, PartialEq)]
 struct ViewModel<'a> {
+    /// Which browser this is — see [`Browser::instance`]. What the view's
+    /// widget ids are prefixed with.
+    instance: u64,
+    /// Drawn as a split tab's second pane — see [`Chrome::Bare`].
+    bare: bool,
     current_dir: &'a Path,
     /// Whether this listing is the Trash — which changes its columns.
     in_trash: bool,
@@ -1086,6 +1119,11 @@ pub struct Browser {
     /// for the life of this `Browser` — see
     /// [`Self::list_scrollable_id`]'s own doc.
     list_scrollable_id: Id,
+    /// This browser's number — see [`Self::instance`].
+    instance: u64,
+    /// Whether the host has another pane beside this one — see
+    /// [`Self::set_other_pane`].
+    other_pane: bool,
     /// What `files-config.toml` configured — the menus, and the keymap
     /// their shortcut hints are read from. Shared, not copied per tab.
     config: Arc<Config>,
@@ -1189,6 +1227,8 @@ impl Browser {
             // than inside `render` (which runs on every `view()` call)
             // is what guarantees that.
             list_scrollable_id: Id::unique(),
+            instance: NEXT_INSTANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            other_pane: false,
             config: Arc::new(Config::default()),
             type_of: None,
             menu: None,
@@ -1271,6 +1311,26 @@ impl Browser {
     /// something to restore *to*.
     pub fn list_scrollable_id(&self) -> Id {
         self.list_scrollable_id.clone()
+    }
+
+    /// This browser's number, unique in the process.
+    ///
+    /// What every widget id the view derives from something shared — a
+    /// path, "the focused row" — is prefixed with, so two browsers drawn
+    /// in one window never name the same widget. Before split view there
+    /// was one browser on screen at a time and a path-derived id was
+    /// enough; a split tab draws two, and both can show the same folder.
+    /// See [`crate::drop::target_id`] and [`crate::reveal::focused_row`].
+    pub fn instance(&self) -> u64 {
+        self.instance
+    }
+
+    /// Tells the browser whether its host has another pane beside it —
+    /// what turns on [`Action::CopyToOtherPane`] and its move. The host
+    /// owns the panes and calls this whenever a tab splits or unsplits,
+    /// the way it calls [`Self::set_can_paste`].
+    pub fn set_other_pane(&mut self, other_pane: bool) {
+        self.other_pane = other_pane;
     }
 
     /// What has been typed into the search box, if anything. A host
@@ -1594,7 +1654,7 @@ impl Browser {
     pub fn drop_targets(&self) -> HashMap<Id, PathBuf> {
         let mut targets: HashMap<Id, PathBuf> = HashMap::new();
         let mut add = |path: &Path| {
-            targets.insert(crate::drop::target_id(path), path.to_path_buf());
+            targets.insert(crate::drop::target_id(self.instance, path), path.to_path_buf());
         };
         add(&self.current_dir);
         if !self.in_trash() {
@@ -1851,6 +1911,7 @@ impl Browser {
                     })
             },
             can_paste: self.can_paste,
+            other_pane: self.other_pane,
             starred: self.selection_starred(),
             pin: {
                 let target = self.pin_target(target);
@@ -1967,7 +2028,7 @@ impl Browser {
         if self.revealed.is_none() {
             return outcome;
         }
-        many(vec![outcome, Outcome::RevealFocused])
+        many(vec![outcome, Outcome::RevealFocused(crate::reveal::focused_row(self.instance))])
     }
 
     /// Brings column view's panes in line with where the browser is, and
@@ -2019,7 +2080,7 @@ impl Browser {
         let Some(Ok(entries)) = &ancestor.listing else { return None };
         let trail = columns::trail(dir, &self.current_dir)?;
         let index = ancestor.order.iter().position(|&i| entries.get(i).is_some_and(|e| e.path == trail))?;
-        Some(Outcome::SnapTo { id: column_scroll_id(dir), y: columns::reveal(index, ancestor.order.len()) })
+        Some(Outcome::SnapTo { id: column_scroll_id(self.instance, dir), y: columns::reveal(index, ancestor.order.len()) })
     }
 
     /// A pane's folder arrived. Dropped unless the pane is still wanted.
@@ -2496,6 +2557,14 @@ impl Browser {
                     .join("\n"),
             ),
             Action::Paste => Outcome::Paste(self.current_dir.clone()),
+            Action::CopyToOtherPane | Action::MoveToOtherPane => Outcome::ToOtherPane(crate::clipboard::FileClip {
+                paths: self.selected_shown(),
+                verb: if action == Action::MoveToOtherPane {
+                    crate::clipboard::ClipVerb::Cut
+                } else {
+                    crate::clipboard::ClipVerb::Copy
+                },
+            }),
             Action::Rename => self.begin_rename(),
             Action::NewFolder => {
                 let name = crate::naming::new_folder_name(self.entries.iter().map(|e| e.name.as_str()));
@@ -2526,7 +2595,9 @@ impl Browser {
             | Action::Preferences
             | Action::Transfers
             | Action::TransferQueue
-            | Action::ConnectToServer => Outcome::Window(action),
+            | Action::ConnectToServer
+            | Action::ToggleSplit
+            | Action::OtherPane => Outcome::Window(action),
         }
     }
 
@@ -3115,10 +3186,26 @@ impl Browser {
         }
     }
 
+    // The tests read the full view model; the window and the dialog go
+    // through `view_as`.
+    #[cfg(test)]
     fn view_model(&self, viewport_width: f32) -> ViewModel<'_> {
-        let sidebar_collapsed = self.prefs.sidebar.collapsed(viewport_width, self.config.sidebar.collapse_below);
+        self.view_model_as(viewport_width, Chrome::Full)
+    }
+
+    fn view_model_as(&self, viewport_width: f32, chrome: Chrome) -> ViewModel<'_> {
+        let bare = chrome == Chrome::Bare;
+        // Without a sidebar, every width below is worked out as though
+        // the narrowest one — the rail — were there and the pane were
+        // that much wider: the rail is subtracted again by every formula
+        // that sizes the listing, which leaves it exactly the pane.
+        let viewport_width = if bare { viewport_width + density::SIDEBAR_RAIL_WIDTH } else { viewport_width };
+        let sidebar_collapsed =
+            bare || self.prefs.sidebar.collapsed(viewport_width, self.config.sidebar.collapse_below);
         let preview_width = density::preview_width(viewport_width, sidebar_collapsed);
         ViewModel {
+            instance: self.instance,
+            bare,
             current_dir: &self.current_dir,
             in_trash: self.in_trash(),
             archive: self.archive.as_deref(),
@@ -3198,7 +3285,16 @@ impl Browser {
     /// layout pass to answer a question the host already knows the
     /// answer to.
     pub fn view(&self, scale: FontScale, viewport_width: f32) -> Element<'_, Message> {
-        render(self.view_model(viewport_width), scale)
+        self.view_as(scale, viewport_width, Chrome::Full)
+    }
+
+    /// [`Self::view`], with only as much chrome as `chrome` asks for —
+    /// see [`Chrome`]. `viewport_width` is then the pane's width, not the
+    /// window's: a split tab gives each pane its own, and the sidebar's
+    /// collapsing and the listing's sideways scroll are decided against
+    /// the room the pane actually has.
+    pub fn view_as(&self, scale: FontScale, viewport_width: f32, chrome: Chrome) -> Element<'_, Message> {
+        render(self.view_model_as(viewport_width, chrome), scale)
     }
 }
 
@@ -3432,12 +3528,11 @@ fn render<'a>(vm: ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // columns with their own headers instead of one window.
     // Collapsed is a *rail*, not nothing — see `sidebar_rail`. The
     // places stay reachable; only their labels fold away.
-    let side = if vm.sidebar_collapsed {
-        sidebar_rail(&vm, scale)
-    } else {
-        sidebar_view(&vm, scale)
-    };
-    let mut middle = row![side, file_area(&vm, scale)].height(Length::Fill);
+    let mut middle = row![].height(Length::Fill);
+    if !vm.bare {
+        middle = middle.push(if vm.sidebar_collapsed { sidebar_rail(&vm, scale) } else { sidebar_view(&vm, scale) });
+    }
+    middle = middle.push(file_area(&vm, scale));
     if let Some(preview) = vm.preview.as_ref() {
         middle = middle.push(preview_pane(preview, scale));
     }
@@ -3446,7 +3541,8 @@ fn render<'a>(vm: ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         middle = middle.push(pane.map(|m| Message::Properties(Box::new(m))));
     }
 
-    let mut page = column![header_bar(&vm, scale), plane_edge()];
+    let header = if vm.bare { bare_bar(&vm, scale) } else { header_bar(&vm, scale) };
+    let mut page = column![header, plane_edge()];
     // The scope rail, only while a search is in force: chrome that is
     // there all the time for a feature used now and then would be a strip
     // of controls that mostly do nothing.
@@ -3597,7 +3693,7 @@ fn file_area<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // over it, in the dim text colour: the accent means *selected*.
     let hovered = vm.drop_hover == Some(vm.current_dir);
     container(body_view(vm, scale))
-        .id(crate::drop::target_id(vm.current_dir))
+        .id(crate::drop::target_id(vm.instance, vm.current_dir))
         .padding(spacing::SM)
         .width(Length::Fill)
         .height(Length::Fill)
@@ -3617,9 +3713,9 @@ fn file_area<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
 /// [`crate::drop::target_id`], and takes the hover step while a drag is
 /// over it — the same fill a row takes under the pointer, never the
 /// accent, which means selected.
-fn drop_zone<'a>(inner: impl Into<Element<'a, Message>>, path: &Path, hovered: bool) -> Element<'a, Message> {
+fn drop_zone<'a>(inner: impl Into<Element<'a, Message>>, instance: u64, path: &Path, hovered: bool) -> Element<'a, Message> {
     container(inner)
-        .id(crate::drop::target_id(path))
+        .id(crate::drop::target_id(instance, path))
         .style(move |_t: &iced::Theme| container::Style {
             background: hovered.then(|| iced::Background::Color(hyprforge_ui::theme::surface::row())),
             border: iced::Border { radius: density::nested_radius().into(), ..iced::Border::default() },
@@ -3748,6 +3844,27 @@ fn header_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> 
         ..container::Style::default()
     })
     .into()
+}
+
+/// A split tab's second pane's header: its own path bar, and — only while
+/// a search is under way there — the search field, so a query typed at
+/// that listing is somewhere the person can see it. The same height and
+/// plane as [`header_bar`], so the two panes' listings start level.
+fn bare_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
+    let mut bar = row![path_bar(vm, scale)].spacing(spacing::SM).align_y(iced::Alignment::Center);
+    if !vm.search_query.is_empty() {
+        bar = bar.push(searching::search_box(vm, scale));
+    }
+    container(bar)
+        .height(Length::Fixed(density::bar_height(scale)))
+        .center_y(Length::Fixed(density::bar_height(scale)))
+        .padding([0, spacing::SM as u16])
+        .width(Length::Fill)
+        .style(|_t: &iced::Theme| container::Style {
+            background: Some(iced::Background::Color(hyprforge_ui::theme::surface::sidebar())),
+            ..container::Style::default()
+        })
+        .into()
 }
 
 /// The 1px line under the header and over the status bar.
@@ -4423,7 +4540,7 @@ fn sidebar_place<'a>(
         drives::RowPlace::Plain => return button.into(),
     };
     let hovered = vm.drop_hover == Some(path.as_path());
-    let zone = drop_zone(button, &path, hovered);
+    let zone = drop_zone(button, vm.instance, &path, hovered);
     sidebar_menu_area(zone, path)
 }
 
@@ -4819,11 +4936,11 @@ fn column_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message>
             for (index, entry) in vm.rows.iter().copied().enumerate() {
                 let row = entry_row(index, entry, vm.selection.is_selected(&entry.path), &ctx);
                 let row = if entry.is_dir && !vm.in_trash {
-                    drop_zone(row, &entry.path, vm.drop_hover == Some(entry.path.as_path()))
+                    drop_zone(row, vm.instance, &entry.path, vm.drop_hover == Some(entry.path.as_path()))
                 } else {
                     row
                 };
-                list = list.push(reveal_tag(row, focused == Some(entry.path.as_path())));
+                list = list.push(reveal_tag(row, vm.instance, focused == Some(entry.path.as_path())));
             }
             scrollable(container(list).padding([0, spacing::XS as u16]))
                 .height(Length::Fill)
@@ -4853,9 +4970,9 @@ fn column_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message>
 /// it is the keyboard's row. Every row gets the container, focused or
 /// not, so moving the focus changes an id rather than the shape of the
 /// widget tree — which would reset the state of every row after it.
-fn reveal_tag<'a>(row: Element<'a, Message>, focused: bool) -> Element<'a, Message> {
+fn reveal_tag<'a>(row: Element<'a, Message>, instance: u64, focused: bool) -> Element<'a, Message> {
     let tagged = container(row);
-    if focused { tagged.id(crate::reveal::focused_row()) } else { tagged }.into()
+    if focused { tagged.id(crate::reveal::focused_row(instance)) } else { tagged }.into()
 }
 
 /// The status bar's left-hand words.
@@ -4911,7 +5028,7 @@ fn column_pane<'a>(pane: &ColumnModel<'a>, vm: &ViewModel<'a>, ctx: &RowContext<
             .height(Length::Fixed(density::row_height(scale)))
             .style(move |t: &iced::Theme, status| trail_row_style(t, status, on_trail));
         list = list.push(if entry.is_dir {
-            drop_zone(button, &entry.path, vm.drop_hover == Some(entry.path.as_path()))
+            drop_zone(button, vm.instance, &entry.path, vm.drop_hover == Some(entry.path.as_path()))
         } else {
             button.into()
         });
@@ -4922,7 +5039,7 @@ fn column_pane<'a>(pane: &ColumnModel<'a>, vm: &ViewModel<'a>, ctx: &RowContext<
     iced::widget::mouse_area(
         scrollable(container(list).padding([0, spacing::XS as u16]))
             .height(Length::Fill)
-            .id(column_scroll_id(pane.dir)),
+            .id(column_scroll_id(vm.instance, pane.dir)),
     )
     .on_right_press(Message::CloseMenu)
     .into()
@@ -5543,11 +5660,11 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         // A folder is somewhere a drop can go; a file is not, and nor is
         // anything in the Trash.
         let row = if entry.is_dir && !vm.in_trash {
-            drop_zone(row, &entry.path, vm.drop_hover == Some(entry.path.as_path()))
+            drop_zone(row, vm.instance, &entry.path, vm.drop_hover == Some(entry.path.as_path()))
         } else {
             row
         };
-        list = list.push(reveal_tag(row, vm.selection.focused() == Some(entry.path.as_path())));
+        list = list.push(reveal_tag(row, vm.instance, vm.selection.focused() == Some(entry.path.as_path())));
     }
     // `.id(..)` is what lets a host restore this list's scroll position
     // across a tab switch — see `Browser::list_scrollable_id`'s own doc.
@@ -5626,7 +5743,7 @@ fn grid_view<'a>(vm: &ViewModel<'a>, text: FontScale) -> Element<'a, Message> {
     // which is most of why it read as squashed. This asks the layout how
     // much room there actually is and fills it.
     let renaming = vm.renaming;
-    let (drop_hover, in_trash) = (vm.drop_hover, vm.in_trash);
+    let (drop_hover, in_trash, instance) = (vm.drop_hover, vm.in_trash, vm.instance);
     // The listing's id, as the list's: one of the two is ever drawn, and
     // it is what `Reveal` scrolls.
     let scroll_id = vm.list_scrollable_id.clone();
@@ -5655,11 +5772,11 @@ fn grid_view<'a>(vm: &ViewModel<'a>, text: FontScale) -> Element<'a, Message> {
                 grid_cell(index, entry, look, renaming, thumbnails.get(&entry.path), icons.for_entry(entry), folder, scale);
             let cell = collections::starred_cell(cell, stars.contains(&entry.path), selected, scale.text);
             let cell = if entry.is_dir && !in_trash {
-                drop_zone(cell, &entry.path, drop_hover == Some(entry.path.as_path()))
+                drop_zone(cell, instance, &entry.path, drop_hover == Some(entry.path.as_path()))
             } else {
                 cell
             };
-            current = current.push(reveal_tag(cell, focused == Some(entry.path.as_path())));
+            current = current.push(reveal_tag(cell, instance, focused == Some(entry.path.as_path())));
         }
         // The last row is padded out with empty space to a full set of
         // columns, so its cells keep the width the rows above gave them
@@ -7400,6 +7517,9 @@ mod tests {
         // before the equality check below, which is about `Mode`
         // specifically.
         dialog.list_scrollable_id = app.list_scrollable_id.clone();
+        // The same for the instance number every other id is prefixed
+        // with — see `Browser::instance`.
+        dialog.instance = app.instance;
 
         assert_eq!(
             app.view_model(1200.0),
@@ -7448,6 +7568,8 @@ mod tests {
             // the two rows have tests of their own in
             // `browser/collections.rs`.
             show_collections: (false, false),
+            instance: 0,
+            bare: false,
             collection: None,
             stars: Box::leak(Box::default()),
             rows: Vec::new(),
@@ -8186,9 +8308,9 @@ mod drop_target_tests {
     fn folders_in_the_listing_are_drop_targets_and_files_are_not() {
         let browser = loaded(&[("docs", true), ("notes.txt", false)]);
         let targets = browser.drop_targets();
-        assert_eq!(targets.get(&target_id(Path::new("/dir/docs"))), Some(&PathBuf::from("/dir/docs")));
-        assert!(!targets.contains_key(&target_id(Path::new("/dir/notes.txt"))));
-        assert!(targets.contains_key(&target_id(Path::new("/dir"))), "the folder in view, for a drop on its background");
+        assert_eq!(targets.get(&target_id(browser.instance(), Path::new("/dir/docs"))), Some(&PathBuf::from("/dir/docs")));
+        assert!(!targets.contains_key(&target_id(browser.instance(), Path::new("/dir/notes.txt"))));
+        assert!(targets.contains_key(&target_id(browser.instance(), Path::new("/dir"))), "the folder in view, for a drop on its background");
     }
 
     #[test]
@@ -8199,8 +8321,8 @@ mod drop_target_tests {
         folder.origin = Some(PathBuf::from("/home/a/old"));
         browser.update(Message::DirLoaded(trash.clone(), Ok(vec![folder])));
         let targets = browser.drop_targets();
-        assert!(!targets.contains_key(&target_id(&trash.join("old"))));
-        assert!(targets.contains_key(&target_id(&trash)), "the Trash itself is: a drop there trashes");
+        assert!(!targets.contains_key(&target_id(browser.instance(), &trash.join("old"))));
+        assert!(targets.contains_key(&target_id(browser.instance(), &trash)), "the Trash itself is: a drop there trashes");
     }
 
     #[test]
@@ -8457,7 +8579,7 @@ mod column_tests {
         let names: Vec<String> = (0..20).map(|i| format!("a{i:02}")).chain((0..20).map(|i| format!("z{i:02}"))).collect();
         let rows: Vec<(&str, bool)> = names.iter().map(|n| (n.as_str(), true)).chain([("m", true)]).collect();
         let outcome = browser.update(Message::ColumnLoaded(PathBuf::from("/srv/a"), Ok(entries("/srv/a", &rows))));
-        assert_eq!(outcome, Outcome::SnapTo { id: column_scroll_id(Path::new("/srv/a")), y: 0.5 });
+        assert_eq!(outcome, Outcome::SnapTo { id: column_scroll_id(browser.instance(), Path::new("/srv/a")), y: 0.5 });
     }
 
     #[test]
@@ -8574,7 +8696,7 @@ mod reveal_tests {
 
     fn reveals(outcome: &Outcome) -> bool {
         match outcome {
-            Outcome::RevealFocused => true,
+            Outcome::RevealFocused(_) => true,
             Outcome::Many(parts) => parts.iter().any(reveals),
             _ => false,
         }
@@ -8858,5 +8980,52 @@ mod zoom_tests {
         browser.update(Message::ShowPreset(crate::prefs::LARGE_ICONS));
         assert_eq!(browser.prefs().view_mode, ViewMode::Grid);
         assert_eq!(size_label(browser.prefs()), "Large icons");
+    }
+}
+
+#[cfg(test)]
+mod split_tests {
+    //! The browser's half of split view: it does not know where the other
+    //! pane is, only whether there is one, and its widget ids never meet
+    //! another browser's.
+    use super::tests_support::loaded;
+    use super::*;
+    use crate::clipboard::{ClipVerb, FileClip};
+
+    #[test]
+    fn copying_to_the_other_pane_hands_the_selection_to_the_host() {
+        let mut browser = loaded(&[("a.txt", false), ("b.txt", false)]);
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+        assert_eq!(browser.perform(Action::CopyToOtherPane), Outcome::None, "no other pane, nothing to do");
+        browser.set_other_pane(true);
+        let expect = |verb| Outcome::ToOtherPane(FileClip { paths: vec![PathBuf::from("/dir/a.txt")], verb });
+        assert_eq!(browser.perform(Action::CopyToOtherPane), expect(ClipVerb::Copy));
+        assert_eq!(browser.perform(Action::MoveToOtherPane), expect(ClipVerb::Cut));
+    }
+
+    /// Two browsers at the same folder — the two panes F3 opens — name
+    /// none of the same widgets.
+    #[test]
+    fn two_browsers_at_the_same_folder_have_distinct_ids() {
+        let (one, two) = (loaded(&[("docs", true)]), loaded(&[("docs", true)]));
+        assert_ne!(one.instance(), two.instance());
+        let (a, b) = (one.drop_targets(), two.drop_targets());
+        assert!(a.keys().all(|id| !b.contains_key(id)), "drop targets");
+        assert_ne!(crate::reveal::focused_row(one.instance()), crate::reveal::focused_row(two.instance()));
+        assert_ne!(
+            column_scroll_id(one.instance(), Path::new("/dir")),
+            column_scroll_id(two.instance(), Path::new("/dir"))
+        );
+        assert_ne!(one.list_scrollable_id(), two.list_scrollable_id());
+    }
+
+    /// The second pane has no sidebar, so its listing has the whole pane.
+    #[test]
+    fn a_bare_pane_has_no_sidebar_and_its_listing_takes_the_room() {
+        let browser = loaded(&[("a.txt", false)]);
+        let (full, bare) = (browser.view_model_as(500.0, Chrome::Full), browser.view_model_as(500.0, Chrome::Bare));
+        assert!(bare.bare && !full.bare);
+        assert!(listing_width(&bare) > listing_width(&full), "{} against {}", listing_width(&bare), listing_width(&full));
+        assert_eq!(listing_width(&bare), density::list_pane_width(500.0 + density::SIDEBAR_RAIL_WIDTH, true));
     }
 }

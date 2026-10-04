@@ -373,6 +373,12 @@ pub struct Prefs {
     /// every save. Like `preview_pane`, a `bool` whose default is not
     /// `bool`'s zero, so the [`Default`] impl below says it.
     pub restore_tabs: bool,
+    /// Whether a tab opened from now on starts split into two panes at
+    /// its folder — see `Action::ToggleSplit`. Off by default: one
+    /// listing is what everyone expects of a new tab, and F3 splits one
+    /// when it is wanted. The window's state, like `restore_tabs`; the
+    /// open/save dialog, which shares this file, has no tabs to split.
+    pub split_new_tabs: bool,
     // Per-directory overrides (vision pillar 6: "auto-remember beats
     // onboarding" — a directory sorted by size once should stay sorted
     // by size) are deliberately **not implemented** in this struct. The
@@ -407,6 +413,7 @@ impl Default for Prefs {
             starred: Vec::new(),
             zoom: Zoom::default(),
             restore_tabs: true,
+            split_new_tabs: false,
         }
     }
 }
