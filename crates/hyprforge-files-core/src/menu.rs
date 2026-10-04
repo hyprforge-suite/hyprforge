@@ -138,6 +138,10 @@ impl Default for MenuConfig {
                 Sep,
                 A(Trash),
                 Sep,
+                // Beside Properties, the other panel on the right: the
+                // preview pane starts hidden, so a right click on a file
+                // is where someone looks for a way to see it.
+                A(TogglePreview),
                 A(Properties),
             ],
             archive: vec![
@@ -157,6 +161,7 @@ impl Default for MenuConfig {
                 Sep,
                 A(Trash),
                 Sep,
+                A(TogglePreview),
                 A(Properties),
             ],
             archive_member: vec![
@@ -191,6 +196,7 @@ impl Default for MenuConfig {
                 Sep,
                 A(Trash),
                 Sep,
+                A(TogglePreview),
                 A(Properties),
             ],
             empty: vec![
@@ -278,7 +284,7 @@ impl MenuConfig {
         use Action::*;
         use MenuEntry::{Action as A, Separator as Sep};
         MenuConfig {
-            entry: vec![A(Open), Sep, A(CopyPath), A(Rename), Sep, A(SelectAll)],
+            entry: vec![A(Open), Sep, A(CopyPath), A(Rename), Sep, A(SelectAll), Sep, A(TogglePreview)],
             folder: vec![A(Open), Sep, A(CopyPath), A(Rename)],
             archive: vec![A(Open), Sep, A(CopyPath)],
             archive_member: vec![A(CopyPath)],

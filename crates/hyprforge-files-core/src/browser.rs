@@ -7341,9 +7341,17 @@ mod media_tests {
         Preview { picture: Some(Picture::Raster(a_handle())), ..Preview::default() }
     }
 
+    /// [`loaded`] with the preview pane switched on — it starts hidden.
+    fn with_pane(rows: &[(&str, bool)]) -> Browser {
+        let mut browser = loaded(rows);
+        browser.perform(Action::TogglePreview);
+        assert!(browser.prefs.preview_pane);
+        browser
+    }
+
     #[test]
     fn selecting_one_picture_asks_the_host_for_its_preview() {
-        let mut browser = loaded(&[("a.png", false), ("notes.txt", false)]);
+        let mut browser = with_pane(&[("a.png", false), ("notes.txt", false)]);
         let outcome = click(&mut browser, "a.png");
         assert_eq!(asks_preview_of(&outcome), Some(PathBuf::from("/dir/a.png")));
     }
@@ -7353,15 +7361,15 @@ mod media_tests {
     /// is the host's to decide. This used to ask for pictures alone.
     #[test]
     fn selecting_anything_asks_the_host_what_it_can_show() {
-        let mut browser = loaded(&[("a.png", false), ("notes.txt", false), ("sub", true)]);
+        let mut browser = with_pane(&[("a.png", false), ("notes.txt", false), ("sub", true)]);
         assert_eq!(asks_preview_of(&click(&mut browser, "notes.txt")), Some(PathBuf::from("/dir/notes.txt")));
         assert_eq!(asks_preview_of(&click(&mut browser, "sub")), Some(PathBuf::from("/dir/sub")));
     }
 
     #[test]
     fn with_the_pane_off_no_preview_is_decoded() {
+        // Off is how it starts.
         let mut browser = loaded(&[("a.png", false)]);
-        browser.perform(Action::TogglePreview);
         assert!(!browser.prefs.preview_pane);
         assert_eq!(asks_preview_of(&click(&mut browser, "a.png")), None);
     }
@@ -7370,7 +7378,7 @@ mod media_tests {
     fn toggling_the_pane_is_remembered_like_every_other_view_setting() {
         let mut browser = loaded(&[]);
         match browser.perform(Action::TogglePreview) {
-            Outcome::PrefsChanged(prefs) => assert!(!prefs.preview_pane),
+            Outcome::PrefsChanged(prefs) => assert!(prefs.preview_pane, "off by default, so this turned it on"),
             other => panic!("expected the preference to be saved, got {other:?}"),
         }
     }
@@ -7433,7 +7441,7 @@ mod media_tests {
     /// must not replace the one they are now looking at.
     #[test]
     fn a_preview_that_arrives_after_the_selection_moved_on_is_ignored() {
-        let mut browser = loaded(&[("a.png", false), ("b.png", false)]);
+        let mut browser = with_pane(&[("a.png", false), ("b.png", false)]);
         click(&mut browser, "a.png");
         click(&mut browser, "b.png");
         browser.update(Message::PreviewLoaded(PathBuf::from("/dir/a.png"), Some(a_preview())));
@@ -8147,6 +8155,7 @@ mod properties_tests {
     #[test]
     fn the_inspector_and_the_preview_never_show_together() {
         let mut browser = loaded(&[("a.txt", false)]);
+        browser.perform(Action::TogglePreview); // it starts hidden
         click(&mut browser, 0);
         assert!(browser.view_model(1400.0).preview.is_some());
         browser.update(Message::ToggleProperties);

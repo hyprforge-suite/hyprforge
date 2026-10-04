@@ -332,14 +332,14 @@ pub struct Prefs {
     pub columns: Columns,
     /// Whether the sidebar shows — see [`SidebarPref`].
     pub sidebar: SidebarPref,
-    /// Whether the preview pane is enabled. Defaults to on, but this is
-    /// a real off state a user can choose and have honoured — not merely
-    /// "on unless we forgot to ask", which is the distinction the brief
-    /// is explicit about: a `bool` with `#[serde(default)]` gives
-    /// exactly that, since the *type's* default is `false` but this
-    /// struct's [`Default`] impl below sets it `true` — an explicit
-    /// choice at the one place that matters, not relying on `bool`'s own
-    /// zero value.
+    /// Whether the preview pane is enabled. Defaults to off — asked for
+    /// by the person using it: a panel saying "Select a file to see it
+    /// here" spends a third of the window on nothing until something is
+    /// selected. Alt+P, the status bar's switch and the right-click menus
+    /// turn it on, and it stays on. A `bool` with `#[serde(default)]`
+    /// still needs the [`Default`] impl below to say so explicitly: the
+    /// choice is made at the one place that matters, not left to
+    /// `bool`'s own zero value happening to agree.
     pub preview_pane: bool,
     pub window_width: u32,
     pub window_height: u32,
@@ -385,7 +385,7 @@ impl Default for Prefs {
             view_mode: ViewMode::List,
             columns: Columns::default(),
             sidebar: SidebarPref::default(),
-            preview_pane: true,
+            preview_pane: false,
             window_width: 900,
             window_height: 600,
             pinned: Vec::new(),
@@ -589,9 +589,10 @@ mod tests {
         assert!(back.columns.shows(Column::Owner), "the others are untouched");
     }
 
+    /// Hidden until asked for — see the field's doc.
     #[test]
-    fn the_preview_pane_is_on_by_default() {
-        assert!(Prefs::default().preview_pane);
+    fn the_preview_pane_is_off_by_default() {
+        assert!(!Prefs::default().preview_pane);
     }
 
     #[test]
@@ -645,16 +646,21 @@ mod tests {
     /// that field's real default, not `bool`'s own zero value. This is
     /// the test the brief calls out by name.
     #[test]
-    fn a_file_written_before_preview_pane_existed_still_parses_and_defaults_it_on() {
+    fn a_file_written_before_preview_pane_existed_still_parses_and_gets_its_default() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("files.toml");
         std::fs::write(&path, "show_hidden = true\n").unwrap();
 
         let prefs = load_from(&path).unwrap();
         assert!(prefs.show_hidden);
-        assert!(
+        // Compared with `Prefs::default()` rather than a literal: the
+        // default is now off, the same as `bool`'s zero, and a literal
+        // `false` would pass whether or not the struct's default were
+        // applied at all.
+        assert_eq!(
             prefs.preview_pane,
-            "a field this file predates must get its own default, not bool's zero value"
+            Prefs::default().preview_pane,
+            "a field this file predates must get the struct's default"
         );
     }
 
