@@ -2199,7 +2199,9 @@ impl Browser {
             | Action::PreviousTab
             | Action::Tab(_)
             | Action::Properties
-            | Action::Preferences => Outcome::Window(action),
+            | Action::Preferences
+            | Action::Transfers
+            | Action::TransferQueue => Outcome::Window(action),
         }
     }
 
