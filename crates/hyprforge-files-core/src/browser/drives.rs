@@ -69,7 +69,7 @@ pub(super) fn place(row: &SidebarRow) -> RowPlace {
 /// What a click on a drive's or share's row does, and whether it is the
 /// one on screen. `None` for a row that is not a drive's.
 pub(super) fn press(row: &SidebarRow, vm: &ViewModel<'_>) -> Option<(Option<Message>, bool)> {
-    let here = row.path == vm.current_dir && vm.search.current.is_none();
+    let here = row.path == vm.current_dir && vm.search.current.is_none() && vm.collection.is_none();
     Some(match row.device.as_ref()? {
         DeviceRow::Volume { id, mounted, .. } => (Some(Message::Device(DeviceMessage::Open(id.clone()))), *mounted && here),
         DeviceRow::Share => (Some(Message::Navigate(row.path.clone())), here),
@@ -386,7 +386,8 @@ mod tests {
         let mut devices = listed(vec![stick("STICK", None)]);
         devices.manages_mounts = true;
         let browser = with(devices);
-        assert_eq!(titles(&browser), ["Devices", "Remote", "Trash"]);
+        // Places is there with no places built: Recent and Starred head it.
+        assert_eq!(titles(&browser), ["Places", "Devices", "Remote", "Trash"]);
     }
 
     #[test]

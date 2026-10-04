@@ -28,7 +28,7 @@
 //! than write a file the loader would then have to complain about.
 
 use crate::action::{Action, Scope};
-use crate::config::{Behaviour, OnConflict};
+use crate::config::{Behaviour, OnConflict, SidebarConfig};
 use crate::config_edit::{BehaviourValue, Edit};
 use crate::keymap::{Combo, KeyPress, Keymap, Resolved};
 use crate::prefs::{Prefs, SidebarPref, ViewMode};
@@ -92,6 +92,34 @@ impl BehaviourSetting {
     }
 }
 
+/// One of `[sidebar]`'s switches the sheet offers: whether Recent and
+/// Starred have a row at the top of Places.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarSetting {
+    ShowRecent(bool),
+    ShowStarred(bool),
+}
+
+impl SidebarSetting {
+    /// The `files-config.toml` edit that makes this so — one line of
+    /// `[sidebar]`, written the way [`BehaviourSetting::edit`] writes one
+    /// of `[behaviour]`.
+    pub fn edit(self) -> Edit {
+        match self {
+            SidebarSetting::ShowRecent(on) => Edit::Sidebar("show-recent", BehaviourValue::Switch(on)),
+            SidebarSetting::ShowStarred(on) => Edit::Sidebar("show-starred", BehaviourValue::Switch(on)),
+        }
+    }
+
+    /// Whether `sidebar` already says this.
+    pub fn holds_in(self, sidebar: &SidebarConfig) -> bool {
+        match self {
+            SidebarSetting::ShowRecent(on) => sidebar.show_recent == on,
+            SidebarSetting::ShowStarred(on) => sidebar.show_starred == on,
+        }
+    }
+}
+
 /// The word `[behaviour] on-conflict` uses for a policy.
 pub fn conflict_id(policy: OnConflict) -> &'static str {
     match policy {
@@ -131,7 +159,7 @@ pub fn group(action: Action) -> &'static str {
         ToggleHidden | TogglePreview | ZoomIn | ZoomOut | ZoomReset | QuickLook | Properties | Preferences | Transfers | TransferQueue => {
             "The window"
         }
-        Pin | Unpin | PinUp | PinDown | Mount | Unmount | Eject | Disconnect | ConnectToServer => "Sidebar",
+        Pin | Unpin | PinUp | PinDown | ToggleStar | Mount | Unmount | Eject | Disconnect | ConnectToServer => "Sidebar",
         NewTab | CloseTab | NextTab | PreviousTab | Tab(_) => "Tabs",
     }
 }
@@ -361,6 +389,37 @@ mod tests {
         Setting::View(ViewMode::Grid).apply(&mut prefs);
         assert!(prefs.show_hidden && !prefs.directories_first);
         assert_eq!(prefs.view_mode, ViewMode::Grid);
+    }
+
+    /// Each sidebar switch writes exactly its own line of `[sidebar]`, and
+    /// leaves every other line — the person's comment included — as it
+    /// was.
+    #[test]
+    fn each_sidebar_switch_writes_exactly_its_line() {
+        let mine = "# my sidebar\n[sidebar]\nshow-trash = false # keep it tidy\n";
+        for (setting, line) in [
+            (SidebarSetting::ShowRecent(false), "show-recent = false"),
+            (SidebarSetting::ShowStarred(false), "show-starred = false"),
+        ] {
+            let out = crate::config_edit::apply(mine, &[setting.edit()], std::path::Path::new("x")).unwrap();
+            let added: Vec<&str> = out.lines().filter(|l| !mine.lines().any(|m| m == *l)).collect();
+            assert_eq!(added, [line], "{out}");
+            assert!(out.starts_with(mine), "nothing of theirs moved: {out}");
+            let (config, problems) = crate::config::parse(&out, std::path::Path::new("x"));
+            assert!(problems.is_empty(), "{problems:?}");
+            assert!(setting.holds_in(&config.sidebar));
+        }
+    }
+
+    /// A line written by hand is what the sheet shows: the switch reads
+    /// the loaded config, and recognises the value already in force.
+    #[test]
+    fn a_hand_written_sidebar_line_is_what_the_sheet_shows() {
+        let (config, problems) =
+            crate::config::parse("[sidebar]\nshow-starred = false\n", std::path::Path::new("x"));
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(SidebarSetting::ShowStarred(false).holds_in(&config.sidebar));
+        assert!(SidebarSetting::ShowRecent(true).holds_in(&config.sidebar), "the other stays on by default");
     }
 
     #[test]

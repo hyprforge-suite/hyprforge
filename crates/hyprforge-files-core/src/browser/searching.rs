@@ -47,12 +47,26 @@ pub(super) struct SearchState {
     runs: u64,
     /// The name being typed for "Save search".
     naming: Option<Naming>,
+    /// Recent or Starred, while one is on screen — see
+    /// `browser/collections.rs`. Here rather than beside the search
+    /// because it *is* a set of results: the rows come from here, and
+    /// everything that already works on a walk's results works on it.
+    pub(super) collection: Option<super::collections::Listed>,
 }
 
 impl SearchState {
-    /// A walk's results, while one is on screen.
+    /// The rows when they are not the folder's own: a walk's results
+    /// while one is on screen, else a collection's.
     pub(super) fn results(&self) -> Option<&[Entry]> {
-        self.run.as_ref().map(|r| r.results.as_slice())
+        self.run
+            .as_ref()
+            .map(|r| r.results.as_slice())
+            .or_else(|| self.collection.as_ref().map(|c| c.results.as_slice()))
+    }
+
+    /// Whether a walk's results are on screen.
+    pub(super) fn walking(&self) -> bool {
+        self.run.is_some()
     }
 }
 
@@ -140,9 +154,10 @@ impl Browser {
         self.search.results().unwrap_or(&self.entries)
     }
 
-    /// Whether the rows are a walk's results rather than this folder.
+    /// Whether the rows are a walk's results, or Recent or Starred,
+    /// rather than this folder.
     pub(super) fn in_results(&self) -> bool {
-        self.search.run.is_some()
+        self.search.run.is_some() || self.search.collection.is_some()
     }
 
     /// The saved searches, as the window's list changes — the same
@@ -216,10 +231,11 @@ impl Browser {
     /// F5. Results on screen may now name files that moved, so a walk on
     /// screen is run again rather than left showing them.
     pub(super) fn search_after_refresh(&mut self) -> Outcome {
-        if self.in_results() {
+        if self.search.run.is_some() {
             self.search_again()
         } else {
-            Outcome::None
+            // A collection's rows may name a file that just moved too.
+            self.collection_after_refresh()
         }
     }
 
@@ -318,6 +334,9 @@ impl Browser {
             }
             SearchMessage::Open(index) => {
                 let Some(saved) = self.prefs.searches.get(index).cloned() else { return Outcome::None };
+                // A saved search is a question about a folder, not about
+                // Recent or Starred: whichever was open is left.
+                self.search.collection = None;
                 let arrive = if saved.folder == self.current_dir {
                     let stop = self.end_search();
                     many(vec![stop])
@@ -397,8 +416,10 @@ impl Browser {
         let Some(path) = self.selection.focused().map(Path::to_path_buf) else { return Outcome::None };
         let Some(folder) = path.parent().map(Path::to_path_buf) else { return Outcome::None };
         if folder == self.current_dir {
-            // Already here: ending the search puts this folder's own
-            // listing back, which is already loaded.
+            // Already here: ending the search — and leaving Recent or
+            // Starred — puts this folder's own listing back, which is
+            // already loaded.
+            self.search.collection = None;
             let stop = self.end_search();
             self.refresh_view();
             if let Some(index) = self.rows().iter().position(|e| e.path == path) {

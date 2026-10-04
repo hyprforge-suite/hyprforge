@@ -2032,6 +2032,7 @@ dependencies = [
  "hyprforge-volumes",
  "iced",
  "memchr",
+ "quick-xml",
  "regex",
  "serde",
  "tempfile",

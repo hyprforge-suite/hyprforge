@@ -357,6 +357,12 @@ pub struct Prefs {
     /// empty `Vec` is the first-run value; `#[serde(default)]` on the
     /// struct is what lets a file written before this existed parse.
     pub searches: Vec<crate::search::SmartFolder>,
+    /// Files and folders the person starred, in the order they were
+    /// starred — see [`crate::starred`]. The window's one list, like
+    /// `pinned`, and kept on the path: a star follows a rename or a move
+    /// made inside Files, and a star whose file has gone some other way
+    /// stays here and is shown as missing.
+    pub starred: Vec<PathBuf>,
     /// How big the listing is drawn in each view — see [`Zoom`].
     pub zoom: Zoom,
     // Per-directory overrides (vision pillar 6: "auto-remember beats
@@ -390,6 +396,7 @@ impl Default for Prefs {
             window_height: 600,
             pinned: Vec::new(),
             searches: Vec::new(),
+            starred: Vec::new(),
             zoom: Zoom::default(),
         }
     }
@@ -713,6 +720,19 @@ mod tests {
         };
         save_to(&path, &prefs).unwrap();
         assert_eq!(load_from(&path).unwrap().searches, prefs.searches);
+    }
+
+    /// A file from before stars existed parses with none, and stars
+    /// written survive the round trip.
+    #[test]
+    fn stars_round_trip_and_an_older_file_has_none() {
+        let older: Prefs = toml::from_str("show_hidden = true\npinned = [\"/p\"]\n").unwrap();
+        assert!(older.starred.is_empty());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("files.toml");
+        let prefs = Prefs { starred: vec![PathBuf::from("/home/alex/notes.txt")], ..Prefs::default() };
+        save_to(&path, &prefs).unwrap();
+        assert_eq!(load_from(&path).unwrap().starred, prefs.starred);
     }
 
     // --- `update`: the read-modify-write every writer shares -------------

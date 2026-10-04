@@ -54,6 +54,9 @@ pub enum Edit {
     Keys(Action, Option<Vec<Combo>>),
     /// `[behaviour] <key> = <value>`.
     Behaviour(&'static str, BehaviourValue),
+    /// `[sidebar] <key> = <value>` — a value of the same kinds
+    /// `[behaviour]` takes.
+    Sidebar(&'static str, BehaviourValue),
 }
 
 /// A `[behaviour]` value, as the sheet sets it.
@@ -61,6 +64,16 @@ pub enum Edit {
 pub enum BehaviourValue {
     Switch(bool),
     Word(&'static str),
+}
+
+impl BehaviourValue {
+    /// The value as a TOML value.
+    fn to_toml(&self) -> Value {
+        match self {
+            BehaviourValue::Switch(on) => Value::from(*on),
+            BehaviourValue::Word(word) => Value::from(*word),
+        }
+    }
 }
 
 /// `text` with `edits` applied, or why not. `path` is only for messages.
@@ -87,6 +100,10 @@ pub fn apply(text: &str, edits: &[Edit], path: &Path) -> Result<String, EditErro
                     BehaviourValue::Word(word) => Value::from(*word),
                 };
                 set(table, key, value);
+            }
+            Edit::Sidebar(key, value) => {
+                let table = section(&mut doc, "sidebar", &shown)?;
+                set(table, key, value.to_toml());
             }
         }
     }

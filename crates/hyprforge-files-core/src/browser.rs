@@ -26,6 +26,7 @@
 mod quicklook;
 mod drives;
 mod searching;
+mod collections;
 
 pub use quicklook::quick_look_edge;
 
@@ -702,6 +703,16 @@ pub enum Outcome {
     /// [`crate::devices`]. The host carries it out and tells every tab
     /// what changed through [`Message::DevicesChanged`].
     Devices(crate::devices::Ask),
+    /// Read Recent — [`crate::recent::read_entries`], off the UI thread —
+    /// and hand it back as [`Message::RecentRead`].
+    ReadRecent,
+    /// Look up each of these starred paths —
+    /// [`crate::starred::read_starred`] — and hand back what was found
+    /// and what was not as [`Message::StarredRead`].
+    ReadStarred(Vec<PathBuf>),
+    /// Change the starred list. The window owns it, as it owns the
+    /// pinned list — see [`crate::starred`].
+    Stars(crate::starred::StarChange),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -844,6 +855,16 @@ pub enum Message {
     DevicesChanged(Arc<crate::devices::Devices>),
     /// A click on a drive's row, or on its eject mark.
     Device(crate::devices::DeviceMessage),
+    /// A click on Recent's or Starred's sidebar row — see
+    /// `browser/collections.rs`.
+    ShowCollection(crate::starred::Collection),
+    /// The answer to [`Outcome::ReadRecent`]: what to show, or why the
+    /// file could not be read.
+    RecentRead(Result<Vec<Entry>, String>),
+    /// The answer to [`Outcome::ReadStarred`].
+    StarredRead { entries: Vec<Entry>, missing: Vec<PathBuf> },
+    /// The Starred view's "Unstar them", for stars whose file is gone.
+    UnstarMissing,
 }
 
 /// Exactly what `render` needs, and nothing `Browser` has that it
@@ -881,6 +902,8 @@ struct ViewModel<'a> {
     hidden_key: Option<String>,
     /// `[sidebar] show-trash`.
     show_trash: bool,
+    /// `[sidebar] show-recent` and `show-starred`.
+    show_collections: (bool, bool),
     /// The rows to draw, in order — borrowed out of the one owned
     /// listing rather than a second copy of it.
     rows: Vec<&'a Entry>,
@@ -914,6 +937,11 @@ struct ViewModel<'a> {
     /// The Properties inspector, when it is open — in the preview pane's
     /// place, so at most one of the two is ever `Some`.
     inspector: Option<InspectorModel<'a>>,
+    /// Recent or Starred, while one is on screen — see
+    /// `browser/collections.rs`.
+    collection: Option<collections::CollectionModel<'a>>,
+    /// What is starred, for the mark on a starred row.
+    stars: &'a HashSet<PathBuf>,
 }
 
 /// The inspector, its subject's icon, and how wide to draw it.
@@ -1063,6 +1091,11 @@ pub struct Browser {
     inspections: u64,
     /// The Quick Look card — see `browser/quicklook.rs`.
     quick_look: quicklook::QuickLook,
+    /// `prefs.starred` as a set, for the mark on every starred row: the
+    /// list is asked about once per row per frame, and a folder of
+    /// thousands against a few hundred stars is not a scan to make each
+    /// time. Kept beside the list by `set_stars` and nothing else.
+    stars: HashSet<PathBuf>,
 }
 
 impl Browser {
@@ -1072,7 +1105,9 @@ impl Browser {
     /// the host must fulfil to show anything at all — with column view's
     /// [`Outcome::ReadColumns`] beside it when that is the view.
     pub fn new(mode: Mode, prefs: Prefs, start_dir: PathBuf, sidebar: Vec<SidebarItem>) -> (Browser, Outcome) {
+        let stars = prefs.starred.iter().cloned().collect();
         let mut browser = Browser {
+            stars,
             column_picker_open: false,
             mode,
             current_dir: start_dir.clone(),
@@ -1327,6 +1362,14 @@ impl Browser {
                 stop
             }
             Message::Search(message) => self.update_search(message),
+            Message::ShowCollection(kind) => self.show_collection(kind),
+            Message::RecentRead(answer) => {
+                self.collection_read(crate::starred::Collection::Recent, answer.map(|entries| (entries, Vec::new())))
+            }
+            Message::StarredRead { entries, missing } => {
+                self.collection_read(crate::starred::Collection::Starred, Ok((entries, missing)))
+            }
+            Message::UnstarMissing => self.unstar_missing(),
             Message::SortBy(column) => {
                 if self.prefs.sort_column() == column {
                     self.prefs.set_sort_direction(match self.prefs.sort_direction() {
@@ -1714,6 +1757,7 @@ impl Browser {
                     })
             },
             can_paste: self.can_paste,
+            starred: self.selection_starred(),
             pin: {
                 let target = self.pin_target(target);
                 action::PinTarget {
@@ -2203,6 +2247,7 @@ impl Browser {
             Action::Mount | Action::Unmount | Action::Eject | Action::Disconnect => {
                 self.device_action(action, target.as_deref())
             }
+            Action::ToggleStar => self.toggle_star(),
             Action::Pin | Action::Unpin | Action::PinUp | Action::PinDown => {
                 let Some(target) = self.pin_target(target.as_deref()) else {
                     return Outcome::None;
@@ -2722,6 +2767,13 @@ impl Browser {
         // `modified:today` cannot draw its line between two rows.
         let search = self.query().matcher(chrono::Local::now());
         self.view = shown_order(self.listed(), &search, &self.prefs, self.entry_filter.as_ref());
+        // Recent keeps the order things were used in. Its whole question
+        // is "what did I have open lately", and sorting it by name would
+        // answer a different one; the indices in their own order are the
+        // newest-first order the host handed over.
+        if self.collection() == Some(crate::starred::Collection::Recent) && !self.search.walking() {
+            self.view.sort_unstable();
+        }
         // Column view's panes take the same filters and the same order,
         // so a folder sorts the same way in its pane as when it was the
         // one in view. Not the search, which is about the folder in view.
@@ -2777,6 +2829,9 @@ impl Browser {
         self.select_first = false;
         self.current_dir = path.clone();
         self.selection.clear();
+        // Recent or Starred, if one was open: going anywhere is leaving
+        // it, as it is leaving a search's results.
+        self.search.collection = None;
         let stop = self.end_search();
         self.view.clear();
         self.load_state = LoadState::Loading;
@@ -2924,6 +2979,9 @@ impl Browser {
             dotfiles: self.dotfiles,
             hidden_key: self.hidden_key.clone(),
             show_trash: self.config.sidebar.show_trash,
+            show_collections: (self.config.sidebar.show_recent, self.config.sidebar.show_starred),
+            collection: self.collection_model(),
+            stars: &self.stars,
             rows: self.rows(),
             columns: self
                 .ancestors
@@ -3239,6 +3297,8 @@ fn render<'a>(vm: ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // there all the time for a feature used now and then would be a strip
     // of controls that mostly do nothing.
     if let Some(rail) = searching::search_rail(&vm, scale) {
+        page = page.push(rail).push(plane_edge());
+    } else if let Some(rail) = collections::rail(&vm, scale) {
         page = page.push(rail).push(plane_edge());
     }
     page.push(middle)
@@ -3849,13 +3909,33 @@ struct SidebarRow {
     missing: bool,
     /// Its icon key — the folder's own, or an ordinary folder's.
     icon: String,
-    /// A saved search rather than a place: which one. A click runs it
-    /// instead of going to `path`, and it is no drop target and has no
-    /// folder's menu — it is a question, not somewhere files live.
-    search: Option<usize>,
+    /// A saved search, Recent or Starred rather than a place: which. A
+    /// click asks it instead of going to `path`, and it is no drop target
+    /// and has no folder's menu — it is a question, not somewhere files
+    /// live.
+    search: Option<RowQuestion>,
     /// A drive, a share, "Connect to Server…" or a note in their place
     /// — see `browser/drives.rs`. `None` for every other section's rows.
     device: Option<drives::DeviceRow>,
+}
+
+/// What a sidebar row that is not a place asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowQuestion {
+    /// The saved search at this index.
+    Saved(usize),
+    /// Recent or Starred.
+    Collection(crate::starred::Collection),
+}
+
+impl RowQuestion {
+    #[cfg(test)]
+    fn collection(self) -> Option<crate::starred::Collection> {
+        match self {
+            RowQuestion::Collection(kind) => Some(kind),
+            RowQuestion::Saved(_) => None,
+        }
+    }
 }
 
 impl SidebarRow {
@@ -3881,12 +3961,37 @@ impl SidebarRow {
 /// is applied uniformly rather than special-cased to any of them — Tags
 /// will land here the same way once it exists.
 fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
+    // Recent and Starred head Places: they are where a person looks for
+    // a file before they remember which folder it is in, which is the
+    // question the rest of Places answers. Each can be switched off in
+    // `[sidebar]`. Keyed as a question, like a saved search, and not by
+    // a made-up path, which a drop or a folder menu would take at its
+    // word.
+    let collections = [
+        (crate::starred::Collection::Recent, vm.show_collections.0),
+        (crate::starred::Collection::Starred, vm.show_collections.1),
+    ];
     let places = SidebarSection {
         title: "Places",
-        rows: vm
-            .sidebar
-            .iter()
-            .map(|item| SidebarRow {
+        rows: collections
+            .into_iter()
+            .filter(|(_, shown)| *shown)
+            .map(|(kind, _)| SidebarRow {
+                label: kind.label().to_string(),
+                path: vm.current_dir.to_path_buf(),
+                // How many stars, like a pin's count — Recent's would
+                // only ever say the cap.
+                meta: (kind == crate::starred::Collection::Starred && !vm.prefs.starred.is_empty())
+                    .then(|| vm.prefs.starred.len().to_string()),
+                // Info, as a saved search's: a view onto files that live
+                // elsewhere, not one more folder.
+                tint: sidebar::Tint::Info,
+                missing: false,
+                icon: collections::icon(kind),
+                search: Some(RowQuestion::Collection(kind)),
+                device: None,
+            })
+            .chain(vm.sidebar.iter().map(|item| SidebarRow {
                 label: item.label.clone(),
                 path: item.path.clone(),
                 meta: None,
@@ -3895,7 +4000,7 @@ fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
                 icon: row_icon(vm, &item.path),
                 search: None,
                 device: None,
-            })
+            }))
             .collect(),
     };
     let pinned = SidebarSection {
@@ -3963,7 +4068,7 @@ fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
                 tint: sidebar::Tint::Info,
                 missing: false,
                 icon: searching::saved_search_icon(),
-                search: Some(index),
+                search: Some(RowQuestion::Saved(index)),
                 device: None,
             })
             .collect(),
@@ -4124,14 +4229,16 @@ fn sidebar_press(row_item: &SidebarRow, vm: &ViewModel<'_>) -> (Option<Message>,
     if let Some(drive) = drives::press(row_item, vm) {
         return drive;
     }
+    let in_collection = vm.collection.as_ref().map(|c| c.kind());
     match row_item.search {
-        Some(index) => (
+        Some(RowQuestion::Saved(index)) => (
             Some(Message::Search(crate::search::SearchMessage::Open(index))),
-            vm.search.current == Some(index),
+            vm.search.current == Some(index) && in_collection.is_none(),
         ),
+        Some(RowQuestion::Collection(kind)) => (Some(Message::ShowCollection(kind)), in_collection == Some(kind)),
         None => (
             Some(Message::Navigate(row_item.path.clone())),
-            row_item.path == vm.current_dir && vm.search.current.is_none(),
+            row_item.path == vm.current_dir && vm.search.current.is_none() && in_collection.is_none(),
         ),
     }
 }
@@ -4471,7 +4578,11 @@ fn body_content<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
         .padding(spacing::LG)
         .into(),
         LoadState::Loaded if vm.rows.is_empty() => {
-            let message = if vm.search.active { searching::empty_message(vm) } else { "This folder is empty." };
+            let message = match collections::empty_message(vm) {
+                Some(message) => message,
+                None if vm.search.active => searching::empty_message(vm),
+                None => "This folder is empty.",
+            };
             container(meta_text(message, BASE_TEXT_SIZE, scale))
                 .center_x(Length::Fill)
                 .padding(spacing::LG)
@@ -4508,6 +4619,7 @@ fn column_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message>
         now: chrono::Local::now(),
         icons: vm.icons,
         thumbnails: vm.thumbnails,
+        stars: vm.stars,
     };
     let mut panes = row![].height(Length::Fill);
     for pane in &vm.columns[skip..] {
@@ -4532,6 +4644,9 @@ fn column_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message>
                 .height(Length::Fill)
                 .id(vm.list_scrollable_id.clone())
                 .into()
+        }
+        LoadState::Loaded if collections::empty_message(vm).is_some() => {
+            pane_message(collections::empty_message(vm).unwrap_or_default(), scale)
         }
         LoadState::Loaded if !vm.search.active => pane_message("This folder is empty.", scale),
         LoadState::Loaded => pane_message(searching::empty_message(vm), scale),
@@ -4687,6 +4802,8 @@ struct RowContext<'a> {
     now: chrono::DateTime<chrono::Local>,
     icons: IconSet<'a>,
     thumbnails: &'a HashMap<PathBuf, Picture>,
+    /// What is starred, for the star on a row's icon.
+    stars: &'a HashSet<PathBuf>,
 }
 
 /// The icons the host has found, and which folders have one of their
@@ -4750,7 +4867,7 @@ fn entry_row<'a>(
     selected: bool,
     ctx: &RowContext<'a>,
 ) -> Element<'a, Message> {
-    let RowContext { columns, renaming, home, results_root, scale, now, icons, thumbnails } = ctx;
+    let RowContext { columns, renaming, home, results_root, scale, now, icons, thumbnails, stars } = ctx;
     let (renaming, scale, now) = (*renaming, *scale, *now);
     // The icon, then the name, then whichever optional columns are
     // switched on — in `Column::ALL` order, which is the same order
@@ -4769,10 +4886,15 @@ fn entry_row<'a>(
     let selected = selected && editing.is_none();
     let mut row_content = row![
         // The picture itself when the host has one, in the icon's square.
-        match thumbnails.get(&entry.path) {
-            Some(picture) => picture.view(scale.apply(20.0)),
-            None => entry_icon(entry.kind, icons.for_entry(entry), 20.0, scale),
-        },
+        collections::starred_icon(
+            match thumbnails.get(&entry.path) {
+                Some(picture) => picture.view(scale.apply(20.0)),
+                None => entry_icon(entry.kind, icons.for_entry(entry), 20.0, scale),
+            },
+            stars.contains(&entry.path),
+            scale.apply(20.0),
+            selected,
+        ),
         // `&entry.name`, not a clone: `scaled_text` borrows for `'a`,
         // and this row is rebuilt for every visible entry on every
         // redraw — a hover anywhere in the window allocated one `String`
@@ -5190,6 +5312,7 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         now: chrono::Local::now(),
         icons: vm.icons,
         thumbnails: vm.thumbnails,
+        stars: vm.stars,
     };
     for (index, entry) in vm.rows.iter().copied().enumerate() {
         // One rule, where the directories end and the files begin.
@@ -5276,6 +5399,7 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         .map(|(index, entry)| (index, entry, vm.selection.is_selected(&entry.path)))
         .collect();
     let thumbnails = vm.thumbnails;
+    let stars = vm.stars;
     let icons = vm.icons;
     // Among a search's results, the list's Folder column becomes a line
     // under each cell's name.
@@ -5311,6 +5435,7 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
                 .map(|root| searching::elide_folder(&searching::found_in(entry, root), density::GRID_FOLDER_CHARS));
             let cell =
                 grid_cell(index, entry, selected, renaming, thumbnails.get(&entry.path), icons.for_entry(entry), folder, scale);
+            let cell = collections::starred_cell(cell, stars.contains(&entry.path), selected, scale);
             let cell = if entry.is_dir && !in_trash {
                 drop_zone(cell, &entry.path, drop_hover == Some(entry.path.as_path()))
             } else {
@@ -6961,6 +7086,12 @@ mod tests {
             dotfiles: 0,
             hidden_key: Some("Ctrl+H".to_string()),
             show_trash: true,
+            // Off, so a test about Places is about the places it built;
+            // the two rows have tests of their own in
+            // `browser/collections.rs`.
+            show_collections: (false, false),
+            collection: None,
+            stars: Box::leak(Box::default()),
             rows: Vec::new(),
             columns: Vec::new(),
             selection,
