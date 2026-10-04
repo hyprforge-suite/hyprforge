@@ -260,6 +260,44 @@ impl WorkspaceRule {
     }
 }
 
+/// A rule for a layer-shell surface — a bar, a launcher, a notification
+/// popup — via Hyprland's `hl.layer_rule`.
+///
+/// Deliberately minimal: a namespace and blur, because that is the one
+/// thing anything in the suite needs (blur behind notif's toasts and its
+/// centre panel) and the one shape checked against a live Hyprland 0.56.
+/// `hl.layer_rule({ name = …, match = { namespace = "^notif$" }, blur =
+/// true })` is accepted there, and a field it does not know is *rejected*
+/// — which aborts the whole generated file, window rules included. So a
+/// field is added here only after it has been loaded into a real
+/// compositor, never from memory of hyprlang's `layerrule = …` names,
+/// which are not the Lua ones.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LayerRule {
+    /// Stable identity, the Lua rule's `name`, as with [`Rule::name`]:
+    /// how Setup finds the rule it added again to take it back out.
+    pub name: String,
+    /// Off means not emitted. Whether `hl.layer_rule` takes an `enabled`
+    /// field the way `hl.window_rule` does has not been checked, and an
+    /// unknown field fails the whole file, so "off" is spelled "absent".
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// The layer surface's namespace, as a regex — `^notif$`, anchored,
+    /// because an unanchored `notif` would also match `notif-center` and
+    /// anything else that happens to contain it.
+    pub namespace: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blur: Option<bool>,
+}
+
+impl LayerRule {
+    /// A rule that matches nothing or does nothing is skipped rather than
+    /// emitted — the same treatment an empty window-rule matcher gets.
+    pub fn is_empty(&self) -> bool {
+        self.namespace.trim().is_empty() || self.blur.is_none()
+    }
+}
+
 /// One ordered rule. Order is semantically meaningful in Hyprland (later
 /// rules override earlier ones for the same window) and is preserved by
 /// TOML array order and Lua emission order alike — never resorted.

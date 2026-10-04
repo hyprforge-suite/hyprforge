@@ -42,6 +42,7 @@ members = [
     "crates/hyprforge-files-core",
     "crates/hyprforge-volumes",
     "crates/hyprforge-files",
+    "crates/hyprforge-setup",
 ]
 # `crates/hyprforge-notif/` is a nested cargo workspace, deliberately kept
 # out of this one.
@@ -132,6 +133,11 @@ hyprforge-icons = { path = "crates/hyprforge-icons", version = "0.1.0" }
 # thumbnails files. A leaf; pixels in, pixels out.
 hyprforge-thumbnails = { path = "crates/hyprforge-thumbnails", version = "0.1.0" }
 hyprforge-files = { path = "crates/hyprforge-files", version = "0.1.0" }
+# The steps that finish an install — services, keybinds, idle lock,
+# default apps, the open/save dialog — checked, applied and undone. Sits
+# above shortcuts, windowrules, ecosystem, session and mime, below the
+# Settings app that renders it.
+hyprforge-setup = { path = "crates/hyprforge-setup", version = "0.1.0" }
 
 # The file manager's content search: finding text in a stream without
 # lowercasing a copy of it. Already in the lockfile through several
@@ -315,6 +321,7 @@ hyprforge-power = { path = "crates/hyprforge-power" }
 hyprforge-process = { path = "crates/hyprforge-process" }
 hyprforge-secret = { path = "crates/hyprforge-secret" }
 hyprforge-session = { path = "crates/hyprforge-session" }
+hyprforge-setup = { path = "crates/hyprforge-setup" }
 hyprforge-shortcuts = { path = "crates/hyprforge-shortcuts" }
 hyprforge-system = { path = "crates/hyprforge-system" }
 hyprforge-thumbnails = { path = "crates/hyprforge-thumbnails" }

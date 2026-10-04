@@ -1,0 +1,47 @@
+[package]
+name = "hyprforge-setup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "The steps that finish a Hyprforge install — services, keybinds, idle lock, notification blur, default apps, the open/save dialog — each checked, applied and undone; Hyprforge-internal, published so the suite's apps build from crates.io"
+
+[features]
+# Exposes `mock::MockSystem` outside `#[cfg(test)]`, so the Settings
+# app's own tests (its `--setup` command and the Set up page) can drive
+# every item without systemctl, hyprctl or a session bus. Same convention
+# as `hyprforge-network`'s `mock` feature.
+mock = []
+
+[dependencies]
+# Every item reuses the module that already owns its file, rather than
+# writing a second copy of the format: shortcuts.toml through
+# hyprforge-shortcuts, window-rules.toml through hyprforge-windowrules,
+# idle.toml through hyprforge-ecosystem, session.toml through
+# hyprforge-session, mimeapps.list through hyprforge-mime. Input, system
+# and appearance are here only for their require lines and the empty file
+# each one's line points at.
+hyprforge-core.workspace = true
+hyprforge-paths.workspace = true
+hyprforge-process.workspace = true
+hyprforge-shortcuts.workspace = true
+hyprforge-windowrules.workspace = true
+hyprforge-ecosystem.workspace = true
+hyprforge-session.workspace = true
+hyprforge-input.workspace = true
+hyprforge-system.workspace = true
+hyprforge-appearance.workspace = true
+hyprforge-mime.workspace = true
+serde.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+# docs.rs builds with every feature on, so the mock is documented rather
+# than hidden behind a flag nobody reading the docs knows to enable.
+[package.metadata.docs.rs]
+all-features = true
