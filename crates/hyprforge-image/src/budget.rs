@@ -25,10 +25,10 @@
 //!
 //! - **Retained** memory is capped. That is the allocation that lives for
 //!   as long as the picture is on screen, and the one a cache multiplies.
-//! - **Transient** memory is not, and cannot be here: `image` 0.25
-//!   exposes no DCT-scaled decode, so a JPEG is decoded whole and then
-//!   scaled down. The peak is a property of the source, not of this
-//!   budget.
+//! - **Transient** memory is not, and cannot be here: the decode's peak
+//!   is a property of the source, not of this budget. The one exception
+//!   is a JPEG wanted at under half its size, which `decode` hands to a
+//!   decoder that scales while it decodes — see `jpeg.rs`.
 //!
 //! # The measured numbers
 //!
@@ -55,8 +55,13 @@
 //!
 //! What is left is a 214MB peak on a machine with any amount of memory,
 //! and the lock screen's lesson is that a peak is not free just because
-//! it is brief. Bringing it lower needs a decoder that can scale while
-//! decoding, which is a change of dependency rather than of arithmetic.
+//! it is brief. Bringing it lower needed a decoder that can scale while
+//! decoding — a change of dependency rather than of arithmetic — and for
+//! a JPEG wanted at under half its size that is now what happens: a
+//! 256-pixel thumbnail of the same kind of photograph peaks at 9MB
+//! (`jpeg.rs` has the table). This table's own case is not one of
+//! them: a 2560x1600 viewport with `ZOOM_HEADROOM` wants a 5120-pixel
+//! edge, more than half of 8001, so it still pays the 214MB.
 
 use crate::measure::SourcePixels;
 

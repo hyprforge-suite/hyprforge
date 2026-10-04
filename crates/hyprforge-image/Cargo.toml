@@ -29,6 +29,11 @@ image.workspace = true
 # Already in the tree through iced_graphics, so this is a line, not a
 # download.
 exif.workspace = true
+# DCT-scaled JPEG decoding, which `image`'s own JPEG decoder lacks — see
+# `src/jpeg.rs` for what it saves. Without `rayon`: it falls back to a
+# plain thread per colour channel, and a library has no business
+# starting a global thread pool for its caller.
+jpeg-decoder.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

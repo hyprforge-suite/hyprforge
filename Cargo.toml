@@ -215,6 +215,7 @@ iced_tiny_skia = { version = "0.14.1", default-features = false }
 #
 # HEIC is not on the list because `image` cannot do it under any feature.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff", "ico"] }
+jpeg-decoder = { version = "0.3", default-features = false }
 # The EXIF reader iced_graphics already pulls in for its own orientation
 # handling, named here so `hyprforge-image::camera` reads the same crate
 # at the same version rather than a second copy.

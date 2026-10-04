@@ -41,15 +41,20 @@ the only place a cap lives. Then `decode::decode_to_fit`.
 
 What is *retained* is capped by the viewport: 56MB for a
 36-megapixel photograph in a 2560x1600 window, against 137MB
-uncapped. What is *transient* cannot be capped here, because `image`
-0.25 has no DCT-scaled decode — a JPEG is decoded whole and then
-scaled down, and the peak belongs to the source.
+uncapped. What is *transient* is the decode's own peak, and for most
+formats it belongs to the source: `image` decodes a picture whole and
+this crate then scales it down.
 
 That peak was measured rather than assumed, and measuring it changed
-the code: it began at 509MB and is 214MB, because the obvious
-downscaler turned out to cost more than the decode it followed. The
-table and the reasoning are in `budget`, the line itself in
-`decode`.
+the code twice. It began at 509MB and became 214MB, because the
+obvious downscaler turned out to cost more than the decode it
+followed — the table and the reasoning are in `budget`, the line
+itself in `decode`. Then a JPEG wanted at under half its size
+stopped being decoded whole at all: `image` 0.25's JPEG decoder has no
+DCT scaling and `jpeg-decoder` does, so a grid thumbnail of a phone
+photograph peaks at 9MB rather than 116MB. That table is in
+`jpeg.rs`. A window big enough to want more than half the picture
+still pays the whole decode.
 
 It also corrected something this doc used to claim: `image`'s own
 `Limits` does *not* bound that peak — the measurement is identical

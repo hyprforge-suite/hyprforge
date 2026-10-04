@@ -7,7 +7,9 @@
 //! 2. [`crate::budget`] decides whether this may be decoded at all, and
 //!    at what size.
 //! 3. The decoder runs under `image`'s own `Limits`, so a file whose
-//!    header lied is refused while allocating rather than after.
+//!    header lied is refused while allocating rather than after. A JPEG
+//!    wanted at under half its size is decoded at a fraction of it
+//!    instead (`jpeg.rs`), so the full-size picture never exists.
 //! 4. The EXIF orientation is applied — **ours to apply**, because the
 //!    renderer only does it for handle kinds a viewer cannot use. See
 //!    [`crate::orientation`].
@@ -61,14 +63,17 @@ pub fn decode_to_fit(path: &Path, budget: &Budget) -> Result<Decoded, ImageError
         });
     }
 
-    let undecodable = |source| ImageError::Undecodable { path: path.to_path_buf(), source };
-
-    let file = std::fs::File::open(path)
-        .map_err(|source| ImageError::Unreadable { path: path.to_path_buf(), source })?;
-    let mut reader = image::ImageReader::new(std::io::BufReader::new(file));
-    reader.set_format(measured.format);
-    reader.limits(budget.limits());
-    let mut decoded = reader.decode().map_err(undecodable)?;
+    // A JPEG wanted at under half its size is decoded at that size
+    // directly — see `crate::jpeg` for what that saves, measured, and
+    // for every case that falls through to the whole decode below.
+    let scaled = match measured.format {
+        image::ImageFormat::Jpeg => crate::jpeg::decode_scaled(path, measured.source, budget.fit(measured.source)),
+        _ => None,
+    };
+    let mut decoded = match scaled {
+        Some(decoded) => decoded,
+        None => decode_whole(path, &measured, budget)?,
+    };
 
     // Orientation before fitting, not after: a quarter turn swaps the
     // axes, so fitting first would fit the wrong rectangle and then turn
@@ -112,6 +117,17 @@ pub fn decode_to_fit(path: &Path, budget: &Budget) -> Result<Decoded, ImageError
         pixels: rgba.into_raw(),
         measured,
     })
+}
+
+/// The picture at its full stored size, by whichever of `image`'s
+/// decoders the format names.
+fn decode_whole(path: &Path, measured: &Measured, budget: &Budget) -> Result<image::DynamicImage, ImageError> {
+    let file = std::fs::File::open(path)
+        .map_err(|source| ImageError::Unreadable { path: path.to_path_buf(), source })?;
+    let mut reader = image::ImageReader::new(std::io::BufReader::new(file));
+    reader.set_format(measured.format);
+    reader.limits(budget.limits());
+    reader.decode().map_err(|source| ImageError::Undecodable { path: path.to_path_buf(), source })
 }
 
 #[cfg(test)]
@@ -193,9 +209,14 @@ mod tests {
     /// blue, so a quarter turn is unmistakable: rotating clockwise sends
     /// the top row to the right-hand column.
     fn jpeg_with_orientation(dir: &Path, name: &str, exif: Option<u16>) -> PathBuf {
-        let mut rgb = image::RgbImage::new(32, 16);
+        sized_jpeg_with_orientation(dir, name, 32, 16, exif)
+    }
+
+    /// The same picture at any size: top half red, bottom half blue.
+    fn sized_jpeg_with_orientation(dir: &Path, name: &str, width: u32, height: u32, exif: Option<u16>) -> PathBuf {
+        let mut rgb = image::RgbImage::new(width, height);
         for (_, y, pixel) in rgb.enumerate_pixels_mut() {
-            *pixel = if y < 8 { image::Rgb([255, 0, 0]) } else { image::Rgb([0, 0, 255]) };
+            *pixel = if y < height / 2 { image::Rgb([255, 0, 0]) } else { image::Rgb([0, 0, 255]) };
         }
         let mut bytes = Vec::new();
         image::DynamicImage::ImageRgb8(rgb)
@@ -296,5 +317,36 @@ mod tests {
         let decoded = decode_to_fit(&path, &Budget::for_edge(1000)).unwrap();
         assert_eq!(decoded.measured.orientation, Orientation::Upright);
         assert_eq!((decoded.size.width, decoded.size.height), decoded.measured.display_size());
+    }
+
+    /// The scaled JPEG path turns a picture the same way the whole decode
+    /// does. It decodes the blocks as stored and the turn comes after, so
+    /// a mistake here would be a thumbnail on its side — and only for
+    /// photographs big enough to take this path, which is every photo a
+    /// phone takes.
+    #[test]
+    fn a_portrait_photo_decoded_small_is_not_shown_sideways_either() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = sized_jpeg_with_orientation(dir.path(), "turned-big.jpg", 640, 320, Some(6));
+        let decoded = decode_to_fit(&path, &Budget::for_edge(80)).unwrap();
+
+        assert_eq!((decoded.size.width, decoded.size.height), (40, 80));
+        assert!(is_reddish(pixel_at(&decoded, 32, 40)), "right column should be red");
+        assert!(is_bluish(pixel_at(&decoded, 6, 40)), "left column should be blue");
+    }
+
+    /// The resource, not just the result: asked for an eighth of a JPEG,
+    /// the decoder hands back an eighth, so the full-size picture was
+    /// never allocated. The result alone cannot show this — the whole
+    /// decode scaled down afterwards gives the same picture at many
+    /// times the cost.
+    #[test]
+    fn a_jpeg_wanted_small_is_decoded_small_rather_than_whole_and_shrunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = sized_jpeg_with_orientation(dir.path(), "big.jpg", 640, 320, None);
+        let measured = crate::measure::measure(&path).unwrap();
+        let scaled =
+            crate::jpeg::decode_scaled(&path, measured.source, DecodePixels { width: 80, height: 40 }).unwrap();
+        assert_eq!((scaled.width(), scaled.height()), (80, 40));
     }
 }
