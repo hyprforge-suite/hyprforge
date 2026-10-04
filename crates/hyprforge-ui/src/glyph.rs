@@ -321,6 +321,8 @@ pub enum Page {
     NightLight,
     ScreenSharing,
     Tray,
+    /// Finishing an install: the steps still to do, ticked off.
+    Setup,
 }
 
 /// A drawn page mark, sized to `side` and stroked `color`.
@@ -506,6 +508,15 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for PageGlyph {
                 line(b, 0.04, 0.38, 0.96, 0.38);
                 line(b, 0.62, 0.27, 0.64, 0.27);
                 line(b, 0.76, 0.27, 0.78, 0.27);
+            }
+            // A checklist: one line ticked, one still to do.
+            Page::Setup => {
+                b.move_to(at(0.04, 0.3));
+                b.line_to(at(0.15, 0.41));
+                b.line_to(at(0.32, 0.18));
+                line(b, 0.46, 0.3, 0.96, 0.3);
+                rect(b, 0.06, 0.6, 0.24, 0.24, 0.05);
+                line(b, 0.46, 0.72, 0.96, 0.72);
             }
         });
 
