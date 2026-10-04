@@ -144,6 +144,18 @@ fi
 # Counts the tests reported across every binary in a `cargo test` run.
 count_tests() { grep 'test result' | awk -F'[.;] ' '{s+=$2} END {print s+0}'; }
 
+# Names each failed test and then says *why*: libtest prints a failure's
+# panic message and captured output under `---- <name> stdout ----`, after
+# the run. This step used to print only the names, so a test that failed
+# once on a CI runner and passed on the re-run left nothing behind but
+# its name — the one time a flake shows its cause, thrown away.
+show_failures() {
+    local out
+    out=$(cat)
+    grep -E '^test .* \.\.\. FAILED' <<<"$out" | head -20
+    awk '/^---- .* stdout ----$/ {p=1} /^failures:$/ && p {p=0} p' <<<"$out" | head -60
+}
+
 step "Lint"
 if warnings=$(cargo clippy --workspace --all-targets 2>&1 | grep -cE '^(error|warning)'); then :; fi
 if [[ "$warnings" -eq 0 ]]; then
@@ -845,7 +857,7 @@ if output=$(cargo test --workspace 2>&1); then cargo_ok=true; else cargo_ok=fals
 tests=$(count_tests <<<"$output")
 if grep -q "test result: FAILED" <<<"$output"; then
     bad "$(grep -c 'test result: FAILED' <<<"$output") test binary(ies) failed"
-    grep -E '^(test .* FAILED|failures:)' <<<"$output" | head -20
+    show_failures <<<"$output"
 elif ! $cargo_ok; then
     bad "cargo test did not finish (exit status non-zero, no test result to read) — run: cargo test --workspace"
     tail -5 <<<"$output"
@@ -889,7 +901,7 @@ if output=$(cd "$NOTIF" && cargo test 2>&1); then cargo_ok=true; else cargo_ok=f
 tests=$(count_tests <<<"$output")
 if grep -q "test result: FAILED" <<<"$output"; then
     bad "$(grep -c 'test result: FAILED' <<<"$output") notif test binary(ies) failed"
-    grep -E '^(test .* FAILED|failures:)' <<<"$output" | head -20
+    show_failures <<<"$output"
 elif ! $cargo_ok; then
     bad "notif's cargo test did not finish — run: (cd $NOTIF && cargo test)"
     tail -5 <<<"$output"
@@ -934,7 +946,7 @@ else
         )
         if grep -q "test result: FAILED" <<<"$output"; then
             bad "live tests failed — the code disagrees with the running system"
-            grep -E '^test .* FAILED' <<<"$output" | head -20
+            show_failures <<<"$output"
         else
             ok "$(count_tests <<<"$output") live tests passed against $(hyprctl version | head -1)"
         fi
@@ -965,7 +977,7 @@ else
             -- --ignored --test-threads=1 --nocapture 2>&1)
         if grep -q "test result: FAILED" <<<"$output"; then
             bad "parse tests failed — a daemon rejected a file this project generates"
-            grep -E '^test .* FAILED' <<<"$output" | head -20
+            show_failures <<<"$output"
         else
             ok "$(count_tests <<<"$output") parse tests passed"
             # Shown even though nothing failed: a skipped check is not a
@@ -999,7 +1011,7 @@ else
             -- --ignored --test-threads=1 --nocapture 2>&1)
         if grep -q "test result: FAILED" <<<"$output"; then
             bad "archive tool tests failed — something else on this machine disagrees with what this suite writes"
-            grep -E '^test .* FAILED' <<<"$output" | head -20
+            show_failures <<<"$output"
         else
             ok "$(count_tests <<<"$output") archive tool tests passed"
             while IFS= read -r reason; do
@@ -1025,7 +1037,7 @@ else
             -- --ignored --test-threads=1 --nocapture 2>&1)
         if grep -q "test result: FAILED" <<<"$output"; then
             bad "NetworkManager tests failed — the code disagrees with the running service"
-            grep -E '^test .* FAILED' <<<"$output" | head -20
+            show_failures <<<"$output"
         else
             ok "$(count_tests <<<"$output") NetworkManager tests passed"
             while IFS= read -r reason; do
@@ -1052,7 +1064,7 @@ else
             -- --ignored --test-threads=1 --nocapture 2>&1)
         if grep -q "test result: FAILED" <<<"$output"; then
             bad "BlueZ tests failed — the code disagrees with the running service"
-            grep -E '^test .* FAILED' <<<"$output" | head -20
+            show_failures <<<"$output"
         else
             ok "$(count_tests <<<"$output") BlueZ tests passed"
             while IFS= read -r reason; do
@@ -1081,7 +1093,7 @@ else
             -- --ignored --test-threads=1 --nocapture 2>&1)
         if grep -q "test result: FAILED" <<<"$output"; then
             bad "hyprsunset tests failed — the code disagrees with the running daemon"
-            grep -E '^test .* FAILED' <<<"$output" | head -20
+            show_failures <<<"$output"
         else
             ok "$(count_tests <<<"$output") hyprsunset tests passed"
             while IFS= read -r reason; do
@@ -1100,7 +1112,7 @@ else
             -- --ignored --test-threads=1 --nocapture 2>&1)
         if grep -q "test result: FAILED" <<<"$output"; then
             bad "logind tests failed — the code disagrees with the running service"
-            grep -E '^test .* FAILED' <<<"$output" | head -20
+            show_failures <<<"$output"
         else
             ok "$(count_tests <<<"$output") logind tests passed"
             while IFS= read -r reason; do
@@ -1125,7 +1137,7 @@ else
             -- --ignored --test-threads=1 --nocapture 2>&1)
         if grep -q "test result: FAILED" <<<"$output"; then
             bad "trash tests failed — this crate disagrees with the trash already on disk"
-            grep -E '^test .* FAILED' <<<"$output" | head -20
+            show_failures <<<"$output"
         else
             ok "$(count_tests <<<"$output") trash tests passed"
             while IFS= read -r reason; do
@@ -1156,7 +1168,7 @@ else
             -- --ignored --test-threads=1 --nocapture 2>&1)
         if grep -q "test result: FAILED" <<<"$output"; then
             bad "UPower tests failed — the code disagrees with the running service"
-            grep -E '^test .* FAILED' <<<"$output" | head -20
+            show_failures <<<"$output"
         else
             ok "$(count_tests <<<"$output") UPower tests passed"
             while IFS= read -r reason; do
@@ -1184,7 +1196,7 @@ else
             -- --ignored --test-threads=1 --nocapture 2>&1)
         if grep -q "test result: FAILED" <<<"$output"; then
             bad "power-profiles-daemon tests failed — the code disagrees with the running service"
-            grep -E '^test .* FAILED' <<<"$output" | head -20
+            show_failures <<<"$output"
         else
             ok "$(count_tests <<<"$output") power-profiles-daemon tests passed"
             while IFS= read -r reason; do
@@ -1215,7 +1227,7 @@ else
             -- --ignored --test-threads=1 --nocapture 2>&1)
         if grep -q "test result: FAILED" <<<"$output"; then
             bad "fprintd tests failed — the lock disagrees with the running fprintd"
-            grep -E '^test .* FAILED' <<<"$output" | head -20
+            show_failures <<<"$output"
         else
             ok "$(count_tests <<<"$output") fprintd tests passed"
             while IFS= read -r reason; do
@@ -1245,7 +1257,7 @@ else
             -- --ignored --test-threads=1 --nocapture 2>&1)
         if grep -q "test result: FAILED" <<<"$output"; then
             bad "UDisks2 tests failed — the code disagrees with the running UDisks2"
-            grep -E '^test .* FAILED' <<<"$output" | head -20
+            show_failures <<<"$output"
         else
             ok "$(count_tests <<<"$output") UDisks2 tests passed"
             while IFS= read -r reason; do
@@ -1271,7 +1283,7 @@ else
             -- --ignored --test-threads=1 --nocapture 2>&1)
         if grep -q "test result: FAILED" <<<"$output"; then
             bad "clipboard tests failed — the code disagrees with the running compositor"
-            grep -E '^test .* FAILED' <<<"$output" | head -20
+            show_failures <<<"$output"
         else
             ok "$(count_tests <<<"$output") clipboard tests passed"
             while IFS= read -r reason; do
@@ -1350,7 +1362,7 @@ else
             -- --ignored --test-threads=1 --nocapture 2>&1)
         if grep -q "test result: FAILED" <<<"$output"; then
             bad "tray tests failed — a real tray host would not show these icons"
-            grep -E '^test .* FAILED' <<<"$output" | head -20
+            show_failures <<<"$output"
         else
             ok "$(count_tests <<<"$output") tray tests passed"
             while IFS= read -r reason; do
