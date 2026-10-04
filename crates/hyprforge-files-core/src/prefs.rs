@@ -233,6 +233,49 @@ impl Zoom {
         changed
     }
 
+    /// The preset `view` is at on [`LADDER`], if its step is one of
+    /// them — a hand-edited step between two is on no rung.
+    pub fn preset(&self, view: ViewMode) -> Option<&'static Preset> {
+        LADDER.iter().find(|p| p.view == view && p.step == self.step(view))
+    }
+
+    /// One rung up (`by` > 0) or down the ladder from where `view` is,
+    /// the way Explorer's Ctrl+wheel goes: the grid's icons shrink to
+    /// Small, then the next step down is Details. Off the ladder (a
+    /// hand-edited step, or column view, which has no rungs) it is the
+    /// plain step of [`Self::adjust`]. Returns the view to show and
+    /// whether anything changed; past either end nothing does.
+    pub fn climb(&mut self, view: ViewMode, by: i32) -> (ViewMode, bool) {
+        if view == ViewMode::Columns {
+            return (view, self.adjust(view, by));
+        }
+        let here = match LADDER.iter().position(|p| p.view == view && p.step == self.step(view)) {
+            Some(index) => index,
+            // Between rungs: the nearest one in this view, then on from
+            // there, so the first step lands somewhere named.
+            None => {
+                let step = self.step(view);
+                let nearest = LADDER
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| p.view == view)
+                    .min_by_key(|(_, p)| (p.step - step).abs())
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                let preset = &LADDER[nearest];
+                *self.step_mut(view) = preset.step;
+                return (view, true);
+            }
+        };
+        let next = (here as i32 + by).clamp(0, LADDER.len() as i32 - 1) as usize;
+        if next == here {
+            return (view, false);
+        }
+        let preset = &LADDER[next];
+        *self.step_mut(preset.view) = preset.step;
+        (preset.view, true)
+    }
+
     /// Back to the size it has always been. Whether anything changed.
     pub fn reset(&mut self, view: ViewMode) -> bool {
         let step = self.step_mut(view);
@@ -241,6 +284,30 @@ impl Zoom {
         changed
     }
 }
+
+/// A named size on the Ctrl+wheel ladder: a view and its zoom step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Preset {
+    pub view: ViewMode,
+    pub step: i8,
+    /// What the status bar calls it — Explorer's own names, which is the
+    /// vocabulary people already have for this.
+    pub name: &'static str,
+}
+
+/// Ctrl+wheel's ladder, smallest first: Explorer's, across both views.
+/// Scrolling down from Small icons is Details, and up from Details is
+/// Small icons — the view changes where the ladder crosses, the way
+/// Explorer's does. Column view has no rungs; Explorer has nothing like
+/// it, and it keeps the plain zoom.
+pub const LADDER: [Preset; 6] = [
+    Preset { view: ViewMode::List, step: -1, name: "Compact details" },
+    Preset { view: ViewMode::List, step: 0, name: "Details" },
+    Preset { view: ViewMode::Grid, step: -2, name: "Small icons" },
+    Preset { view: ViewMode::Grid, step: 0, name: "Medium icons" },
+    Preset { view: ViewMode::Grid, step: 2, name: "Large icons" },
+    Preset { view: ViewMode::Grid, step: 4, name: "Extra large icons" },
+];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -708,5 +775,44 @@ mod tests {
         let prefs: Prefs = toml::from_str(older).expect("parses");
         assert_eq!(prefs.zoom, Zoom::default());
         assert_eq!(prefs.zoom.factor(ViewMode::Grid), 1.0);
+    }
+
+    #[test]
+    fn the_ladder_runs_from_compact_details_to_extra_large_icons_crossing_views() {
+        let mut zoom = Zoom::default();
+        // Details, up one: the list's next size up is Small icons in the grid.
+        let (view, changed) = zoom.climb(ViewMode::List, 1);
+        assert!(changed);
+        assert_eq!(view, ViewMode::Grid);
+        assert_eq!(zoom.preset(ViewMode::Grid).map(|p| p.name), Some("Small icons"));
+        // On up to the top, and no further.
+        let mut view = view;
+        for _ in 0..10 {
+            view = zoom.climb(view, 1).0;
+        }
+        assert_eq!(zoom.preset(view).map(|p| p.name), Some("Extra large icons"));
+        assert!(!zoom.climb(view, 1).1, "nothing above the top rung");
+        // And all the way down lands in the list, compact.
+        for _ in 0..10 {
+            view = zoom.climb(view, -1).0;
+        }
+        assert_eq!(view, ViewMode::List);
+        assert_eq!(zoom.preset(view).map(|p| p.name), Some("Compact details"));
+    }
+
+    #[test]
+    fn a_size_between_rungs_steps_onto_the_nearest_one_first() {
+        let mut zoom = Zoom { list: 0, grid: 1, columns: 0 };
+        let (view, changed) = zoom.climb(ViewMode::Grid, 1);
+        assert!(changed);
+        assert_eq!(view, ViewMode::Grid);
+        assert!(zoom.preset(ViewMode::Grid).is_some(), "now on a named rung");
+    }
+
+    #[test]
+    fn column_view_zooms_plainly_with_no_rungs() {
+        let mut zoom = Zoom::default();
+        assert_eq!(zoom.climb(ViewMode::Columns, 1), (ViewMode::Columns, true));
+        assert_eq!(zoom.factor(ViewMode::Columns), 1.25);
     }
 }

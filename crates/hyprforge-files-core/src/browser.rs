@@ -1886,13 +1886,16 @@ impl Browser {
         self.reveal_trail(&dir).unwrap_or(Outcome::None)
     }
 
-    /// Moves the view in front of you `by` zoom steps, remembered.
+    /// One rung up or down Ctrl+wheel's ladder from the view in front of
+    /// you — see [`crate::prefs::LADDER`] — which may change the view.
+    /// Remembered.
     fn zoom(&mut self, by: i32) -> Outcome {
-        if self.prefs.zoom.adjust(self.prefs.view_mode, by) {
-            Outcome::PrefsChanged(self.prefs.clone())
-        } else {
-            Outcome::None
+        let (view, changed) = self.prefs.zoom.climb(self.prefs.view_mode, by);
+        if !changed {
+            return Outcome::None;
         }
+        self.prefs.view_mode = view;
+        Outcome::PrefsChanged(self.prefs.clone())
     }
 
     /// A row in a pane was clicked. A folder — or an archive, which this
@@ -3753,6 +3756,7 @@ fn status_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> 
             dotfile_switch,
             preview_switch,
             iced::widget::Space::new().width(Length::Fill),
+            meta_text(size_label(vm.prefs), density::META_TEXT_BASE, scale),
             meta_text(
                 vm.current_dir.display().to_string(),
                 density::META_TEXT_BASE,
@@ -3763,6 +3767,23 @@ fn status_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> 
         .align_y(iced::Alignment::Center)
         .into(),
     )
+}
+
+/// What size the listing is drawn at, for the status bar: the preset's
+/// name on Ctrl+wheel's ladder — "Large icons", "Details" — the way
+/// Explorer's status bar shows its view. Column view, which has no
+/// presets, says its percentage only when it is not at its own size; a
+/// hand-edited size between two rungs says its percentage too.
+fn size_label(prefs: &Prefs) -> String {
+    let view = prefs.view_mode;
+    if let Some(preset) = prefs.zoom.preset(view) {
+        return preset.name.to_string();
+    }
+    let factor = prefs.zoom.factor(view);
+    if view == ViewMode::Columns && factor == 1.0 {
+        return String::new();
+    }
+    format!("{}%", (factor * 100.0).round())
 }
 
 /// A button that reads as a line of status text until pointed at — a
@@ -8214,9 +8235,21 @@ mod zoom_tests {
     fn ctrl_wheel_zooms_the_view_in_front_of_you_and_remembers_it() {
         let mut browser = loaded(&[("a", false)]);
         browser.update(Message::SetViewMode(ViewMode::Grid));
-        let outcome = browser.update(Message::Zoom(2));
+        // Medium icons, one notch up: Large icons.
+        let outcome = browser.update(Message::Zoom(1));
         assert!(matches!(outcome, Outcome::PrefsChanged(ref p) if p.zoom.factor(ViewMode::Grid) == 1.5), "{outcome:?}");
         assert_eq!(browser.prefs().zoom.factor(ViewMode::List), 1.0, "the list keeps its own size");
+    }
+
+    #[test]
+    fn ctrl_wheel_down_past_small_icons_switches_to_details_as_explorer_does() {
+        let mut browser = loaded(&[("a", false)]);
+        browser.update(Message::SetViewMode(ViewMode::Grid));
+        browser.update(Message::Zoom(-1)); // Small icons
+        assert_eq!(browser.prefs().view_mode, ViewMode::Grid);
+        browser.update(Message::Zoom(-1));
+        assert_eq!(browser.prefs().view_mode, ViewMode::List, "below Small icons is Details");
+        assert_eq!(browser.prefs().zoom.preset(ViewMode::List).map(|p| p.name), Some("Details"));
     }
 
     #[test]
@@ -8233,5 +8266,17 @@ mod zoom_tests {
         assert!(matches!(browser.perform(Action::ZoomReset), Outcome::PrefsChanged(_)));
         assert_eq!(browser.prefs().zoom.factor(ViewMode::List), 1.0);
         assert_eq!(browser.perform(Action::ZoomReset), Outcome::None, "already at its own size");
+    }
+
+    #[test]
+    fn the_status_bar_names_the_preset_the_listing_is_at() {
+        let mut browser = loaded(&[("a", false)]);
+        assert_eq!(size_label(browser.prefs()), "Details");
+        browser.update(Message::Zoom(2)); // Details → Small → Medium icons
+        assert_eq!(size_label(browser.prefs()), "Medium icons");
+        browser.update(Message::SetViewMode(ViewMode::Columns));
+        assert_eq!(size_label(browser.prefs()), "", "column view at its own size says nothing");
+        browser.update(Message::Zoom(1));
+        assert_eq!(size_label(browser.prefs()), "125%");
     }
 }
