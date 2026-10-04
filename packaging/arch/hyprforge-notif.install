@@ -1,0 +1,47 @@
+# pacman scriptlet for hyprforge-notif. Sourced by bash, as root, inside
+# the transaction. Shaped like hyprforge-displayd.install, with one
+# difference: notifd is not the only program that wants its bus name.
+#
+# Only one process can own org.freedesktop.Notifications. Enabling
+# notifd for every user beside dunst, mako or swaync makes each login a
+# race, and notifd exits at start-up rather than fight for the name —
+# so in practice whichever lost shows nothing, and it is not the same
+# one every time. Which daemon a person keeps is theirs to decide, and
+# a package scriptlet cannot ask them. So when another one is installed
+# the preset is not applied, and Settings -> Set up — which can see
+# which one is actually running, and put it back on undo — is where the
+# swap happens.
+#
+# Nothing here may fail the transaction.
+
+_unit=notifd.service
+
+post_install() {
+  local others
+  # Installed, not running: a scriptlet runs as root, outside anyone's
+  # session, and cannot see a user's services. Installed is the
+  # conservative reading — it may hold back the preset for someone who
+  # installed mako once and never used it, which costs one click in Set
+  # up, where the opposite costs a login with no notifications.
+  others=$(timeout 10 pacman -Qq dunst mako swaync 2>/dev/null | tr '\n' ' ')
+  others=${others% }
+  if [[ -n $others ]]; then
+    echo ":: notifd was not enabled: another notification daemon is installed"
+    echo "   (${others// /, }), and only one can run. Settings -> Set up can replace it."
+    return 0
+  fi
+  if ! timeout 30 systemctl --global preset "$_unit" >/dev/null 2>&1; then
+    echo ":: could not enable $_unit for every user; each user can run:"
+    echo "     systemctl --user enable --now $_unit"
+  fi
+}
+
+# Nothing on upgrade, for the reason hyprforge-displayd.install gives:
+# preset would re-enable a unit the administrator disabled.
+post_upgrade() {
+  :
+}
+
+pre_remove() {
+  timeout 30 systemctl --global disable "$_unit" >/dev/null 2>&1 || true
+}

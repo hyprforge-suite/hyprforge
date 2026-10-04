@@ -1,0 +1,13 @@
+# pacman scriptlet for hyprforge-settings. Sourced by bash, as root.
+#
+# It writes nothing. Everything left to do after a package install —
+# keybinds, locking when idle, default applications, the open/save
+# dialog — lives in a user's own ~/.config, and a scriptlet runs as root
+# with no user to write it for (and must not guess one). The Set up page
+# does it, as the user, and says what it changed; this only says where
+# to find it. Once, on install: an upgrade has nothing new to say.
+
+post_install() {
+  echo ":: Open Hyprforge Settings — the Set up page finishes the rest"
+  echo "   (or run: hyprforge-settings --setup)."
+}

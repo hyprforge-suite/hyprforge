@@ -17,6 +17,16 @@
 # time is testing a binary that was never replaced. This verifies the
 # copy landed instead of assuming it, because assuming it cost two full
 # debugging rounds.
+#
+# What it does not do is wire anything into the user's desktop. Enabling
+# the daemons, the keybinds, hypridle's lock_cmd, default applications
+# and the open/save dialog are `hyprforge-settings --setup`'s job — the
+# same code as Settings' Set up page, which records what it changed so
+# it can be undone — and --install ends by running it (see run_setup).
+# This script used to print all of that as a page of instructions
+# instead; only the greeter is still printed, and deliberately: a bad
+# greetd config is a machine that cannot log in, so that step stays a
+# human's.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
@@ -61,53 +71,25 @@ flush_current() {
     CURRENT_COUNT=0
 }
 
-# Every component used to print its own "==> X: next steps" block right
-# where it ran, which meant `--install --all` interleaved six essays into
-# the action log and you could no longer see what the script had actually
-# done by the time it finished. Each component appends its block to one
-# of these instead, and the whole thing is printed once, at the end, in
-# a fixed order rather than install order — see print_next_steps.
-NEXT_DISPLAYD=
-NEXT_TRAY=
-NEXT_CLIPBOARD=
 COMPONENT_CHANGED=false
 NO_RESTART=false
-NEXT_EMOJI=
-NEXT_FILES=
-STATE_EMOJI=todo
-REASON_EMOJI=
-STATE_FILES=todo
-REASON_FILES=
-NEXT_MEDIA=
-STATE_MEDIA=todo
-REASON_MEDIA=
-NEXT_NOTIF=
-STATE_NOTIF=todo
-REASON_NOTIF=
-NEXT_LOCK=
-NEXT_SETTINGS=
+
+# The one step this script still prints rather than does: the greeter's.
+# It is captured here and printed once, at the very end, after setup has
+# run — not in the middle of the action log, where it used to sit among
+# nine other components' blocks and got skimmed past. Every other block
+# (enable this service, bind that key, point hypridle here, make Files
+# the default for folders) is now an item `hyprforge-settings --setup`
+# does and can undo; see run_setup.
 NEXT_GREETER=
 
-# One of done / todo / unknown per block above (see "next-step checks"
-# below for what each means) plus, for `unknown`, the reason it could
-# not be determined. Set by each install_* function right after it
-# builds the NEXT_* text, from a live but bounded check of the system —
-# never from anything install_* just did, since --dry-run must report
-# the same states as a real run.
-STATE_DISPLAYD=;  REASON_DISPLAYD=
-STATE_TRAY=;      REASON_TRAY=
-STATE_CLIPBOARD=; REASON_CLIPBOARD=
-STATE_LOCK=;      REASON_LOCK=
-STATE_SETTINGS=;  REASON_SETTINGS=
+# One of done / todo / unknown (see "next-step checks" below), plus, for
+# `unknown`, why it could not be determined. Set by install_greeter from
+# a live but bounded check of the system — never from anything the
+# install just did, since --dry-run must report the same state as a real
+# run.
 STATE_GREETER=;   REASON_GREETER=
 
-# Prints every captured block as one numbered list, ordered by
-# consequence rather than by the order components were installed:
-# services to enable first, then the config the user has to point at
-# Hyprforge, and the greeter's block last — it's the one with real
-# consequences (a bad greetd config can leave the machine unable to log
-# in), so it belongs where it gets read most carefully: last, right
-# before the script says it's done.
 # ------------------------------------------------------- next-step checks
 #
 # Three states, not two: `done` (verified satisfied — omit the step),
@@ -149,78 +131,6 @@ service_state() {
         return
     fi
     if [[ $state == enabled ]]; then
-        CHECK_STATE=done
-    else
-        CHECK_STATE=todo
-    fi
-}
-
-# The lock step: is hypridle actually pointed at hyprforge-lock, not
-# just mentioning it?
-#
-# A missing hypridle.conf and a present-but-commented-out one are both
-# `todo`, but they are not the same state, in the same spirit as
-# CLAUDE.md's "file could not be read is not the same as nothing
-# configured": one means hypridle may not even be in use here, the
-# other means it is in use and simply not wired up yet. Keeping the
-# reasons distinct means a future addition of a real "can't tell" case
-# does not get merged back into either by accident.
-#
-# The match is anchored to the start of the line (after whitespace) so
-# that a commented line — "    # lock_cmd = ... hyprforge-lock", which
-# is the literal contents of this machine's hypridle.conf — does NOT
-# match: it starts with '#', not 'l'. A bare substring grep for
-# "hyprforge-lock" anywhere in the file is exactly the trap this step
-# exists to avoid.
-lock_step_state() {
-    local conf="$HOME/.config/hypr/hypridle.conf"
-    CHECK_REASON=
-    if [[ ! -e $conf ]]; then
-        CHECK_STATE=todo
-        CHECK_REASON="no ~/.config/hypr/hypridle.conf yet — hypridle may not be in use"
-        return
-    fi
-    if [[ ! -r $conf ]]; then
-        CHECK_STATE=unknown
-        CHECK_REASON="$conf exists but could not be read"
-        return
-    fi
-    if grep -Eq '^[[:space:]]*lock_cmd[[:space:]]*=.*hyprforge-lock' "$conf"; then
-        CHECK_STATE=done
-    else
-        CHECK_STATE=todo
-    fi
-}
-
-# The clipboard step is really two conditions — the daemon enabled, and
-# the popup bound — and both have to hold before the instruction is
-# moot.
-clipboard_step_state() {
-    service_state --user hyprforge-clipd
-    local svc_state=$CHECK_STATE svc_reason=$CHECK_REASON
-    if [[ $svc_state == unknown ]]; then
-        CHECK_STATE=unknown; CHECK_REASON=$svc_reason
-        return
-    fi
-
-    local binds="$HOME/.config/hypr/hyprforge/keybinds.lua" bind_state
-    if [[ ! -e $binds ]]; then
-        # Same missing-vs-present distinction as hypridle: no
-        # keybinds.lua at all is first-run, not a bind that went
-        # missing. Either way the step is still outstanding, so it
-        # stays `todo` rather than becoming `unknown`.
-        bind_state=todo
-    elif [[ ! -r $binds ]]; then
-        CHECK_STATE=unknown
-        CHECK_REASON="$binds exists but could not be read"
-        return
-    elif grep -q hyprforge-clipmenu "$binds" 2>/dev/null; then
-        bind_state=done
-    else
-        bind_state=todo
-    fi
-
-    if [[ $svc_state == done && $bind_state == done ]]; then
         CHECK_STATE=done
     else
         CHECK_STATE=todo
@@ -276,70 +186,32 @@ greeter_step_state() {
     fi
 }
 
+# The greeter's step, printed last — after setup has run and said what
+# it did — because it is the one with real consequences (a bad greetd
+# config can leave the machine unable to log in), so it belongs where it
+# gets read most carefully: right before the script says it's done.
+#
+# Still three states, never two. `done` collapses to one line; `todo`
+# prints the block; `unknown` prints the block *and* why it could not be
+# checked — a step nobody could verify must neither look finished nor
+# vanish (see "next-step checks" above).
 print_next_steps() {
-    # Four arrays indexed in lockstep. Adding a component means adding
-    # to all four at the same position — miss one and every entry after
-    # it is labelled with its neighbour's name, which reads as a bug in
-    # whichever component happened to land next to the gap.
-    local labels=("Display daemon" "Tray icons" "Clipboard" "Notifications" "Emoji picker" "File manager" "Image viewer" "Lock" "Settings app" "Greeter")
-    local texts=("$NEXT_DISPLAYD" "$NEXT_TRAY" "$NEXT_CLIPBOARD" "$NEXT_NOTIF" "$NEXT_EMOJI" "$NEXT_FILES" "$NEXT_MEDIA" "$NEXT_LOCK" "$NEXT_SETTINGS" "$NEXT_GREETER")
-    local states=("$STATE_DISPLAYD" "$STATE_TRAY" "$STATE_CLIPBOARD" "$STATE_NOTIF" "$STATE_EMOJI" "$STATE_FILES" "$STATE_MEDIA" "$STATE_LOCK" "$STATE_SETTINGS" "$STATE_GREETER")
-    local reasons=("$REASON_DISPLAYD" "$REASON_TRAY" "$REASON_CLIPBOARD" "$REASON_NOTIF" "$REASON_EMOJI" "$REASON_FILES" "$REASON_MEDIA" "$REASON_LOCK" "$REASON_SETTINGS" "$REASON_GREETER")
+    [[ -n $NEXT_GREETER ]] || return 0   # the greeter was not part of this run
 
-    # Steps that are `done` collapse into this count instead of being
-    # read one by one, matching the "N already current" pattern used
-    # for file installs above — the point there and here is the same:
-    # say nothing was missed, then only enumerate what actually needs
-    # attention.
-    local out_labels=() out_texts=() out_states=() out_reasons=()
-    local done_count=0 ran_any=false i
-    for ((i = 0; i < ${#labels[@]}; i++)); do
-        [[ -n ${texts[i]} ]] || continue   # component was not part of this run
-        ran_any=true
-        if [[ ${states[i]} == done ]]; then
-            (( done_count += 1 ))
-            continue
-        fi
-        out_labels+=("${labels[i]}")
-        out_texts+=("${texts[i]}")
-        out_states+=("${states[i]}")
-        out_reasons+=("${reasons[i]}")
-    done
-    $ran_any || return 0
-
-    # The heading has to agree with what follows it. "Before this does
-    # anything, you need to:" above a list of nothing reads as a bug,
-    # and on a machine that is already fully set up that is the common
-    # case rather than the rare one.
-    local plural="steps"
-    (( done_count == 1 )) && plural="step"
-    if (( ${#out_texts[@]} == 0 )); then
-        step "Nothing left to do"
-        (( done_count > 0 )) && skip "$done_count $plural already done"
-    else
-        step "Before this does anything, you need to:"
-        (( done_count > 0 )) && skip "$done_count $plural already done"
-    fi
-
-    if (( ${#out_texts[@]} == 0 )); then
-        # Every step this run touched is verified done, and any check
-        # that could not run would still be sitting in out_texts above
-        # (see the `unknown` branch below) — so an empty list here
-        # really does mean nothing left, not a check that gave up.
-        ok "everything this run set up is already wired in"
+    if [[ $STATE_GREETER == done ]]; then
+        step "Greeter"
+        ok "this session logged in through greetd; nothing left to do by hand"
         return 0
     fi
 
-    local n=1
-    for ((i = 0; i < ${#out_texts[@]}; i++)); do
-        printf '\n  %s%d. %s%s\n' "$B" "$n" "${out_labels[i]}" "$N"
-        if [[ ${out_states[i]} == unknown ]]; then
-            printf '  %s(could not verify whether this is still needed: %s)%s\n' \
-                "$Y" "${out_reasons[i]}" "$N"
-        fi
-        printf '%s\n' "${out_texts[i]}"
-        ((n++))
-    done
+    step "Greeter: one step left, by hand on purpose"
+    if [[ $STATE_GREETER == unknown ]]; then
+        printf '  %s(could not verify whether this is still needed: %s)%s\n' \
+            "$Y" "$REASON_GREETER" "$N"
+    elif [[ -n $REASON_GREETER ]]; then
+        printf '  %s(%s)%s\n' "$D" "$REASON_GREETER" "$N"
+    fi
+    printf '%s\n' "$NEXT_GREETER"
 }
 
 # Every privileged action goes through here, so --dry-run is honest and
@@ -353,8 +225,18 @@ run_root() {
 }
 
 confirm() {
+    # A dry run answers *no*, and says what it would have asked. It used
+    # to answer yes — and several callers act on a yes with a plain `rm`
+    # rather than run_root, so `--dry-run --uninstall --settings
+    # --force-cleanup` was one confirm away from `rm -rf ~/.config/hyprforge`.
+    # "No" is the answer under which nothing happens, which is the only
+    # answer a dry run may give. Checked before --yes, so `--dry-run --yes`
+    # is still a dry run.
+    if $DRY_RUN; then
+        printf '  %s· would ask: %s%s\n' "$D" "$1" "$N"
+        return 1
+    fi
     $ASSUME_YES && return 0
-    $DRY_RUN && return 0
     local reply
     read -rp "  $1 [y/N] " reply
     [[ $reply == [yY] ]]
@@ -367,23 +249,28 @@ usage() {
 ${B}Usage:${N} ./hyprforge <action> [components] [options]
 
 ${B}Actions${N}
-  --install        Build and install. Re-running updates in place.
-  --uninstall      Remove what --install put on the system.
-  --status         Show what is installed and whether it is current.
+  --install        Build and install, then run hyprforge-settings --setup
+                   to wire it in (services, keybinds, default apps,
+                   idle lock, the open/save dialog), asking per item.
+                   Re-running updates in place.
+  --uninstall      Offer to undo what setup changed, then remove what
+                   --install put on the system.
+  --status         Show what is installed, whether it is current, and
+                   what setup has left to do.
 
 ${B}Components${N}
   --greeter        The login screen: hyprforge-greet, its compositor
                    config, and the exported-look directory.
                    Does NOT enable greetd — see --install --greeter output.
   --lock           The lock screen: hyprforge-lock and its PAM stack.
-  --displayd       The display daemon, as a systemd user service.
+  --displayd       The display daemon's binary and systemd user unit.
   --tray           The tray icons (Wi-Fi, Bluetooth, keep awake, night
-                   light), as a systemd user service.
-  --clipboard      Clipboard history: the daemon as a systemd user
-                   service, plus the popup its keybind launches.
-  --notif          Notifications: notifd as a systemd user service,
-                   and notifctl to drive its center and do-not-disturb.
-                   Does not stop dunst or mako — see the output.
+                   light): the daemon's binary and user unit.
+  --clipboard      Clipboard history: the daemon's binary and user unit,
+                   plus the popup its keybind launches.
+  --notif          Notifications: notifd's binary and user unit, and
+                   notifctl to drive its center and do-not-disturb.
+                   Setup offers to replace dunst, mako or swaync.
   --settings       The Settings app and its launcher entry.
   --files          The file manager, and its launcher entry.
   --media          The media viewer (pictures, videos, 3D models), and its launcher entry.
@@ -410,8 +297,10 @@ ${B}Options${N}
   --no-restart     Do not restart a running daemon whose binary changed.
                    The install still happens; the old process keeps
                    running until you restart it yourself.
-  --dry-run        Print what would happen. Touches nothing.
-  --yes            Do not ask for confirmation.
+  --dry-run        Print what would happen. Touches nothing; setup only
+                   lists what it would do (--setup --list).
+  --yes            Do not ask for confirmation; setup applies each
+                   item's default (--setup --yes).
   -h, --help       This.
 
 ${B}Examples${N}
@@ -549,6 +438,36 @@ install_file() {
     ok "$verb $dst"
 }
 
+# The user-scope twins of run_root and remove_file: files in the user's
+# own home that need no sudo. Every removal under $HOME goes through
+# one of these, never a bare `rm`, because a bare `rm` is invisible to
+# --dry-run — `uninstall_settings` deleted a real launcher entry during
+# a dry run that way, and check.sh's "The installer's dry run touches
+# nothing" step now runs every uninstall against a scratch home to keep
+# it from happening again.
+run_user() {
+    if $DRY_RUN; then
+        printf '  %s· would run: %s%s\n' "$D" "$*" "$N"
+        return 0
+    fi
+    "$@"
+}
+
+# remove_user_path <path> [label]: a file or a whole directory.
+remove_user_path() {
+    local path=$1
+    if [[ ! -e $path && ! -L $path ]]; then
+        skip "$path is already gone"
+        return 0
+    fi
+    if [[ -d $path && ! -L $path ]]; then
+        run_user rm -rf "$path"
+    else
+        run_user rm -f "$path"
+    fi
+    $DRY_RUN || ok "removed $path"
+}
+
 remove_file() {
     local path=$1
     if [[ ! -e $path ]]; then
@@ -556,7 +475,9 @@ remove_file() {
         return 0
     fi
     run_root rm -f "$path"
-    ok "removed $path"
+    # Same rule as install_file: a dry run has printed its "would run",
+    # and must never then claim the thing happened.
+    $DRY_RUN || ok "removed $path"
 }
 
 # --------------------------------------------------------------- greeter
@@ -608,12 +529,12 @@ install_greeter() {
     fi
 
     # Safety-critical, so it still gets a loud pointer right here — the
-    # full explanation and the commands to test it are in the "Before
-    # this does anything" list at the end, where the greeter's block is
-    # deliberately last, but a skim of the action log must not miss this.
+    # full explanation and the commands to test it are printed at the
+    # very end, deliberately last, but a skim of the action log must not
+    # miss this.
     warn "greetd's own config is deliberately NOT installed (installing it wrong is how"
-    warn "a machine boots to something that cannot take a password) — see the last item"
-    warn "in \"Before this does anything, you need to:\" below before you touch it."
+    warn "a machine boots to something that cannot take a password) — see \"Greeter\""
+    warn "at the end of this run before you touch it."
 
     NEXT_GREETER=$(cat <<EOF
   ${D}greetd's own config is deliberately NOT installed. It decides which VT
@@ -638,7 +559,17 @@ EOF
 
 uninstall_greeter() {
     step "Greeter: removing"
-    if systemctl is-enabled greetd >/dev/null 2>&1; then
+    greeter_removable
+    remove_file "$PREFIX/hyprforge-greet"
+    uninstall_greeter_cleanup
+}
+
+greeter_removable() {
+    # Bounded, through service_state, so a systemd that does not answer
+    # is `unknown` — and unknown refuses too. "Could not check whether
+    # this machine logs in through greetd" is no permission to remove it.
+    service_state --system greetd
+    if [[ $CHECK_STATE == done ]]; then
         # Refusing rather than disabling it: greetd being enabled means
         # it is how this machine logs in, and taking that away as a side
         # effect of removing a binary is how you get an unbootable
@@ -646,9 +577,13 @@ uninstall_greeter() {
         die "greetd is still enabled — this machine logs in through it.
        Run 'sudo systemctl disable greetd' and set up another way to log
        in first, then remove the greeter."
+    elif [[ $CHECK_STATE == unknown ]]; then
+        die "could not tell whether this machine logs in through greetd ($CHECK_REASON),
+       so the greeter was left in place. Try again once systemctl answers."
     fi
-    remove_file "$PREFIX/hyprforge-greet"
+}
 
+uninstall_greeter_cleanup() {
     if $FORCE_CLEANUP; then
         step "Greeter: forced cleanup"
         remove_file "$GREETD_DIR/hyprland-greeter.lua"
@@ -682,29 +617,26 @@ install_lock() {
     # `account` stack and so rejects correct passwords.
     install_file crates/hyprforge-lock/pam/hyprforge-lock /etc/pam.d/hyprforge-lock 644
     flush_current
-
-    NEXT_LOCK=$(cat <<EOF
-  ${D}Nothing calls the lock screen on its own. Point your existing config at it:${N}
-
-    ~/.config/hypr/hypridle.conf   lock_cmd = pidof hyprforge-lock || hyprforge-lock
-    your keybind                   hyprforge-lock
-
-  hypridle handles logind's Lock signal, so suspend and 'loginctl lock-session'
-  both work once lock_cmd points here.
-EOF
-)
-    lock_step_state
-    STATE_LOCK=$CHECK_STATE; REASON_LOCK=$CHECK_REASON
+    # Nothing calls the lock screen on its own. Setup's `idle-lock` item
+    # points hypridle's lock_cmd at it (so suspend and `loginctl
+    # lock-session` lock too) and `bind-lock` binds Super+Escape. The
+    # check this replaced grepped hypridle.conf and never saw the
+    # idle.conf Settings writes and hypridle.conf sources, so it said
+    # "todo" on a machine that was already wired.
 }
 
-uninstall_lock() {
-    step "Lock: removing"
+lock_removable() {
     # Named explicitly, never pkill -f: the pattern would match the shell
     # running it, kill that shell, and exit 144.
     if pgrep -x hyprforge-lock >/dev/null; then
         die "hyprforge-lock is running — it may be holding the session locked.
        Unlock first; removing the binary now would not unlock anything."
     fi
+}
+
+uninstall_lock() {
+    step "Lock: removing"
+    lock_removable
     remove_file "$PREFIX/hyprforge-lock"
     if $FORCE_CLEANUP; then
         remove_file /etc/pam.d/hyprforge-lock
@@ -755,13 +687,10 @@ install_displayd() {
     fi
     flush_current
 
-    NEXT_DISPLAYD=$(cat <<EOF
-    systemctl --user enable --now hyprforge-displayd
-EOF
-)
-    service_state --user hyprforge-displayd
-    STATE_DISPLAYD=$CHECK_STATE; REASON_DISPLAYD=$CHECK_REASON
-
+    # Installs the unit; never enables it. Enabling is setup's
+    # `service-displayd` item, which records it so --undo can reverse
+    # it — this script enabling it too would be a second writer nobody
+    # recorded.
     restart_if_running hyprforge-displayd "the display daemon"
 }
 
@@ -801,28 +730,8 @@ install_tray() {
     fi
     flush_current
 
-    NEXT_TRAY=$(cat <<EOF
-    systemctl --user enable --now hyprforge-trayd
-
-    Which icons appear is Settings' business, not this script's:
-    Network and Bluetooth are on by default, keep awake and night light
-    are off until switched on in Settings.
-
-    A restart is how a rebuilt daemon reaches the bar. Running it by hand
-    means a stale binary keeps running long after it was replaced, which
-    is how two icons went missing after being switched on:
-        systemctl --user restart hyprforge-trayd
-
-    Right-click draws hyprforge-trayd's own menu (hyprforge-traymenu),
-    themed like the rest of the suite, rather than whatever your bar
-    would otherwise draw from com.canonical.dbusmenu. It opens below the
-    icon that was clicked; ~/.config/hyprforge/tray.toml's menu_y_offset
-    tunes how far below to clear your bar if the default doesn't.
-EOF
-)
-    service_state --user hyprforge-trayd
-    STATE_TRAY=$CHECK_STATE; REASON_TRAY=$CHECK_REASON
-
+    # Enabling is setup's `service-trayd` item, as for displayd. Which
+    # icons appear is Settings' business too.
     restart_if_running hyprforge-trayd "the tray icons and their menus"
 }
 
@@ -895,21 +804,10 @@ install_clipboard() {
     fi
     flush_current
 
-    NEXT_CLIPBOARD=$(cat <<EOF
-    systemctl --user enable --now hyprforge-clipd
-
-    Then bind the popup. Hyprforge owns keybinds.lua, so the binding
-    belongs in Settings -> Shortcuts rather than in a hand-edited file:
-        ${B}hyprforge-clipmenu${N}
-
-    The daemon records; the popup reads. Nothing is recorded from an
-    application that marks its clipboard offer as a secret, which is how
-    password managers ask not to be remembered.
-EOF
-)
-    clipboard_step_state
-    STATE_CLIPBOARD=$CHECK_STATE; REASON_CLIPBOARD=$CHECK_REASON
-
+    # Setup's `service-clipd` enables the daemon and `bind-clipboard`
+    # binds the popup through Settings' own shortcuts model — Hyprforge
+    # owns keybinds.lua, so a binding written any other way is lost on
+    # the next save.
     restart_if_running hyprforge-clipd "clipboard history"
 }
 
@@ -967,28 +865,12 @@ install_notif() {
         warn "a packaged notifd is also installed${owner:+ ($owner)}; this build's unit overrides its service. Remove it with: sudo pacman -R ${owner:-<its package>}"
     fi
 
-    NEXT_NOTIF=$(cat <<EOF
-    Only one program can own org.freedesktop.Notifications. If dunst,
-    mako or swaync is running, stop and disable it first, or notifd will
-    exit at start-up rather than fight it for the name:
-        systemctl --user disable --now dunst    (or mako, swaync)
-
-    Then:
-        systemctl --user enable --now notifd
-
-    Blur and rounding are the compositor's job, not notifd's:
-        layerrule = blur, notif
-        layerrule = blur, notif-center
-
-    The center and do-not-disturb are notifctl commands; bind them in
-    Settings -> Shortcuts:
-        ${B}notifctl center${N}
-        ${B}notifctl dnd${N}
-EOF
-)
-    service_state --user notifd
-    STATE_NOTIF=$CHECK_STATE; REASON_NOTIF=$CHECK_REASON
-
+    # Only one program can own org.freedesktop.Notifications, so enabling
+    # notifd beside dunst, mako or swaync is a race at every login. Setup's
+    # `service-notifd` item names the other daemon before it replaces it,
+    # and records it so --undo brings it back; `notif-blur` and
+    # `bind-notifications`/`bind-dnd` do the rest. (The layer-rule syntax
+    # this used to print was hyprlang, which a Lua config rejects.)
     restart_if_running notifd "notifications"
 }
 
@@ -998,22 +880,29 @@ install_emoji() {
     step "Emoji picker"
     install_file target/release/hyprforge-emojimenu "$PREFIX/hyprforge-emojimenu" 755
 
-    # No service and no daemon: it is a popup that runs, does one thing
-    # and exits, the same shape as hyprforge-clipmenu. The only thing it
-    # needs from the user is a key to open it on, and Hyprforge owns
-    # keybinds.lua — so the binding belongs in Settings, not in a file
-    # this script edits behind the user's back.
-    NEXT_EMOJI=$(cat <<'EOF'
-  Bind it in Settings -> Shortcuts. Hyprforge owns keybinds.lua, so a
-  hand-edited binding there is overwritten on the next save:
-      hyprforge-emojimenu
+    flush_current
 
-  It needs an emoji font to show anything. Without one every cell
-  renders as an identical empty box, which looks like a broken picker
-  rather than a missing font:
-      pacman -S noto-fonts-emoji
-EOF
-)
+    # No service and no daemon: a popup that runs, does one thing and
+    # exits. Its key is setup's `bind-emoji` item.
+    #
+    # The one thing setup cannot do is install a package, and without an
+    # emoji font every cell renders as an identical empty box — which
+    # looks like a broken picker, not a missing font. The pacman package
+    # depends on noto-fonts-emoji; a source install has nothing that
+    # does, so it is asked for here — only when it is actually missing,
+    # and fontconfig is bounded like every other process this talks to.
+    local fonts rc=0
+    if ! command -v fc-list >/dev/null 2>&1; then
+        warn "could not check for an emoji font (no fc-list); the picker needs one, e.g. noto-fonts-emoji"
+    elif fonts=$(timeout 10 fc-list ':charset=1f600' family 2>/dev/null); then
+        if [[ -z $fonts ]]; then
+            warn "no emoji font is installed, so every emoji will draw as an empty box:"
+            warn "  sudo pacman -S noto-fonts-emoji"
+        fi
+    else
+        rc=$?
+        warn "fc-list did not answer (exit $rc), so whether an emoji font is installed is unknown"
+    fi
 }
 
 # Tells the running session bus to read its service files again.
@@ -1036,13 +925,13 @@ reload_session_bus() {
 uninstall_files() {
     step "File manager: removing"
     remove_file "$PREFIX/hyprforge-files"
-    remove_file "$DESKTOP_DIR/hyprforge-files.desktop"
+    remove_user_path "$DESKTOP_DIR/hyprforge-files.desktop"
     remove_file "$PREFIX/hyprforge-files-portal"
     remove_file "$PORTAL_DIR/hyprforge.portal"
-    remove_file "$DBUS_SERVICES_DIR/$PORTAL_BUS_NAME.service"
+    remove_user_path "$DBUS_SERVICES_DIR/$PORTAL_BUS_NAME.service"
     # The FileManager1 claim goes with it, which hands the name back to
     # whichever file manager /usr/share's services name.
-    remove_file "$DBUS_SERVICES_DIR/$FILE_MANAGER1_NAME.service"
+    remove_user_path "$DBUS_SERVICES_DIR/$FILE_MANAGER1_NAME.service"
     reload_session_bus
     # Nothing else to undo: no service, no config written by the
     # installer. The user's own files.toml is deliberately left alone —
@@ -1139,13 +1028,12 @@ uninstall_notif() {
             skip "would remove the user unit"
         else
             if [[ ! -e /usr/lib/systemd/user/notifd.service ]] \
-                && systemctl --user is-enabled notifd >/dev/null 2>&1; then
-                systemctl --user disable --now notifd || true
+                && timeout 5 systemctl --user is-enabled notifd >/dev/null 2>&1; then
+                timeout 20 systemctl --user disable --now notifd || true
                 ok "disabled the user service"
             fi
-            rm -f "$HOME/.config/systemd/user/notifd.service"
-            systemctl --user daemon-reload
-            ok "removed the user unit"
+            remove_user_path "$HOME/.config/systemd/user/notifd.service"
+            timeout 20 systemctl --user daemon-reload || true
             [[ -e /usr/lib/systemd/user/notifd.service ]] &&
                 skip "notifd.service now means the packaged /usr/bin/notifd again; it takes over at the next restart"
         fi
@@ -1159,16 +1047,13 @@ uninstall_notif() {
 
 uninstall_clipboard() {
     step "Clipboard: removing"
-    if ! $DRY_RUN && systemctl --user is-enabled hyprforge-clipd >/dev/null 2>&1; then
-        systemctl --user disable --now hyprforge-clipd || true
+    if ! $DRY_RUN && timeout 5 systemctl --user is-enabled hyprforge-clipd >/dev/null 2>&1; then
+        timeout 20 systemctl --user disable --now hyprforge-clipd || true
         ok "disabled the user service"
     fi
     if [[ -e "$HOME/.config/systemd/user/hyprforge-clipd.service" ]]; then
-        $DRY_RUN && skip "would remove the user unit" || {
-            rm -f "$HOME/.config/systemd/user/hyprforge-clipd.service"
-            systemctl --user daemon-reload
-            ok "removed the user unit"
-        }
+        remove_user_path "$HOME/.config/systemd/user/hyprforge-clipd.service"
+        $DRY_RUN || timeout 20 systemctl --user daemon-reload || true
     fi
     remove_file "$PREFIX/hyprforge-clipd"
     remove_file "$PREFIX/hyprforge-clipmenu"
@@ -1181,16 +1066,13 @@ uninstall_clipboard() {
 
 uninstall_tray() {
     step "Tray icons: removing"
-    if ! $DRY_RUN && systemctl --user is-enabled hyprforge-trayd >/dev/null 2>&1; then
-        systemctl --user disable --now hyprforge-trayd || true
+    if ! $DRY_RUN && timeout 5 systemctl --user is-enabled hyprforge-trayd >/dev/null 2>&1; then
+        timeout 20 systemctl --user disable --now hyprforge-trayd || true
         ok "disabled the user service"
     fi
     if [[ -e "$HOME/.config/systemd/user/hyprforge-trayd.service" ]]; then
-        $DRY_RUN && skip "would remove the user unit" || {
-            rm -f "$HOME/.config/systemd/user/hyprforge-trayd.service"
-            systemctl --user daemon-reload
-            ok "removed the user unit"
-        }
+        remove_user_path "$HOME/.config/systemd/user/hyprforge-trayd.service"
+        $DRY_RUN || timeout 20 systemctl --user daemon-reload || true
     fi
     remove_file "$PREFIX/hyprforge-trayd"
     remove_file "$PREFIX/hyprforge-traymenu"
@@ -1198,24 +1080,22 @@ uninstall_tray() {
 
 uninstall_displayd() {
     step "Display daemon: removing"
-    if ! $DRY_RUN && systemctl --user is-enabled hyprforge-displayd >/dev/null 2>&1; then
-        systemctl --user disable --now hyprforge-displayd || true
+    if ! $DRY_RUN && timeout 5 systemctl --user is-enabled hyprforge-displayd >/dev/null 2>&1; then
+        timeout 20 systemctl --user disable --now hyprforge-displayd || true
         ok "disabled the user service"
     fi
     remove_file "$PREFIX/hyprforge-displayd"
     remove_file "$PREFIX/hyprforge-displayctl"
     if [[ -e "$HOME/.config/systemd/user/hyprforge-displayd.service" ]]; then
-        rm -f "$HOME/.config/systemd/user/hyprforge-displayd.service"
-        $DRY_RUN || systemctl --user daemon-reload
-        ok "removed the user service unit"
+        remove_user_path "$HOME/.config/systemd/user/hyprforge-displayd.service"
+        $DRY_RUN || timeout 20 systemctl --user daemon-reload || true
     fi
     if $FORCE_CLEANUP; then
         # Display profiles are user data: what monitors you have and how
         # you arranged them. Never removed without being asked.
         local profiles="${XDG_CONFIG_HOME:-$HOME/.config}/hyprforge/display-profiles.toml"
         if [[ -e $profiles ]] && confirm "remove your saved display profiles ($profiles)?"; then
-            rm -f "$profiles"
-            ok "removed $profiles"
+            remove_user_path "$profiles"
         fi
     fi
 }
@@ -1306,33 +1186,14 @@ install_files() {
 
     # No service and no daemon: a window that opens when asked and exits
     # when closed. (The dialog's service above is started by D-Bus when an
-    # application asks for a dialog, and by nothing else.) Unlike the Settings app it takes no single-instance
-    # lock either — two file manager windows onto two directories is how
-    # people move files, and every file manager anyone has used allows
-    # it.
-    NEXT_FILES=$(cat <<EOF
-  ${D}It should appear in rofi as "Hyprforge Files". To make it the
-  handler other applications use for "open containing folder":
-      xdg-mime default hyprforge-files.desktop inode/directory
-
-  To make Files every application's Open and Save dialog — opt-in, and
-  undone by removing the last line — put this in
-  ~/.config/xdg-desktop-portal/hyprland-portals.conf (the folder is
-  usually not there yet: mkdir -p ~/.config/xdg-desktop-portal):
-      [preferred]
-      default=hyprland;gtk
-      org.freedesktop.impl.portal.FileChooser=hyprforge
-  Keep the default= line: the portal reads only the first portals.conf
-  it finds, so a file holding just the last line would drop the system's
-  choices for screenshots and screen sharing. Then:
-      systemctl --user restart xdg-desktop-portal
-
-  Connecting to an SMB share needs one more package. Without it the app
-  runs fine and says so where the share would be, rather than failing in
-  a way you would have to go and diagnose:
-      pacman -S gvfs-smb${N}
-EOF
-)
+    # application asks for a dialog, and by nothing else.) Unlike the
+    # Settings app it takes no single-instance lock either — two file
+    # manager windows onto two directories is how people move files.
+    #
+    # Making it the default for folders (`default-folders`) and every
+    # application's open/save dialog (`portal-dialog`, which keeps the
+    # rest of the user's portals.conf) are setup items. A missing
+    # gvfs-smb is said in the app, where a share would have been.
 }
 
 install_media() {
@@ -1358,22 +1219,15 @@ install_media() {
     flush_current
 
     # Like the file manager: a window, no service, no single-instance
-    # lock. Nothing is made the default for pictures — that choice is
-    # the user's, and Settings -> Default Applications is where it is
-    # made.
-    NEXT_MEDIA=$(cat <<EOF
-  ${D}It should appear in rofi as "Hyprforge Media". To open pictures in it
-  from the file manager and everywhere else, choose it in Settings ->
-  Default Applications, or:
-      xdg-mime default hyprforge-media.desktop image/png image/jpeg image/webp image/gif${N}
-EOF
-)
+    # lock. Nothing here makes it the default for pictures — that is
+    # setup's `default-images` item, which records the handler it
+    # replaced so --undo puts it back.
 }
 
 uninstall_media() {
     step "Image viewer: removing"
     remove_file "$PREFIX/hyprforge-media"
-    remove_file "$DESKTOP_DIR/hyprforge-media.desktop"
+    remove_user_path "$DESKTOP_DIR/hyprforge-media.desktop"
     # media.toml is the user's and stays, for the reason uninstall_files
     # gives for files.toml.
 }
@@ -1399,34 +1253,164 @@ install_settings() {
         ok "installed $dst"
     fi
     flush_current
+}
 
-    NEXT_SETTINGS=$(cat <<EOF
-  ${D}It should now appear in rofi as "Hyprforge Settings". If it does not,
-  your launcher may cache entries — log out and back in.
+# ----------------------------------------------------------------- setup
+#
+# Everything this script used to print as "Before this does anything, you
+# need to:" is now `hyprforge-settings --setup`: the same items, the same
+# code as Settings' Set up page, and a record in setup.toml of what each
+# one replaced so --undo can put it back. The installer only decides how
+# to ask:
+#
+#   --dry-run       --setup --list   (states only; a dry run changes nothing)
+#   --yes           --setup --yes    (each item's default, no questions)
+#   a terminal      --setup          (asks per item, [Y/n] or [y/N])
+#   no terminal     --setup --list   (nobody to answer; says how to run it)
+#
+# Its exit status is reported, never fatal: 1 is "an item failed", and
+# every file this run installed is still correct. 2 is a usage error —
+# which is also how a hyprforge-settings from before --setup existed
+# answers, since it refuses any flag it does not know.
 
-  The Settings app is also what fills in the greeter's look: one save in
-  Appearance writes the theme and exports a copy the login screen reads.${N}
-EOF
-)
-    # Nothing above is a pending action — it's what to expect once the
-    # app is installed, not a step with a verifiable done/todo state.
-    # Marking it done unconditionally is what keeps it out of the
-    # outstanding list without inventing a check that would not mean
-    # anything.
-    STATE_SETTINGS=done; REASON_SETTINGS=
+# The hyprforge-settings to ask, on stdout; non-zero when there is none.
+# $PREFIX's first: that is the one this script installs (and the one a
+# real --install just replaced), and a /usr/bin copy from the package
+# may be an older build.
+settings_binary() {
+    if [[ -x $PREFIX/hyprforge-settings ]]; then
+        printf '%s\n' "$PREFIX/hyprforge-settings"
+    else
+        command -v hyprforge-settings 2>/dev/null
+    fi
+}
+
+run_setup() {
+    step "Set up"
+    local bin
+    if ! bin=$(settings_binary); then
+        if has_component settings && $DRY_RUN; then
+            skip "hyprforge-settings is not installed yet, so setup cannot be previewed;"
+            skip "a real --install runs it once Settings is in $PREFIX"
+        else
+            skip "hyprforge-settings is not installed, so nothing was wired in."
+            skip "Install it (./hyprforge --install --settings) and its Set up page, or"
+            skip "hyprforge-settings --setup, enables the services and adds the keybinds."
+        fi
+        return 0
+    fi
+
+    local args=(--setup) bound=()
+    if $DRY_RUN; then
+        args+=(--list); bound=(timeout 30)
+        # The dry run did not install anything, so this is the binary
+        # already on the machine, which a real run might replace.
+        has_component settings && skip "previewing with the installed $bin; a real run uses the new build"
+    elif $ASSUME_YES; then
+        # Unattended, so bounded: every call setup makes is bounded on
+        # its own, and this is the bound on all of them together.
+        args+=(--yes); bound=(timeout 300)
+    elif [[ ! -t 0 ]]; then
+        args+=(--list); bound=(timeout 30)
+        skip "no terminal to answer setup's questions; showing what it would do."
+        skip "Run hyprforge-settings --setup (or open Settings -> Set up) to apply it."
+    fi
+    # Interactive is the one call left unbounded: it is waiting on a
+    # person, not on another process.
+
+    local rc=0
+    ${bound[@]+"${bound[@]}"} "$bin" "${args[@]}" || rc=$?
+    case $rc in
+        0)   if [[ ${args[*]} == *--list* ]]; then
+                 ok "listed what setup would do; nothing was changed"
+             else
+                 # An open Settings window takes a writing request itself
+                 # and exits 0 here — see offer_setup_undo.
+                 ok "setup finished — or, if Settings was open, its Set up page took over"
+             fi ;;
+        1)   warn "setup could not do every item (it says which above); the install itself is complete."
+             warn "Settings -> Set up shows each item's state and can retry it." ;;
+        2)   warn "$bin did not accept ${args[*]} — it may be a build from before --setup existed."
+             warn "Reinstall Settings (./hyprforge --install --settings), then run: hyprforge-settings --setup" ;;
+        124) warn "setup did not finish within its time limit; run hyprforge-settings --setup to see where it stopped" ;;
+        *)   warn "setup exited with status $rc; run hyprforge-settings --setup to see why" ;;
+    esac
+    return 0
+}
+
+# Before --uninstall removes anything: offer to unwire what setup wired,
+# while hyprforge-settings — the only thing that knows what that was —
+# still exists. Afterwards the record in setup.toml outlives the binary
+# that can read it, and the keybinds, default applications and portal
+# line it wrote keep pointing at programs that are gone.
+#
+# Only the items that belong to what is being removed: uninstalling the
+# clipboard alone is not a reason to unwire the lock screen. Removing
+# Settings undoes everything, since nothing would be left to undo it
+# later. And never as a failure — a declined or failed undo leaves the
+# user's config as it was, which is the safe direction for an uninstall
+# to err in.
+#
+# The ids are setup's own (`hyprforge-settings --setup --porcelain`
+# lists them); an item that was never applied is nothing for undo to do.
+setup_ids_for() {
+    case $1 in
+        displayd)  echo service-displayd ;;
+        tray)      echo service-trayd ;;
+        clipboard) echo service-clipd bind-clipboard ;;
+        notif)     echo service-notifd bind-notifications bind-dnd notif-blur ;;
+        emoji)     echo bind-emoji ;;
+        files)     echo bind-files default-folders portal-dialog show-in-folder ;;
+        media)     echo default-images ;;
+        lock)      echo bind-lock idle-lock ;;
+    esac
+}
+
+offer_setup_undo() {
+    local bin ids=() c
+    bin=$(settings_binary) || return 0
+    if ! has_component settings; then
+        for c in ${COMPONENTS[@]+"${COMPONENTS[@]}"}; do
+            # Word-splitting on purpose: each line is a list of ids.
+            # shellcheck disable=SC2207
+            ids+=($(setup_ids_for "$c"))
+        done
+        (( ${#ids[@]} )) || return 0
+    fi
+    local what=${ids[*]:-everything setup changed}
+    step "Set up: undo"
+    if $DRY_RUN; then
+        skip "would offer: $bin --setup --undo ${ids[*]:-(every item, since Settings goes too)}"
+        return 0
+    fi
+    if ! confirm "first undo what Hyprforge's setup changed for this ($what)?"; then
+        skip "left setup's changes in place; hyprforge-settings --setup --undo reverts them while it is installed"
+        return 0
+    fi
+    local rc=0
+    timeout 300 "$bin" --setup --undo ${ids[@]+"${ids[@]}"} || rc=$?
+    case $rc in
+        # An open Settings window takes the request instead (one writer
+        # to shortcuts.toml) and exit 0 cannot tell the two apart — so
+        # say both, rather than claim an undo that may be waiting on a
+        # button.
+        0) ok "setup's undo finished — or, if Settings was open, its Set up page is showing it" ;;
+        2) warn "$bin did not accept --setup --undo — it may predate setup; nothing was undone" ;;
+        *) warn "setup's undo did not finish cleanly (exit $rc); what it could not undo is listed above" ;;
+    esac
+    return 0
 }
 
 uninstall_settings() {
     step "Settings app: removing"
     remove_file "$PREFIX/hyprforge-settings"
     local dst="$DESKTOP_DIR/hyprforge-settings.desktop"
-    if [[ -e $dst ]]; then
-        rm -f "$dst"
+    # Through remove_user_path: this was a bare `rm`, and a dry run
+    # deleted a real launcher entry with it.
+    remove_user_path "$dst"
+    if ! $DRY_RUN; then
         command -v update-desktop-database >/dev/null &&
-            update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
-        ok "removed $dst"
-    else
-        skip "$dst is already gone"
+            timeout 30 update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
     fi
     if $FORCE_CLEANUP; then
         # Everything the app has ever configured lives here. It is the
@@ -1434,8 +1418,7 @@ uninstall_settings() {
         # removal that asks twice: --force-cleanup AND a prompt.
         local config="${XDG_CONFIG_HOME:-$HOME/.config}/hyprforge"
         if [[ -d $config ]] && confirm "remove ALL Hyprforge settings in $config?"; then
-            rm -rf "$config"
-            ok "removed $config"
+            remove_user_path "$config"
         fi
     fi
 }
@@ -1488,11 +1471,17 @@ status_path() {
 # does not exist, so a bare `|| echo` prints twice. Take the output when
 # there is any, and only substitute when there is none.
 status_service() {
-    local scope=$1 unit=$2 note=$3 state
+    local scope=$1 unit=$2 note=$3 state rc=0
     if [[ $scope == --user ]]; then
-        state=$(systemctl --user is-enabled "$unit" 2>/dev/null) || true
+        state=$(timeout 3 systemctl --user is-enabled "$unit" 2>/dev/null) || rc=$?
     else
-        state=$(systemctl is-enabled "$unit" 2>/dev/null) || true
+        state=$(timeout 3 systemctl is-enabled "$unit" 2>/dev/null) || rc=$?
+    fi
+    # A systemctl that gave up (124) or never ran (126/127) has said
+    # nothing, and "not installed" would be a claim it did not make.
+    if (( rc == 124 || rc == 126 || rc == 127 )); then
+        printf '  %s?%s %-24s %ssystemctl did not answer%s\n' "$Y" "$N" "$unit" "$Y" "$N"
+        return 0
     fi
     # systemd says "not-found" for a unit that was never installed. That
     # is its wording for an internal state, not an answer to the question
@@ -1516,12 +1505,64 @@ status_service() {
         # the unit is there, so somebody meant to use it.
         disabled)
             if [[ $scope == --user ]]; then
-                printf '    %ssystemctl --user enable --now %s%s\n' "$D" "$unit" "$N"
+                # Setup is what enables a suite service now, and records
+                # it so --undo can reverse it; see "Set up" below.
+                printf '    %shyprforge-settings --setup (or: systemctl --user enable --now %s)%s\n' "$D" "$unit" "$N"
             else
                 printf '    %ssudo systemctl enable --now %s%s\n' "$D" "$unit" "$N"
             fi
             ;;
     esac
+}
+
+# What setup would say about each of its items, from
+# `hyprforge-settings --setup --porcelain`: one `<id>\t<state>\t<reason>`
+# line per item, state one of done / todo / unavailable / unknown.
+#
+# The four stay four. `unavailable` (the component is not installed —
+# nothing to do, nothing wrong) is dim; `unknown` (the check could not
+# run) is marked as its own thing in yellow, never folded into done or
+# todo — the same rule as the next-step checks above. A line in a state
+# this script does not know is shown as exactly that, not guessed at:
+# it means Settings is newer than this script.
+status_setup() {
+    step "Set up"
+    local bin
+    if ! bin=$(settings_binary); then
+        skip "hyprforge-settings is not installed, so there is no setup to ask"
+        return 0
+    fi
+    local out rc=0
+    out=$(timeout 30 "$bin" --setup --porcelain 2>/dev/null) || rc=$?
+    case $rc in
+        0) ;;
+        2)   warn "$bin does not know --setup (a build from before it existed?)"; return 0 ;;
+        124) warn "$bin --setup --porcelain did not answer within 30s"; return 0 ;;
+        *)   warn "$bin --setup --porcelain failed (exit $rc)"; return 0 ;;
+    esac
+    if [[ -z $out ]]; then
+        # Not "nothing to set up": --porcelain always lists every item,
+        # so empty output means something answered that was not setup.
+        warn "$bin --setup --porcelain answered with no items — could not read setup's state"
+        return 0
+    fi
+
+    local id state reason todo=0 mark colour
+    while IFS=$'\t' read -r id state reason; do
+        [[ -n $id ]] || continue
+        case $state in
+            done)        mark=$G✓ colour=$N ;;
+            todo)        mark=$Y! colour=$N; (( todo += 1 )) ;;
+            unavailable) mark=$D· colour=$D ;;
+            unknown)     mark=$Y? colour=$Y; state="could not check" ;;
+            *)           mark=$Y? colour=$Y; state="unrecognised state '$state'" ;;
+        esac
+        printf '  %s%s %-24s %s%s%s%s\n' "$mark" "$N" "$id" "$colour" "$state" \
+            "${reason:+: $reason}" "$N"
+    done <<<"$out"
+    if (( todo )); then
+        printf '    %shyprforge-settings --setup, or Settings -> Set up%s\n' "$D" "$N"
+    fi
 }
 
 # What is installed, in one line, so `--status` answers the question it
@@ -1597,6 +1638,8 @@ show_status() {
     status_service --user hyprforge-clipd "clipboard history is being recorded"
     status_service --user notifd "notifications are being shown"
 
+    status_setup
+
     step "Session"
     if command -v loginctl >/dev/null && [[ -n ${XDG_SESSION_ID:-} ]]; then
         loginctl show-session "$XDG_SESSION_ID" \
@@ -1636,11 +1679,23 @@ case $ACTION in
         has_component media && install_media
         has_component mime && install_mime
         has_component settings && install_settings
+        # After every component, so setup sees all of them installed and
+        # does not report as unavailable what this run just put in place;
+        # before the greeter's step, so that is still the last thing read.
+        run_setup
         print_next_steps
         step "Done"
         $DRY_RUN && warn "this was a dry run; nothing changed"
         ;;
     uninstall)
+        # The refusals first. An uninstall that is going to stop at
+        # "greetd is still enabled" must stop before setup's undo has
+        # unwired the user's config, not after — or the config is gone
+        # and the binaries are all still there.
+        has_component greeter && greeter_removable
+        has_component lock && lock_removable
+        # Then the undo, while hyprforge-settings still exists to do it.
+        offer_setup_undo
         has_component greeter  && uninstall_greeter
         has_component lock     && uninstall_lock
         has_component clipboard && uninstall_clipboard

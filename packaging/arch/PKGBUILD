@@ -81,6 +81,51 @@ _bin() {
   install -Dm755 "$srcdir/target/release/$1" "$pkgdir/usr/bin/$1"
 }
 
+# _unit <unit file> <ExecStart command>
+#
+# A systemd user unit, with its ExecStart pointed at /usr/bin. The units
+# in the components' packaging/ directories are written for the README's
+# manual route and start `%h/.cargo/bin/...`; installed verbatim to
+# /usr/lib/systemd/user they fail every start with status=203/EXEC, the
+# binary sitting in /usr/bin where the unit never looks. That shipped
+# unnoticed only because nothing ever enabled the packaged units. The
+# presets below enable them for every user, so it has to be right now.
+# The installer makes the same rewrite for its own $PREFIX.
+#
+# check.sh's "Every package is a repository" step reads these calls: the
+# command's first word must be a binary the same package installs.
+_unit() {
+  local dst="$pkgdir/usr/lib/systemd/user/${1##*/}"
+  install -d "${dst%/*}"
+  sed "s|^ExecStart=.*|ExecStart=/usr/bin/$2|" "$1" > "$dst"
+  chmod 644 "$dst"
+  # A unit with no ExecStart= line would come out unchanged and wrong,
+  # and sed would not say so.
+  grep -qx "ExecStart=/usr/bin/$2" "$dst" ||
+    { echo "_unit: $1 has no ExecStart= line to rewrite" >&2; return 1; }
+}
+
+# _preset <package> <unit>
+#
+# "Enable this unit for every user", as systemd preset policy, at
+# /usr/lib/systemd/user-preset/80-<package>.preset. The file is policy,
+# not action: nothing reads it until `systemctl --global preset <unit>`
+# runs, which the package's .install script does in post_install — and
+# only there, never on upgrade, because `preset` on upgrade would
+# re-enable a unit the administrator has since disabled. 80 sorts before
+# systemd's own 90-systemd.preset, and the first matching line wins.
+#
+# systemd.preset(5) suggests leaving presets to the distribution rather
+# than the package. Arch has no user-preset policy of its own to defer
+# to, so the package carries one, at a priority any file the
+# administrator puts in /etc/systemd/user-preset still overrides.
+_preset() {
+  local dst="$pkgdir/usr/lib/systemd/user-preset/80-$1.preset"
+  install -d "${dst%/*}"
+  printf 'enable %s\n' "$2" > "$dst"
+  chmod 644 "$dst"
+}
+
 # The licence, where Arch expects it: an MIT package has to carry its
 # text, since there is no shared copy in /usr/share/licenses/common to
 # point at. notif keeps its own file — it came into the suite as a
@@ -91,13 +136,30 @@ _license() {
 
 package_hyprforge-settings() {
   pkgdesc="Settings application for Hyprland"
+  # Prints one line pointing at the Set up page, which does what a
+  # package cannot: keybinds, idle locking, default applications and the
+  # open/save dialog all live in a *user's* config, and a scriptlet runs
+  # as root with no user to write them for.
+  install=hyprforge-settings.install
   depends=(wayland libxkbcommon)
   optdepends=(
     'hyprforge-displayd: monitor arrangement that remembers your setups'
     'hyprforge-tray: tray icons for Wi-Fi, Bluetooth, keep awake and night light'
     'hyprpaper: wallpaper'
     'hyprsunset: night light'
-    'hypridle: idle timeouts'
+    # Set up's "lock when idle" writes hypridle's lock_cmd; without
+    # hypridle the item says it is unavailable rather than writing a
+    # config nothing reads.
+    'hypridle: idle timeouts, and locking when idle (Set up)'
+    # What Set up wires each sibling into. Every one is optional: an item
+    # whose component is not installed is reported unavailable, never
+    # attempted — see "every component runs alone" in CLAUDE.md.
+    'hyprforge-lock: the lock screen Set up binds and points hypridle at'
+    'hyprforge-clipboard: clipboard history, which Set up binds to Super+V'
+    'hyprforge-emojimenu: the emoji picker, which Set up binds to Super+.'
+    'hyprforge-notif: notifications, whose center Set up binds to Super+N'
+    'hyprforge-files: the file manager Set up makes the default for folders'
+    'hyprforge-media: the viewer Set up makes the default for pictures'
   )
   cd "$startdir/../.."
   _bin hyprforge-settings
@@ -120,6 +182,10 @@ package_hyprforge-files() {
     'udisks2: the Devices section — mounting and ejecting drives'
     'gvfs: Connect to Server, for sftp:// and ftp:// addresses'
     'gvfs-smb: Connect to Server, for smb:// (Windows) shares'
+    # The open/save dialog is a portal backend; with no portal there is
+    # nothing to ask for it, and Settings -> Set up's "open/save dialog"
+    # item has no portals.conf to write that anything would read.
+    'xdg-desktop-portal: other applications using Files as their open/save dialog'
   )
   cd "$startdir/../.."
   _bin hyprforge-files
@@ -136,8 +202,11 @@ package_hyprforge-files() {
   # org.freedesktop.FileManager1 — "Show in Folder" from other
   # applications. Named after this package rather than the bus name, so
   # it never collides with another file manager's file of the same name;
-  # with two in /usr/share the bus picks one, and the installer's copy in
-  # the user's own services directory is the way to be sure it is this.
+  # with two in /usr/share the bus picks one. A copy in the user's own
+  # ~/.local/share/dbus-1/services is read first and settles it — that
+  # is Settings -> Set up's "Show in folder" item (and, for a source
+  # install, the installer's). This file stays as the fallback for a
+  # user who has not run Set up and has no other file manager.
   install -Dm644 crates/hyprforge-files/packaging/hyprforge-files.FileManager1.service \
     "$pkgdir/usr/share/dbus-1/services/hyprforge-files.FileManager1.service"
   _license
@@ -188,17 +257,19 @@ package_hyprforge-greet() {
 
 package_hyprforge-displayd() {
   pkgdesc="Display daemon that remembers monitor layouts"
+  install=hyprforge-displayd.install
   depends=(wayland)
   cd "$startdir/../.."
   _bin hyprforge-displayd
   _bin hyprforge-displayctl
-  install -Dm644 crates/hyprforge-displayd/packaging/hyprforge-displayd.service \
-    "$pkgdir/usr/lib/systemd/user/hyprforge-displayd.service"
+  _unit crates/hyprforge-displayd/packaging/hyprforge-displayd.service "hyprforge-displayd run"
+  _preset hyprforge-displayd hyprforge-displayd.service
   _license
 }
 
 package_hyprforge-tray() {
   pkgdesc="Tray icons for Wi-Fi, Bluetooth, keep awake and night light"
+  install=hyprforge-tray.install
   # wayland/libxkbcommon: hyprforge-traymenu draws its own right-click
   # menu (com.canonical.dbusmenu is no longer served — see
   # hyprforge-tray's own module doc), a layer-shell popup on the same
@@ -219,19 +290,20 @@ package_hyprforge-tray() {
   cd "$startdir/../.."
   _bin hyprforge-trayd
   _bin hyprforge-traymenu
-  install -Dm644 crates/hyprforge-tray/packaging/hyprforge-trayd.service \
-    "$pkgdir/usr/lib/systemd/user/hyprforge-trayd.service"
+  _unit crates/hyprforge-tray/packaging/hyprforge-trayd.service hyprforge-trayd
+  _preset hyprforge-tray hyprforge-trayd.service
   _license
 }
 
 package_hyprforge-clipboard() {
   pkgdesc="Clipboard history with a popup at the pointer"
+  install=hyprforge-clipboard.install
   depends=(wayland libxkbcommon)
   cd "$startdir/../.."
   _bin hyprforge-clipd
   _bin hyprforge-clipmenu
-  install -Dm644 crates/hyprforge-clipboard/packaging/hyprforge-clipd.service \
-    "$pkgdir/usr/lib/systemd/user/hyprforge-clipd.service"
+  _unit crates/hyprforge-clipboard/packaging/hyprforge-clipd.service hyprforge-clipd
+  _preset hyprforge-clipboard hyprforge-clipd.service
   _license
 }
 
@@ -258,6 +330,7 @@ package_hyprforge-emojimenu() {
 
 package_hyprforge-notif() {
   pkgdesc="Notification daemon and notification center, with notifctl to drive them"
+  install=hyprforge-notif.install
   # Nothing but libc: notif's Wayland and D-Bus clients are pure Rust,
   # and `ldd notifd` names no libwayland, libxkbcommon or libdbus. The
   # standalone notif-git package listed `wayland` without needing it.
@@ -271,8 +344,11 @@ package_hyprforge-notif() {
   cd "$startdir/../.."
   _bin notifd
   _bin notifctl
-  install -Dm644 crates/hyprforge-notif/notifd.service \
-    "$pkgdir/usr/lib/systemd/user/notifd.service"
+  _unit crates/hyprforge-notif/notifd.service notifd
+  # The preset ships unconditionally; whether it is *applied* is the
+  # .install script's call, and it holds back when another notification
+  # daemon is installed — see hyprforge-notif.install.
+  _preset hyprforge-notif notifd.service
   _license crates/hyprforge-notif/LICENSE
 }
 

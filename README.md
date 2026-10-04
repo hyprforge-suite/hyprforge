@@ -544,11 +544,34 @@ the copy landed. That last check is not ceremony — a stale binary in
 `/usr/local/bin` looks exactly like a code change that did not work, and
 `--status` is the fastest way to rule it out.
 
+`--install` ends by running `hyprforge-settings --setup` when Settings is
+installed. It wires the suite into the desktop: it enables the daemons'
+user services, binds the popups, points hypridle's `lock_cmd` at the
+lock screen, sets Files and Media as default applications, and sets up
+the open/save dialog. It asks about each item. Under `--yes` it applies
+each item's default, and under `--dry-run` it only lists what it would
+do. It is the same code as the Settings app's **Set up** page, and it
+records what it changed, so `hyprforge-settings --setup --undo` puts it
+back. `--uninstall` offers that undo before it removes anything, and
+`--status` shows each item's state.
+
 It deliberately does **not** install `/etc/greetd/config.toml` or enable
 `greetd`. That file decides which VT the machine logs in on, so it is the
 one step that stays manual; see `crates/hyprforge-greet/INSTALL.md`.
 
-## Installing the systemd unit
+From the Arch packages (`packaging/arch/PKGBUILD`), the four daemons —
+displayd, trayd, clipd and notifd — are enabled for every user on
+install, through systemd presets. notifd is the exception when dunst,
+mako or swaync is installed: only one notification daemon can run, so
+its package leaves that choice to the Set up page. The Settings package
+points at the Set up page for the rest. Nothing in the user's own
+config is written as root.
+
+## Installing the systemd unit by hand
+
+Only for a build installed some other way, such as `cargo install`.
+`./hyprforge` and the packages both install the unit, and setup enables
+it.
 
 ```
 mkdir -p ~/.config/systemd/user

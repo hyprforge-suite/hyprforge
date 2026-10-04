@@ -603,6 +603,82 @@ for package in packages:
     if body and not re.search(r"^\s*_license\b", body.group(1), re.M):
         problems.append(f"{package}: installs no licence (call _license in package_{package})")
 
+# The daemons come on with their packages: each ships a systemd preset
+# and an `install=` scriptlet that applies it. Every piece of that is a
+# name in one file that must match a name in another, and none of it
+# fails at build time — makepkg packages a scriptlet naming a unit that
+# does not exist, and `systemctl --global preset` on a unit nobody
+# installed exits quietly. So, per package:
+#   * every `install=` names a file next to the PKGBUILD;
+#   * every `_unit <src> <cmd>` names a unit file that exists, and starts
+#     a binary this same package installs (the units shipped for three
+#     releases starting ~/.cargo/bin, which the packages never install);
+#   * every `_preset <name> <unit>` is named after its package and
+#     enables a unit this package ships — and the package has a
+#     scriptlet, or the preset is policy nobody ever applies;
+#   * a scriptlet's `_unit=` is a unit this package ships, and it only
+#     presets in post_install: `preset` on upgrade re-enables a unit the
+#     administrator disabled.
+# And no scriptlet in packaging/arch is left that no package names.
+named_scripts = set()
+for package in packages:
+    body = re.search(
+        rf"^package_{re.escape(package)}\(\)\s*\{{(.*?)^\}}",
+        text,
+        re.S | re.M,
+    )
+    if not body:
+        continue
+    body = body.group(1)
+    package_bins = set(re.findall(r"^\s*_bin\s+([a-z0-9][a-z0-9-]*)", body, re.M))
+
+    units = set()
+    for src, cmd in re.findall(r'^\s*_unit\s+(\S+)\s+("[^"]*"|\S+)', body, re.M):
+        name = src.rsplit("/", 1)[-1]
+        units.add(name)
+        if not Path(src).is_file():
+            problems.append(f"{package}: _unit names {src}, which does not exist")
+        first = cmd.strip('"').split()[0]
+        if first not in package_bins:
+            problems.append(
+                f"{package}: {name} would start /usr/bin/{first}, which this package does not install"
+            )
+    # A unit installed the old way, verbatim, keeps whatever ExecStart
+    # its source had — the exact bug _unit exists to prevent.
+    for verbatim in re.findall(r"usr/lib/systemd/user/([\w.@-]+\.service)", body):
+        problems.append(f"{package}: installs {verbatim} verbatim — use _unit so ExecStart points at /usr/bin")
+
+    presets = re.findall(r"^\s*_preset\s+(\S+)\s+(\S+)", body, re.M)
+    for name, unit in presets:
+        if name != package:
+            problems.append(f"{package}: preset 80-{name}.preset is not named after its package")
+        if unit not in units:
+            problems.append(f"{package}: its preset enables {unit}, which this package does not ship")
+
+    script = re.search(r"^\s*install=(\S+)", body, re.M)
+    if presets and not script:
+        problems.append(f"{package}: ships a preset but no install= scriptlet to apply it")
+    if not script:
+        continue
+    named_scripts.add(script.group(1))
+    path = PKGBUILD.parent / script.group(1)
+    if not path.is_file():
+        problems.append(f"{package}: install={script.group(1)}, which is not in {PKGBUILD.parent}")
+        continue
+    script_text = path.read_text()
+    unit = re.search(r"^_unit=(\S+)", script_text, re.M)
+    if presets and not unit:
+        problems.append(f"{package}: {path.name} names no _unit= to preset")
+    if unit and unit.group(1) not in units:
+        problems.append(f"{package}: {path.name} presets {unit.group(1)}, which this package does not ship")
+    upgrade = re.search(r"^post_upgrade\(\)\s*\{(.*?)^\}", script_text, re.S | re.M)
+    if upgrade and "preset" in upgrade.group(1):
+        problems.append(f"{package}: {path.name} presets in post_upgrade, which re-enables what an administrator disabled")
+
+for orphan in sorted(p.name for p in PKGBUILD.parent.glob("*.install")):
+    if orphan not in named_scripts:
+        problems.append(f"{orphan}: no package names it with install=")
+
 print(f"CHECKED {checked}")
 for problem in problems:
     print(f"PROBLEM {problem}")
@@ -615,6 +691,7 @@ PYEOF
         sed -n 's/^PROBLEM /    • /p' <<<"$output"
     else
         ok "$(sed -n 's/^CHECKED //p' <<<"$output") package(s) each build from one crate directory, and every package carries its licence"
+        ok "every unit starts a binary its package installs; every preset and scriptlet names a unit its package ships"
     fi
 fi
 
@@ -626,12 +703,82 @@ step "The installer can plan every component"
 # popups had moved into their parent crates as second binaries, the
 # installer kept building them by their old crate names, and nobody had
 # run the dry run since. Running it here is what makes the guard a check.
-if output=$(./hyprforge --install --all --dry-run </dev/null 2>&1); then
+#
+# Against a scratch home, like the step below: the install now ends by
+# asking whatever hyprforge-settings is installed for `--setup --list`,
+# and that reads a home directory — never the real one from a check.
+scratch_home=$(mktemp -d)
+if output=$(HOME="$scratch_home" XDG_CONFIG_HOME="$scratch_home/.config" \
+        XDG_DATA_HOME="$scratch_home/.local/share" XDG_STATE_HOME="$scratch_home/.local/state" \
+        XDG_CACHE_HOME="$scratch_home/.cache" \
+        timeout 120 ./hyprforge --install --all --dry-run </dev/null 2>&1); then
     ok "every component's install plan resolves (dry run)"
 else
     bad "./hyprforge --install --all --dry-run fails"
     grep -E 'error|die' <<<"$output" | head -5 | sed 's/^/    • /'
 fi
+rm -rf "$scratch_home"
+
+step "The installer's dry run touches nothing"
+# A dry run that deletes something is worse than no dry run: it is the
+# command you run *because* you do not want anything touched. One did —
+# `uninstall_settings` removed the launcher entry with a bare `rm`, and
+# `confirm` answered yes under --dry-run, which put
+# `--uninstall --settings --force-cleanup --dry-run` one prompt away from
+# `rm -rf ~/.config/hyprforge`. Nothing caught it because every check of
+# the dry run read its *output*, and output is what a dry run is honest
+# about by construction; the question is what it does to the disk.
+#
+# So: a scratch home holding a fixture for every user-scope path any
+# uninstall touches, every component's dry-run uninstall run against it
+# with --force-cleanup (one at a time, because the greeter's and the
+# lock's refusals stop a combined run before the others are reached —
+# a refusal is fine here, a write is not), and the tree compared byte
+# for byte, with modes and mtimes, before and after. Files under $PREFIX
+# and /etc are outside it; those go through run_root, which a dry run
+# only prints.
+scratch_home=$(mktemp -d)
+for fixture in \
+    .config/systemd/user/hyprforge-displayd.service \
+    .config/systemd/user/hyprforge-trayd.service \
+    .config/systemd/user/hyprforge-clipd.service \
+    .config/systemd/user/notifd.service \
+    .config/hyprforge/display-profiles.toml \
+    .config/hyprforge/emojimenu.toml \
+    .config/hyprforge/setup.toml \
+    .config/hyprforge/clipboard/history \
+    .config/notif/config.toml \
+    .local/share/applications/hyprforge-settings.desktop \
+    .local/share/applications/hyprforge-files.desktop \
+    .local/share/applications/hyprforge-media.desktop \
+    .local/share/dbus-1/services/org.freedesktop.FileManager1.service \
+    .local/share/dbus-1/services/org.freedesktop.impl.portal.desktop.hyprforge.service; do
+    mkdir -p "$scratch_home/$(dirname "$fixture")"
+    printf 'fixture %s\n' "$fixture" > "$scratch_home/$fixture"
+done
+snapshot() {
+    (cd "$scratch_home" && find . -printf '%p %y %m %s %T@\n' | sort &&
+        find . -type f -exec sha256sum {} + | sort)
+}
+before=$(snapshot)
+refused=0
+for component in greeter lock displayd tray clipboard notif emoji files media mime settings; do
+    HOME="$scratch_home" XDG_CONFIG_HOME="$scratch_home/.config" \
+        XDG_DATA_HOME="$scratch_home/.local/share" XDG_STATE_HOME="$scratch_home/.local/state" \
+        XDG_CACHE_HOME="$scratch_home/.cache" \
+        timeout 60 ./hyprforge --uninstall "--$component" --force-cleanup --dry-run \
+        </dev/null >/dev/null 2>&1 || (( refused += 1 ))
+done
+after=$(snapshot)
+if [[ $before == "$after" ]]; then
+    # The refusals are named so a run where *every* uninstall stopped at
+    # a guard is not mistaken for one that walked every removal path.
+    ok "11 dry-run uninstalls with --force-cleanup left a scratch home unchanged ($refused stopped at a guard first)"
+else
+    bad "a dry-run uninstall changed files in the home directory it was given"
+    diff <(printf '%s\n' "$before") <(printf '%s\n' "$after") | head -10 | sed 's/^/    • /'
+fi
+rm -rf "$scratch_home"
 
 step "Docs name things that exist"
 # The half of keeping docs current that a machine can do. The other half
