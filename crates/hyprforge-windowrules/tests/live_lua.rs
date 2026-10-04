@@ -12,8 +12,11 @@
 //! only to a temp dir, sources that file into the *running* compositor via
 //! `hyprctl keyword`-free means (see below), and never edits `hyprland.lua`.
 
-use hyprforge_windowrules::codegen::generate;
-use hyprforge_windowrules::model::{Effects, Matcher, Opacity, Rule, Workspace, WorkspaceRule};
+use hyprforge_windowrules::codegen::generate_all;
+use hyprforge_windowrules::model::{
+    Effects, LayerRule, Matcher, Opacity, Rule, Workspace, WorkspaceRule,
+};
+use hyprforge_windowrules::storage::Rules;
 use std::process::Command;
 
 /// Every field a workspace rule can emit. The workspace is named rather than
@@ -97,6 +100,18 @@ fn every_supported_field() -> Vec<Rule> {
     ]
 }
 
+/// Every field a layer rule can emit — the shape Setup writes for notif's
+/// blur. The namespace matches nothing a real session has open, so the
+/// rule cannot change anything on screen while it is loaded.
+fn every_supported_layer_rule() -> Vec<LayerRule> {
+    vec![LayerRule {
+        name: "hyprforge-live-lua-probe-layer".to_string(),
+        enabled: true,
+        namespace: "^hyprforge-live-lua-probe$".to_string(),
+        blur: Some(true),
+    }]
+}
+
 fn config_errors() -> String {
     let out = Command::new("hyprctl")
         .arg("configerrors")
@@ -127,7 +142,11 @@ fn hyprland_accepts_every_field_the_codegen_emits() {
     let dir = std::env::temp_dir().join("hyprforge-live-lua");
     std::fs::create_dir_all(&dir).expect("could not create temp dir");
     let path = dir.join("probe.lua");
-    let lua = generate(&every_supported_field(), &every_supported_workspace_rule());
+    let lua = generate_all(&Rules {
+        rules: every_supported_field(),
+        workspace_rules: every_supported_workspace_rule(),
+        layer_rules: every_supported_layer_rule(),
+    });
     std::fs::write(&path, &lua).expect("could not write probe file");
     eprintln!("--- generated ---\n{lua}");
 

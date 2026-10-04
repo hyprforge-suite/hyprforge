@@ -93,7 +93,8 @@ Hyprland-facing
                             hyprland.lua setup, monitor geometry, and the
                             D-Bus proxy for displayd
   hyprforge-displayd/      daemon + CLI (hyprforge-displayd, hyprforge-displayctl)
-  hyprforge-windowrules/   TOML rule storage, Lua codegen
+  hyprforge-windowrules/   TOML rule storage, Lua codegen — window,
+                            workspace and layer rules
   hyprforge-shortcuts/     TOML shortcut storage, Lua codegen, live conflict
                             detection against hyprctl binds
   hyprforge-input/         the input option catalog (51 options)
@@ -104,6 +105,14 @@ Hyprland-facing
   hyprforge-ecosystem/     hyprpaper / hyprsunset / hypridle config
   hyprforge-session/       autostart programs and environment variables
   hyprforge-system/        the misc/debug/render catalog
+  hyprforge-setup/         the steps that finish an install — services,
+                            keybinds, the idle lock, notification blur,
+                            default apps, the open/save dialog — each
+                            checked, applied through the module that owns
+                            its file, and recorded in setup.toml so it can
+                            be undone. Behind a System trait with a mock,
+                            so no test enables a real service. The
+                            Settings app's --setup and Set up page.
   hyprforge-lua-import/    sandboxed mlua evaluator that imports hand-written
                             hl.bind()/hl.window_rule()/hl.monitor() calls —
                             the only crate depending on mlua

@@ -17,6 +17,25 @@
 use hyprforge_core::hyprlang;
 use serde::{Deserialize, Serialize};
 
+/// The canonical `idle.toml` behind the Idle & lock page.
+///
+/// Public, like [`crate::wallpaper::settings_path`], because two writers
+/// share it: the Settings page and `hyprforge-setup`'s "lock when idle"
+/// item. Two private copies of a path are two places for it to drift.
+pub fn settings_path() -> std::path::PathBuf {
+    hyprforge_core::paths::hyprforge_config_dir().join("idle.toml")
+}
+
+/// The generated `idle.conf` the settings are rendered into.
+pub fn generated_path() -> std::path::PathBuf {
+    hyprforge_core::paths::hypr_hyprforge_dir().join("idle.conf")
+}
+
+/// hypridle's own config, which sources [`generated_path`].
+pub fn hypridle_conf_path() -> std::path::PathBuf {
+    hyprforge_core::paths::hypr_config_dir().join("hypridle.conf")
+}
+
 /// Session-wide commands and inhibitor handling.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct General {

@@ -228,13 +228,27 @@ pub fn idle(
     target: &Path,
     settings: &idle::Settings,
 ) -> Result<Applied, ApplyError> {
-    write_and_source(generated, target, &idle::generate(settings))?;
+    write_idle(generated, target, settings)?;
     match running("hypridle") {
         Some(true) => {}
         Some(false) => return Ok(Applied::DaemonNotRunning),
         None => return Ok(Applied::DaemonUnknown),
     }
     Ok(Applied::NeedsRestart)
+}
+
+/// [`idle`](idle())'s write half alone: render, write, make sure
+/// `hypridle.conf` sources it — and ask nothing about the daemon.
+///
+/// For a caller that answers "is hypridle running" itself, through a seam
+/// its tests can replace (`hyprforge-setup`'s `System`), rather than
+/// through the `pgrep` [`idle`](idle()) runs.
+pub fn write_idle(
+    generated: &Path,
+    target: &Path,
+    settings: &idle::Settings,
+) -> Result<(), ApplyError> {
+    write_and_source(generated, target, &idle::generate(settings))
 }
 
 /// Restarts hypridle, on explicit request.

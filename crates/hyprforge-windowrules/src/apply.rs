@@ -5,7 +5,7 @@
 //! This crate contributes only what's specific to window rules: what to
 //! generate, and what an empty set of them looks like.
 
-use crate::codegen::generate;
+use crate::codegen::{generate, generate_all};
 use crate::storage::Rules;
 use std::path::Path;
 
@@ -14,7 +14,7 @@ pub use hyprforge_core::apply_lua::ApplyError;
 pub fn apply(lua_path: &Path, rules: &Rules) -> Result<(), ApplyError> {
     hyprforge_core::apply_lua::apply(hyprforge_core::apply_lua::GeneratedFile {
         path: lua_path,
-        contents: &generate(&rules.rules, &rules.workspace_rules),
+        contents: &generate_all(rules),
         empty: &generate(&[], &[]),
         subject: "rules",
     })

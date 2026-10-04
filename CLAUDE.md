@@ -841,6 +841,10 @@ hyprforge-video     play a video into memory through libmpv (dlopen'd, so mpv
                     is optional), and a video's first real frame via ffmpeg
 hyprforge-ui        the iced layer; knows nothing about Hyprland
 hyprforge-core      Hyprland config machinery — a new app should never need it
+hyprforge-setup     the steps that finish an install, each checked, applied and
+                    undone through the module that owns its file; above
+                    shortcuts, windowrules, ecosystem, session and mime, below
+                    the Settings app that renders it
 ```
 
 `hyprforge-core` re-exports `hyprforge-process` as `hyprforge_core::command` so

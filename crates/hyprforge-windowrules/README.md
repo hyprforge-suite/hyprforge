@@ -8,9 +8,11 @@ Rules screen, and the `window-rules.lua` it generates.
 Hyprforge-internal, published so the suite's applications can build
 from crates.io; the API follows the suite, not semver. A `Rule` is a
 `Matcher` (which windows) and `Effects` (what happens to them); a
-`WorkspaceRule` pins a workspace to a monitor. Both are stored in one
-TOML file and rendered as `hl.window_rule` / `hl.workspace_rule` calls
-into a file the user's `hyprland.lua` `require()`s. Nothing here draws.
+`WorkspaceRule` pins a workspace to a monitor; a `LayerRule` blurs
+behind a layer surface such as a notification popup. All three are
+stored in one TOML file and rendered as `hl.window_rule` /
+`hl.workspace_rule` / `hl.layer_rule` calls into a file the user's
+`hyprland.lua` `require()`s. Nothing here draws.
 
 # Two decisions someone would otherwise reverse
 

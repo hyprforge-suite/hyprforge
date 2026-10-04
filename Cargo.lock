@@ -2324,6 +2324,7 @@ dependencies = [
  "hyprforge-paths",
  "hyprforge-power",
  "hyprforge-session",
+ "hyprforge-setup",
  "hyprforge-shortcuts",
  "hyprforge-system",
  "hyprforge-tray",
@@ -2339,6 +2340,27 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zbus",
+]
+
+[[package]]
+name = "hyprforge-setup"
+version = "0.1.7"
+dependencies = [
+ "hyprforge-appearance",
+ "hyprforge-core",
+ "hyprforge-ecosystem",
+ "hyprforge-input",
+ "hyprforge-mime",
+ "hyprforge-paths",
+ "hyprforge-process",
+ "hyprforge-session",
+ "hyprforge-shortcuts",
+ "hyprforge-system",
+ "hyprforge-windowrules",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.19",
+ "toml",
 ]
 
 [[package]]

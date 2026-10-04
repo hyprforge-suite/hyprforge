@@ -1,5 +1,7 @@
-use hyprforge_windowrules::model::{Effects, Matcher, Opacity, Rule, Workspace, WorkspaceRule};
-use hyprforge_windowrules::{codegen::generate, storage};
+use hyprforge_windowrules::model::{
+    Effects, LayerRule, Matcher, Opacity, Rule, Workspace, WorkspaceRule,
+};
+use hyprforge_windowrules::{codegen::generate, codegen::generate_all, storage};
 
 fn discord_rule() -> Rule {
     Rule {
@@ -338,7 +340,7 @@ fn toml_round_trip_preserves_order_and_fields() {
         r
     }];
 
-    let stored = storage::Rules { rules: rules.clone(), workspace_rules: Vec::new() };
+    let stored = storage::Rules { rules: rules.clone(), ..Default::default() };
     storage::save(&path, &stored).unwrap();
     let loaded = storage::load(&path).unwrap();
     assert_eq!(loaded.rules, rules);
@@ -407,6 +409,7 @@ fn both_rule_kinds_round_trip_through_one_toml() {
             default: true,
             persistent: true,
         }],
+        ..Default::default()
     };
     storage::save(&path, &stored).unwrap();
     assert_eq!(storage::load(&path).unwrap(), stored);
@@ -425,4 +428,76 @@ fn a_file_without_workspace_rules_still_loads() {
     let loaded = storage::load(&path).unwrap();
     assert_eq!(loaded.rules.len(), 1);
     assert!(loaded.workspace_rules.is_empty());
+}
+
+fn notif_blur() -> LayerRule {
+    LayerRule {
+        name: "hyprforge-notif-blur".to_string(),
+        enabled: true,
+        namespace: "^notif$".to_string(),
+        blur: Some(true),
+    }
+}
+
+/// The exact shape a live Hyprland 0.56 accepted. A field beyond these
+/// three rejects the whole file, window rules and all.
+#[test]
+fn a_layer_rule_renders_as_the_lua_form_hyprland_accepts() {
+    let stored = storage::Rules { layer_rules: vec![notif_blur()], ..Default::default() };
+    let lua = generate_all(&stored);
+    assert!(
+        lua.contains(
+            "hl.layer_rule({ name = [[hyprforge-notif-blur]], match = { namespace = [[^notif$]] }, blur = true })"
+        ),
+        "got: {lua}"
+    );
+}
+
+/// Whether `hl.layer_rule` takes `enabled` is unverified, and an unknown
+/// field fails the file, so a disabled rule is simply not written.
+#[test]
+fn a_disabled_layer_rule_is_not_emitted() {
+    let mut rule = notif_blur();
+    rule.enabled = false;
+    let stored = storage::Rules { layer_rules: vec![rule], ..Default::default() };
+    assert!(!generate_all(&stored).contains("hl.layer_rule"));
+}
+
+/// Window rules come first and layer rules after, in one file.
+#[test]
+fn generate_all_keeps_everything_generate_writes() {
+    let stored = storage::Rules {
+        rules: vec![discord_rule()],
+        layer_rules: vec![notif_blur()],
+        ..Default::default()
+    };
+    let all = generate_all(&stored);
+    assert!(all.starts_with(&generate(&stored.rules, &stored.workspace_rules)), "got: {all}");
+    assert!(all.find("hl.window_rule") < all.find("hl.layer_rule"), "got: {all}");
+}
+
+/// Layer rules are written by Setup, not the Window Rules page — they have
+/// to survive a load and save, or that page's next save deletes them.
+#[test]
+fn layer_rules_round_trip_through_the_toml() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("window-rules.toml");
+    let stored = storage::Rules {
+        rules: vec![discord_rule()],
+        layer_rules: vec![notif_blur()],
+        ..Default::default()
+    };
+    storage::save(&path, &stored).unwrap();
+    assert_eq!(storage::load(&path).unwrap(), stored);
+}
+
+/// A file with no layer rules is written exactly as it was before they
+/// existed — no empty `layer_rule` key appears in anybody's TOML.
+#[test]
+fn no_layer_rules_leaves_the_toml_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("window-rules.toml");
+    let stored = storage::Rules { rules: vec![discord_rule()], ..Default::default() };
+    storage::save(&path, &stored).unwrap();
+    assert!(!std::fs::read_to_string(&path).unwrap().contains("layer_rule"));
 }

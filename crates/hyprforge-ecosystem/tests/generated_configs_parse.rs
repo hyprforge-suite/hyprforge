@@ -287,3 +287,49 @@ fn the_empty_generated_files_parse() {
         );
     }
 }
+
+/// What Setup's "lock when idle" relies on: a user's own `hypridle.conf`
+/// that already has a `general { }` block, followed by the `source =`
+/// line pulling in a generated file with a second one.
+///
+/// hyprlang has no rule against a category appearing twice — each block
+/// assigns its keys again, and the later assignment stands, which is why
+/// the source line goes at the end of the file. What this can prove is
+/// the first half: hypridle reads the pair without complaint. It cannot
+/// prove the second, because hypridle reports nothing about which
+/// `lock_cmd` it settled on, and the only way to observe it is to make it
+/// lock the session — not something a test on a machine somebody is
+/// using gets to do. So "the later block wins" is hyprlang's assignment
+/// semantics, not something this test measured.
+#[test]
+#[ignore]
+fn hypridle_accepts_a_user_general_block_followed_by_the_sourced_one() {
+    let sourced_dir = match tempfile::tempdir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            eprintln!("{SKIP_MARKER} could not create a temp dir for the sourced file: {e}");
+            return;
+        }
+    };
+    let mut settings = idle::Settings::default();
+    // `true`, like every command here: a real program that does nothing.
+    settings.general.lock_cmd = "true".into();
+    let generated = sourced_dir.path().join("idle.conf");
+    if let Err(e) = std::fs::write(&generated, idle::generate(&settings)) {
+        eprintln!("{SKIP_MARKER} could not write the sourced file: {e}");
+        return;
+    }
+    let user = format!(
+        "general {{\n    lock_cmd = true\n    before_sleep_cmd = true\n}}\n\nsource = {}\n",
+        generated.display()
+    );
+    let Some(parsed) = parse_with("hypridle", &user) else {
+        // `parse_with` has already said why.
+        return;
+    };
+    assert!(
+        !parsed.complained(),
+        "hypridle rejected a second general block arriving through source =:\n{}\n--- config ---\n{user}",
+        parsed.output
+    );
+}

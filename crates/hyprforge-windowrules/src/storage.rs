@@ -1,4 +1,4 @@
-use crate::model::{Rule, WorkspaceRule};
+use crate::model::{LayerRule, Rule, WorkspaceRule};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -35,6 +35,10 @@ struct RuleFile {
     /// field simply has none.
     #[serde(rename = "workspace_rule", default)]
     workspace_rules: Vec<WorkspaceRule>,
+    /// Layer-surface rules. Skipped when empty so a file written before
+    /// they existed reads back byte-for-byte the same.
+    #[serde(rename = "layer_rule", default, skip_serializing_if = "Vec::is_empty")]
+    layer_rules: Vec<LayerRule>,
 }
 
 /// Everything the module persists. Returned as a struct rather than a tuple
@@ -43,6 +47,11 @@ struct RuleFile {
 pub struct Rules {
     pub rules: Vec<Rule>,
     pub workspace_rules: Vec<WorkspaceRule>,
+    /// Added by Setup (blur behind notifications) rather than by the
+    /// Window Rules page, which does not edit them yet — so anything that
+    /// loads, changes and saves this struct must carry them through, or a
+    /// save from that page would quietly delete them.
+    pub layer_rules: Vec<LayerRule>,
 }
 
 /// Loads the ordered rule lists from `path`. A missing file is treated as an
@@ -62,6 +71,7 @@ pub fn load(path: &Path) -> Result<Rules, StorageError> {
     Ok(Rules {
         rules: file.rules,
         workspace_rules: file.workspace_rules,
+        layer_rules: file.layer_rules,
     })
 }
 
@@ -71,6 +81,7 @@ pub fn save(path: &Path, rules: &Rules) -> Result<(), StorageError> {
     let file = RuleFile {
         rules: rules.rules.clone(),
         workspace_rules: rules.workspace_rules.clone(),
+        layer_rules: rules.layer_rules.clone(),
     };
     let contents = toml::to_string_pretty(&file)?;
     hyprforge_core::paths::write_atomic(path, &contents).map_err(|source| StorageError::Write {
