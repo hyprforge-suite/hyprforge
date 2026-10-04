@@ -449,6 +449,19 @@ impl Selection {
     fn clear(&mut self) {
         *self = Selection::default();
     }
+
+    /// Exactly `paths`, in the order given: the first is focused and
+    /// anchors a following shift-click. Nothing at all selects nothing.
+    fn select_only<'a>(&mut self, paths: impl IntoIterator<Item = &'a PathBuf>) {
+        self.clear();
+        for path in paths {
+            if self.selected.is_empty() {
+                self.anchor = Some(path.clone());
+                self.focused = Some(path.clone());
+            }
+            self.selected.insert(path.clone());
+        }
+    }
 }
 
 /// Where a context menu was asked for.
@@ -592,6 +605,10 @@ pub enum Outcome {
     FocusRename { id: Id, select: usize },
     /// Rename `from` to `to` (same folder).
     Rename { from: PathBuf, to: PathBuf },
+    /// Open the bulk rename sheet over these — F2 with several selected.
+    /// The sheet is the host's, like Preferences: a dialog has no use
+    /// for one and ignores this.
+    BulkRename(crate::bulk_rename::Request),
     /// Create this folder, then show it being renamed.
     CreateFolder(PathBuf),
     /// Work out where typed text could go — [`crate::jump::Request::run`],
@@ -735,6 +752,9 @@ pub enum Message {
     /// renaming it if `rename`. How a new folder arrives ready to name,
     /// and how a renamed file stays selected under its new name.
     AfterListing { path: PathBuf, rename: bool },
+    /// When these next appear in a listing, select them — how a bulk
+    /// rename leaves what it renamed selected under the new names.
+    SelectWhenListed(Vec<PathBuf>),
     /// Open the right-click menu for `spot` at `at` (window coordinates).
     /// The view sends this with `at` unset; the host fills it in from
     /// the pointer, because a right press carries no position.
@@ -979,6 +999,8 @@ pub struct Browser {
     drop_hover: Option<PathBuf>,
     /// See [`Message::AfterListing`].
     after_listing: Option<(PathBuf, bool)>,
+    /// See [`Message::SelectWhenListed`]. Empty when nothing waits.
+    select_when_listed: Vec<PathBuf>,
     /// Select the first row when the listing arrives — Right in column
     /// view, which goes into a folder and carries on from its top.
     select_first: bool,
@@ -1048,6 +1070,7 @@ impl Browser {
             palette: None,
             drop_hover: None,
             after_listing: None,
+            select_when_listed: Vec::new(),
             select_first: false,
             ancestors: Vec::new(),
             revealed: None,
@@ -1220,6 +1243,10 @@ impl Browser {
             }
             Message::AfterListing { path, rename } => {
                 self.after_listing = Some((path, rename));
+                Outcome::None
+            }
+            Message::SelectWhenListed(paths) => {
+                self.select_when_listed = paths;
                 Outcome::None
             }
             Message::EntryActivated(index) => self.activate(index),
@@ -2204,9 +2231,13 @@ impl Browser {
         }
     }
 
-    /// Starts editing the one selected name.
+    /// Starts editing the one selected name — or, with several selected,
+    /// asks the host for the bulk rename sheet.
     fn begin_rename(&mut self) -> Outcome {
         let selected = self.selected_shown();
+        if selected.len() > 1 {
+            return self.bulk_rename_request();
+        }
         let [path] = selected.as_slice() else {
             return Outcome::None;
         };
@@ -2217,6 +2248,36 @@ impl Browser {
         let select = crate::naming::stem_len(&entry.name, entry.is_dir);
         self.renaming = Some(Renaming { path: path.clone(), text: entry.name.clone(), id: id.clone() });
         Outcome::FocusRename { id, select }
+    }
+
+    /// What a bulk rename of the selection starts from: the selected
+    /// rows in the order they are drawn, which is the order numbering
+    /// counts in, and every name the folder holds.
+    ///
+    /// Every name, not only the shown ones: a dotfile hidden from view is
+    /// still a name a rename can land on. And inside an archive, only
+    /// the folder in view — a search's results from deeper in an
+    /// archive have neighbours this listing never read, and an archive's
+    /// table, unlike a disk, would accept two members of one name
+    /// without complaint.
+    fn bulk_rename_request(&self) -> Outcome {
+        let items: Vec<crate::bulk_rename::Item> = self
+            .rows()
+            .into_iter()
+            .filter(|e| self.selection.is_selected(&e.path))
+            .map(|e| crate::bulk_rename::Item { path: e.path.clone(), name: e.name.clone(), is_dir: e.is_dir })
+            .collect();
+        if self.archive.is_some() && items.iter().any(|i| i.path.parent() != Some(self.current_dir.as_path())) {
+            return Outcome::Notice("Inside an archive, rename things from the folder they are in.".to_string());
+        }
+        let mut neighbours: Vec<PathBuf> = self.entries.iter().map(|e| e.path.clone()).collect();
+        // A search's results, from folders below this one: the only
+        // names in those folders this listing knows. The rest are the
+        // disk's to refuse — `hyprforge_fileops::batch` never replaces.
+        if let Some(results) = self.search.results() {
+            neighbours.extend(results.iter().map(|e| e.path.clone()));
+        }
+        Outcome::BulkRename(crate::bulk_rename::Request { items, neighbours })
     }
 
     /// Enter in the rename field: rename, close quietly, or say why not
@@ -2491,6 +2552,15 @@ impl Browser {
         // Something the host asked to have selected once it showed up —
         // a folder just made, a file just renamed. If it is not here yet
         // the request waits for the next listing.
+        // Waits, like `after_listing`, for a listing that has them: an
+        // archive's rewrite runs as a queued job, and a re-read can land
+        // before it has finished.
+        if self.select_when_listed.iter().any(|p| still_here.contains(p)) {
+            let wanted: HashSet<PathBuf> = std::mem::take(&mut self.select_when_listed).into_iter().collect();
+            self.with_rows(|selection, rows| {
+                selection.select_only(rows.iter().map(|e| &e.path).filter(|p| wanted.contains(*p)))
+            });
+        }
         if std::mem::take(&mut self.select_first) && self.after_listing.is_none() && !self.view.is_empty() {
             self.with_rows(|selection, rows| selection.click_with(rows, 0, false, false));
         }
@@ -5684,11 +5754,55 @@ mod tests {
     }
 
     #[test]
-    fn rename_needs_exactly_one_selected() {
+    fn rename_needs_something_selected() {
         let mut browser = loaded_browser(&["a.txt", "b.txt"]);
         assert_eq!(browser.perform(Action::Rename), Outcome::None, "nothing selected");
+    }
+
+    fn bulk_request(outcome: Outcome) -> crate::bulk_rename::Request {
+        match outcome {
+            Outcome::BulkRename(request) => request,
+            other => panic!("expected the bulk rename sheet, got {other:?}"),
+        }
+    }
+
+    /// F2 with several selected opens the sheet rather than doing
+    /// nothing — and hands the items over in the order the listing
+    /// draws them, which is the order numbering counts in.
+    #[test]
+    fn f2_with_several_selected_asks_for_bulk_rename_in_listing_order() {
+        let mut browser = loaded_browser(&["a.txt", "b.txt", "c.txt"]);
+        browser.update(Message::SortBy(SortColumn::Name));
         browser.perform(Action::SelectAll);
-        assert_eq!(browser.perform(Action::Rename), Outcome::None, "two selected");
+        let request = bulk_request(browser.perform(Action::Rename));
+        let names: Vec<&str> = request.items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["c.txt", "b.txt", "a.txt"]);
+        assert!(browser.renaming.is_none(), "no in-place field opens as well");
+    }
+
+    /// A dotfile the listing is hiding is still a name a rename could
+    /// land on, so the sheet is told about it.
+    #[test]
+    fn a_bulk_rename_knows_the_names_the_listing_is_hiding() {
+        let mut browser = super::tests_support::loaded(&[("a", false), ("b", false), (".c", false)]);
+        browser.perform(Action::SelectAll);
+        let request = bulk_request(browser.perform(Action::Rename));
+        assert_eq!(request.items.len(), 2, "the hidden file is not selected");
+        assert!(request.neighbours.contains(&PathBuf::from("/dir/.c")));
+    }
+
+    /// After a bulk rename the window asks for the new names to be
+    /// selected once the folder is read again — all of them, not one.
+    #[test]
+    fn renamed_items_are_selected_when_the_listing_shows_them() {
+        let mut browser = loaded_browser(&["a", "b", "c"]);
+        browser.update(Message::SelectWhenListed(vec!["/dir/x".into(), "/dir/y".into()]));
+        browser.update(Message::DirLoaded("/dir".into(), Ok(vec![entry("a", false)])));
+        assert!(browser.selection().selected_paths().is_empty(), "not there yet: it waits");
+        browser.update(Message::DirLoaded("/dir".into(), Ok(vec![entry("x", false), entry("y", false), entry("c", false)])));
+        let mut selected: Vec<&Path> = browser.selection().selected_paths().iter().map(|p| p.as_path()).collect();
+        selected.sort();
+        assert_eq!(selected, [Path::new("/dir/x"), Path::new("/dir/y")]);
     }
 
     #[test]

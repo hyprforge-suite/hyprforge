@@ -230,6 +230,12 @@ toml = "1.1"
 # `files-config.toml`. `toml` round-trips values, not documents. Already
 # in the tree (zbus's macros parse Cargo.toml with it), at this version.
 toml_edit = "0.25"
+# Files' bulk rename offers a regular expression as one way to find what
+# to replace. This crate guarantees linear time in the length of the name
+# for any pattern, so a pattern someone typed cannot hang the preview
+# that is recomputed on every keystroke; its compiled size is capped
+# where it is built (`hyprforge-files-core`'s `bulk_rename`).
+regex = "1.13"
 clap ={ version = "4.6", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

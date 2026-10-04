@@ -66,6 +66,8 @@ chrono.workspace = true
 # `content.rs`. `memchr2` finds a needle's first letter in either case
 # without making a lowercased copy of every chunk.
 memchr.workspace = true
+# Bulk rename's "regular expression" switch — see `bulk_rename.rs`.
+regex.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

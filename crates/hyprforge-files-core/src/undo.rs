@@ -10,6 +10,9 @@
 //!
 //! - **Trashed** — put the items back where they came from.
 //! - **Renamed** — rename back.
+//! - **Renamed several at once** — rename them all back, as one batch:
+//!   a bulk rename that swapped two names is undone by swapping them
+//!   again, which no sequence of single renames back can do.
 //! - **Moved** — move back.
 //! - **Copied** — move the copies to the Trash. Never delete them: an
 //!   undo that loses a file is worse than no undo.
@@ -42,6 +45,9 @@ pub enum Undoable {
     /// from, and its `.trashinfo` record.
     Trashed(Vec<(PathBuf, PathBuf, PathBuf)>),
     Renamed { from: PathBuf, to: PathBuf },
+    /// A bulk rename, as `(what it was called, what it is called now)` —
+    /// one step, so one Ctrl+Z takes the whole batch back.
+    RenamedAll(Vec<(PathBuf, PathBuf)>),
     /// Items moved, as `(where it was, where it is now)`.
     Moved(Vec<(PathBuf, PathBuf)>),
     /// Copies made, where they are.
@@ -64,6 +70,7 @@ impl Undoable {
         match self {
             Undoable::Trashed(items) => format!("Moved {} to the Trash", count(items.len())),
             Undoable::Renamed { to, .. } => format!("Renamed to \u{201C}{}\u{201D}", name(to)),
+            Undoable::RenamedAll(items) => format!("Renamed {}", count(items.len())),
             Undoable::Moved(items) => format!("Moved {}", count(items.len())),
             Undoable::Copied(items) => format!("Copied {}", count(items.len())),
             Undoable::MadeFolder(path) => format!("Made \u{201C}{}\u{201D}", name(path)),
@@ -83,6 +90,7 @@ impl Undoable {
             Undoable::Trashed(items) => items.is_empty(),
             Undoable::Moved(items) => items.is_empty(),
             Undoable::Copied(items) => items.is_empty(),
+            Undoable::RenamedAll(items) => items.is_empty(),
             Undoable::Renamed { .. }
             | Undoable::MadeFolder(_)
             | Undoable::Extracted(_)
@@ -202,5 +210,9 @@ mod tests {
             "Renamed to \u{201C}b.txt\u{201D}"
         );
         assert_eq!(copied(1).describe(), "Copied 1 item");
+        assert_eq!(
+            Undoable::RenamedAll(vec![("/a".into(), "/b".into()), ("/b".into(), "/a".into())]).describe(),
+            "Renamed 2 items"
+        );
     }
 }

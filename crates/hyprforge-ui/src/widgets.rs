@@ -8,6 +8,7 @@
 
 mod anchor;
 mod badges;
+mod change;
 mod controls;
 mod field;
 mod layout;
@@ -19,6 +20,7 @@ mod suggestions;
 
 pub use anchor::{anchored, Anchored};
 pub use badges::{chip, config_line, keycap, removable_chip};
+pub use change::{change_row, Change};
 pub use controls::{
     dropdown_menu_style, dropdown_style, segment_style, segmented, segmented_choice,
     slider_style, step_index, stepped_slider, toggle, toggle_style, value_slider, SegmentLook,

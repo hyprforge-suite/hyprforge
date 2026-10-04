@@ -590,7 +590,7 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         Action::Unpin => ctx.pin.pinned_at.is_some(),
         Action::PinUp => ctx.pin.pinned_at.is_some_and(|at| at > 0),
         Action::PinDown => ctx.pin.pinned_at.is_some_and(|at| at + 1 < ctx.pin.pins),
-        Action::Rename => ctx.selected == 1 && !ctx.in_trash,
+        Action::Rename => ctx.selected >= 1 && !ctx.in_trash,
         // A folder with nothing in it is the one thing an archive
         // cannot hold by implication, so "New Folder" inside one would
         // have to write a directory member and rewrite the whole

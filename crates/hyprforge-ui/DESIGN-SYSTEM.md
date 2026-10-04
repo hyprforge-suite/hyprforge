@@ -105,6 +105,7 @@ Each is `hyprforge_ui::widgets::<name>`.
 | Layout | `section`, `divider`, `vertical_divider`, `row_field`, `page_header`, `setting_list`, `setting_row`, `setting_row_style`, `hero_card`, `status_dot`, `pending_bar`, `pending_label` |
 | Panels | `panel_tabs`: words across a docked panel's top, the chosen one over an accent underline. `fact_row` and `fact`: a dim label at a fixed width and its value beside it, so a panel's values line up (Files' Properties inspector) |
 | Badges | `chip` (something the system says about a row, in a state colour), `removable_chip` (something the person typed and can take back: neutral, with a ×), `keycap` |
+| Previews | `change_row` (with `Change`): what something is now, an arrow, what it would become, in two columns that each wrap on their own; unchanged rows dim, a refused one in the error colour with its reason under it (Files' bulk rename) |
 | Dialogs | `confirm_dialog` |
 | Time | `countdown_ring`, with `remaining_fraction` |
 | Progress | `progress_line` (with `progress_line_style`): a thin bar in the foreground colour on the `row` step, never the accent; drawn only when there is an honest fraction |
