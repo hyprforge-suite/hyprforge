@@ -159,6 +159,19 @@ pub(super) fn apply(cx: &Cx<'_>) -> Result<Applied, String> {
 /// Removes exactly the lines setup inserted, wherever they are now. The
 /// marker comments around them stay: they are harmless, and the next
 /// install puts its lines back between them.
+/// `lines` without any Hyprforge-managed require block that is now empty:
+/// an opening marker followed directly by its closing one. Repeated until
+/// none is left, because an earlier version could nest one block inside
+/// the other and an undo of both left the pairs inside each other.
+fn without_empty_blocks(mut lines: Vec<&str>) -> Vec<&str> {
+    let is_start = |l: &str| l.trim().starts_with("-- Hyprforge-managed requires (");
+    let is_end = |l: &str| l.trim() == "-- end Hyprforge-managed requires";
+    while let Some(i) = lines.windows(2).position(|w| is_start(w[0]) && is_end(w[1])) {
+        lines.drain(i..i + 2);
+    }
+    lines
+}
+
 pub(super) fn undo(cx: &Cx<'_>, inserted: &[String]) -> Result<Option<String>, String> {
     let path = cx.env.hyprland_lua();
     let text = match std::fs::read_to_string(&path) {
@@ -168,6 +181,7 @@ pub(super) fn undo(cx: &Cx<'_>, inserted: &[String]) -> Result<Option<String>, S
     };
     let kept: Vec<&str> =
         text.lines().filter(|l| !inserted.iter().any(|ours| l.trim() == ours.trim())).collect();
+    let kept = without_empty_blocks(kept);
     let mut out = kept.join("\n");
     if text.ends_with('\n') {
         out.push('\n');
@@ -177,4 +191,30 @@ pub(super) fn undo(cx: &Cx<'_>, inserted: &[String]) -> Result<Option<String>, S
             .map_err(|e| format!("couldn't write {}: {e}", path.display()))?;
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod empty_block_tests {
+    use super::without_empty_blocks;
+
+    /// What undo left behind before: two empty pairs inside each other.
+    /// Both go, and nothing of the user's is touched.
+    #[test]
+    fn undo_leaves_no_empty_marker_blocks_behind() {
+        let lines = vec![
+            "hl.bind(x)",
+            "-- Hyprforge-managed requires (evaluated last) — do not edit by hand.",
+            "-- Hyprforge-managed requires (evaluated first) — do not edit by hand.",
+            "-- end Hyprforge-managed requires",
+            "-- end Hyprforge-managed requires",
+            "-- mine",
+        ];
+        assert_eq!(without_empty_blocks(lines), ["hl.bind(x)", "-- mine"]);
+        let kept = vec![
+            "-- Hyprforge-managed requires (evaluated last) — do not edit by hand.",
+            "require(\"theirs\")",
+            "-- end Hyprforge-managed requires",
+        ];
+        assert_eq!(without_empty_blocks(kept.clone()), kept, "a block still holding a line stays");
+    }
 }

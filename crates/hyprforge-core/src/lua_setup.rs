@@ -128,12 +128,22 @@ pub fn detect(hyprland_lua: &str, line: &str, placement: Placement) -> SetupPlan
     }
 
     let end = lines.len() + 1;
+    // Lines inside a Hyprforge-managed block, which are ours and not the
+    // user's. The "first require" below is the *user's* first, and an
+    // insertion point must never fall inside one of our blocks either.
+    // Getting this wrong nested the first block inside the last one:
+    // wiring keybinds (`AtEnd`) before window rules on a config with no
+    // requires of its own made Hyprforge's keybinds line the only
+    // `require(` in the file, and the first block went in right above it
+    // — between the last block's markers. Seen running setup against a
+    // nested compositor.
+    let managed = managed_lines(&lines);
     let insert_before_line = match placement {
         Placement::AtEnd => end,
         Placement::BeforeUserRequires => lines
             .iter()
             .enumerate()
-            .find(|(_, l)| l.trim_start().starts_with("require("))
+            .find(|(i, l)| !managed[*i] && l.trim_start().starts_with("require("))
             .map(|(i, _)| i + 1)
             // No requires at all. "The end" is the tempting fallback and it
             // is exactly backwards: Hyprland applies the *last* matching
@@ -143,7 +153,37 @@ pub fn detect(hyprland_lua: &str, line: &str, placement: Placement) -> SetupPlan
             // without a `require()` of its own, which is most of them.
             .unwrap_or_else(|| first_content_line(&lines)),
     };
+    // Never inside a block of ours: step back to its opening marker.
+    let mut insert_before_line = insert_before_line;
+    while insert_before_line >= 2 && insert_before_line - 1 < lines.len() && managed[insert_before_line - 1]
+        && lines[insert_before_line - 1].trim() != marker_start(Placement::AtEnd)
+        && lines[insert_before_line - 1].trim() != marker_start(Placement::BeforeUserRequires)
+    {
+        insert_before_line -= 1;
+    }
     SetupPlan::NeedsInsert { insert_before_line }
+}
+
+/// For each line, whether it sits inside a Hyprforge-managed require block
+/// (its markers included).
+fn managed_lines(lines: &[&str]) -> Vec<bool> {
+    let starts = [marker_start(Placement::BeforeUserRequires), marker_start(Placement::AtEnd)];
+    let mut inside = false;
+    lines
+        .iter()
+        .map(|l| {
+            let t = l.trim();
+            if starts.contains(&t) {
+                inside = true;
+                true
+            } else if t == MARKER_END && inside {
+                inside = false;
+                true
+            } else {
+                inside
+            }
+        })
+        .collect()
 }
 
 /// Applies `plan` to `hyprland_lua`, returning the new full contents.
@@ -378,6 +418,32 @@ mod tests {
         assert!(out_lines[2].contains("hyprforge/keybinds"));
         assert_eq!(out_lines[3], MARKER_END);
         assert_eq!(out_lines[4], "require(\"mine\")");
+    }
+
+    /// The order setup and Settings' startup can wire modules in: an
+    /// `AtEnd` block first, on a config with no requires of its own, then a
+    /// `BeforeUserRequires` one. The second must open its own block before
+    /// the first, never inside it.
+    #[test]
+    fn a_first_block_never_lands_inside_the_last_one() {
+        let cfg = "-- my config\nhl.monitor({ output = [[X]] })\n";
+        let keys = "hyprforge/keybinds";
+        let cfg = apply(cfg, &detect(cfg, keys, Placement::AtEnd), &format!("require(\"{keys}\")"), Placement::AtEnd);
+        let rules = "hyprforge/window-rules";
+        let out = apply(
+            &cfg,
+            &detect(&cfg, rules, Placement::BeforeUserRequires),
+            &format!("require(\"{rules}\")"),
+            Placement::BeforeUserRequires,
+        );
+        let lines: Vec<&str> = out.lines().collect();
+        let at = |needle: &str| lines.iter().position(|l| l.trim() == needle).unwrap_or_else(|| panic!("{needle}\n{out}"));
+        let first_start = at(marker_start(Placement::BeforeUserRequires));
+        let last_start = at(marker_start(Placement::AtEnd));
+        let rules_line = at(&format!("require(\"{rules}\")"));
+        let first_end = lines[first_start..].iter().position(|l| l.trim() == MARKER_END).unwrap() + first_start;
+        assert!(first_start < rules_line && rules_line < first_end, "{out}");
+        assert!(first_end < last_start, "the first block closes before the last one opens:\n{out}");
     }
 
     #[test]
