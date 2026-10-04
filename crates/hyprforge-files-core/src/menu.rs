@@ -246,6 +246,11 @@ pub const DIALOG_ACTIONS: &[Action] = &[
     Action::NewFolder,
     Action::ToggleHidden,
     Action::TogglePreview,
+    // Zoom in a dialog too: a file chooser full of photographs is where
+    // big thumbnails are worth asking for.
+    Action::ZoomIn,
+    Action::ZoomOut,
+    Action::ZoomReset,
     // A file chooser is where looking before choosing matters most —
     // the macOS open panel takes Space for exactly this. It reads, and
     // a dialog reads everything the window does (`hyprforge_files::host`).

@@ -61,6 +61,12 @@ pub enum Action {
     ToggleHidden,
     /// Show or hide the preview pane beside the listing. Remembered.
     TogglePreview,
+    /// Draw the listing larger, smaller, or at its own size again — per
+    /// view and remembered: see [`crate::prefs::Zoom`]. Ctrl+wheel over
+    /// the listing does the same.
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
     /// Show the focused entry large, over the window, until the next key
     /// — see `browser/quicklook.rs`. Not remembered: it is a glance.
     QuickLook,
@@ -205,6 +211,9 @@ impl Action {
             Action::NextSearchScope,
             Action::ToggleHidden,
             Action::TogglePreview,
+            Action::ZoomIn,
+            Action::ZoomOut,
+            Action::ZoomReset,
             Action::QuickLook,
             Action::Trash,
             Action::DeletePermanently,
@@ -263,6 +272,9 @@ impl Action {
             Action::NextSearchScope => "next-search-scope",
             Action::ToggleHidden => "show-hidden",
             Action::TogglePreview => "preview-pane",
+            Action::ZoomIn => "zoom-in",
+            Action::ZoomOut => "zoom-out",
+            Action::ZoomReset => "zoom-reset",
             Action::QuickLook => "quick-look",
             Action::Trash => "trash",
             Action::DeletePermanently => "delete-permanently",
@@ -344,6 +356,9 @@ impl Action {
             Action::NextSearchScope => "Search Next Scope",
             Action::ToggleHidden => "Show Hidden Files",
             Action::TogglePreview => "Preview Pane",
+            Action::ZoomIn => "Zoom In",
+            Action::ZoomOut => "Zoom Out",
+            Action::ZoomReset => "Normal Size",
             Action::QuickLook => "Quick Look",
             Action::Trash => "Move to Trash",
             Action::DeletePermanently => "Delete Permanently",
@@ -453,6 +468,12 @@ impl Action {
             // Alt+P is Windows Explorer's, the one file manager whose
             // preview pane has a key people already know.
             Action::TogglePreview => &["Alt+P"],
+            // Every browser's and file manager's keys. `Ctrl+=` is the
+            // unshifted key that has + on it; `Ctrl+Plus` is the keypad's
+            // and a shifted press.
+            Action::ZoomIn => &["Ctrl+=", "Ctrl+Plus"],
+            Action::ZoomOut => &["Ctrl+Minus"],
+            Action::ZoomReset => &["Ctrl+0"],
             // The Finder's key, and Nautilus's with Sushi. The one bare
             // text key bindable here: nothing typed into a search begins
             // with a space, and one typed mid-query still reaches it —
@@ -634,6 +655,7 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         | Action::SelectAll => ctx.shown > 0,
         Action::ClearSearch | Action::NextSearchScope => ctx.searching,
         Action::ToggleHidden | Action::TogglePreview | Action::ContextMenu => true,
+        Action::ZoomIn | Action::ZoomOut | Action::ZoomReset => true,
         // Something to look at: the focused row, file or folder.
         Action::QuickLook => ctx.focused_is_dir.is_some(),
         // Not inside an archive: there is no trash in a zip, and a

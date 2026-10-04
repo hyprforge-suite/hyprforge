@@ -169,6 +169,79 @@ impl Columns {
     }
 }
 
+/// How big the listing is drawn, per view: Ctrl+wheel, Ctrl+= and
+/// Ctrl+- over it.
+///
+/// Per view, as Nautilus and Dolphin keep it, because the views want
+/// different things: the grid is zoomed in to see pictures, the list
+/// out to see more rows, and one shared level would undo each every time
+/// you switched. A step, not a factor, in the file: a number someone can
+/// read and edit, always one of [`Zoom::FACTORS`], never a float that
+/// drifts.
+///
+/// Only the listing scales — rows, icons, names and grid cells together,
+/// through the same scale the font size already drives. The header,
+/// sidebar and status bar stay as they are.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Zoom {
+    pub list: i8,
+    pub grid: i8,
+    pub columns: i8,
+}
+
+impl Zoom {
+    /// What each step draws the listing at; step 0 is `1.0`, the size it
+    /// has always been. Coarse at the small end, where a row stops being
+    /// readable quickly, and up to double at the large one.
+    pub const FACTORS: [f32; 7] = [0.75, 0.875, 1.0, 1.25, 1.5, 1.75, 2.0];
+    /// The index of step 0 in [`Self::FACTORS`].
+    const ORIGIN: i8 = 2;
+
+    fn step_mut(&mut self, view: ViewMode) -> &mut i8 {
+        match view {
+            ViewMode::List => &mut self.list,
+            ViewMode::Grid => &mut self.grid,
+            ViewMode::Columns => &mut self.columns,
+        }
+    }
+
+    pub fn step(&self, view: ViewMode) -> i8 {
+        match view {
+            ViewMode::List => self.list,
+            ViewMode::Grid => self.grid,
+            ViewMode::Columns => self.columns,
+        }
+    }
+
+    /// The factor `view` is drawn at. A hand-edited step past either end
+    /// is the end, not an error.
+    pub fn factor(&self, view: ViewMode) -> f32 {
+        let index = (self.step(view) + Self::ORIGIN).clamp(0, Self::FACTORS.len() as i8 - 1);
+        Self::FACTORS[index as usize]
+    }
+
+    /// Moves `view` by `by` steps, stopping at either end. Whether
+    /// anything changed, so a wheel spun past the end saves nothing.
+    pub fn adjust(&mut self, view: ViewMode, by: i32) -> bool {
+        let lowest = -Self::ORIGIN;
+        let highest = Self::FACTORS.len() as i8 - 1 - Self::ORIGIN;
+        let step = self.step_mut(view);
+        let next = (*step as i32 + by).clamp(lowest as i32, highest as i32) as i8;
+        let changed = next != *step;
+        *step = next;
+        changed
+    }
+
+    /// Back to the size it has always been. Whether anything changed.
+    pub fn reset(&mut self, view: ViewMode) -> bool {
+        let step = self.step_mut(view);
+        let changed = *step != 0;
+        *step = 0;
+        changed
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Prefs {
@@ -206,6 +279,8 @@ pub struct Prefs {
     /// empty `Vec` is the first-run value; `#[serde(default)]` on the
     /// struct is what lets a file written before this existed parse.
     pub searches: Vec<crate::search::SmartFolder>,
+    /// How big the listing is drawn in each view — see [`Zoom`].
+    pub zoom: Zoom,
     // Per-directory overrides (vision pillar 6: "auto-remember beats
     // onboarding" — a directory sorted by size once should stay sorted
     // by size) are deliberately **not implemented** in this struct. The
@@ -237,6 +312,7 @@ impl Default for Prefs {
             window_height: 600,
             pinned: Vec::new(),
             searches: Vec::new(),
+            zoom: Zoom::default(),
         }
     }
 }
@@ -599,5 +675,38 @@ mod tests {
         assert!(!updated.preview_pane);
         assert!(updated.directories_first, "everything else stays at its default");
         assert_eq!(load_from(&path).unwrap(), updated);
+    }
+
+    #[test]
+    fn each_view_zooms_on_its_own() {
+        let mut zoom = Zoom::default();
+        assert!(zoom.adjust(ViewMode::Grid, 2));
+        assert_eq!(zoom.factor(ViewMode::Grid), 1.5);
+        assert_eq!(zoom.factor(ViewMode::List), 1.0, "the list is untouched");
+    }
+
+    #[test]
+    fn zoom_stops_at_either_end_and_says_nothing_changed_there() {
+        let mut zoom = Zoom::default();
+        zoom.adjust(ViewMode::List, 100);
+        assert_eq!(zoom.factor(ViewMode::List), 2.0);
+        assert!(!zoom.adjust(ViewMode::List, 1), "already at the largest");
+        zoom.adjust(ViewMode::List, -100);
+        assert_eq!(zoom.factor(ViewMode::List), 0.75);
+    }
+
+    #[test]
+    fn a_hand_edited_zoom_past_the_end_draws_at_the_end() {
+        let zoom = Zoom { list: 40, grid: -9, columns: 0 };
+        assert_eq!(zoom.factor(ViewMode::List), 2.0);
+        assert_eq!(zoom.factor(ViewMode::Grid), 0.75);
+    }
+
+    #[test]
+    fn a_settings_file_written_before_zoom_existed_draws_at_the_old_size() {
+        let older = "view_mode = \"grid\"\n";
+        let prefs: Prefs = toml::from_str(older).expect("parses");
+        assert_eq!(prefs.zoom, Zoom::default());
+        assert_eq!(prefs.zoom.factor(ViewMode::Grid), 1.0);
     }
 }

@@ -110,6 +110,7 @@ Each is `hyprforge_ui::widgets::<name>`.
 | Dialogs | `confirm_dialog` |
 | Time | `countdown_ring`, with `remaining_fraction` |
 | Progress | `progress_line` (with `progress_line_style`): a thin bar in the foreground colour on the `row` step, never the accent; drawn only when there is an honest fraction |
+| Input | `wheel_zoom` (with `WheelZoom`, `steps_from_pixels`, `PIXELS_PER_STEP`): Ctrl+wheel over what it wraps is a zoom step, taken before the scrollable inside can scroll with it; a plain wheel passes through. A touchpad's pixels are added up into whole steps — Files' listing |
 | Floating | `popover_card`: the surface a popover opens on, the context menu's own (see Patterns). `scrim`: a card centred over the window dimmed with `scrim_color` (the root step at `SCRIM_ALPHA`), a press on the dim layer dismissing it, and nothing beneath reachable — Files' Quick Look |
 
 ## Patterns

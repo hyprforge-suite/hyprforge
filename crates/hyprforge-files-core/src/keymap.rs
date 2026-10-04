@@ -112,7 +112,9 @@ mod tests {
         let keys = defaults();
         assert_eq!(keys.resolve(&press("Ctrl+Enter")), Some(Resolved::Action(Action::OpenInNewTab)));
         assert_eq!(keys.resolve(&press("Shift+Enter")), None, "Shift+Enter is not Enter");
-        assert_eq!(keys.resolve(&press("Ctrl+0")), None, "there is no tab 0");
+        // There is no tab 0: Ctrl+0 is the browser's Normal Size, as in
+        // every browser, not a tab — the tab keys run 1 to 9.
+        assert_eq!(keys.resolve(&press("Ctrl+0")), Some(Resolved::Action(Action::ZoomReset)), "there is no tab 0");
     }
 
     #[test]

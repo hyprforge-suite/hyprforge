@@ -52,7 +52,7 @@ use crate::types::{Entry, EntrySize, FilesError, ItemCount};
 use hyprforge_ui::theme::{spacing, FontScale, BASE_TEXT_SIZE};
 use hyprforge_ui::widgets::{
     divider, inset_field_style, meta_text, scaled_text, segment_style, segmented, spaced_caps,
-    vertical_divider, SegmentLook,
+    vertical_divider, wheel_zoom, SegmentLook,
 };
 use iced::widget::{column, container, row, scrollable, text_input, Id};
 use iced::{Element, Length};
@@ -710,6 +710,9 @@ pub enum Message {
     DirLoaded(PathBuf, Result<Vec<Entry>, DirError>),
     /// A pane's folder, read — the answer to [`Outcome::ReadColumns`].
     ColumnLoaded(PathBuf, Result<Vec<Entry>, DirError>),
+    /// Ctrl+wheel over the listing: this many zoom steps, in or (negative)
+    /// out — see [`crate::prefs::Zoom`].
+    Zoom(i32),
     /// A row in one of column view's panes was clicked: go there.
     ColumnChose(PathBuf),
     /// Answers to [`Outcome::CountFolders`]. `None` for a directory that
@@ -1272,6 +1275,7 @@ impl Browser {
             Message::DirLoaded(path, result) => self.apply_dir_loaded(path, result),
             Message::ColumnLoaded(dir, result) => self.apply_column_loaded(dir, result),
             Message::ColumnChose(path) => self.choose_in_column(path),
+            Message::Zoom(by) => self.zoom(by),
             Message::CountsLoaded(counts) => self.apply_counts(counts),
             Message::GoBack => self.go_back(),
             Message::GoForward => self.go_forward(),
@@ -1882,6 +1886,15 @@ impl Browser {
         self.reveal_trail(&dir).unwrap_or(Outcome::None)
     }
 
+    /// Moves the view in front of you `by` zoom steps, remembered.
+    fn zoom(&mut self, by: i32) -> Outcome {
+        if self.prefs.zoom.adjust(self.prefs.view_mode, by) {
+            Outcome::PrefsChanged(self.prefs.clone())
+        } else {
+            Outcome::None
+        }
+    }
+
     /// A row in a pane was clicked. A folder — or an archive, which this
     /// browser goes into — becomes the folder in view; a file shows its
     /// folder with it selected, as the path bar does.
@@ -2246,6 +2259,15 @@ impl Browser {
             }
             Action::ShowInFolder => self.show_in_folder(),
             Action::NextSearchScope => self.next_scope(),
+            Action::ZoomIn => self.zoom(1),
+            Action::ZoomOut => self.zoom(-1),
+            Action::ZoomReset => {
+                if self.prefs.zoom.reset(self.prefs.view_mode) {
+                    Outcome::PrefsChanged(self.prefs.clone())
+                } else {
+                    Outcome::None
+                }
+            }
             Action::TogglePreview => {
                 // With the inspector in the pane's place, asking for the
                 // preview means "show me the preview instead": the
@@ -4376,14 +4398,21 @@ fn crumb_button<'a>(
 
 
 fn body_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
+    // The listing is drawn at the view's zoom on top of the font scale —
+    // rows, icons, names and cells all follow `FontScale`, so one
+    // multiplication zooms them together, and nothing else in the window
+    // (header, sidebar, status bar) is given it.
+    let zoomed = FontScale(scale.0 * vm.prefs.zoom.factor(vm.prefs.view_mode));
     // Right-clicking anywhere the rows are not opens the folder's own
     // menu. Rows capture their own right press first — see
     // `with_row_menu` — so this only sees the empty space.
-    iced::widget::mouse_area(
-        container(body_content(vm, scale)).width(Length::Fill).height(Length::Fill),
+    let body = iced::widget::mouse_area(
+        container(body_content(vm, zoomed)).width(Length::Fill).height(Length::Fill),
     )
-    .on_right_press(Message::OpenContextMenu { spot: MenuSpot::Background, at: (0.0, 0.0) })
-    .into()
+    .on_right_press(Message::OpenContextMenu { spot: MenuSpot::Background, at: (0.0, 0.0) });
+    // Outermost, so Ctrl+wheel is a zoom before the listing's scrollable
+    // can take it as a scroll — see `hyprforge_ui::widgets::wheel_zoom`.
+    wheel_zoom(body, Message::Zoom).into()
 }
 
 fn body_content<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
@@ -5267,7 +5296,11 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
             }
         }
         grid = grid.push(current);
-        scrollable(container(grid).padding(gap)).height(Length::Fill).id(scroll_id.clone()).into()
+        // The full pane's width, not the grid's: a scrollable as wide as
+        // its content puts its scrollbar just right of the last column,
+        // in the middle of the pane, which showed the first time zooming
+        // in made a short folder scroll.
+        scrollable(container(grid).padding(gap)).width(Length::Fill).height(Length::Fill).id(scroll_id.clone()).into()
     })
     .into()
 }
@@ -8169,5 +8202,36 @@ mod status_tests {
         let mut browser = loaded(&[("a.txt", false), ("b.txt", false)]);
         browser.update(Message::SearchChanged("zzz".into()));
         assert_eq!(status_line(&browser.view_model(1400.0)), "No matches \u{00B7} 2 hidden");
+    }
+}
+
+#[cfg(test)]
+mod zoom_tests {
+    use super::tests_support::loaded;
+    use super::*;
+
+    #[test]
+    fn ctrl_wheel_zooms_the_view_in_front_of_you_and_remembers_it() {
+        let mut browser = loaded(&[("a", false)]);
+        browser.update(Message::SetViewMode(ViewMode::Grid));
+        let outcome = browser.update(Message::Zoom(2));
+        assert!(matches!(outcome, Outcome::PrefsChanged(ref p) if p.zoom.factor(ViewMode::Grid) == 1.5), "{outcome:?}");
+        assert_eq!(browser.prefs().zoom.factor(ViewMode::List), 1.0, "the list keeps its own size");
+    }
+
+    #[test]
+    fn zooming_past_the_end_saves_nothing() {
+        let mut browser = loaded(&[("a", false)]);
+        browser.update(Message::Zoom(100));
+        assert_eq!(browser.update(Message::Zoom(1)), Outcome::None);
+    }
+
+    #[test]
+    fn the_reset_key_puts_the_view_back_to_its_own_size() {
+        let mut browser = loaded(&[("a", false)]);
+        browser.update(Message::Zoom(-1));
+        assert!(matches!(browser.perform(Action::ZoomReset), Outcome::PrefsChanged(_)));
+        assert_eq!(browser.prefs().zoom.factor(ViewMode::List), 1.0);
+        assert_eq!(browser.perform(Action::ZoomReset), Outcome::None, "already at its own size");
     }
 }

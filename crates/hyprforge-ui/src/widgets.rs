@@ -18,6 +18,7 @@ mod ring;
 mod scrim;
 mod selection;
 mod suggestions;
+mod wheel_zoom;
 
 pub use anchor::{anchored, Anchored};
 pub use badges::{chip, config_line, keycap, removable_chip};
@@ -37,6 +38,7 @@ pub use ring::{countdown_ring, remaining_fraction};
 pub use scrim::{scrim, scrim_color, SCRIM_ALPHA};
 pub use selection::{section_label, selectable_row_style, spaced_caps, Tint};
 pub use suggestions::{suggestions, Suggestion};
+pub use wheel_zoom::{steps_from_pixels, wheel_zoom, WheelZoom, PIXELS_PER_STEP};
 
 use crate::theme::{self, spacing, surface, FontScale};
 use iced::widget::{button, column, container, row, text, text::IntoFragment, Text};
