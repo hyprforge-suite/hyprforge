@@ -40,7 +40,7 @@ pub fn menu_size(items: &[crate::menu::MenuItem], scale: FontScale) -> (f32, f32
         .iter()
         .map(|item| match item {
             crate::menu::MenuItem::Separator => menu_separator_height(scale),
-            crate::menu::MenuItem::Action { .. } => row_height(scale),
+            crate::menu::MenuItem::Action { .. } | crate::menu::MenuItem::Custom { .. } => row_height(scale),
         })
         .sum();
     // `menu_padding` all round, plus the one-pixel border either side.

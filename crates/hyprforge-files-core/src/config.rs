@@ -43,6 +43,16 @@
 //! downloads = "folder-cloud"
 //! trash = "user-trash-full"
 //! "~/Projects" = "~/.local/share/icons/projects.svg"
+//!
+//! [behaviour]
+//! # "Open Terminal Here", as a list of words. Left out, Files finds one.
+//! terminal = ["ghostty"]
+//!
+//! [[action]]
+//! # Your own commands, in the menus and the palette — see `crate::custom`.
+//! label = "Resize to 50%"
+//! command = ["magick", "mogrify", "-resize", "50%"]
+//! types = ["image/*"]
 //! ```
 
 use crate::keymap::Keymap;
@@ -62,6 +72,13 @@ pub struct Config {
     pub menus: MenuConfig,
     pub behaviour: Behaviour,
     pub sidebar: SidebarConfig,
+    /// `[behaviour] terminal`: the terminal "Open Terminal Here" runs, as
+    /// a program and its arguments. `None` is Automatic — the window
+    /// finds one. Here rather than in [`Behaviour`], which is `Copy`.
+    pub terminal: Option<Vec<String>>,
+    /// The `[[action]]` blocks that loaded, in the file's order — see
+    /// [`crate::custom`].
+    pub actions: Vec<crate::custom::CustomAction>,
 }
 
 /// `[sidebar]`: what the sidebar offers, and when it folds to a rail.
@@ -225,6 +242,8 @@ struct RawConfig {
     menu: BTreeMap<String, Vec<String>>,
     behaviour: RawBehaviour,
     sidebar: RawSidebar,
+    /// `[[action]]` — checked block by block in [`crate::custom`].
+    action: Option<toml::Value>,
 }
 
 /// `[sidebar]` as written — checked by hand, like `[behaviour]`.
@@ -250,6 +269,7 @@ struct RawBehaviour {
     progress_after_ms: Option<toml::Value>,
     undo_depth: Option<toml::Value>,
     undo_notice_seconds: Option<toml::Value>,
+    terminal: Option<toml::Value>,
 }
 
 /// A number within `range`, or a problem naming it. `name` includes
@@ -399,7 +419,46 @@ pub fn parse(text: &str, path: &Path) -> (Config, Vec<ConfigProblem>) {
         &mut problems,
     );
     let sidebar = sidebar_with(&raw.sidebar, &mut problems);
-    (Config { keymap, menus, behaviour, sidebar }, problems)
+    let terminal = terminal_with(&raw.behaviour.terminal, &mut problems);
+    let mut action_problems = Vec::new();
+    let actions = raw
+        .action
+        .as_ref()
+        .map(|value| crate::custom::parse_blocks(value, &mut action_problems))
+        .unwrap_or_default();
+    problems.extend(action_problems.into_iter().map(problem));
+    (Config { keymap, menus, behaviour, sidebar, terminal, actions }, problems)
+}
+
+/// `[behaviour] terminal`: a list of words, the program first. One word
+/// may be written as a plain string; a string with spaces in it is
+/// refused rather than split, because splitting it would be guessing at
+/// shell quoting — the thing `crate::custom` refuses to do for commands.
+/// An empty list is Automatic, the same as leaving the line out.
+fn terminal_with(raw: &Option<toml::Value>, problems: &mut Vec<ConfigProblem>) -> Option<Vec<String>> {
+    let bad = |problems: &mut Vec<ConfigProblem>, value: &toml::Value| {
+        problems.push(problem(format!(
+            "[behaviour] terminal = {value}: use a list of words, like [\"kitty\", \"--single-instance\"] \
+             — finding one automatically until this is fixed"
+        )));
+        None
+    };
+    match raw {
+        None => None,
+        Some(toml::Value::String(word)) if !word.trim().is_empty() && !word.trim().contains(char::is_whitespace) => {
+            Some(vec![word.trim().to_string()])
+        }
+        Some(toml::Value::Array(words)) => {
+            let words: Option<Vec<String>> =
+                words.iter().map(|w| w.as_str().filter(|s| !s.is_empty()).map(str::to_string)).collect();
+            match words {
+                Some(words) if words.is_empty() => None,
+                Some(words) => Some(words),
+                None => bad(problems, raw.as_ref().expect("matched Some")),
+            }
+        }
+        Some(other) => bad(problems, other),
+    }
 }
 
 /// `[sidebar]` over the defaults. An unknown place is reported and left
@@ -853,5 +912,41 @@ mod tests {
         std::fs::write(&path, text).unwrap();
         let _ = load_from(&path);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+
+    #[test]
+    fn the_terminal_is_a_list_of_words_and_absent_means_automatic() {
+        assert_eq!(parsed("").0.terminal, None);
+        let (config, problems) = parsed("[behaviour]\nterminal = [\"kitty\", \"--single-instance\"]\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(config.terminal, Some(vec!["kitty".to_string(), "--single-instance".to_string()]));
+        assert_eq!(parsed("[behaviour]\nterminal = \"ghostty\"\n").0.terminal, Some(vec!["ghostty".to_string()]));
+        assert_eq!(parsed("[behaviour]\nterminal = []\n").0.terminal, None);
+    }
+
+    /// A line with spaces would have to be split by shell rules to mean
+    /// anything, and guessing at those is refused — with the rest of the
+    /// section kept.
+    #[test]
+    fn a_terminal_written_as_one_line_is_refused_rather_than_split() {
+        let (config, problems) = parsed("[behaviour]\nterminal = \"kitty -1\"\nconfirm-trash = true\n");
+        assert_eq!(config.terminal, None);
+        assert!(config.behaviour.confirm_trash);
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].message.contains("list of words"), "{}", problems[0]);
+    }
+
+    #[test]
+    fn custom_actions_load_beside_everything_else_and_a_bad_one_is_reported() {
+        let (config, problems) = parsed(
+            "[keys]\ntrash = \"Ctrl+J\"\n\
+             [[action]]\nlabel = \"Shrink\"\ncommand = [\"magick\"]\n\
+             [[action]]\nlabel = \"Broken\"\n",
+        );
+        assert_eq!(config.actions.len(), 1);
+        assert_eq!(config.actions[0].label, "Shrink");
+        assert_eq!(does(&config, "Ctrl+J"), Some(Action::Trash), "the rest of the file still applies");
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].message.contains("Broken"), "{}", problems[0]);
     }
 }

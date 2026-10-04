@@ -1040,6 +1040,9 @@ uninstall_files() {
     remove_file "$PREFIX/hyprforge-files-portal"
     remove_file "$PORTAL_DIR/hyprforge.portal"
     remove_file "$DBUS_SERVICES_DIR/$PORTAL_BUS_NAME.service"
+    # The FileManager1 claim goes with it, which hands the name back to
+    # whichever file manager /usr/share's services name.
+    remove_file "$DBUS_SERVICES_DIR/$FILE_MANAGER1_NAME.service"
     reload_session_bus
     # Nothing else to undo: no service, no config written by the
     # installer. The user's own files.toml is deliberately left alone —
@@ -1229,6 +1232,7 @@ readonly DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 readonly PORTAL_DIR=/usr/share/xdg-desktop-portal/portals
 readonly DBUS_SERVICES_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/dbus-1/services"
 readonly PORTAL_BUS_NAME=org.freedesktop.impl.portal.desktop.hyprforge
+readonly FILE_MANAGER1_NAME=org.freedesktop.FileManager1
 
 install_files() {
     COMPONENT_CHANGED=false
@@ -1276,6 +1280,26 @@ install_files() {
         mkdir -p "$DBUS_SERVICES_DIR"
         printf '%s\n' "$wanted" > "$activation"
         ok "installed $activation"
+        reload_session_bus
+    fi
+    flush_current
+
+    # org.freedesktop.FileManager1: what a browser's "Show in Folder" and
+    # an editor's "Reveal in File Manager" call. Claimed on install, on
+    # purpose — Files is the file manager this suite installs, and a
+    # file in the user's own services directory is read before
+    # /usr/share's, so it wins over Nemo's or Nautilus's there. The
+    # service is this binary with --dbus-service; it exits when idle.
+    local fm1="$DBUS_SERVICES_DIR/$FILE_MANAGER1_NAME.service"
+    wanted=$(printf '[D-BUS Service]\nName=%s\nExec=%s --dbus-service\n' "$FILE_MANAGER1_NAME" "$PREFIX/hyprforge-files")
+    if $DRY_RUN; then
+        skip "would install $fm1"
+    elif [[ -e $fm1 ]] && [[ $(cat "$fm1") == "$wanted" ]]; then
+        mark_current
+    else
+        mkdir -p "$DBUS_SERVICES_DIR"
+        printf '%s\n' "$wanted" > "$fm1"
+        ok "installed $fm1"
         reload_session_bus
     fi
     flush_current
