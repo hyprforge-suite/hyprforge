@@ -26,7 +26,7 @@ use std::path::Path;
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
 /// The first line of a file this sheet had to create.
-pub const HEADER: &str = "# Files' own settings: [keys], [menu], [behaviour] and [sidebar].\n\
+pub const HEADER: &str = "# Files' own settings: [keys], [menu], [behaviour], [sidebar] and [thumbnails].\n\
      # Files' Preferences writes here one line at a time, and the file is\n\
      # yours to edit too: comments and anything you add are kept.\n";
 
@@ -54,6 +54,8 @@ pub enum Edit {
     Keys(Action, Option<Vec<Combo>>),
     /// `[behaviour] <key> = <value>`.
     Behaviour(&'static str, BehaviourValue),
+    /// `[thumbnails] <key> = <value>`.
+    Thumbnails(&'static str, BehaviourValue),
 }
 
 /// A `[behaviour]` value, as the sheet sets it.
@@ -61,6 +63,17 @@ pub enum Edit {
 pub enum BehaviourValue {
     Switch(bool),
     Word(&'static str),
+    Number(i64),
+}
+
+impl BehaviourValue {
+    fn to_toml(&self) -> Value {
+        match self {
+            BehaviourValue::Switch(on) => Value::from(*on),
+            BehaviourValue::Word(word) => Value::from(*word),
+            BehaviourValue::Number(n) => Value::from(*n),
+        }
+    }
 }
 
 /// `text` with `edits` applied, or why not. `path` is only for messages.
@@ -82,11 +95,11 @@ pub fn apply(text: &str, edits: &[Edit], path: &Path) -> Result<String, EditErro
             }
             Edit::Behaviour(key, value) => {
                 let table = section(&mut doc, "behaviour", &shown)?;
-                let value = match value {
-                    BehaviourValue::Switch(on) => Value::from(*on),
-                    BehaviourValue::Word(word) => Value::from(*word),
-                };
-                set(table, key, value);
+                set(table, key, value.to_toml());
+            }
+            Edit::Thumbnails(key, value) => {
+                let table = section(&mut doc, "thumbnails", &shown)?;
+                set(table, key, value.to_toml());
             }
         }
     }

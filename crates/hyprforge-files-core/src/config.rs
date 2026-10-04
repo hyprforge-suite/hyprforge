@@ -37,6 +37,15 @@
 //! show-trash = true
 //! collapse-below = 760   # window width; 0 never collapses on its own
 //!
+//! [thumbnails]
+//! # Which kinds of file get a picture instead of an icon.
+//! pictures = true
+//! pdfs = true
+//! videos = true
+//! models = true      # STL, 3MF, OBJ
+//! system = true      # other programs' thumbnailers, glycin's and the like
+//! max-file-mb = 0    # skip files bigger than this; 0 never skips
+//!
 //! [sidebar.icons]
 //! # A place, "trash", or a folder's path = an icon theme name, or an
 //! # image file (anything with a slash in it).
@@ -62,6 +71,52 @@ pub struct Config {
     pub menus: MenuConfig,
     pub behaviour: Behaviour,
     pub sidebar: SidebarConfig,
+    pub thumbnails: Thumbnails,
+}
+
+/// `[thumbnails]`: which kinds of file are drawn as a picture of
+/// themselves, and how big a file may be before it is not.
+///
+/// Per source because each has its own cost: a picture is decoded here,
+/// a PDF page and a video frame each run another program, a model is
+/// loaded whole and drawn, and a system thumbnailer is somebody else's
+/// program, run on a file of a type nothing here can read. Someone on a
+/// slow network share can turn off the expensive ones and keep the rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Thumbnails {
+    pub pictures: bool,
+    pub pdfs: bool,
+    pub videos: bool,
+    pub models: bool,
+    pub system: bool,
+    /// Files bigger than this many megabytes keep their icon. `0` never
+    /// skips one.
+    pub max_file_mb: u64,
+}
+
+impl Default for Thumbnails {
+    fn default() -> Self {
+        Thumbnails { pictures: true, pdfs: true, videos: true, models: true, system: true, max_file_mb: 0 }
+    }
+}
+
+impl Thumbnails {
+    /// Whether a source of this kind is switched on.
+    pub fn allows(&self, source: crate::preview::Source) -> bool {
+        use crate::preview::Source;
+        match source {
+            Source::Picture | Source::Svg => self.pictures,
+            Source::Pdf => self.pdfs,
+            Source::Video => self.videos,
+            Source::Model => self.models,
+            Source::System => self.system,
+        }
+    }
+
+    /// Whether a file of `bytes` is small enough to thumbnail.
+    pub fn allows_size(&self, bytes: u64) -> bool {
+        self.max_file_mb == 0 || bytes <= self.max_file_mb.saturating_mul(1024 * 1024)
+    }
 }
 
 /// `[sidebar]`: what the sidebar offers, and when it folds to a rail.
@@ -142,6 +197,9 @@ pub struct Behaviour {
     /// How long "Moved 3 items to the Trash · Undo" stays in the status
     /// bar. `0` turns the notice off; Ctrl+Z still works.
     pub undo_notice_seconds: u64,
+    /// How many lines of its name a grid cell shows before "…", one to
+    /// three. The selected cell shows the whole name whatever this says.
+    pub grid_name_lines: u8,
 }
 
 impl Default for Behaviour {
@@ -153,6 +211,7 @@ impl Default for Behaviour {
             progress_after_ms: 500,
             undo_depth: 20,
             undo_notice_seconds: 6,
+            grid_name_lines: 2,
         }
     }
 }
@@ -225,6 +284,19 @@ struct RawConfig {
     menu: BTreeMap<String, Vec<String>>,
     behaviour: RawBehaviour,
     sidebar: RawSidebar,
+    thumbnails: RawThumbnails,
+}
+
+/// `[thumbnails]` as written — checked by hand, like `[behaviour]`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+struct RawThumbnails {
+    pictures: Option<toml::Value>,
+    pdfs: Option<toml::Value>,
+    videos: Option<toml::Value>,
+    models: Option<toml::Value>,
+    system: Option<toml::Value>,
+    max_file_mb: Option<toml::Value>,
 }
 
 /// `[sidebar]` as written — checked by hand, like `[behaviour]`.
@@ -250,6 +322,7 @@ struct RawBehaviour {
     progress_after_ms: Option<toml::Value>,
     undo_depth: Option<toml::Value>,
     undo_notice_seconds: Option<toml::Value>,
+    grid_name_lines: Option<toml::Value>,
 }
 
 /// A number within `range`, or a problem naming it. `name` includes
@@ -398,8 +471,37 @@ pub fn parse(text: &str, path: &Path) -> (Config, Vec<ConfigProblem>) {
         "seconds",
         &mut problems,
     );
+    behaviour.grid_name_lines = number(
+        "[behaviour] grid-name-lines",
+        &raw.behaviour.grid_name_lines,
+        1..=3,
+        behaviour.grid_name_lines as u64,
+        "a count of lines",
+        &mut problems,
+    ) as u8;
     let sidebar = sidebar_with(&raw.sidebar, &mut problems);
-    (Config { keymap, menus, behaviour, sidebar }, problems)
+    let thumbnails = thumbnails_with(&raw.thumbnails, &mut problems);
+    (Config { keymap, menus, behaviour, sidebar, thumbnails }, problems)
+}
+
+/// `[thumbnails]` over the defaults, one entry at a time.
+fn thumbnails_with(raw: &RawThumbnails, problems: &mut Vec<ConfigProblem>) -> Thumbnails {
+    let d = Thumbnails::default();
+    Thumbnails {
+        pictures: switch("[thumbnails] pictures", &raw.pictures, d.pictures, problems),
+        pdfs: switch("[thumbnails] pdfs", &raw.pdfs, d.pdfs, problems),
+        videos: switch("[thumbnails] videos", &raw.videos, d.videos, problems),
+        models: switch("[thumbnails] models", &raw.models, d.models, problems),
+        system: switch("[thumbnails] system", &raw.system, d.system, problems),
+        max_file_mb: number(
+            "[thumbnails] max-file-mb",
+            &raw.max_file_mb,
+            0..=1_000_000,
+            d.max_file_mb,
+            "megabytes",
+            problems,
+        ),
+    }
 }
 
 /// `[sidebar]` over the defaults. An unknown place is reported and left
@@ -840,6 +942,34 @@ mod tests {
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(config.behaviour.undo_depth, 0);
         assert_eq!(config.behaviour.undo_notice_seconds, 0);
+    }
+
+    /// Every source on and no size cap, until the file says otherwise;
+    /// a bad value costs that one entry, not the section.
+    #[test]
+    fn thumbnails_are_all_on_by_default_and_each_switches_alone() {
+        assert_eq!(Config::default().thumbnails, Thumbnails::default());
+        assert!(Thumbnails::default().allows_size(u64::MAX), "no cap by default");
+        let (config, problems) =
+            parsed("[thumbnails]\nvideos = false\nmodels = \"no\"\nmax-file-mb = 50\n");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(!config.thumbnails.videos);
+        assert!(config.thumbnails.models, "the bad value keeps its default");
+        assert!(config.thumbnails.allows_size(50 * 1024 * 1024));
+        assert!(!config.thumbnails.allows_size(50 * 1024 * 1024 + 1));
+    }
+
+    /// Two lines unless the file says one or three; anything else is
+    /// named and ignored.
+    #[test]
+    fn grid_names_take_two_lines_unless_told_otherwise() {
+        assert_eq!(Config::default().behaviour.grid_name_lines, 2);
+        let (config, problems) = parsed("[behaviour]\ngrid-name-lines = 3\n");
+        assert!(problems.is_empty());
+        assert_eq!(config.behaviour.grid_name_lines, 3);
+        let (config, problems) = parsed("[behaviour]\ngrid-name-lines = 7\n");
+        assert_eq!(problems.len(), 1);
+        assert_eq!(config.behaviour.grid_name_lines, 2);
     }
 
     /// The config is read, never written — this module has no function

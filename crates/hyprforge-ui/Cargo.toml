@@ -29,3 +29,7 @@ hyprforge-keys.workspace = true
 # `widgets::anchored`, which places an overlay from its anchor's own
 # layout — the one thing no stock widget does.
 iced = { workspace = true, features = ["canvas", "advanced"] }
+# `widgets::clamped_text` cuts a name between graphemes, never inside
+# one — an accent is not left without its letter. Already in the tree
+# under cosmic-text, at this version.
+unicode-segmentation = "1.12"

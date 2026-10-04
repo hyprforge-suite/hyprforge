@@ -220,24 +220,68 @@ pub fn grid_cell_width(scale: FontScale) -> f32 {
     scale.apply(GRID_CELL_WIDTH)
 }
 
-/// A grid cell's total height: icon, gap, and two lines of name.
-pub fn grid_cell_height(scale: FontScale) -> f32 {
-    scale.apply(GRID_CELL_HEIGHT)
+/// A grid cell's total height: icon, gap, and `lines` lines of name —
+/// `[behaviour] grid-name-lines`, one to three.
+///
+/// The two-line cell is the design's 132; each line more or fewer is one
+/// line of row text more or less, so the slack the result cell's folder
+/// line lives in is the same at every setting.
+pub fn grid_cell_height(scale: FontScale, lines: u8) -> f32 {
+    let line = ROW_TEXT_BASE * GRID_NAME_LINE_HEIGHT;
+    scale.apply(GRID_CELL_HEIGHT + (lines as f32 - DEFAULT_NAME_LINES) * line)
 }
 
-/// The room a grid cell gives a name: two lines of row text.
+/// The room a grid cell gives a name: `lines` lines of row text.
 ///
 /// Fixed rather than "as much as the name needs", because cells sit in
 /// rows — one three-line name would push its whole row taller than the
 /// rows above and below it, and a grid whose rows are different heights
-/// reads as broken rather than as accommodating.
-pub fn grid_name_height(scale: FontScale) -> f32 {
-    scale.apply(ROW_TEXT_BASE) * GRID_NAME_LINE_HEIGHT * GRID_NAME_LINES
+/// reads as broken rather than as accommodating. A name that needs more
+/// is cut with "…" by `hyprforge_ui::widgets::clamped_text` — never
+/// clipped through its letters — and shown whole when its cell is the
+/// one selected.
+pub fn grid_name_height(scale: FontScale, lines: u8) -> f32 {
+    scale.apply(ROW_TEXT_BASE) * GRID_NAME_LINE_HEIGHT * lines as f32
 }
 
 /// iced's default line height is 1.3x the text size.
 const GRID_NAME_LINE_HEIGHT: f32 = 1.3;
-const GRID_NAME_LINES: f32 = 2.0;
+/// The lines [`GRID_CELL_HEIGHT`] was drawn for.
+const DEFAULT_NAME_LINES: f32 = 2.0;
+
+/// The space inside a grid cell's edge, and between its icon and its
+/// name. Scaled with everything else in the cell: unscaled, a cell at
+/// Extra large had the same eight pixels of air as one at Small, and the
+/// sum the cell's height is checked against was a different sum from
+/// the one drawn.
+pub fn grid_padding(scale: FontScale) -> f32 {
+    scale.apply(hyprforge_ui::theme::spacing::SM)
+}
+
+/// The largest scale at which one grid cell, with the grid's padding and
+/// the scrollbar's lane, fits across `pane_width`.
+///
+/// Every term of that sum is linear in the scale, so it is one division.
+/// Past it a lone cell would overrun the pane, and a row that overruns
+/// is squeezed — the name wraps into a column narrower than its cell and
+/// is cut where it would have fitted.
+pub fn grid_scale_cap(pane_width: f32) -> f32 {
+    pane_width / (GRID_CELL_WIDTH + 2.0 * GRID_GAP + SCROLLBAR_LANE)
+}
+
+/// The scale the grid is drawn at: `zoomed`, unless not even one cell
+/// would fit across `pane_width` at it — then the largest that does,
+/// though never below `floor`. Whether it was capped is the second half,
+/// for the status bar to say so: a zoom that silently does less than it
+/// says reads as the zoom being broken.
+pub fn grid_scale(zoomed: FontScale, pane_width: f32, floor: f32) -> (FontScale, bool) {
+    let cap = grid_scale_cap(pane_width).max(floor);
+    if zoomed.0 > cap {
+        (FontScale(cap), true)
+    } else {
+        (zoomed, false)
+    }
+}
 
 /// The icon inside a grid cell.
 pub fn grid_icon_size(scale: FontScale) -> f32 {
@@ -492,32 +536,69 @@ mod grid_tests {
     /// the failure this guards against is exactly the one that arrives
     /// by a few pixels when someone grows the icon.
     #[test]
-    fn a_cell_holds_its_icon_and_two_lines_of_name_without_squeezing() {
-        for scale in [FontScale::default(), FontScale(1.25), FontScale(1.6)] {
-            // `grid_cell`'s own layout: `padding(SM)` all round, then a
-            // column of [icon, name] spaced `SM`.
-            let padding = scale.apply(hyprforge_ui::theme::spacing::SM) * 2.0;
-            let gap = scale.apply(hyprforge_ui::theme::spacing::SM);
-            let needed = padding + grid_icon_size(scale) + gap + grid_name_height(scale);
-            assert!(
-                grid_cell_height(scale) >= needed,
-                "a cell is {} tall but needs {needed} at scale {:?}",
-                grid_cell_height(scale),
-                scale,
-            );
+    fn a_cell_holds_its_icon_and_its_lines_of_name_without_squeezing() {
+        // Up to Extra large at the largest font scale the suite offers —
+        // where the names were being cut.
+        for scale in [1.0, 1.25, 1.6, 2.0, 3.2].map(FontScale) {
+            for lines in 1..=3 {
+                // `grid_cell`'s own layout: `grid_padding` all round,
+                // then a column of [icon, name] spaced the same.
+                let needed =
+                    3.0 * grid_padding(scale) + grid_icon_size(scale) + grid_name_height(scale, lines);
+                assert!(
+                    grid_cell_height(scale, lines) + 0.01 >= needed,
+                    "a cell is {} tall but needs {needed} at scale {scale:?} with {lines} lines",
+                    grid_cell_height(scale, lines),
+                );
+            }
         }
         assert!(grid_cell_width(FontScale::default()) > grid_icon_size(FontScale::default()));
+    }
+
+    /// Never squeezed: at the scale the grid is actually drawn at, one
+    /// whole cell and everything around it fits the pane — at every
+    /// zoom, font scale and pane width, down to the floor.
+    #[test]
+    fn a_cell_never_comes_out_narrower_than_its_size() {
+        for font in [1.0, 1.25, 1.6] {
+            for zoom in crate::prefs::Zoom::FACTORS {
+                let mut width = 140.0_f32;
+                while width < 2000.0 {
+                    let floor = font * crate::prefs::Zoom::FACTORS[0];
+                    let (scale, capped) = grid_scale(FontScale(font * zoom), width, floor);
+                    let used = grid_cell_width(scale) + 2.0 * grid_gap(scale) + scale.apply(SCROLLBAR_LANE);
+                    assert!(
+                        used <= width + 0.01 || scale.0 <= floor,
+                        "{used} in {width} at font {font} zoom {zoom}"
+                    );
+                    assert_eq!(capped, scale.0 < font * zoom);
+                    width += 3.0;
+                }
+            }
+        }
+    }
+
+    /// Extra large on a wide pane is Extra large: the cap only ever
+    /// takes away what does not fit.
+    #[test]
+    fn a_pane_wide_enough_keeps_the_zoom_it_was_given() {
+        assert_eq!(grid_scale(FontScale(2.0), 1200.0, 0.75), (FontScale(2.0), false));
+        let (scale, capped) = grid_scale(FontScale(3.2), 400.0, 0.75);
+        assert!(capped && scale.0 < 3.2);
     }
 
     /// A result's cell is the same height as any other, and holds its
     /// smaller icon, the two-line name and the folder line under it.
     #[test]
     fn a_result_cell_holds_its_folder_line_at_the_same_height() {
-        for scale in [FontScale::default(), FontScale(1.25), FontScale(1.6)] {
-            let padding = scale.apply(hyprforge_ui::theme::spacing::SM) * 2.0;
-            let gap = scale.apply(hyprforge_ui::theme::spacing::SM);
-            let needed = padding + grid_result_icon_size(scale) + gap + grid_name_height(scale) + grid_folder_height(scale);
-            assert!(grid_cell_height(scale) >= needed, "needs {needed} at scale {scale:?}");
+        for scale in [1.0, 1.25, 1.6, 3.2].map(FontScale) {
+            for lines in 1..=3 {
+                let needed = 3.0 * grid_padding(scale)
+                    + grid_result_icon_size(scale)
+                    + grid_name_height(scale, lines)
+                    + grid_folder_height(scale);
+                assert!(grid_cell_height(scale, lines) + 0.01 >= needed, "needs {needed} at {scale:?}, {lines} lines");
+            }
         }
         assert!(grid_result_icon_size(FontScale::default()) < grid_icon_size(FontScale::default()));
     }
@@ -531,13 +612,16 @@ mod grid_tests {
         assert!(GRID_FOLDER_CHARS as f32 * scale.apply(META_TEXT_BASE) * 0.55 <= inner);
     }
 
-    /// Two lines, not one and not three — a grid whose rows are
-    /// different heights because one name was longer reads as broken.
+    /// Exactly the lines asked for — a grid whose rows are different
+    /// heights because one name was longer reads as broken.
     #[test]
-    fn the_name_budget_is_exactly_two_lines() {
+    fn the_name_budget_is_exactly_the_lines_asked_for() {
         let scale = FontScale::default();
         let one_line = scale.apply(ROW_TEXT_BASE) * 1.3;
-        assert!((grid_name_height(scale) - one_line * 2.0).abs() < 0.01);
+        for lines in 1..=3 {
+            assert!((grid_name_height(scale, lines) - one_line * lines as f32).abs() < 0.01);
+        }
+        assert_eq!(grid_cell_height(scale, 2), 132.0, "the design's cell at the default");
     }
 
     /// Everything here scales with the font, like every other dimension
@@ -546,7 +630,7 @@ mod grid_tests {
     fn every_grid_dimension_grows_with_the_font_scale() {
         let big = FontScale(1.5);
         assert!(grid_cell_width(big) > grid_cell_width(FontScale::default()));
-        assert!(grid_cell_height(big) > grid_cell_height(FontScale::default()));
+        assert!(grid_cell_height(big, 2) > grid_cell_height(FontScale::default(), 2));
         assert!(grid_icon_size(big) > grid_icon_size(FontScale::default()));
         // And a bigger font means fewer cells across the same pane.
         assert!(grid_columns(1200.0, big) < grid_columns(1200.0, FontScale::default()));
