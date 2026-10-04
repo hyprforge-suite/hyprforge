@@ -1016,6 +1016,23 @@ EOF
 )
 }
 
+# Tells the running session bus to read its service files again.
+#
+# dbus-broker, Arch's bus, does not watch the directory: a service file
+# written while the session is running is not there to it until a reload
+# or the next login. Found the first time the dialog was turned on — the
+# portal answered every request with "Backend call failed: The name is
+# not activatable", with the file sitting in place. Bounded like every
+# other call to another process here; failing to reload is a warning
+# with the command to run, never a failed install.
+reload_session_bus() {
+    $DRY_RUN && return 0
+    if ! timeout 5 busctl --user call org.freedesktop.DBus /org/freedesktop/DBus \
+        org.freedesktop.DBus ReloadConfig >/dev/null 2>&1; then
+        warn "the session bus did not reload — log out and back in, or run: busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig"
+    fi
+}
+
 uninstall_files() {
     step "File manager: removing"
     remove_file "$PREFIX/hyprforge-files"
@@ -1023,6 +1040,7 @@ uninstall_files() {
     remove_file "$PREFIX/hyprforge-files-portal"
     remove_file "$PORTAL_DIR/hyprforge.portal"
     remove_file "$DBUS_SERVICES_DIR/$PORTAL_BUS_NAME.service"
+    reload_session_bus
     # Nothing else to undo: no service, no config written by the
     # installer. The user's own files.toml is deliberately left alone —
     # uninstalling a program is not a reason to throw away the
@@ -1258,6 +1276,7 @@ install_files() {
         mkdir -p "$DBUS_SERVICES_DIR"
         printf '%s\n' "$wanted" > "$activation"
         ok "installed $activation"
+        reload_session_bus
     fi
     flush_current
 
@@ -1274,7 +1293,8 @@ install_files() {
 
   To make Files every application's Open and Save dialog — opt-in, and
   undone by removing the last line — put this in
-  ~/.config/xdg-desktop-portal/hyprland-portals.conf:
+  ~/.config/xdg-desktop-portal/hyprland-portals.conf (the folder is
+  usually not there yet: mkdir -p ~/.config/xdg-desktop-portal):
       [preferred]
       default=hyprland;gtk
       org.freedesktop.impl.portal.FileChooser=hyprforge
