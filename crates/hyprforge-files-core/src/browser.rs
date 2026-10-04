@@ -4110,11 +4110,17 @@ fn status_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> 
                 density::META_TEXT_BASE,
                 scale,
             ),
-            meta_text(
-                vm.current_dir.display().to_string(),
-                density::META_TEXT_BASE,
-                scale,
-            ),
+            // One line, with "~" for home and "…" where it runs out: in a
+            // split pane the status bar is half the window, and the whole
+            // path wrapped onto a second line and out of the bar.
+            container(
+                clamped_text(crate::format::tilde_path(vm.current_dir, home_dir().as_deref()), 1)
+                    .size(scale.apply(density::META_TEXT_BASE))
+                    .color(hyprforge_ui::theme::text_dim())
+                    .wrapping(iced::widget::text::Wrapping::Glyph),
+            )
+            .width(Length::Shrink)
+            .max_width(scale.apply(480.0)),
         ]
         .spacing(spacing::MD)
         .align_y(iced::Alignment::Center)
