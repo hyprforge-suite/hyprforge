@@ -119,6 +119,26 @@ impl Picture {
         }
     }
 
+    /// Drawn as large as the space it is given, keeping its proportions —
+    /// and never larger than itself: `ScaleDown`, not `Contain`, so a
+    /// 64-pixel icon in Quick Look is a 64-pixel icon rather than a
+    /// smear of invented pixels filling the window. An SVG has no pixels
+    /// to invent and is drawn to fit, whatever size it declares.
+    pub fn view_fill<'a, Message: 'a>(&self) -> Element<'a, Message> {
+        match self {
+            Picture::Svg(handle) => iced::widget::svg(handle.clone())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .content_fit(iced::ContentFit::Contain)
+                .into(),
+            Picture::Raster(handle) => iced::widget::image(handle.clone())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .content_fit(iced::ContentFit::ScaleDown)
+                .into(),
+        }
+    }
+
     /// Drawn within `width` by `height`, keeping its proportions.
     pub fn view_in<'a, Message: 'a>(&self, width: f32, height: f32) -> Element<'a, Message> {
         match self {

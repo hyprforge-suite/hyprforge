@@ -109,7 +109,7 @@ Each is `hyprforge_ui::widgets::<name>`.
 | Dialogs | `confirm_dialog` |
 | Time | `countdown_ring`, with `remaining_fraction` |
 | Progress | `progress_line` (with `progress_line_style`): a thin bar in the foreground colour on the `row` step, never the accent; drawn only when there is an honest fraction |
-| Floating | `popover_card`: the surface a popover opens on, the context menu's own (see Patterns) |
+| Floating | `popover_card`: the surface a popover opens on, the context menu's own (see Patterns). `scrim`: a card centred over the window dimmed with `scrim_color` (the root step at `SCRIM_ALPHA`), a press on the dim layer dismissing it, and nothing beneath reachable — Files' Quick Look |
 
 ## Patterns
 

@@ -125,8 +125,17 @@ impl Combo {
     ///
     /// Only meaningful for an app that *has* somewhere to type; see
     /// [`crate::BareKeys`].
+    ///
+    /// Space is the one text key that may be bound bare. Nothing anyone
+    /// types begins with a space, so a bare Space can only swallow one
+    /// *in the middle* of something being typed — and that moment is one
+    /// the app can see and this crate cannot. An app that binds Space
+    /// hands a Space typed mid-query back to the query with
+    /// [`crate::Keymap::resolve_typing`]. Files' Quick Look is the
+    /// binding this exists for: Space is the key every file manager
+    /// since the Finder has used for it.
     pub fn would_swallow_typing(&self) -> bool {
-        self.key.types_text() && !self.mods.any_shortcut_modifier()
+        self.key.types_text() && self.key != Key::Space && !self.mods.any_shortcut_modifier()
     }
 }
 
@@ -241,7 +250,9 @@ mod tests {
     fn only_ctrl_alt_and_super_make_a_text_key_safe_to_bind() {
         assert!(Combo::parse("N").unwrap().would_swallow_typing());
         assert!(Combo::parse("Shift+N").unwrap().would_swallow_typing());
-        assert!(Combo::parse("Space").unwrap().would_swallow_typing());
+        // Space is the exception — see `would_swallow_typing` and
+        // `keymap::tests::a_bound_space_yields_to_a_query_being_typed`.
+        assert!(!Combo::parse("Space").unwrap().would_swallow_typing());
         assert!(!Combo::parse("Ctrl+N").unwrap().would_swallow_typing());
         assert!(!Combo::parse("Alt+N").unwrap().would_swallow_typing());
         assert!(!Combo::parse("Super+N").unwrap().would_swallow_typing());

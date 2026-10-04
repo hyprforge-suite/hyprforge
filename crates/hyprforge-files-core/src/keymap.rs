@@ -123,6 +123,28 @@ mod tests {
         assert_eq!(hints, ["Alt+Up", "Backspace"]);
     }
 
+    /// Space is Quick Look — except between two words of a search being
+    /// typed at the listing, where it is the space it looks like.
+    #[test]
+    fn space_is_quick_look_unless_a_search_is_being_typed() {
+        let keys = defaults();
+        let space = KeyPress { key: Key::Space, mods: Modifiers::default(), text: Some(' ') };
+        assert_eq!(keys.resolve_typing(&space, false), Some(Resolved::Action(Action::QuickLook)));
+        assert_eq!(keys.resolve_typing(&space, true), Some(Resolved::Text(' ')));
+    }
+
+    /// Space survives a round trip through the file: Preferences writes
+    /// an action's whole line when a key is added to it, and a loader that
+    /// refused a bare Space would drop Quick Look's own key on the way.
+    #[test]
+    fn a_line_naming_space_is_loaded_not_refused() {
+        let line = [("quick-look".to_string(), vec!["Space".to_string(), "Ctrl+Y".to_string()])];
+        let (keys, problems) = crate::config::keymap_with(&line.into_iter().collect());
+        assert!(problems.is_empty(), "{problems:?}");
+        let space = KeyPress { key: Key::Space, mods: Modifiers::default(), text: Some(' ') };
+        assert_eq!(keys.resolve(&space), Some(Resolved::Action(Action::QuickLook)));
+    }
+
     /// This app's answer to the one question the shared grammar leaves to
     /// its host, pinned: a bare letter goes into search, not to an action.
     #[test]

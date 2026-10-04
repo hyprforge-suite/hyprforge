@@ -43,6 +43,12 @@ Getting this wrong is quiet: with the file manager's answer forced on a
 viewer, the viewer's own default bindings are refused at load, and the
 user is told about a search box their app does not have.
 
+Space is the one bare text key an app with a search box may still
+bind — the file manager's Quick Look. Nothing typed begins with a
+space, so it only matters mid-query, and an app that knows a query is
+being typed says so to `Keymap::resolve_typing`, which then hands
+the Space to the query whatever it is bound to.
+
 # Nothing here may log what was typed
 
 A `KeyPress` carries the character a key produced. CLAUDE.md's rule —
