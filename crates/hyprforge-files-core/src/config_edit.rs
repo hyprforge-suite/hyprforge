@@ -26,7 +26,7 @@ use std::path::Path;
 use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, Value};
 
 /// The first line of a file this sheet had to create.
-pub const HEADER: &str = "# Files' own settings: [keys], [menu], [behaviour], [sidebar] and [[action]].\n\
+pub const HEADER: &str = "# Files' own settings: [keys], [menu], [behaviour], [sidebar], [thumbnails] and [[action]].\n\
      # Files' Preferences writes here one line at a time, and the file is\n\
      # yours to edit too: comments and anything you add are kept.\n";
 
@@ -68,6 +68,8 @@ pub enum Edit {
     /// One `[[action]]` block added, changed or removed — see
     /// [`crate::custom::Change`].
     Action(crate::custom::Change),
+    /// `[thumbnails] <key> = <value>`.
+    Thumbnails(&'static str, BehaviourValue),
 }
 
 /// A `[behaviour]` value, as the sheet sets it.
@@ -110,6 +112,10 @@ pub fn apply(text: &str, edits: &[Edit], path: &Path) -> Result<String, EditErro
             }
             Edit::Behaviour(key, value) => {
                 let table = section(&mut doc, "behaviour", &shown)?;
+                set(table, key, value.to_toml());
+            }
+            Edit::Thumbnails(key, value) => {
+                let table = section(&mut doc, "thumbnails", &shown)?;
                 set(table, key, value.to_toml());
             }
             Edit::Sidebar(key, value) => {

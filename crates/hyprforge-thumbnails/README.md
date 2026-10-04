@@ -20,11 +20,13 @@ cache would store every one of those a second time.
 
 # As small as it can be
 
-- The `normal` size, 128 pixels, which is what the file manager's
-  listing draws — and `large`, 256, for the photo viewer's grid, whose
-  tiles are twice that wide on a scaled screen. Nothing bigger: the
-  specification's `x-large` and `xx-large` are for sizes no window here
-  draws.
+- The smallest of the specification's sizes that covers what is
+  drawn: `normal`, 128 pixels, for the file manager's listing at its
+  usual size; `large`, 256, for the photo viewer's grid and a zoomed
+  listing; `x-large`, 512, for the listing's Extra large icons on a
+  scaled screen, where a 256-pixel picture would be drawn at more than
+  twice its size. `Size::for_edge` picks it. Nothing bigger:
+  `xx-large` is for sizes no window here draws.
 - Encoded with the PNG encoder's strongest compression and adaptive
   filtering, and without an alpha channel when every pixel is opaque —
   which a photograph, a video frame and a PDF page all are, and which
@@ -33,6 +35,14 @@ cache would store every one of those a second time.
   specification describes — a 1×1 image carrying the same two chunks —
   so a broken video is not handed to ffmpeg on every visit.
 - `Cache::prune` removes thumbnails whose file is gone.
+
+# Other programs' thumbnailers
+
+`thumbnailers` reads the `*.thumbnailer` files other packages
+install — glycin's for AVIF, HEIF and JPEG XL on this machine — and
+runs one for a type nothing built in can read: bounded by
+`hyprforge_process::TIMEOUT`, into a private temporary file, read
+back through the same size cap as a thumbnail from the cache.
 
 What *not* to cache is the caller's decision, because it knows what a
 thumbnail costs to make: a picture already small enough to decode

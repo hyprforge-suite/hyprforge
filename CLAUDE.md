@@ -818,8 +818,9 @@ hyprforge-icons     the freedesktop icon theme lookup: which file an icon
                     name is, through the configured theme and everything it
                     inherits. A leaf; depends only on hyprforge-process
 hyprforge-thumbnails the freedesktop thumbnail cache, shared with every other
-                    program: pixels in, pixels out. A leaf with no Hyprforge
-                    dependency
+                    program: pixels in, pixels out — and other programs'
+                    `*.thumbnailer`s, run bounded. A leaf; depends only on
+                    hyprforge-process
 hyprforge-archive   zip, tar and 7z: what is inside one as a directory tree,
                     extracting from it, and rewriting it. A leaf; its one
                     Hyprforge dependency is hyprforge-secret, for archive

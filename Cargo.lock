@@ -1994,6 +1994,7 @@ dependencies = [
  "hyprforge-icons",
  "hyprforge-image",
  "hyprforge-look",
+ "hyprforge-mesh",
  "hyprforge-mime",
  "hyprforge-paths",
  "hyprforge-process",
@@ -2368,6 +2369,7 @@ dependencies = [
 name = "hyprforge-thumbnails"
 version = "0.1.6"
 dependencies = [
+ "hyprforge-process",
  "md-5",
  "png 0.18.1",
  "tempfile",
@@ -2411,6 +2413,7 @@ dependencies = [
  "hyprforge-keys",
  "hyprforge-look",
  "iced",
+ "unicode-segmentation",
 ]
 
 [[package]]

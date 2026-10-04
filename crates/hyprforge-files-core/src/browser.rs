@@ -54,7 +54,7 @@ use crate::types::{Entry, EntrySize, FilesError, ItemCount};
 // does not carry an unused import.
 use hyprforge_ui::theme::{spacing, FontScale, BASE_TEXT_SIZE};
 use hyprforge_ui::widgets::{
-    divider, inset_field_style, meta_text, scaled_text, segment_style, segmented, spaced_caps,
+    clamped_text, divider, inset_field_style, meta_text, scaled_text, segment_style, segmented, spaced_caps,
     vertical_divider, wheel_zoom, SegmentLook,
 };
 use iced::widget::{column, container, row, scrollable, text_input, Id};
@@ -64,12 +64,27 @@ use std::path::{Path, PathBuf};
 
 /// How many thumbnails one folder may hold, grid and list together.
 ///
-/// Each is decoded at twice the grid icon's logical size (for a 2x
-/// display) — 112 pixels square, about 50KB — so the cap bounds a folder
-/// of thousands of photographs to roughly 30MB of thumbnails. Past it the
-/// rest keep their icons; a grid of 600 pictures is past what anyone
-/// scrolls through by eye.
+/// At the smallest bucket — 128 pixels, 64KB of pixels at most — the cap
+/// bounds a folder of thousands of photographs to under 40MB of
+/// thumbnails. Past it the rest keep their icons; a grid of 600 pictures
+/// is past what anyone scrolls through by eye.
 const MAX_THUMBNAILS: usize = 600;
+
+/// The most memory the bigger thumbnails may take between them.
+///
+/// A 512-pixel thumbnail is a megabyte of pixels, so 600 of them would
+/// be 600MB — for a folder of photographs at Extra large icons, which is
+/// exactly where someone scrolls. So only the first
+/// [`thumbnails_at`]`(edge)` in display order are made at the bucket
+/// the zoom wants; past them a file still gets one, at the smallest
+/// bucket, which is softer but never an icon where a picture was.
+const THUMBNAIL_BYTES: usize = 128 * 1024 * 1024;
+
+/// How many thumbnails of `edge` pixels fit [`THUMBNAIL_BYTES`], never
+/// more than [`MAX_THUMBNAILS`].
+fn thumbnails_at(edge: u32) -> usize {
+    (THUMBNAIL_BYTES / (edge as usize * edge as usize * 4)).min(MAX_THUMBNAILS)
+}
 
 /// The preview pane's widest, logical pixels — what the host decodes the
 /// pane's picture for. How wide it is actually drawn depends on the
@@ -160,9 +175,14 @@ fn column_scroll_id(dir: &Path) -> Id {
 struct Media {
     dir: PathBuf,
     thumbnails: HashMap<PathBuf, Picture>,
-    /// Asked for, whether or not an answer has come — so nothing is
-    /// asked for twice, including a file that could not be decoded.
-    requested: HashSet<PathBuf>,
+    /// The bucket each of `thumbnails` was made at, so a zoom past it
+    /// asks again — and a late answer at a smaller bucket does not
+    /// replace a bigger one that came first.
+    made: HashMap<PathBuf, u32>,
+    /// Asked for, and at which bucket, whether or not an answer has come
+    /// — so nothing is asked for twice at the same size, including a
+    /// file that could not be decoded.
+    requested: HashMap<PathBuf, u32>,
     /// The file the preview pane was last asked to show.
     preview_for: Option<PathBuf>,
     /// Its picture, once decoded. `None` while waiting, and for a file
@@ -658,11 +678,12 @@ pub enum Outcome {
     Notice(String),
     /// Several things to do, in order.
     Many(Vec<Outcome>),
-    /// Decode these pictures as grid thumbnails and hand each back as
+    /// Make thumbnails of these, each fitting an `edge`-pixel square —
+    /// one of [`crate::preview::BUCKETS`] — and hand each back as
     /// [`Message::ThumbnailLoaded`]. In display order, so the ones on
     /// screen first arrive first; one at a time, so a folder of
     /// photographs is never decoded all at once.
-    LoadThumbnails(Vec<PathBuf>),
+    LoadThumbnails { paths: Vec<PathBuf>, edge: u32 },
     /// Decode this picture for the preview pane and hand it back as
     /// [`Message::PreviewLoaded`].
     LoadPreview(PathBuf),
@@ -747,8 +768,15 @@ pub enum Message {
     /// could not be read — never `Some(0)`, which would claim it is
     /// empty.
     CountsLoaded(Vec<(PathBuf, Option<usize>)>),
-    /// A grid thumbnail the host decoded — see [`Outcome::LoadThumbnails`].
-    ThumbnailLoaded(PathBuf, Picture),
+    /// A thumbnail the host made, and the bucket it was made at — see
+    /// [`Outcome::LoadThumbnails`].
+    ThumbnailLoaded(PathBuf, Picture, u32),
+    /// How the window is scaled: the output's scale factor and the font
+    /// scale. Thumbnails are made for the pixels a cell actually has —
+    /// a 112-pixel icon on a 1.6 output is 180 physical pixels, and a
+    /// 128-pixel thumbnail drawn there is a blur. Sent by the host when
+    /// it learns the factor, and again whenever it may have changed.
+    ScaleFactor { output: f32, font: FontScale },
     /// The preview pane's picture, or `None` when it would not decode.
     PreviewLoaded(PathBuf, Option<Preview>),
     /// Theme icons the host looked up, by key — `None` for a key the
@@ -945,6 +973,8 @@ struct ViewModel<'a> {
     can_go_forward: bool,
     /// Grid thumbnails the host has decoded, by path.
     thumbnails: &'a HashMap<PathBuf, Picture>,
+    /// `[behaviour] grid-name-lines`.
+    grid_name_lines: u8,
     /// Theme icons, and which folders have their own.
     icons: IconSet<'a>,
     /// What the preview pane shows, when it is on *and* the window has
@@ -1076,6 +1106,11 @@ pub struct Browser {
     path_edit: Option<PathEdit>,
     /// Which files show — see [`EntryFilter`]. `None` shows everything.
     entry_filter: Option<EntryFilter>,
+    /// The output's scale factor and the font scale, from
+    /// [`Message::ScaleFactor`] — what a thumbnail's bucket is worked out
+    /// from. `1.0` until the host says otherwise.
+    output_scale: f32,
+    font_scale: FontScale,
     /// The command palette, while it is open.
     palette: Option<PaletteState>,
     /// The folder a drag over the window is over — told by the host,
@@ -1162,6 +1197,8 @@ impl Browser {
             renaming: None,
             path_edit: None,
             entry_filter: None,
+            output_scale: 1.0,
+            font_scale: FontScale::default(),
             palette: None,
             drop_hover: None,
             after_listing: None,
@@ -1312,12 +1349,21 @@ impl Browser {
                 self.close_quick_look();
                 Outcome::None
             }
-            Message::ThumbnailLoaded(path, handle) => {
+            Message::ThumbnailLoaded(path, handle, made) => {
                 // Only what was asked for in this folder: a thumbnail for
-                // a folder already left has nowhere to go.
-                if self.media.requested.contains(&path) {
+                // a folder already left has nowhere to go. And never a
+                // smaller one over a bigger: answers to a re-ask can
+                // overtake the first.
+                let bigger = self.media.made.get(&path).is_none_or(|&had| made >= had);
+                if self.media.requested.contains_key(&path) && bigger {
+                    self.media.made.insert(path.clone(), made);
                     self.media.thumbnails.insert(path, handle);
                 }
+                Outcome::None
+            }
+            Message::ScaleFactor { output, font } => {
+                self.output_scale = output;
+                self.font_scale = font;
                 Outcome::None
             }
             Message::PreviewLoaded(path, handle) => {
@@ -1738,6 +1784,11 @@ impl Browser {
         self.menu.is_some()
     }
 
+    /// What `files-config.toml` configured, as this browser has it.
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
     /// What the listing looks like right now, for deciding which actions
     /// make sense — see [`crate::action::enabled`].
     pub fn action_context(&self) -> ActionContext {
@@ -2021,6 +2072,51 @@ impl Browser {
         outcome
     }
 
+    /// The physical pixels a thumbnail is drawn across in this view: the
+    /// grid's icon at the zoom, or a list row's, times the output's scale.
+    fn thumbnail_edge(&self) -> f32 {
+        let zoomed = FontScale(self.font_scale.0 * self.prefs.zoom.factor(self.prefs.view_mode));
+        let logical = match self.prefs.view_mode {
+            ViewMode::Grid => density::grid_icon_size(zoomed),
+            ViewMode::List | ViewMode::Columns => zoomed.apply(density::ROW_ICON),
+        };
+        logical * self.output_scale
+    }
+
+    /// The thumbnails this listing wants and has not asked for at a big
+    /// enough size, grouped by size, in display order.
+    ///
+    /// The first [`thumbnails_at`] of them at the bucket the zoom wants,
+    /// the rest at the smallest — see [`THUMBNAIL_BYTES`]. One already
+    /// asked for at a smaller bucket is asked for again at the bigger,
+    /// and keeps its old picture until the new one arrives.
+    fn thumbnail_asks(&mut self, grid: bool) -> Vec<Outcome> {
+        let bucket = crate::preview::bucket_for(self.thumbnail_edge());
+        let smallest = crate::preview::BUCKETS[0];
+        let big = thumbnails_at(bucket);
+        let allowed = self.config.thumbnails;
+        let mut by_edge: Vec<(u32, Vec<PathBuf>)> = Vec::new();
+        let mut asked = Vec::new();
+        let wanted = self
+            .rows()
+            .into_iter()
+            .filter(|e| !e.is_dir && crate::preview::wants_thumbnail(&e.path, grid, &allowed))
+            .take(MAX_THUMBNAILS);
+        for (position, entry) in wanted.enumerate() {
+            let want = if position < big { bucket } else { smallest };
+            if self.media.requested.get(&entry.path).is_some_and(|&had| had >= want) {
+                continue;
+            }
+            asked.push((entry.path.clone(), want));
+            match by_edge.iter_mut().find(|(edge, _)| *edge == want) {
+                Some((_, paths)) => paths.push(entry.path.clone()),
+                None => by_edge.push((want, vec![entry.path.clone()])),
+            }
+        }
+        self.media.requested.extend(asked);
+        by_edge.into_iter().map(|(edge, paths)| Outcome::LoadThumbnails { paths, edge }).collect()
+    }
+
     /// Adds whatever pictures this state now wants to `outcome`: the
     /// preview pane's, when exactly one picture is selected and the pane
     /// is on, and the grid's thumbnails, when the grid is showing.
@@ -2051,19 +2147,7 @@ impl Browser {
         let grid = self.prefs.view_mode == ViewMode::Grid;
         let loaded = matches!(self.load_state, LoadState::Loaded);
         if loaded && self.archive.is_none() {
-            let room = MAX_THUMBNAILS.saturating_sub(self.media.requested.len());
-            let wanted: Vec<PathBuf> = self
-                .rows()
-                .into_iter()
-                .filter(|e| !e.is_dir && crate::preview::wants_thumbnail(&e.path, grid))
-                .filter(|e| !self.media.requested.contains(&e.path))
-                .take(room)
-                .map(|e| e.path.clone())
-                .collect();
-            if !wanted.is_empty() {
-                self.media.requested.extend(wanted.iter().cloned());
-                asks.push(Outcome::LoadThumbnails(wanted));
-            }
+            asks.extend(self.thumbnail_asks(grid));
         }
 
         // Every row's icon key, not only the ones on screen: the keys in
@@ -3068,6 +3152,7 @@ impl Browser {
             can_go_back: !self.back_stack.is_empty(),
             can_go_forward: !self.forward_stack.is_empty(),
             thumbnails: &self.media.thumbnails,
+            grid_name_lines: self.config.behaviour.grid_name_lines,
             icons: IconSet { icons: &self.icons, folders: &self.folder_icons },
             preview: preview_width.filter(|_| self.prefs.preview_pane && self.inspector.is_none()).map(|width| {
                 PreviewModel {
@@ -3890,7 +3975,16 @@ fn status_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> 
             dotfile_switch,
             preview_switch,
             iced::widget::Space::new().width(Length::Fill),
-            meta_text(size_label(vm.prefs), density::META_TEXT_BASE, scale),
+            meta_text(
+                match vm.prefs.view_mode == ViewMode::Grid && grid_draw_scale(vm, scale).1 {
+                    // Said, because a zoom that does less than its name
+                    // with nothing to say why reads as the zoom broken.
+                    true => format!("{}, smaller to fit the window", size_label(vm.prefs)),
+                    false => size_label(vm.prefs),
+                },
+                density::META_TEXT_BASE,
+                scale,
+            ),
             meta_text(
                 vm.current_dir.display().to_string(),
                 density::META_TEXT_BASE,
@@ -4604,7 +4698,10 @@ fn body_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // rows, icons, names and cells all follow `FontScale`, so one
     // multiplication zooms them together, and nothing else in the window
     // (header, sidebar, status bar) is given it.
-    let zoomed = FontScale(scale.0 * vm.prefs.zoom.factor(vm.prefs.view_mode));
+    let zoomed = match vm.prefs.view_mode {
+        ViewMode::Grid => grid_draw_scale(vm, scale).0,
+        ViewMode::List | ViewMode::Columns => FontScale(scale.0 * vm.prefs.zoom.factor(vm.prefs.view_mode)),
+    };
     // Right-clicking anywhere the rows are not opens the folder's own
     // menu. Rows capture their own right press first — see
     // `with_row_menu` — so this only sees the empty space.
@@ -4615,6 +4712,22 @@ fn body_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // Outermost, so Ctrl+wheel is a zoom before the listing's scrollable
     // can take it as a scroll — see `hyprforge_ui::widgets::wheel_zoom`.
     wheel_zoom(body, Message::Zoom).into()
+}
+
+/// The width the listing itself gets: the pane, less whichever of the
+/// preview pane and the inspector is beside it.
+fn listing_width(vm: &ViewModel<'_>) -> f32 {
+    density::list_pane_width(vm.viewport_width, vm.sidebar_collapsed)
+        - vm.preview.as_ref().map_or(0.0, |p| p.width)
+        - vm.inspector.as_ref().map_or(0.0, |i| i.width)
+}
+
+/// The scale the grid is drawn at, and whether the zoom had to give way
+/// for it — see [`density::grid_scale`]. Never below the smallest zoom
+/// step: a pane narrower than that is narrower than the window allows.
+fn grid_draw_scale(vm: &ViewModel<'_>, scale: FontScale) -> (FontScale, bool) {
+    let zoomed = FontScale(scale.0 * vm.prefs.zoom.factor(ViewMode::Grid));
+    density::grid_scale(zoomed, listing_width(vm), scale.0 * crate::prefs::Zoom::FACTORS[0])
 }
 
 fn body_content<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
@@ -4829,11 +4942,13 @@ fn trail_row_style(theme: &iced::Theme, status: iced::widget::button::Status, on
 /// straight through its neighbour, which is how a long name ended up
 /// printed over the Kind column.
 ///
-/// Truncation is blunt — iced 0.14 has no ellipsis — but a name cut off
-/// at the column edge still reads as "there is more here", where text
-/// lying across the next column reads as a bug. A column too narrow for
-/// its content is the user's cue to turn one off; they are switchable
-/// for exactly this reason.
+/// Truncation here is blunt — iced 0.14 has no ellipsis — but a value
+/// cut off at the column edge still reads as "there is more here", where
+/// text lying across the next column reads as a bug. A column too narrow
+/// for its content is the user's cue to turn one off; they are
+/// switchable for exactly this reason. The *name* is the one cell that
+/// does get an ellipsis, through `clamped_text`: it is the column people
+/// read, and the one most often too long.
 fn list_cell<'a>(
     content: iced::widget::Text<'a>,
     portion: u16,
@@ -4842,6 +4957,21 @@ fn list_cell<'a>(
         .width(Length::FillPortion(portion))
         .clip(true)
         .into()
+}
+
+/// A list row's name: one line, cut with "…" at its column's edge —
+/// see `clamped_text` — and clipped as well, so a frame laid out before
+/// the cut caught up can never draw across the next column.
+fn list_name<'a>(entry: &'a Entry, scale: FontScale) -> Element<'a, Message> {
+    container(
+        clamped_text(entry.name.as_str(), 1)
+            .wrapping(iced::widget::text::Wrapping::None)
+            .size(scale.apply(density::ROW_TEXT_BASE))
+            .width(Length::Fill),
+    )
+    .width(Length::FillPortion(NAME_PORTION))
+    .clip(true)
+    .into()
 }
 
 /// What every row in one listing shares — worked out once per listing,
@@ -4962,7 +5092,7 @@ fn entry_row<'a>(
         // per row for a value that was already sitting right there.
         match editing {
             Some(r) => container(rename_field(r, scale)).width(Length::FillPortion(NAME_PORTION)).into(),
-            None => list_cell(scaled_text(&entry.name, density::ROW_TEXT_BASE, scale), NAME_PORTION),
+            None => list_name(entry, scale),
         },
     ]
     .spacing(spacing::SM)
@@ -5460,6 +5590,7 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // Owned rather than borrowed for the same reason `entry_row` borrows
     // where it can: these strings already exist on the entries, so only
     // the paths and the flags come along.
+    let focused = vm.selection.focused();
     let cells: Vec<(usize, &Entry, bool)> = vm
         .rows
         .iter()
@@ -5467,6 +5598,7 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         .enumerate()
         .map(|(index, entry)| (index, entry, vm.selection.is_selected(&entry.path)))
         .collect();
+    let lines = vm.grid_name_lines;
     let thumbnails = vm.thumbnails;
     let stars = vm.stars;
     let icons = vm.icons;
@@ -5481,7 +5613,6 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // much room there actually is and fills it.
     let renaming = vm.renaming;
     let (drop_hover, in_trash) = (vm.drop_hover, vm.in_trash);
-    let focused = vm.selection.focused();
     // The listing's id, as the list's: one of the two is ever drawn, and
     // it is what `Reveal` scrolls.
     let scroll_id = vm.list_scrollable_id.clone();
@@ -5502,8 +5633,12 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
             }
             let folder = results_root
                 .map(|root| searching::elide_folder(&searching::found_in(entry, root), density::GRID_FOLDER_CHARS));
+            // The selected cell the keyboard is on shows its whole name,
+            // Explorer's way: the one name you are looking at is never
+            // the one cut short.
+            let look = CellLook::of(selected, focused == Some(entry.path.as_path()), lines);
             let cell =
-                grid_cell(index, entry, selected, renaming, thumbnails.get(&entry.path), icons.for_entry(entry), folder, scale);
+                grid_cell(index, entry, look, renaming, thumbnails.get(&entry.path), icons.for_entry(entry), folder, scale);
             let cell = collections::starred_cell(cell, stars.contains(&entry.path), selected, scale);
             let cell = if entry.is_dir && !in_trash {
                 drop_zone(cell, &entry.path, drop_hover == Some(entry.path.as_path()))
@@ -5533,8 +5668,8 @@ fn grid_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     .into()
 }
 
-/// A grid cell's name.
-fn grid_name<'a>(entry: &'a Entry, scale: FontScale) -> Element<'a, Message> {
+/// A grid cell's name, cut with "…" past `lines` lines — or whole.
+fn grid_name<'a>(entry: &'a Entry, lines: u8, whole: bool, scale: FontScale) -> Element<'a, Message> {
     // The same text size as a list row's name, not a smaller one. The
     // grid used to shrink it to 12px, which made a view meant for
     // *recognising* things harder to read than the one meant for
@@ -5546,19 +5681,21 @@ fn grid_name<'a>(entry: &'a Entry, scale: FontScale) -> Element<'a, Message> {
     // of the cell and across its neighbour. This wraps at word
     // boundaries where there are any and falls back to breaking
     // mid-name where there are none.
-    container(
-        scaled_text(&entry.name, density::ROW_TEXT_BASE, scale)
-            .align_x(iced::Alignment::Center)
-            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
-            .width(Length::Fill),
-    )
-    // And clipped to the room a name actually has, so a third line
-    // cannot push the cell taller than its neighbours and stagger the
-    // row. Two lines is the budget; past that the name is cut rather
-    // than the grid distorted.
-    .height(Length::Fixed(density::grid_name_height(scale)))
-    .clip(true)
-    .into()
+    //
+    // Cut to the room a name has, with "…", so a long name neither
+    // pushes the cell taller than its neighbours nor loses its last line
+    // through the middle of its letters — which is what a clipped box
+    // did at Extra large. `clamped_text` measures with the real font.
+    let name = clamped_text(entry.name.as_str(), CellLook { selected: false, whole, lines }.name_lines())
+        .size(scale.apply(density::ROW_TEXT_BASE))
+        .align_x(iced::Alignment::Center)
+        .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+        .width(Length::Fill);
+    if whole {
+        // As tall as the name needs: this one cell grows.
+        return container(name).width(Length::Fill).into();
+    }
+    container(name).width(Length::Fill).height(Length::Fixed(density::grid_name_height(scale, lines))).into()
 }
 
 /// The in-place edit field a name becomes while it is renamed.
@@ -5601,6 +5738,35 @@ fn rename_field_style(
     }
 }
 
+/// How one grid cell is drawn, beyond what it shows.
+#[derive(Debug, Clone, Copy)]
+struct CellLook {
+    selected: bool,
+    /// Its whole name, the cell as tall as that takes.
+    whole: bool,
+    /// `[behaviour] grid-name-lines`.
+    lines: u8,
+}
+
+impl CellLook {
+    /// The selected cell the keyboard is on shows its whole name. Only
+    /// that one: a select-all showing every name whole would turn the
+    /// grid into rows of every height, which is what the line limit
+    /// exists to prevent.
+    fn of(selected: bool, focused: bool, lines: u8) -> CellLook {
+        CellLook { selected, whole: selected && focused, lines }
+    }
+
+    /// How many lines of name `clamped_text` is given.
+    fn name_lines(self) -> usize {
+        if self.whole {
+            usize::MAX
+        } else {
+            self.lines as usize
+        }
+    }
+}
+
 /// One cell of the grid: a big icon over a centred name — and, among a
 /// search's results, the folder the result is in under that.
 ///
@@ -5611,19 +5777,21 @@ fn rename_field_style(
 fn grid_cell<'a>(
     index: usize,
     entry: &'a Entry,
-    selected: bool,
+    look: CellLook,
     renaming: Option<&'a Renaming>,
     thumbnail: Option<&Picture>,
     icon: Option<&Picture>,
     folder: Option<String>,
     scale: FontScale,
 ) -> Element<'a, Message> {
+    let CellLook { selected, whole, lines } = look;
     let editing = renaming.filter(|r| r.path == entry.path);
     // Unfilled while being renamed — see `entry_row`.
     let selected = selected && editing.is_none();
+    let whole = whole && editing.is_none();
     let name: Element<'a, Message> = match editing {
         Some(r) => rename_field(r, scale),
-        None => grid_name(entry, scale),
+        None => grid_name(entry, lines, whole, scale),
     };
     // The picture itself where the host has decoded one, in the same box
     // the icon would take, so a row of thumbnails and icons lines up.
@@ -5650,23 +5818,120 @@ fn grid_cell<'a>(
         .into(),
         None => name,
     };
+    let padding = density::grid_padding(scale);
     let content = column![
         picture,
         name,
     ]
-    .spacing(spacing::SM)
+    .spacing(padding)
     .align_x(iced::Alignment::Center);
 
-    let cell = iced::widget::button(container(content).center_x(Length::Fill).center_y(Length::Fill))
+    let height = density::grid_cell_height(scale, lines);
+    let inner: Element<'a, Message> = if whole {
+        // At least a cell's height — a short name looks exactly as it
+        // does unselected — and taller when the whole name needs it.
+        row![
+            iced::widget::Space::new().width(Length::Fixed(0.0)).height(Length::Fixed(height - 2.0 * padding)),
+            container(content).center_x(Length::Fill),
+        ]
+        .align_y(iced::Alignment::Center)
+        .into()
+    } else {
+        container(content).center_x(Length::Fill).center_y(Length::Fill).into()
+    };
+    let cell = iced::widget::button(inner)
         .on_press(Message::EntryClicked { index, ctrl: false, shift: false })
         .width(Length::Fixed(density::grid_cell_width(scale)))
-        .height(Length::Fixed(density::grid_cell_height(scale)))
+        .height(if whole { Length::Shrink } else { Length::Fixed(height) })
         // Real padding inside the cell, so the icon and the name have
         // air around them rather than sitting against the selection
-        // fill's edge.
-        .padding(spacing::SM)
+        // fill's edge — scaled with the cell, as everything in it is.
+        .padding(padding)
         .style(move |t: &iced::Theme, status| selectable_row_style(t, status, selected));
     with_row_menu(with_drag(cell.into(), index, editing.is_none()), index)
+}
+
+/// Long names in the grid, measured with the real font — the bug the
+/// user saw at Extra large.
+#[cfg(test)]
+mod grid_name_tests {
+    use super::*;
+    use iced::advanced::graphics::text::Paragraph as Shaped;
+    use iced::advanced::text::{Paragraph as _, Text};
+
+    const LONG: &str = "Hyprforge design review — every screen, annotated, second pass (final) v3.pdf";
+    const UNBROKEN: &str = "IntradaScreenConnectInstallerForTheWholeOfficeVersion2026.msi";
+
+    /// What a cell's name box holds at `scale`: the text as the cell
+    /// draws it, at the cell's inner width.
+    fn name_text(content: &str, scale: FontScale) -> Text<&str, iced::Font> {
+        let inner = density::grid_cell_width(scale) - 2.0 * density::grid_padding(scale);
+        Text {
+            content,
+            bounds: iced::Size::new(inner, f32::INFINITY),
+            size: iced::Pixels(scale.apply(density::ROW_TEXT_BASE)),
+            line_height: iced::widget::text::LineHeight::default(),
+            font: iced::Font::default(),
+            align_x: iced::widget::text::Alignment::Center,
+            align_y: iced::alignment::Vertical::Top,
+            shaping: iced::widget::text::Shaping::Advanced,
+            wrapping: iced::widget::text::Wrapping::WordOrGlyph,
+        }
+    }
+
+    fn height(content: &str, scale: FontScale) -> f32 {
+        Shaped::with_text(name_text(content, scale)).min_bounds().height
+    }
+
+    /// At Extra large, at every font scale from 1.0 to 1.6 and in panes
+    /// from a narrow tile to a wide window, what is drawn fits the box it
+    /// is drawn in — so nothing is clipped, let alone through a glyph —
+    /// and a name that did not fit says so with "…". The first assertion
+    /// is the bug as it was: the whole name is taller than the box.
+    #[test]
+    fn names_at_extra_large_are_never_cut_mid_glyph() {
+        for font in [1.0, 1.25, 1.5, 1.6] {
+            for pane in [300.0, 480.0, 900.0, 1600.0] {
+                let zoomed = FontScale(font * 2.0);
+                let (scale, _) = density::grid_scale(zoomed, pane, font * crate::prefs::Zoom::FACTORS[0]);
+                for lines in 1..=3u8 {
+                    let budget = density::grid_name_height(scale, lines) + 0.5;
+                    for name in [LONG, UNBROKEN] {
+                        assert!(height(name, scale) > budget, "the fixture must be too long to fit: {name}");
+                        let shown = hyprforge_ui::widgets::clamp::<Shaped>(name_text(name, scale), lines as usize);
+                        assert!(shown.ends_with(hyprforge_ui::widgets::ELLIPSIS), "{shown}");
+                        let drawn = height(&shown, scale);
+                        assert!(
+                            drawn <= budget,
+                            "{shown:?} is {drawn} tall in a {budget} box (font {font}, pane {pane}, {lines} lines)"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The selected cell the keyboard is on is given every line its
+    /// name needs; any other cell, selected or not, its line budget.
+    #[test]
+    fn the_selected_name_is_shown_whole() {
+        let look = CellLook::of(true, true, 2);
+        assert_eq!(look.name_lines(), usize::MAX);
+        let scale = FontScale(2.0);
+        let shown = hyprforge_ui::widgets::clamp::<Shaped>(name_text(LONG, scale), look.name_lines());
+        assert_eq!(shown, LONG, "whole, no ellipsis");
+        assert_eq!(CellLook::of(true, false, 2).name_lines(), 2, "selected among others: its budget");
+        assert_eq!(CellLook::of(false, true, 3).name_lines(), 3, "focused but not selected");
+    }
+
+    /// The focused, selected cell grows; the grid then lays it out
+    /// through `grid_cell`'s `Shrink` — here, the claim it rests on: the
+    /// whole name needs more room than the cell's box.
+    #[test]
+    fn a_whole_name_needs_more_than_the_cell_s_box() {
+        let scale = FontScale(2.0);
+        assert!(height(LONG, scale) > density::grid_name_height(scale, 2));
+    }
 }
 
 /// Fixtures shared by this module's test modules.
@@ -7179,6 +7444,7 @@ mod tests {
             // leaking one empty map is simpler than threading it through
             // every caller.
             thumbnails: Box::leak(Box::default()),
+            grid_name_lines: 2,
             icons: IconSet { icons: Box::leak(Box::default()), folders: Box::leak(Box::default()) },
             preview: None,
             inspector: None,
@@ -7527,9 +7793,13 @@ mod media_tests {
     }
 
     fn asks_thumbnails(outcome: &Outcome) -> Vec<PathBuf> {
+        asks_thumbnails_at(outcome).into_iter().map(|(path, _)| path).collect()
+    }
+
+    fn asks_thumbnails_at(outcome: &Outcome) -> Vec<(PathBuf, u32)> {
         match outcome {
-            Outcome::LoadThumbnails(paths) => paths.clone(),
-            Outcome::Many(parts) => parts.iter().flat_map(asks_thumbnails).collect(),
+            Outcome::LoadThumbnails { paths, edge } => paths.iter().map(|p| (p.clone(), *edge)).collect(),
+            Outcome::Many(parts) => parts.iter().flat_map(asks_thumbnails_at).collect(),
             _ => Vec::new(),
         }
     }
@@ -7630,12 +7900,62 @@ mod media_tests {
     #[test]
     fn a_thumbnail_nobody_asked_for_is_dropped() {
         let mut browser = loaded(&[("a.png", false)]);
-        browser.update(Message::ThumbnailLoaded(PathBuf::from("/elsewhere/x.png"), Picture::Raster(a_handle())));
+        browser.update(Message::ThumbnailLoaded(PathBuf::from("/elsewhere/x.png"), Picture::Raster(a_handle()), 128));
         assert!(browser.media.thumbnails.is_empty());
 
         browser.update(Message::SetViewMode(ViewMode::Grid));
-        browser.update(Message::ThumbnailLoaded(PathBuf::from("/dir/a.png"), Picture::Raster(a_handle())));
+        browser.update(Message::ThumbnailLoaded(PathBuf::from("/dir/a.png"), Picture::Raster(a_handle()), 128));
         assert!(browser.media.thumbnails.contains_key(Path::new("/dir/a.png")));
+    }
+
+    /// The bucket follows zoom times scale: the grid at Medium on a 1x
+    /// screen is the 128 bucket, the same grid on a 1.6 output is 256,
+    /// and Extra large there is 512 — asked for again, the old picture
+    /// still drawn until the new one replaces it.
+    #[test]
+    fn the_thumbnail_bucket_follows_zoom_times_scale() {
+        let mut browser = loaded(&[("a.png", false)]);
+        let gridded = browser.update(Message::SetViewMode(ViewMode::Grid));
+        assert!(asks_thumbnails_at(&gridded).is_empty(), "the listing already asked at 128: {gridded:?}");
+        browser.update(Message::ThumbnailLoaded(PathBuf::from("/dir/a.png"), Picture::Raster(a_handle()), 128));
+
+        let scaled = browser.update(Message::ScaleFactor { output: 1.6, font: FontScale::default() });
+        // 56 × 1.6 = 89.6: still covered by 128.
+        assert!(asks_thumbnails_at(&scaled).is_empty(), "{scaled:?}");
+
+        browser.prefs.zoom.adjust(ViewMode::Grid, 4);
+        // 56 × 2.0 (Extra large) × 1.6 = 179.2: the 256 bucket.
+        let zoomed = browser.update(Message::Zoom(0));
+        assert_eq!(asks_thumbnails_at(&zoomed), [(PathBuf::from("/dir/a.png"), 256)]);
+        // × font 1.25 = 224: still 256, nothing to ask.
+        let same = browser.update(Message::ScaleFactor { output: 1.6, font: FontScale(1.25) });
+        assert!(asks_thumbnails_at(&same).is_empty(), "{same:?}");
+        // × font 1.6 = 358.4: the 512 bucket.
+        let bigger = browser.update(Message::ScaleFactor { output: 1.6, font: FontScale(1.6) });
+        assert_eq!(asks_thumbnails_at(&bigger), [(PathBuf::from("/dir/a.png"), 512)]);
+        assert!(browser.media.thumbnails.contains_key(Path::new("/dir/a.png")), "the old picture stays drawn");
+
+        // A late answer at the smaller size does not replace the bigger.
+        browser.update(Message::ThumbnailLoaded(PathBuf::from("/dir/a.png"), Picture::Raster(a_handle()), 512));
+        browser.update(Message::ThumbnailLoaded(PathBuf::from("/dir/a.png"), Picture::Raster(a_handle()), 256));
+        assert_eq!(browser.media.made.get(Path::new("/dir/a.png")), Some(&512));
+    }
+
+    /// The bigger thumbnails are bounded by memory, not only by count:
+    /// a folder of photographs at 512 pixels asks for its first ones at
+    /// 512 and the rest at the smallest size.
+    #[test]
+    fn big_thumbnails_are_bounded_by_memory() {
+        let names: Vec<String> = (0..300).map(|i| format!("p{i:03}.jpg")).collect();
+        let rows: Vec<(&str, bool)> = names.iter().map(|n| (n.as_str(), false)).collect();
+        let mut browser = loaded(&rows);
+        browser.update(Message::SetViewMode(ViewMode::Grid));
+        browser.prefs.zoom.adjust(ViewMode::Grid, 4);
+        let asked = asks_thumbnails_at(&browser.update(Message::ScaleFactor { output: 2.0, font: FontScale(1.6) }));
+        let at_512 = asked.iter().filter(|(_, e)| *e == 512).count();
+        assert_eq!(at_512, thumbnails_at(512));
+        assert!(at_512 * 512 * 512 * 4 <= THUMBNAIL_BYTES);
+        assert!(at_512 < 300, "not every one at full size");
     }
 
     /// The preview for a picture the user has already clicked away from

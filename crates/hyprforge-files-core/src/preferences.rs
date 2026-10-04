@@ -78,6 +78,9 @@ pub enum BehaviourSetting {
     /// [`WATCH_NETWORK_EVERY`] from the sheet; the file takes any whole
     /// number the loader allows.
     WatchNetworkEvery(u64),
+    /// `grid-name-lines`: how much of a name a grid cell shows before
+    /// "…", one to three.
+    GridNameLines(u8),
 }
 
 impl BehaviourSetting {
@@ -91,6 +94,7 @@ impl BehaviourSetting {
             BehaviourSetting::WatchNetworkEvery(seconds) => {
                 Edit::Behaviour("watch-network-every", BehaviourValue::Number(seconds as i64))
             }
+            BehaviourSetting::GridNameLines(n) => Edit::Behaviour("grid-name-lines", BehaviourValue::Number(n.into())),
         }
     }
 
@@ -101,6 +105,7 @@ impl BehaviourSetting {
             BehaviourSetting::OnConflict(policy) => behaviour.on_conflict == policy,
             BehaviourSetting::ConfirmTrash(on) => behaviour.confirm_trash == on,
             BehaviourSetting::ConfirmDelete(on) => behaviour.confirm_delete == on,
+            BehaviourSetting::GridNameLines(n) => behaviour.grid_name_lines == n,
             BehaviourSetting::Watch(on) => behaviour.watch == on,
             BehaviourSetting::WatchNetworkEvery(seconds) => behaviour.watch_network_every == seconds,
         }
@@ -132,6 +137,81 @@ impl SidebarSetting {
             SidebarSetting::ShowRecent(on) => sidebar.show_recent == on,
             SidebarSetting::ShowStarred(on) => sidebar.show_starred == on,
         }
+    }
+}
+
+/// The grid name lengths the sheet offers.
+pub const GRID_NAME_LINES: [u8; 3] = [1, 2, 3];
+
+/// One of `[thumbnails]`' settings, as the sheet changes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThumbnailSetting {
+    /// One source on or off.
+    Source(crate::preview::Source, bool),
+    /// `max-file-mb`; `0` never skips a file.
+    MaxFileMb(u64),
+}
+
+/// The sources the sheet lists, each once — SVGs go with pictures,
+/// under the one `pictures` switch.
+pub const THUMBNAIL_SOURCES: [crate::preview::Source; 5] = {
+    use crate::preview::Source::*;
+    [Picture, Pdf, Video, Model, System]
+};
+
+/// The size caps the sheet offers, in megabytes; `0` is "no limit".
+pub const THUMBNAIL_CAPS: [u64; 5] = [0, 10, 50, 200, 1000];
+
+impl ThumbnailSetting {
+    /// The `files-config.toml` edit that makes this so.
+    pub fn edit(self) -> Edit {
+        match self {
+            ThumbnailSetting::Source(source, on) => Edit::Thumbnails(source_key(source), BehaviourValue::Switch(on)),
+            ThumbnailSetting::MaxFileMb(mb) => {
+                Edit::Thumbnails("max-file-mb", BehaviourValue::Number(mb.min(i64::MAX as u64) as i64))
+            }
+        }
+    }
+
+    /// Whether `thumbnails` already says this.
+    pub fn holds_in(self, thumbnails: &crate::config::Thumbnails) -> bool {
+        match self {
+            ThumbnailSetting::Source(source, on) => thumbnails.allows(source) == on,
+            ThumbnailSetting::MaxFileMb(mb) => thumbnails.max_file_mb == mb,
+        }
+    }
+}
+
+/// The `[thumbnails]` key that switches `source`.
+pub fn source_key(source: crate::preview::Source) -> &'static str {
+    use crate::preview::Source;
+    match source {
+        Source::Picture | Source::Svg => "pictures",
+        Source::Pdf => "pdfs",
+        Source::Video => "videos",
+        Source::Model => "models",
+        Source::System => "system",
+    }
+}
+
+/// What the sheet calls a source.
+pub fn source_label(source: crate::preview::Source) -> &'static str {
+    use crate::preview::Source;
+    match source {
+        Source::Picture | Source::Svg => "Pictures",
+        Source::Pdf => "PDFs",
+        Source::Video => "Videos",
+        Source::Model => "3D models",
+        Source::System => "Other programs' thumbnailers",
+    }
+}
+
+/// What the sheet calls a size cap.
+pub fn cap_label(mb: u64) -> String {
+    match mb {
+        0 => "No limit".to_string(),
+        mb if mb >= 1000 && mb.is_multiple_of(1000) => format!("{} GB", mb / 1000),
+        mb => format!("{mb} MB"),
     }
 }
 
@@ -501,6 +581,70 @@ mod tests {
         assert!(problems.is_empty(), "{problems:?}");
         assert!(SidebarSetting::ShowStarred(false).holds_in(&config.sidebar));
         assert!(SidebarSetting::ShowRecent(true).holds_in(&config.sidebar), "the other stays on by default");
+    }
+
+    /// Applies one edit to `text` and parses the result.
+    fn written(text: &str, edit: Edit) -> (String, crate::config::Config) {
+        let out = crate::config_edit::apply(text, &[edit], std::path::Path::new("x")).unwrap();
+        let (config, problems) = crate::config::parse(&out, std::path::Path::new("x"));
+        assert!(problems.is_empty(), "{problems:?}\n{out}");
+        (out, config)
+    }
+
+    /// The lines that changed between two versions of a file.
+    fn changed(before: &str, after: &str) -> Vec<String> {
+        let before: Vec<&str> = before.lines().collect();
+        after.lines().filter(|l| !l.is_empty() && !before.contains(l)).map(String::from).collect()
+    }
+
+    /// Each grid-name control writes exactly its one line, keeps the
+    /// person's comment, and loads as what it says.
+    #[test]
+    fn the_grid_name_control_writes_exactly_its_line() {
+        let file = "# mine\n[behaviour]\nconfirm-trash = true # keep\n";
+        for n in GRID_NAME_LINES {
+            let (out, config) = written(file, BehaviourSetting::GridNameLines(n).edit());
+            assert_eq!(changed(file, &out), [format!("grid-name-lines = {n}")], "{out}");
+            assert_eq!(config.behaviour.grid_name_lines, n);
+            assert!(BehaviourSetting::GridNameLines(n).holds_in(&config.behaviour));
+        }
+    }
+
+    /// Each thumbnail control writes exactly its one line under
+    /// `[thumbnails]`, and the value it wrote is the one in force.
+    #[test]
+    fn each_thumbnail_control_writes_exactly_its_line() {
+        let file = "# mine\n[behaviour]\nconfirm-trash = true\n";
+        for source in THUMBNAIL_SOURCES {
+            let setting = ThumbnailSetting::Source(source, false);
+            let (out, config) = written(file, setting.edit());
+            let new = changed(file, &out);
+            assert_eq!(new, ["[thumbnails]".to_string(), format!("{} = false", source_key(source))], "{out}");
+            assert!(!config.thumbnails.allows(source));
+            assert!(setting.holds_in(&config.thumbnails));
+        }
+        for mb in THUMBNAIL_CAPS {
+            let (out, config) = written(file, ThumbnailSetting::MaxFileMb(mb).edit());
+            assert!(changed(file, &out).contains(&format!("max-file-mb = {mb}")), "{out}");
+            assert_eq!(config.thumbnails.max_file_mb, mb);
+        }
+    }
+
+    /// A line written by hand is what the sheet shows as chosen.
+    #[test]
+    fn a_hand_written_thumbnail_line_is_what_the_sheet_shows() {
+        let (config, _) = crate::config::parse("[thumbnails]\nvideos = false\nmax-file-mb = 50\n", std::path::Path::new("x"));
+        assert!(ThumbnailSetting::Source(crate::preview::Source::Video, false).holds_in(&config.thumbnails));
+        assert!(ThumbnailSetting::MaxFileMb(50).holds_in(&config.thumbnails));
+        let (config, _) = crate::config::parse("[behaviour]\ngrid-name-lines = 1\n", std::path::Path::new("x"));
+        assert!(BehaviourSetting::GridNameLines(1).holds_in(&config.behaviour));
+    }
+
+    #[test]
+    fn caps_read_as_sizes() {
+        assert_eq!(cap_label(0), "No limit");
+        assert_eq!(cap_label(50), "50 MB");
+        assert_eq!(cap_label(1000), "1 GB");
     }
 
     #[test]

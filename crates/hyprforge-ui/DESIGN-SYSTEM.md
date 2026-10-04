@@ -98,7 +98,7 @@ Each is `hyprforge_ui::widgets::<name>`.
 
 | Group | Widgets |
 |---|---|
-| Text | `scaled_text` (every text goes through it, so `font_scale` reaches the screen), `meta_text`, `hint_text`, `section_label`, `spaced_caps`, `config_line` |
+| Text | `scaled_text` (every text goes through it, so `font_scale` reaches the screen), `meta_text`, `hint_text`, `section_label`, `spaced_caps`, `config_line`, and `clamped_text` (a `ClampedText`): text cut to N lines, or to its width when unwrapped, with `ELLIPSIS` where it was cut — measured with the renderer's own paragraph in layout, cut between graphemes by binary search (`clamp`), because iced has no ellipsis and a clipped box slices the last line through its letters (Files' grid and list names) |
 | Selection | `selectable_row_style`: the one rule, accent means selected and hover never shares it. `Tint` for a row mark's role |
 | Fields | `inset_field_style` (the recessed box Files' path bar and every search share), `inset_input_style`, `search_field`, and `token_field`: a search field holding finished tokens between the magnifier and the cursor (Files' `ext:rs` chips) |
 | Under a field | `anchored` (an `Anchored`): hangs one element under another, at its width, as an overlay; placed from the anchor's own layout, because a window cannot ask where a widget landed. `suggestions` (of `Suggestion` rows): the list that hangs there, with a heading line, an empty message and the shared row look |

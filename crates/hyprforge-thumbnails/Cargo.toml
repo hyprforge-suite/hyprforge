@@ -8,7 +8,8 @@ rust-version.workspace = true
 readme = "README.md"
 description = "The freedesktop thumbnail cache: find a file's thumbnail if it is still current, and store a new one as small as it can be."
 
-# A leaf: no GUI toolkit, nothing Hyprland-shaped. Pixels in, pixels out;
+# A leaf: no GUI toolkit, nothing Hyprland-shaped; its one Hyprforge
+# dependency is the bounded subprocess wait. Pixels in, pixels out;
 # producing a thumbnail is the caller's business, and so is drawing one.
 [dependencies]
 # The thumbnail file format *is* PNG, with its source's URI and mtime in
@@ -18,6 +19,9 @@ png = "0.18"
 # A thumbnail's name is the MD5 of its source's URI, by specification.
 # Not for security; for agreeing with every other program's file names.
 md-5 = "0.10"
+# Other programs' thumbnailers are run with a bound, like every external
+# program in this suite — see `thumbnailers`.
+hyprforge-process.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

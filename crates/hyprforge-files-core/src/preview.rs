@@ -57,27 +57,133 @@ pub struct Listing {
     pub total: usize,
 }
 
-/// Whether an entry is worth asking the host for a thumbnail of, by its
-/// name alone — the browser does no I/O, and this is asked of every row.
+/// Where a thumbnail of a file comes from — what it costs, and which
+/// `[thumbnails]` switch governs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Source {
+    /// A picture this build decodes itself (`hyprforge-image`).
+    Picture,
+    /// An SVG, which iced draws from the file at any size.
+    Svg,
+    /// A PDF's first page, by poppler's `pdftoppm`.
+    Pdf,
+    /// A video's first real frame, by `ffmpeg`.
+    Video,
+    /// An STL, 3MF or OBJ model, loaded and drawn by `hyprforge-mesh`.
+    Model,
+    /// Anything else a `*.thumbnailer` file installed on this machine
+    /// claims — somebody else's program.
+    System,
+}
+
+impl Source {
+    /// Only in the grid. Everything but a picture runs a program or
+    /// loads a whole model per file — a video's frame is about half a
+    /// second of `ffmpeg` — which is worth it for a cell big enough to
+    /// show a page or a scene, and not for a list row's twenty-pixel icon.
+    pub fn grid_only(self) -> bool {
+        !matches!(self, Source::Picture | Source::Svg)
+    }
+
+    /// The built-in reader for a MIME type, if there is one. Pictures and
+    /// models are not here: the decoder and the mesh loader each decide
+    /// by their own format lists, which is what [`ThumbnailTypes`] asks.
+    pub fn for_mime(mime: &str) -> Option<Source> {
+        match mime {
+            "image/svg+xml" | "image/svg+xml-compressed" => Some(Source::Svg),
+            "application/pdf" => Some(Source::Pdf),
+            _ if mime.starts_with("video/") => Some(Source::Video),
+            _ => None,
+        }
+    }
+}
+
+/// What a file's thumbnail would come from, by its name — the host's
+/// answer, from the MIME database and the thumbnailers installed.
 ///
-/// Pictures and SVGs in either view; PDFs and videos in the grid only.
-/// Those two need another program run per file — a video's frame costs
-/// about half a second of `ffmpeg` — which is worth it for a grid cell
-/// big enough to show a page or a scene, and not for a list row's
-/// twenty-pixel icon. Like the picture check it can be wrong about a
-/// misnamed file; the host then answers nothing and the icon stays.
-pub fn wants_thumbnail(path: &Path, grid: bool) -> bool {
+/// The browser does no I/O and loads no MIME database (see its module
+/// doc), so it cannot answer this itself; and it is a fact about the
+/// machine rather than about any one tab, so the host installs it once
+/// with [`install_thumbnail_types`] and every browser — every tab, every
+/// pane, the open/save dialog — asks the same one. Asked of every row on
+/// every listing, so it must decide by name: a glob lookup, never a read.
+#[derive(Clone)]
+pub struct ThumbnailTypes(std::sync::Arc<SourceOf>);
+
+/// The question [`ThumbnailTypes`] answers.
+type SourceOf = dyn Fn(&Path) -> Option<Source> + Send + Sync;
+
+impl ThumbnailTypes {
+    pub fn new(of: impl Fn(&Path) -> Option<Source> + Send + Sync + 'static) -> ThumbnailTypes {
+        ThumbnailTypes(std::sync::Arc::new(of))
+    }
+
+    pub fn of(&self, path: &Path) -> Option<Source> {
+        (self.0)(path)
+    }
+}
+
+static TYPES: std::sync::OnceLock<ThumbnailTypes> = std::sync::OnceLock::new();
+
+/// Makes `types` the answer for this process. The first call wins; a
+/// host calls it once, before its first window.
+pub fn install_thumbnail_types(types: ThumbnailTypes) {
+    let _ = TYPES.set(types);
+}
+
+/// Where `path`'s thumbnail would come from: the installed answer, or —
+/// before a host installed one, and in this crate's own tests — by
+/// extension, which is what this always did.
+pub fn source_of(path: &Path) -> Option<Source> {
+    match TYPES.get() {
+        Some(types) => types.of(path),
+        None => by_extension(path),
+    }
+}
+
+/// The answer without a MIME database: pictures by the decoder's own
+/// list, and the common SVG, PDF, video and model extensions.
+pub fn by_extension(path: &Path) -> Option<Source> {
     if hyprforge_image::format::looks_decodable(path) {
-        return true;
+        return Some(Source::Picture);
     }
-    let Some(ext) = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase) else {
-        return false;
-    };
+    let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase)?;
     match ext.as_str() {
-        "svg" => true,
-        "pdf" | "mp4" | "mkv" | "webm" | "mov" | "avi" | "m4v" | "wmv" | "mpg" | "mpeg" | "ogv" => grid,
-        _ => false,
+        "svg" | "svgz" => Some(Source::Svg),
+        "pdf" => Some(Source::Pdf),
+        "mp4" | "mkv" | "webm" | "mov" | "avi" | "m4v" | "wmv" | "mpg" | "mpeg" | "ogv" => Some(Source::Video),
+        "stl" | "3mf" | "obj" => Some(Source::Model),
+        _ => None,
     }
+}
+
+/// Whether an entry is worth asking the host for a thumbnail of: it has
+/// a source, that source is switched on in `[thumbnails]`, and — for one
+/// that runs a program — the grid is showing. See [`Source::grid_only`].
+///
+/// By name, like the picture check, so it can be wrong about a misnamed
+/// file; the host then answers nothing and the icon stays. The size cap
+/// is the host's to apply: it is the one that reads the file's size.
+pub fn wants_thumbnail(path: &Path, grid: bool, allowed: &crate::config::Thumbnails) -> bool {
+    wants(source_of(path), grid, allowed)
+}
+
+/// [`wants_thumbnail`] for a source already found.
+pub fn wants(source: Option<Source>, grid: bool, allowed: &crate::config::Thumbnails) -> bool {
+    source.is_some_and(|s| allowed.allows(s) && (grid || !s.grid_only()))
+}
+
+/// The thumbnail sizes there are, in physical pixels, smallest first —
+/// the freedesktop cache's `normal`, `large` and `x-large`.
+/// `hyprforge-thumbnails` has the same list; the host's tests hold the
+/// two to each other.
+pub const BUCKETS: [u32; 3] = [128, 256, 512];
+
+/// The smallest bucket that covers `edge` physical pixels, or the
+/// largest when none does — so a thumbnail is never drawn bigger than it
+/// was made unless nothing bigger can be made.
+pub fn bucket_for(edge: f32) -> u32 {
+    BUCKETS.into_iter().find(|&b| b as f32 >= edge).unwrap_or(BUCKETS[BUCKETS.len() - 1])
 }
 
 /// Something to draw in a box: decoded pixels, or an SVG iced renders at
@@ -160,19 +266,54 @@ impl Picture {
 mod tests {
     use super::*;
 
+    use crate::config::Thumbnails;
+
     /// The grid shows pages and scenes; a list row shows only what is
     /// cheap to draw at twenty pixels.
     #[test]
     fn pdfs_and_videos_get_thumbnails_in_the_grid_alone() {
+        let all = Thumbnails::default();
         for name in ["a.png", "b.JPG", "c.svg"] {
-            assert!(wants_thumbnail(Path::new(name), false), "{name} in a list");
-            assert!(wants_thumbnail(Path::new(name), true), "{name} in a grid");
+            assert!(wants_thumbnail(Path::new(name), false, &all), "{name} in a list");
+            assert!(wants_thumbnail(Path::new(name), true, &all), "{name} in a grid");
         }
-        for name in ["doc.pdf", "clip.mp4", "film.MKV"] {
-            assert!(!wants_thumbnail(Path::new(name), false), "{name} in a list");
-            assert!(wants_thumbnail(Path::new(name), true), "{name} in a grid");
+        for name in ["doc.pdf", "clip.mp4", "film.MKV", "part.stl"] {
+            assert!(!wants_thumbnail(Path::new(name), false, &all), "{name} in a list");
+            assert!(wants_thumbnail(Path::new(name), true, &all), "{name} in a grid");
         }
-        assert!(!wants_thumbnail(Path::new("notes.txt"), true));
-        assert!(!wants_thumbnail(Path::new("Makefile"), true));
+        assert!(!wants_thumbnail(Path::new("notes.txt"), true, &all));
+        assert!(!wants_thumbnail(Path::new("Makefile"), true, &all));
+    }
+
+    /// Each `[thumbnails]` switch turns off its own source and no other.
+    #[test]
+    fn a_source_switched_off_is_not_asked_for() {
+        let no_videos = Thumbnails { videos: false, ..Thumbnails::default() };
+        assert!(!wants(Some(Source::Video), true, &no_videos));
+        assert!(wants(Some(Source::Pdf), true, &no_videos));
+        let no_system = Thumbnails { system: false, ..Thumbnails::default() };
+        assert!(!wants(Some(Source::System), true, &no_system));
+        assert!(wants(Some(Source::System), true, &Thumbnails::default()));
+        assert!(!wants(Some(Source::System), false, &Thumbnails::default()), "a program per row is grid only");
+    }
+
+    /// Video by family, SVG and PDF by name; everything else is somebody
+    /// else's to claim.
+    #[test]
+    fn the_built_in_readers_are_found_by_mime_type() {
+        assert_eq!(Source::for_mime("video/x-matroska"), Some(Source::Video));
+        assert_eq!(Source::for_mime("application/pdf"), Some(Source::Pdf));
+        assert_eq!(Source::for_mime("image/svg+xml"), Some(Source::Svg));
+        assert_eq!(Source::for_mime("image/jxl"), None);
+    }
+
+    /// The bucket covers the edge; past the largest, the largest.
+    #[test]
+    fn the_bucket_is_the_smallest_that_covers_the_edge() {
+        assert_eq!(bucket_for(56.0), 128);
+        assert_eq!(bucket_for(128.0), 128);
+        assert_eq!(bucket_for(128.5), 256);
+        assert_eq!(bucket_for(358.4), 512);
+        assert_eq!(bucket_for(2000.0), 512);
     }
 }

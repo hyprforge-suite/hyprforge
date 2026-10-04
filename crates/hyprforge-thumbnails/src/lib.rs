@@ -16,11 +16,13 @@
 //!
 //! # As small as it can be
 //!
-//! - The `normal` size, 128 pixels, which is what the file manager's
-//!   listing draws — and `large`, 256, for the photo viewer's grid, whose
-//!   tiles are twice that wide on a scaled screen. Nothing bigger: the
-//!   specification's `x-large` and `xx-large` are for sizes no window here
-//!   draws.
+//! - The smallest of the specification's sizes that covers what is
+//!   drawn: `normal`, 128 pixels, for the file manager's listing at its
+//!   usual size; `large`, 256, for the photo viewer's grid and a zoomed
+//!   listing; `x-large`, 512, for the listing's Extra large icons on a
+//!   scaled screen, where a 256-pixel picture would be drawn at more than
+//!   twice its size. [`Size::for_edge`] picks it. Nothing bigger:
+//!   `xx-large` is for sizes no window here draws.
 //! - Encoded with the PNG encoder's strongest compression and adaptive
 //!   filtering, and without an alpha channel when every pixel is opaque —
 //!   which a photograph, a video frame and a PDF page all are, and which
@@ -29,6 +31,14 @@
 //!   specification describes — a 1×1 image carrying the same two chunks —
 //!   so a broken video is not handed to ffmpeg on every visit.
 //! - [`Cache::prune`] removes thumbnails whose file is gone.
+//!
+//! # Other programs' thumbnailers
+//!
+//! [`thumbnailers`] reads the `*.thumbnailer` files other packages
+//! install — glycin's for AVIF, HEIF and JPEG XL on this machine — and
+//! runs one for a type nothing built in can read: bounded by
+//! `hyprforge_process::TIMEOUT`, into a private temporary file, read
+//! back through the same size cap as a thumbnail from the cache.
 //!
 //! What *not* to cache is the caller's decision, because it knows what a
 //! thumbnail costs to make: a picture already small enough to decode
@@ -53,27 +63,47 @@ use md5::{Digest, Md5};
 pub const NORMAL: u32 = 128;
 /// The `large` size's edge, by specification.
 pub const LARGE: u32 = 256;
+/// The `x-large` size's edge, by specification.
+pub const X_LARGE: u32 = 512;
+
+pub mod thumbnailers;
 
 /// Which of the specification's sizes a thumbnail is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Size {
     Normal,
     Large,
+    XLarge,
 }
 
 impl Size {
+    /// Every size, smallest first.
+    pub const ALL: [Size; 3] = [Size::Normal, Size::Large, Size::XLarge];
+
     /// The edge a thumbnail of this size fits inside.
     pub fn edge(self) -> u32 {
         match self {
             Size::Normal => NORMAL,
             Size::Large => LARGE,
+            Size::XLarge => X_LARGE,
         }
+    }
+
+    /// The smallest size whose edge covers `edge` physical pixels — the
+    /// largest there is when nothing does.
+    ///
+    /// Covering, not nearest: a 200-pixel cell drawn from a 128-pixel
+    /// thumbnail is a blur, and one drawn from 256 is a picture scaled
+    /// down, which is what every other thumbnail here already is.
+    pub fn for_edge(edge: u32) -> Size {
+        Size::ALL.into_iter().find(|s| s.edge() >= edge).unwrap_or(Size::XLarge)
     }
 
     fn dir(self) -> &'static str {
         match self {
             Size::Normal => "normal",
             Size::Large => "large",
+            Size::XLarge => "x-large",
         }
     }
 }
@@ -84,9 +114,15 @@ impl Size {
 const FAIL_DIR: &str = concat!("hyprforge-", env!("CARGO_PKG_VERSION"));
 
 /// A thumbnail file larger than this is not one: a 128-pixel PNG is tens
-/// of kilobytes at worst. Refused before decoding, so a planted file
-/// cannot make a lookup allocate.
-const MAX_FILE: u64 = 1024 * 1024;
+/// of kilobytes at worst, and a 512-pixel photograph a few hundred —
+/// 512 × 512 × 3 bytes is 768KB *before* compression. Refused before
+/// decoding, so a planted file cannot make a lookup allocate.
+const MAX_FILE: u64 = 4 * 1024 * 1024;
+
+/// The widest a decoded thumbnail may be: twice `x-large`, the room a
+/// thumbnailer is given to overshoot before it is scaled down. 4MB of
+/// pixels at most.
+pub const MAX_EDGE: u32 = 2 * X_LARGE;
 
 /// Pixels, eight bits per channel, four channels.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -331,7 +367,7 @@ fn decode(path: &Path, pixels: bool) -> Option<(Option<Rgba>, TextChunks)> {
 /// could honestly be — before the buffer for it is allocated.
 fn pixels_of<R: io::BufRead + io::Seek>(mut reader: png::Reader<R>) -> Option<Rgba> {
     let (width, height) = (reader.info().width, reader.info().height);
-    if width > 4 * NORMAL || height > 4 * NORMAL {
+    if width > MAX_EDGE || height > MAX_EDGE {
         return None;
     }
     let mut buffer = vec![0; reader.output_buffer_size()?];
@@ -382,6 +418,48 @@ pub fn decode_png(bytes: &[u8]) -> Option<Rgba> {
     pixels_of(decoder.read_info().ok()?)
 }
 
+/// `rgba` scaled down to fit inside an `edge`-pixel square, each new
+/// pixel the average of the old ones it covers; unchanged when it
+/// already fits. For a picture another program made bigger than it was
+/// asked to — a thumbnail stored under `normal/` has to be one.
+pub fn fit(rgba: Rgba, edge: u32) -> Rgba {
+    let edge = edge.max(1);
+    if rgba.width <= edge && rgba.height <= edge {
+        return rgba;
+    }
+    let ratio = edge as f64 / rgba.width.max(rgba.height) as f64;
+    let width = ((rgba.width as f64 * ratio).round() as u32).clamp(1, edge);
+    let height = ((rgba.height as f64 * ratio).round() as u32).clamp(1, edge);
+    let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
+    for y in 0..height {
+        let (y0, y1) = span(y, height, rgba.height);
+        for x in 0..width {
+            let (x0, x1) = span(x, width, rgba.width);
+            let mut sum = [0u64; 4];
+            for sy in y0..y1 {
+                let row = sy as usize * rgba.width as usize;
+                for sx in x0..x1 {
+                    let at = (row + sx as usize) * 4;
+                    for (c, total) in sum.iter_mut().enumerate() {
+                        *total += rgba.pixels[at + c] as u64;
+                    }
+                }
+            }
+            let count = ((y1 - y0) * (x1 - x0)).max(1) as u64;
+            pixels.extend(sum.iter().map(|total| (total / count) as u8));
+        }
+    }
+    Rgba { width, height, pixels }
+}
+
+/// The source rows (or columns) that destination row `i` of `to` covers
+/// out of `from` — never empty.
+fn span(i: u32, to: u32, from: u32) -> (u32, u32) {
+    let start = (i as u64 * from as u64 / to as u64) as u32;
+    let end = (((i as u64 + 1) * from as u64).div_ceil(to as u64) as u32).clamp(start + 1, from);
+    (start, end)
+}
+
 fn create_private_dir(dir: &Path) -> io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
@@ -423,7 +501,59 @@ mod tests {
         assert!(dir.path().join("thumbnails/large").join(thumbnail_name(&path)).exists());
         assert!(matches!(cache.get_sized(Size::Large, &path, stamp), Lookup::Current(_)));
         assert_eq!(cache.get(&path, stamp), Lookup::Missing, "a large thumbnail answered for normal");
-        assert_eq!((Size::Normal.edge(), Size::Large.edge()), (128, 256));
+        assert_eq!((Size::Normal.edge(), Size::Large.edge(), Size::XLarge.edge()), (128, 256, 512));
+        cache.put_sized(Size::XLarge, &path, stamp, &picture(true)).unwrap();
+        assert!(dir.path().join("thumbnails/x-large").join(thumbnail_name(&path)).exists());
+    }
+
+    /// The bucket covers what is drawn, and is never bigger than it has
+    /// to be: a 200-pixel cell takes `large`, not `x-large`.
+    #[test]
+    fn the_size_for_an_edge_is_the_smallest_that_covers_it() {
+        assert_eq!(Size::for_edge(1), Size::Normal);
+        assert_eq!(Size::for_edge(128), Size::Normal);
+        assert_eq!(Size::for_edge(129), Size::Large);
+        assert_eq!(Size::for_edge(256), Size::Large);
+        assert_eq!(Size::for_edge(300), Size::XLarge);
+        assert_eq!(Size::for_edge(4000), Size::XLarge, "the largest there is");
+    }
+
+    /// A 512-pixel photograph — noise, the worst case for PNG — is stored
+    /// and read back: the file cap has to leave room for the size it
+    /// stores.
+    #[test]
+    fn an_x_large_thumbnail_of_noise_still_fits_the_file_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::at(dir.path().join("thumbnails"));
+        let (path, stamp) = source(dir.path(), "noise.jpg");
+        let mut seed = 0x2545_f491_u32;
+        let pixels = (0..512 * 512)
+            .flat_map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                let b = seed.to_le_bytes();
+                [b[0], b[1], b[2], 255]
+            })
+            .collect();
+        let noise = Rgba { width: 512, height: 512, pixels };
+        cache.put_sized(Size::XLarge, &path, stamp, &noise).unwrap();
+        let stored = dir.path().join("thumbnails/x-large").join(thumbnail_name(&path));
+        let bytes = fs::metadata(&stored).unwrap().len();
+        assert!(bytes <= MAX_FILE, "{bytes} bytes");
+        assert_eq!(cache.get_sized(Size::XLarge, &path, stamp), Lookup::Current(noise));
+    }
+
+    /// Scaled down to fit, proportions kept, averaging rather than
+    /// picking; something already small enough is left alone.
+    #[test]
+    fn fitting_scales_down_to_the_edge_and_keeps_the_shape() {
+        let wide = Rgba { width: 600, height: 300, pixels: [200, 100, 50, 255].repeat(600 * 300) };
+        let fitted = fit(wide, 256);
+        assert_eq!((fitted.width, fitted.height), (256, 128));
+        assert_eq!(fitted.pixels.len(), 256 * 128 * 4);
+        assert_eq!(&fitted.pixels[..4], &[200, 100, 50, 255], "a flat colour stays that colour");
+        assert_eq!(fit(picture(true), 256), picture(true));
     }
 
     /// A file that could not be read fails at every size.
@@ -570,7 +700,7 @@ mod tests {
     fn a_tools_png_decodes_and_an_oversized_one_is_refused() {
         let small = encode(&picture(true), "file:///x", Stamp { mtime: 0, size: 0 }).unwrap();
         assert_eq!(decode_png(&small), Some(picture(true)));
-        let big = Rgba { width: 4 * NORMAL + 1, height: 1, pixels: vec![255; (4 * NORMAL as usize + 1) * 4] };
+        let big = Rgba { width: MAX_EDGE + 1, height: 1, pixels: vec![255; (MAX_EDGE as usize + 1) * 4] };
         let big = encode(&big, "file:///x", Stamp { mtime: 0, size: 0 }).unwrap();
         assert_eq!(decode_png(&big), None);
     }

@@ -9,6 +9,7 @@
 mod anchor;
 mod badges;
 mod change;
+mod clamped_text;
 mod controls;
 mod field;
 mod layout;
@@ -23,6 +24,7 @@ mod wheel_zoom;
 pub use anchor::{anchored, Anchored};
 pub use badges::{chip, config_line, keycap, removable_chip};
 pub use change::{change_row, Change};
+pub use clamped_text::{clamp, clamped_text, ClampedText, ELLIPSIS};
 pub use controls::{
     dropdown_menu_style, dropdown_style, segment_style, segmented, segmented_choice,
     slider_style, step_index, stepped_slider, toggle, toggle_style, value_slider, SegmentLook,
