@@ -194,9 +194,8 @@ pub fn group(action: Action) -> &'static str {
         | NextSearchScope | ContextMenu => "Selecting",
         Trash | DeletePermanently | Restore | EmptyTrash | Copy | Cut | Paste | CopyPath | Rename | NewFolder
         | OpenWith | Extract | ExtractTo | Compress | Undo => "Files",
-        ToggleHidden | TogglePreview | ZoomIn | ZoomOut | ZoomReset | QuickLook | Properties | Preferences | Transfers | TransferQueue => {
-            "The window"
-        }
+        ToggleHidden | TogglePreview | ZoomIn | ZoomOut | ZoomReset | QuickLook | Properties | Preferences | Transfers
+        | TransferQueue | OpenTerminal => "The window",
         Pin | Unpin | PinUp | PinDown | ToggleStar | Mount | Unmount | Eject | Disconnect | ConnectToServer => "Sidebar",
         NewTab | CloseTab | NextTab | PreviousTab | Tab(_) => "Tabs",
     }

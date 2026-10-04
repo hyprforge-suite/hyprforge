@@ -97,6 +97,12 @@ pub enum Action {
     /// Open a file with an application the user picks, and optionally
     /// make that the default for its kind.
     OpenWith,
+    /// Start a terminal in a folder: a folder row's own, else the folder
+    /// in view. Which terminal is the window's question — see
+    /// `hyprforge_files::terminal`. Browser scope, because it is about a
+    /// folder in the listing; the open/save dialog leaves it out of its
+    /// menus ([`crate::menu::DIALOG_ACTIONS`]).
+    OpenTerminal,
     /// Unpack the selected archives, each into a new folder beside it
     /// named after it.
     ///
@@ -229,6 +235,7 @@ impl Action {
             Action::CopyPath,
             Action::Refresh,
             Action::OpenWith,
+            Action::OpenTerminal,
             Action::Extract,
             Action::ExtractTo,
             Action::Compress,
@@ -291,6 +298,7 @@ impl Action {
             Action::CopyPath => "copy-path",
             Action::Refresh => "refresh",
             Action::OpenWith => "open-with",
+            Action::OpenTerminal => "open-terminal",
             Action::Extract => "extract",
             Action::ExtractTo => "extract-to",
             Action::Compress => "compress",
@@ -376,6 +384,7 @@ impl Action {
             Action::CopyPath => "Copy Path",
             Action::Refresh => "Refresh",
             Action::OpenWith => "Open With\u{2026}",
+            Action::OpenTerminal => "Open Terminal Here",
             Action::Extract => "Extract",
             Action::ExtractTo => "Extract Here",
             Action::Compress => "Compress\u{2026}",
@@ -503,6 +512,8 @@ impl Action {
             // No default key: it opens a chooser, which is a thing you
             // go looking for rather than reach for.
             Action::OpenWith => &[],
+            // Dolphin's key for its terminal, and Thunar's, and free here.
+            Action::OpenTerminal => &["F4"],
             // All three are reached from a menu. Extracting is not
             // something anyone does often enough to hold a key for, and
             // Compress opens a dialog — a thing you go looking for,
@@ -707,6 +718,10 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         // applications" is not a question the chooser can ask, and a
         // folder is opened by going into it.
         Action::OpenWith => ctx.selected == 1 && ctx.focused_is_dir == Some(false) && !ctx.in_trash,
+        // A terminal's working directory has to be a directory the kernel
+        // knows. A folder inside an archive is not one, and the Trash's
+        // listing is its records rather than a place to work in.
+        Action::OpenTerminal => !ctx.in_trash && !ctx.in_archive,
         // A path through an archive is not somewhere a sidebar can
         // usefully point: the archive it goes through can be rewritten
         // or deleted, and a pin to a folder inside one would break
@@ -989,5 +1004,15 @@ mod tests {
             Action::ClearSearch,
             &ActionContext { searching: true, ..ActionContext::default() }
         ));
+    }
+
+    #[test]
+    fn a_terminal_opens_only_where_there_is_a_real_folder_to_stand_in() {
+        let ctx = ActionContext::default();
+        assert!(enabled(Action::OpenTerminal, &ctx));
+        assert!(!enabled(Action::OpenTerminal, &ActionContext { in_archive: true, ..ctx }));
+        assert!(!enabled(Action::OpenTerminal, &ActionContext { in_trash: true, ..ctx }));
+        assert_eq!(Action::OpenTerminal.scope(), Scope::Browser);
+        assert_eq!(Action::OpenTerminal.default_keys(), &["F4"]);
     }
 }

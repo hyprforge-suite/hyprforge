@@ -27,8 +27,10 @@ mod quicklook;
 mod drives;
 mod searching;
 mod collections;
+mod launching;
 
 pub use quicklook::quick_look_edge;
+use launching::PaletteChoice;
 
 use crate::columns;
 use crate::density;
@@ -539,6 +541,11 @@ struct OpenMenu {
     /// selection; a sidebar row is not in the listing, so its menu
     /// carries its own target.
     target: Option<PathBuf>,
+    /// The folder row a listing's menu was opened on, if it was one —
+    /// where its "Open Terminal Here" opens (see `browser/launching.rs`).
+    /// Not `target`: that one changes what every action in the menu is
+    /// about, and only the terminal asks which folder was clicked.
+    folder: Option<PathBuf>,
 }
 
 /// Everything a host must do in response to [`Browser::update`] or
@@ -599,6 +606,16 @@ pub enum Outcome {
     /// both the host's, and the open/save dialog has no business
     /// launching anything at all.
     OpenWith(PathBuf),
+    /// Start a terminal with this folder as its working directory — see
+    /// [`Action::OpenTerminal`]. Which terminal, and starting it, are the
+    /// host's; the open/save dialog declines it.
+    OpenTerminal(PathBuf),
+    /// Run one of the person's own `[[action]]`s ([`crate::custom`]) on
+    /// `paths`, appended to its command as arguments of their own, with
+    /// `cwd` — the folder in view — as the working directory. The
+    /// action itself rather than its index, so a configuration reloaded
+    /// in between cannot turn it into a different one.
+    RunCustom { action: Box<crate::custom::CustomAction>, paths: Vec<PathBuf>, cwd: PathBuf },
     /// Change the pinned list. The window owns that list — every tab
     /// shows the same one — so the change goes to it rather than into
     /// this tab's own copy of the preferences.
@@ -1042,6 +1059,9 @@ pub struct Browser {
     /// What `files-config.toml` configured — the menus, and the keymap
     /// their shortcut hints are read from. Shared, not copied per tab.
     config: Arc<Config>,
+    /// What files are, for the person's own actions — see
+    /// [`Self::set_type_of`]. `None` offers none of them.
+    type_of: Option<crate::custom::TypeOf>,
     /// The context menu, when one is showing.
     menu: Option<OpenMenu>,
     /// Whether the clipboard holds files — see [`Self::set_can_paste`].
@@ -1135,6 +1155,7 @@ impl Browser {
             // is what guarantees that.
             list_scrollable_id: Id::unique(),
             config: Arc::new(Config::default()),
+            type_of: None,
             menu: None,
             can_paste: false,
             archive: None,
@@ -1567,11 +1588,32 @@ impl Browser {
     /// What the command palette offers for what has been typed — only
     /// what would do something here and now, and in the open/save dialog
     /// only what the dialog does ([`crate::menu::DIALOG_ACTIONS`]).
-    fn palette_matches(&self) -> Vec<Action> {
+    ///
+    /// The person's own actions that suit the selection are in the same
+    /// list, ranked on the same scale; on a tie the built-in one comes
+    /// first, keeping its place for someone who knows it by position.
+    fn palette_matches(&self) -> Vec<PaletteChoice> {
         let Some(palette) = &self.palette else { return Vec::new() };
         let context = self.action_context();
         let allowed = matches!(self.mode, Mode::Dialog(_)).then_some(crate::menu::DIALOG_ACTIONS);
-        crate::palette::matches(&palette.query, |a| action::enabled(a, &context), allowed)
+        let built_in = crate::palette::matches(&palette.query, |a| action::enabled(a, &context), allowed);
+        let mut ranked: Vec<(u32, usize, PaletteChoice)> = built_in
+            .into_iter()
+            .enumerate()
+            .map(|(order, a)| {
+                let score = crate::palette::score(&palette.query, crate::palette::label(a)).unwrap_or(u32::MAX);
+                (score, order, PaletteChoice::Action(a))
+            })
+            .collect();
+        let first_custom = ranked.len();
+        ranked.extend(
+            self.custom_palette_matches(&palette.query)
+                .into_iter()
+                .enumerate()
+                .map(|(n, (score, choice))| (score, first_custom + n, choice)),
+        );
+        ranked.sort_by_key(|(score, order, _)| (*score, *order));
+        ranked.into_iter().map(|(_, _, choice)| choice).collect()
     }
 
     fn open_palette(&mut self) -> Outcome {
@@ -1590,7 +1632,8 @@ impl Browser {
         let chosen = self.palette_matches().get(index).copied();
         self.palette = None;
         match chosen {
-            Some(action) => self.perform(action),
+            Some(PaletteChoice::Action(action)) => self.perform(action),
+            Some(PaletteChoice::Custom(index)) => self.run_custom(index),
             None => Outcome::None,
         }
     }
@@ -2212,6 +2255,7 @@ impl Browser {
                 Some(path) => Outcome::OpenWith(path.to_path_buf()),
                 None => Outcome::None,
             },
+            Action::OpenTerminal => self.open_terminal(target.as_deref(), None),
             Action::OpenInNewTab => match (target, self.selection.focused()) {
                 (Some(target), _) => Outcome::OpenInNewTab(target),
                 (None, Some(path)) => Outcome::OpenInNewTab(path.to_path_buf()),
@@ -2500,7 +2544,8 @@ impl Browser {
                 &self.action_context_for(Some(&path)),
                 &self.config.keymap,
             );
-            self.menu = (!items.is_empty()).then_some(OpenMenu { items, at, highlighted: None, target: Some(path) });
+            self.menu =
+                (!items.is_empty()).then_some(OpenMenu { items, at, highlighted: None, target: Some(path), folder: None });
             return;
         }
         let row = match spot {
@@ -2554,7 +2599,16 @@ impl Browser {
         if on_row {
             items = self.with_result_items(items);
         }
-        self.menu = (!items.is_empty()).then_some(OpenMenu { items, at, highlighted: None, target: None });
+        // The person's own actions, on the three menus about ordinary
+        // files and folders — see `browser/launching.rs`.
+        if matches!(kind, MenuKind::Entry | MenuKind::Folder | MenuKind::Empty) {
+            items = menus::with_custom(items, self.custom_items());
+        }
+        let folder = match (&row_entry, kind) {
+            (Some((_, path, _)), MenuKind::Folder) => Some(path.clone()),
+            _ => None,
+        };
+        self.menu = (!items.is_empty()).then_some(OpenMenu { items, at, highlighted: None, target: None, folder });
     }
 
     fn step_menu(&mut self, direction: i32) -> Outcome {
@@ -2572,9 +2626,16 @@ impl Browser {
             return Outcome::None;
         };
         match menu.items.get(index) {
+            // A folder row's own menu opens the terminal in that folder,
+            // where the key opens it where you are — see
+            // `Browser::open_terminal`.
+            Some(MenuItem::Action { action: Action::OpenTerminal, enabled: true, .. }) if menu.folder.is_some() => {
+                self.open_terminal(menu.target.as_deref(), menu.folder.as_deref())
+            }
             Some(MenuItem::Action { action, enabled: true, .. }) => {
                 self.perform_on(*action, menu.target)
             }
+            Some(MenuItem::Custom { index, enabled: true, .. }) => self.run_custom(*index),
             _ => Outcome::None,
         }
     }
@@ -2624,9 +2685,9 @@ impl Browser {
         let rows: Vec<hyprforge_ui::widgets::Suggestion> = matches
             .iter()
             .take(MOST)
-            .map(|action| hyprforge_ui::widgets::Suggestion {
-                label: crate::palette::label(*action).to_string(),
-                hint: self.config.keymap.combos_for(*action).first().map(|c| c.to_string()),
+            .map(|choice| {
+                let (label, hint) = self.palette_row(*choice);
+                hyprforge_ui::widgets::Suggestion { label, hint }
             })
             .collect();
         let field = text_input("Type a command", &palette.query)
@@ -4998,16 +5059,24 @@ fn context_menu<'a>(menu: &'a OpenMenu, scale: FontScale, width: f32) -> Element
                         .padding([0, spacing::SM as u16]),
                 );
             }
-            MenuItem::Action { label, hint, enabled, .. } => {
-                let enabled = *enabled;
+            MenuItem::Action { .. } | MenuItem::Custom { .. } => {
+                let (label, hint, enabled) = match item {
+                    MenuItem::Action { label, hint, enabled, .. } => (*label, hint.as_ref(), *enabled),
+                    MenuItem::Custom { label, enabled, .. } => (label.as_str(), None, *enabled),
+                    MenuItem::Separator => unreachable!("matched above"),
+                };
                 let highlighted = menu.highlighted == Some(index);
                 let colour = if enabled {
                     hyprforge_ui::theme::text()
                 } else {
                     hyprforge_ui::theme::text_dim()
                 };
-                let mut content = row![scaled_text(*label, density::ROW_TEXT_BASE, scale)
+                // One line, whatever the label: `menu_size` placed the
+                // menu counting one row per item, and a person's own
+                // label can be longer than any this crate ships.
+                let mut content = row![scaled_text(label, density::ROW_TEXT_BASE, scale)
                     .color(colour)
+                    .wrapping(iced::widget::text::Wrapping::None)
                     .width(Length::Fill)]
                 .align_y(iced::Alignment::Center)
                 .spacing(spacing::MD);
@@ -6256,7 +6325,7 @@ mod tests {
                     .iter()
                     .filter_map(|i| match i {
                         MenuItem::Action { label, .. } => Some(*label),
-                        MenuItem::Separator => None,
+                        _ => None,
                     })
                     .collect()
             })
@@ -6329,7 +6398,7 @@ mod tests {
             let menu = b.menu.as_ref().unwrap();
             menu.highlighted.and_then(|i| match &menu.items[i] {
                 MenuItem::Action { action, .. } => Some(*action),
-                MenuItem::Separator => None,
+                _ => None,
             })
         };
         browser.perform(Action::FocusDown);
@@ -6440,6 +6509,7 @@ mod tests {
             at: (0.0, 0.0),
             highlighted: None,
             target: None,
+            folder: None,
         });
         assert_eq!(browser.update(Message::MenuChose(0)), Outcome::None);
         assert!(!browser.menu_open());
@@ -7895,7 +7965,10 @@ mod palette_tests {
         browser.perform(Action::CommandPalette);
         let offered = browser.palette_matches();
         assert!(!offered.is_empty());
-        assert!(offered.iter().all(|a| crate::menu::DIALOG_ACTIONS.contains(a)), "{offered:?}");
+        assert!(
+            offered.iter().all(|c| matches!(c, PaletteChoice::Action(a) if crate::menu::DIALOG_ACTIONS.contains(a))),
+            "{offered:?}"
+        );
     }
 }
 

@@ -30,6 +30,7 @@ pub mod columns;
 pub mod config;
 pub mod config_edit;
 pub mod content;
+pub mod custom;
 pub mod density;
 pub mod devices;
 pub mod drag;

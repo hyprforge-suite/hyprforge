@@ -133,6 +133,13 @@ package_hyprforge-files() {
     "$pkgdir/usr/share/xdg-desktop-portal/portals/hyprforge.portal"
   install -Dm644 crates/hyprforge-files/packaging/org.freedesktop.impl.portal.desktop.hyprforge.service \
     "$pkgdir/usr/share/dbus-1/services/org.freedesktop.impl.portal.desktop.hyprforge.service"
+  # org.freedesktop.FileManager1 — "Show in Folder" from other
+  # applications. Named after this package rather than the bus name, so
+  # it never collides with another file manager's file of the same name;
+  # with two in /usr/share the bus picks one, and the installer's copy in
+  # the user's own services directory is the way to be sure it is this.
+  install -Dm644 crates/hyprforge-files/packaging/hyprforge-files.FileManager1.service \
+    "$pkgdir/usr/share/dbus-1/services/hyprforge-files.FileManager1.service"
   _license
 }
 

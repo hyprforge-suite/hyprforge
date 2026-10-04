@@ -23,10 +23,10 @@
 use crate::action::Action;
 use crate::keymap::Combo;
 use std::path::Path;
-use toml_edit::{Array, DocumentMut, Item, Table, Value};
+use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, Value};
 
 /// The first line of a file this sheet had to create.
-pub const HEADER: &str = "# Files' own settings: [keys], [menu], [behaviour] and [sidebar].\n\
+pub const HEADER: &str = "# Files' own settings: [keys], [menu], [behaviour], [sidebar] and [[action]].\n\
      # Files' Preferences writes here one line at a time, and the file is\n\
      # yours to edit too: comments and anything you add are kept.\n";
 
@@ -44,6 +44,11 @@ pub enum EditError {
     Read { path: String, why: String },
     #[error("{path} couldn't be written: {why}")]
     Write { path: String, why: String },
+    /// The `[[action]]` block an edit was for is not in the file any
+    /// more — changed in an editor since the sheet read it. Nothing was
+    /// written: guessing which block was meant could change the wrong one.
+    #[error("{path} has no action called \u{201c}{id}\u{201d} any more, so nothing was changed")]
+    NoSuchAction { path: String, id: String },
 }
 
 /// One change to the file.
@@ -57,6 +62,12 @@ pub enum Edit {
     /// `[sidebar] <key> = <value>` — a value of the same kinds
     /// `[behaviour]` takes.
     Sidebar(&'static str, BehaviourValue),
+    /// `[behaviour] terminal = [...]`. `None` removes the line, which is
+    /// Automatic.
+    Terminal(Option<Vec<String>>),
+    /// One `[[action]]` block added, changed or removed — see
+    /// [`crate::custom::Change`].
+    Action(crate::custom::Change),
 }
 
 /// A `[behaviour]` value, as the sheet sets it.
@@ -105,9 +116,81 @@ pub fn apply(text: &str, edits: &[Edit], path: &Path) -> Result<String, EditErro
                 let table = section(&mut doc, "sidebar", &shown)?;
                 set(table, key, value.to_toml());
             }
+            Edit::Terminal(words) => {
+                let table = section(&mut doc, "behaviour", &shown)?;
+                match words {
+                    None => {
+                        table.remove("terminal");
+                    }
+                    Some(words) => set(table, "terminal", Value::Array(words.iter().map(String::as_str).collect())),
+                }
+            }
+            Edit::Action(change) => change_action(&mut doc, change, &shown)?,
         }
     }
     Ok(doc.to_string())
+}
+
+/// Applies one change to the `[[action]]` blocks, in place.
+///
+/// A block is found by its id ([`crate::custom::block_id`]) rather than
+/// by where it sits, so a block someone added above it in an editor
+/// since the sheet read the file does not shift the edit onto the wrong
+/// one. Changing a block sets each field with [`set`], which keeps the
+/// comment above a line and the one after it; a key the draft leaves
+/// empty (`types`) is removed, because an empty list would read as a
+/// restriction someone wrote.
+fn change_action(doc: &mut DocumentMut, change: &crate::custom::Change, path: &str) -> Result<(), EditError> {
+    use crate::custom::{block_id, slug, Change, Draft};
+    let item = doc.entry("action").or_insert_with(|| Item::ArrayOfTables(ArrayOfTables::new()));
+    let Some(blocks) = item.as_array_of_tables_mut() else {
+        return Err(EditError::NotATable { path: path.to_string(), section: "action".to_string() });
+    };
+    let id_of = |table: &Table| {
+        block_id(table.get("id").and_then(Item::as_str), table.get("label").and_then(Item::as_str))
+    };
+    let position = |blocks: &ArrayOfTables, id: &str| {
+        blocks
+            .iter()
+            .position(|t| id_of(t).as_deref() == Some(id))
+            .ok_or_else(|| EditError::NoSuchAction { path: path.to_string(), id: id.to_string() })
+    };
+    let fill = |table: &mut Table, draft: &Draft| {
+        set(table, "label", Value::from(draft.label.trim()));
+        set(table, "command", Value::Array(draft.command.iter().map(String::as_str).collect()));
+        if draft.types.is_empty() {
+            table.remove("types");
+        } else {
+            set(table, "types", Value::Array(draft.types.iter().map(String::as_str).collect()));
+        }
+        set(table, "selection", Value::from(draft.selection.id()));
+        set(table, "terminal", Value::from(draft.terminal));
+    };
+    match change {
+        Change::Add(draft) => {
+            // An id of its own, written out, so renaming it later in the
+            // sheet does not change what the block is called.
+            let taken: Vec<String> = blocks.iter().filter_map(id_of).collect();
+            let base = slug(&draft.label);
+            let id = std::iter::once(base.clone())
+                .chain((2..).map(|n| format!("{base}-{n}")))
+                .find(|id| !taken.contains(id))
+                .expect("an unbounded sequence finds a free name");
+            let mut table = Table::new();
+            table.insert("id", Item::Value(Value::from(id)));
+            fill(&mut table, draft);
+            blocks.push(table);
+        }
+        Change::Replace { id, draft } => {
+            let at = position(blocks, id)?;
+            fill(blocks.get_mut(at).expect("found just now"), draft);
+        }
+        Change::Remove { id } => {
+            let at = position(blocks, id)?;
+            blocks.remove(at);
+        }
+    }
+    Ok(())
 }
 
 /// `key = value` in `table`, changing only the value when the key is
@@ -370,5 +453,114 @@ mod tests {
         assert_eq!(names.into_iter().collect::<Vec<_>>(), ["go-up", "trash"]);
         assert!(customised("[keys\n").is_empty());
         assert!(customised("").is_empty());
+    }
+
+    fn draft(label: &str, command: &[&str]) -> crate::custom::Draft {
+        crate::custom::Draft {
+            label: label.to_string(),
+            command: command.iter().map(|w| w.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    /// Automatic is the line's absence; a chosen terminal is one line of
+    /// words — and the loader reads back what was written.
+    #[test]
+    fn the_terminal_control_writes_exactly_its_line() {
+        let text = "[behaviour]\n# mine\nconfirm-trash = true\n";
+        let out = edited(text, &[Edit::Terminal(Some(vec!["kitty".into(), "--single-instance".into()]))]);
+        assert_eq!(out, "[behaviour]\n# mine\nconfirm-trash = true\nterminal = [\"kitty\", \"--single-instance\"]\n");
+        let (config, problems) = crate::config::parse(&out, Path::new("x"));
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(config.terminal, Some(vec!["kitty".to_string(), "--single-instance".to_string()]));
+        assert_eq!(edited(&out, &[Edit::Terminal(None)]), text, "Automatic takes the line away again");
+    }
+
+    #[test]
+    fn adding_an_action_writes_one_block_the_loader_reads_back() {
+        use crate::custom::{Change, Selection};
+        let mut new = draft("Resize to 50%", &["magick", "mogrify", "-resize", "50%"]);
+        new.types = vec!["image/*".into()];
+        new.selection = Selection::Many;
+        let out = edited("[keys]\ntrash = \"Delete\"\n", &[Edit::Action(Change::Add(new))]);
+        assert!(out.starts_with("[keys]\ntrash = \"Delete\"\n"), "{out}");
+        assert!(
+            out.contains(
+                "[[action]]\nid = \"resize-to-50\"\nlabel = \"Resize to 50%\"\n\
+                 command = [\"magick\", \"mogrify\", \"-resize\", \"50%\"]\ntypes = [\"image/*\"]\n\
+                 selection = \"many\"\nterminal = false\n"
+            ),
+            "{out}"
+        );
+        let (config, problems) = crate::config::parse(&out, Path::new("x"));
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(config.actions[0].selection, Selection::Many);
+        assert_eq!(config.actions[0].types, ["image/*"]);
+    }
+
+    #[test]
+    fn a_second_action_with_the_same_label_gets_an_id_of_its_own() {
+        use crate::custom::Change;
+        let out = edited(
+            "",
+            &[Edit::Action(Change::Add(draft("Shrink", &["a"]))), Edit::Action(Change::Add(draft("Shrink", &["b"])))],
+        );
+        let (config, problems) = crate::config::parse(&out, Path::new("x"));
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(config.actions.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["shrink", "shrink-2"]);
+    }
+
+    /// Editing a block changes its fields and nothing else: the comments
+    /// in it and around it, and the blocks either side, are as written.
+    #[test]
+    fn editing_an_action_keeps_its_comments_and_the_blocks_around_it() {
+        use crate::custom::{Change, Selection};
+        let text = "# my actions\n\
+                    [[action]]\nlabel = \"First\"\ncommand = [\"one\"]\n\
+                    \n# the one I use most\n[[action]]\n\
+                    label = \"Shrink\"  # for the blog\n\
+                    # the argv, not a shell line\n\
+                    command = [\"magick\"]\ntypes = [\"image/*\"]\n\
+                    \n[[action]]\nlabel = \"Last\"\ncommand = [\"three\"]\n";
+        let mut changed = draft("Shrink more", &["magick", "mogrify", "-resize", "25%"]);
+        changed.selection = Selection::One;
+        let out = edited(text, &[Edit::Action(Change::Replace { id: "shrink".into(), draft: changed })]);
+        for kept in [
+            "# my actions",
+            "[[action]]\nlabel = \"First\"\ncommand = [\"one\"]",
+            "# the one I use most",
+            "label = \"Shrink more\"  # for the blog",
+            "# the argv, not a shell line\ncommand = [\"magick\", \"mogrify\", \"-resize\", \"25%\"]",
+            "[[action]]\nlabel = \"Last\"\ncommand = [\"three\"]",
+        ] {
+            assert!(out.contains(kept), "lost {kept:?} from:\n{out}");
+        }
+        assert!(!out.contains("types"), "an empty list of types is no line at all:\n{out}");
+        let (config, problems) = crate::config::parse(&out, Path::new("x"));
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(config.actions[1].label, "Shrink more");
+        assert_eq!(config.actions[1].selection, Selection::One);
+    }
+
+    #[test]
+    fn removing_an_action_takes_only_its_block() {
+        use crate::custom::Change;
+        let text = "[[action]]\nlabel = \"Keep\"\ncommand = [\"a\"]\n\
+                    [[action]]\nid = \"bye\"\nlabel = \"Go\"\ncommand = [\"b\"]\n";
+        let out = edited(text, &[Edit::Action(Change::Remove { id: "bye".into() })]);
+        assert_eq!(out, "[[action]]\nlabel = \"Keep\"\ncommand = [\"a\"]\n");
+    }
+
+    /// The block was renamed in an editor since the sheet read the file:
+    /// nothing is written, rather than the edit landing on a neighbour.
+    #[test]
+    fn an_action_that_is_no_longer_in_the_file_is_not_guessed_at() {
+        use crate::custom::Change;
+        let result = apply(
+            "[[action]]\nlabel = \"Other\"\ncommand = [\"a\"]\n",
+            &[Edit::Action(Change::Remove { id: "gone".into() })],
+            Path::new("x.toml"),
+        );
+        assert!(matches!(result, Err(EditError::NoSuchAction { .. })), "{result:?}");
     }
 }

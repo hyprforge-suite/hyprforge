@@ -61,28 +61,33 @@ pub fn matches(query: &str, enabled: impl Fn(Action) -> bool, allowed: Option<&[
         .into_iter()
         .filter(|a| listed(*a) && enabled(*a) && allowed.is_none_or(|allowed| allowed.contains(a)))
         .enumerate()
-        .filter_map(|(order, action)| {
-            if query.is_empty() {
-                return Some((0, order, action));
-            }
-            let name = label(action);
-            // Initials as their own tier: `nf` for New Folder is how
-            // people type a command they know by name.
-            let initials: String = name.split_whitespace().filter_map(|w| w.chars().next()).collect();
-            let by_initials = initials.to_lowercase().starts_with(&query.to_lowercase()).then_some(1);
-            let by_name = crate::jump::score(name, query).map(|tier| tier as u32 * 2);
-            let best = match (by_name, by_initials) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            }?;
-            Some((best, order, action))
-        })
+        .filter_map(|(order, action)| Some((score(query, label(action))?, order, action)))
         .collect();
     scored.sort_by_key(|(score, order, _)| (*score, *order));
     // Each action once: `Action::all` lists none twice, but a stray
     // duplicate there would show two rows that do one thing.
     let mut seen = std::collections::HashSet::new();
     scored.into_iter().map(|(_, _, a)| a).filter(|a| seen.insert(*a)).collect()
+}
+
+/// How well `name` answers `query` — lower is better, `None` is not at
+/// all, and an empty query matches everything equally. Public so the
+/// person's own actions (`crate::custom`), which are not [`Action`]s,
+/// rank on the same scale as the built-in ones and merge into one list.
+pub fn score(query: &str, name: &str) -> Option<u32> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Some(0);
+    }
+    // Initials as their own tier: `nf` for New Folder is how people
+    // type a command they know by name.
+    let initials: String = name.split_whitespace().filter_map(|w| w.chars().next()).collect();
+    let by_initials = initials.to_lowercase().starts_with(&query.to_lowercase()).then_some(1);
+    let by_name = crate::jump::score(name, query).map(|tier| tier as u32 * 2);
+    match (by_name, by_initials) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 #[cfg(test)]

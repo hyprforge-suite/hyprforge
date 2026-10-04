@@ -187,6 +187,9 @@ impl Default for MenuConfig {
                 A(OpenInNewTab),
                 A(Pin),
                 A(ToggleStar),
+                // Beside the other ways into the folder: a terminal there
+                // is one more place to open it.
+                A(OpenTerminal),
                 Sep,
                 A(Cut),
                 A(Copy),
@@ -215,6 +218,7 @@ impl Default for MenuConfig {
                 Sep,
                 A(GoUp),
                 A(NewTab),
+                A(OpenTerminal),
                 Sep,
                 A(Properties),
             ],
@@ -354,13 +358,48 @@ pub enum MenuItem {
         hint: Option<String>,
         enabled: bool,
     },
+    /// One of the person's own `[[action]]`s — see [`crate::custom`].
+    /// Its own variant rather than an [`Action`], because the label is
+    /// theirs (a `String`, not one of the shipped `&'static str`s) and
+    /// there is no key to hint at.
+    Custom {
+        /// Which of `Config::actions` it is.
+        index: usize,
+        label: String,
+        /// Whether the selection is the size the action takes —
+        /// greyed when it is not, like the built-in rows.
+        enabled: bool,
+    },
     Separator,
 }
 
 impl MenuItem {
     pub fn is_selectable(&self) -> bool {
-        matches!(self, MenuItem::Action { enabled: true, .. })
+        matches!(self, MenuItem::Action { enabled: true, .. } | MenuItem::Custom { enabled: true, .. })
     }
+
+    /// What the row says.
+    pub fn label(&self) -> &str {
+        match self {
+            MenuItem::Action { label, .. } => label,
+            MenuItem::Custom { label, .. } => label,
+            MenuItem::Separator => "",
+        }
+    }
+}
+
+/// `items` with the person's own actions after them, as a group of their
+/// own under a line. Nothing is added — not even the line — when there
+/// are none.
+pub fn with_custom(mut items: Vec<MenuItem>, custom: Vec<MenuItem>) -> Vec<MenuItem> {
+    if custom.is_empty() {
+        return items;
+    }
+    if !items.is_empty() {
+        items.push(MenuItem::Separator);
+    }
+    items.extend(custom);
+    items
 }
 
 /// The menu to show for `entries` in `ctx`.
@@ -377,7 +416,7 @@ pub fn build(entries: &[MenuEntry], ctx: &ActionContext, keymap: &Keymap) -> Vec
     for entry in entries {
         match entry {
             MenuEntry::Separator => {
-                if matches!(items.last(), Some(MenuItem::Action { .. })) {
+                if matches!(items.last(), Some(MenuItem::Action { .. } | MenuItem::Custom { .. })) {
                     items.push(MenuItem::Separator);
                 }
             }
@@ -479,8 +518,8 @@ mod tests {
         items
             .iter()
             .map(|i| match i {
-                MenuItem::Action { label, .. } => *label,
                 MenuItem::Separator => "-",
+                other => other.label(),
             })
             .collect()
     }
@@ -594,5 +633,23 @@ mod tests {
         assert_eq!(MenuEntry::parse("-"), Some(MenuEntry::Separator));
         assert_eq!(MenuEntry::parse("trash"), Some(MenuEntry::Action(Action::Trash)));
         assert_eq!(MenuEntry::parse("defenestrate"), None);
+    }
+
+    #[test]
+    fn the_persons_own_actions_come_last_under_a_line_of_their_own() {
+        let built = build(&[MenuEntry::Action(Action::Open)], &ctx_with_selection(), &crate::keymap::defaults());
+        let custom = vec![MenuItem::Custom { index: 0, label: "Shrink".into(), enabled: true }];
+        assert_eq!(labels(&with_custom(built.clone(), custom.clone())), ["Open", "-", "Shrink"]);
+        assert_eq!(labels(&with_custom(built.clone(), Vec::new())), ["Open"], "no stray line when there are none");
+        assert_eq!(labels(&with_custom(Vec::new(), custom)), ["Shrink"]);
+    }
+
+    #[test]
+    fn a_custom_row_the_selection_does_not_suit_is_greyed_and_skipped_by_the_arrows() {
+        let items = vec![
+            MenuItem::Custom { index: 0, label: "Compare".into(), enabled: false },
+            MenuItem::Custom { index: 1, label: "Shrink".into(), enabled: true },
+        ];
+        assert_eq!(step(&items, None, 1), Some(1));
     }
 }
