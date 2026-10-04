@@ -2647,13 +2647,12 @@ impl Browser {
         let Some(path) = self.rows().get(index).map(|e| e.path.clone()) else {
             return Outcome::None;
         };
-        if self.in_archive() {
-            // A member's path is `~/x.zip/notes.txt`, which nothing
-            // outside this app can open, and a drag has to hand over its
-            // files the moment another application asks — no time to
-            // unpack them first the way Copy does.
-            return Outcome::Notice("Files inside an archive can't be dragged out yet — copy them instead.".to_string());
-        }
+        // Inside an archive the paths are `~/x.zip/notes.txt`, which
+        // nothing outside this app can open. They go out as they are all
+        // the same: the host unpacks them while the drag is under way
+        // and hands over the real files when they are asked for, which
+        // is a host's business (it needs a disk and a compositor), not
+        // the listing's.
         if !self.selection.is_selected(&path) {
             self.with_rows(|selection, rows| selection.click_with(rows, index, false, false));
         }
@@ -5385,11 +5384,13 @@ mod tests {
         assert!(!row_selected(&browser, 0));
     }
 
+    /// The listing hands members over by their own paths, as it does
+    /// any file; unpacking them for the receiver is the host's job.
     #[test]
-    fn nothing_is_dragged_out_of_an_archive() {
+    fn members_of_an_archive_are_dragged_like_any_other_row() {
         let mut browser = loaded_browser(&["a"]);
         browser.set_archive(Some("zip".to_string()));
-        assert!(matches!(browser.update(Message::DragStarted(0)), Outcome::Notice(_)));
+        assert_eq!(dragged(browser.update(Message::DragStarted(0))), vec![PathBuf::from("/dir/a")]);
     }
 
     // --- selection: ctrl-toggle and shift-range ---------------------------
