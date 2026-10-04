@@ -394,7 +394,11 @@ it is a plain Unix rule, not anything specific to this code: while one
 thread holds an executable open for writing, a fork in another thread
 gives the child a copy of that write descriptor, and exec of that file
 then fails with "text file busy". Serialising write-then-exec across
-those tests fixes it; a retry loop would only hide it. The general
+those tests fixes it; a retry loop would only hide it. The lock has to
+cover every test that *spawns*, not just the ones that write: a spawn
+that ends in "not found" still forks, and its child holds the copy
+while it searches `$PATH` — the tray's missing-binary test went without
+the lock for that reason and was the fork that broke a sibling on CI. The general
 lesson is the one about flaky tests generally — "passes alone, fails in
 the suite" is information, and it names concurrency with a sibling
 rather than inviting a re-run.
