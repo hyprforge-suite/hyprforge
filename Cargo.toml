@@ -40,6 +40,7 @@ members = [
     "crates/hyprforge-media",
     "crates/hyprforge-archive",
     "crates/hyprforge-files-core",
+    "crates/hyprforge-volumes",
     "crates/hyprforge-files",
 ]
 # `crates/hyprforge-notif/` is a nested cargo workspace, deliberately kept
@@ -115,6 +116,10 @@ hyprforge-mesh = { path = "crates/hyprforge-mesh", version = "0.1.0" }
 hyprforge-video = { path = "crates/hyprforge-video", version = "0.1.0" }
 hyprforge-media = { path = "crates/hyprforge-media", version = "0.1.0" }
 hyprforge-files-core = { path = "crates/hyprforge-files-core", version = "0.1.0" }
+# Drives over UDisks2 and network shares over gvfs. default-features =
+# false so the browser view takes the data and the decisions without the
+# D-Bus client; the file manager's window turns `client` on.
+hyprforge-volumes = { path = "crates/hyprforge-volumes", version = "0.1.0", default-features = false }
 # Zip, tar and 7z, for the file manager's archive browsing. A leaf, like
 # hyprforge-mime beside it — nothing GUI and nothing Hyprland-shaped.
 hyprforge-archive = { path = "crates/hyprforge-archive", version = "0.1.0" }
@@ -292,4 +297,5 @@ hyprforge-thumbnails = { path = "crates/hyprforge-thumbnails" }
 hyprforge-tray = { path = "crates/hyprforge-tray" }
 hyprforge-ui = { path = "crates/hyprforge-ui" }
 hyprforge-video = { path = "crates/hyprforge-video" }
+hyprforge-volumes = { path = "crates/hyprforge-volumes" }
 hyprforge-windowrules = { path = "crates/hyprforge-windowrules" }

@@ -1,0 +1,54 @@
+[package]
+name = "hyprforge-volumes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "Drives over UDisks2 and network shares over gvfs and the mount table: what is plugged in, mounting, unmounting and ejecting it, and connecting to a server, behind backend traits with a mock"
+
+[dependencies]
+# A typed password for a server goes to `gio`'s standard input and
+# nowhere else; the type that holds it until then renders a length.
+hyprforge-secret.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# Everything below is the `client` feature: the D-Bus client, the `gio`
+# conversation and the backend traits they implement. Without it this
+# crate is plain data and pure decisions — which is all the file
+# manager's browser view needs, and that view is also the open/save
+# dialog's: it has no business pulling a D-Bus stack in to draw a row.
+#
+# UDisks2 is already a daemon, so this is a client and never a second
+# one. `tokio` for the same reason every suite D-Bus client gives: zbus
+# otherwise polls on its own thread, and anything a handler spawns panics
+# with "there is no reactor running".
+zbus = { workspace = true, optional = true }
+# `net` for `AsyncFd`, which is how a change to the mount table is
+# heard without polling it — see `network::watch_mount_table`.
+tokio = { workspace = true, optional = true, features = ["process", "io-util", "net"] }
+async-trait = { workspace = true, optional = true }
+# `StreamExt::next` over zbus's signal stream.
+futures-util = { workspace = true, optional = true }
+# The bounded wait for `gio info`, `umount` and `fusermount3` — see
+# `network`. A leaf with no dependencies of its own.
+hyprforge-process = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util", "process", "io-util", "net"] }
+tempfile = "3"
+
+[features]
+default = ["client"]
+client = ["dep:zbus", "dep:tokio", "dep:async-trait", "dep:futures-util", "dep:hyprforge-process"]
+# Exposes `backend::mock`, so the file manager's own tests can drive a
+# window against drives that mount, refuse and vanish on cue, without a
+# bus.
+mock = ["client"]
+
+# docs.rs builds with every feature on, so the mock backend (and, for
+# core, the D-Bus proxy) is documented rather than hidden behind a flag
+# nobody reading the docs knows to enable.
+[package.metadata.docs.rs]
+all-features = true

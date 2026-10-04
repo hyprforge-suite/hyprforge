@@ -35,6 +35,10 @@
 #                             the shape the lock's fingerprint path claims.
 #                             Never claims the reader. Needs fprintd
 #                             installed (it is bus-activated).
+#   3g. UDisks2             — does UDisks2 agree? Read-only checks that
+#                             its block devices and drives are the shape
+#                             hyprforge-volumes claims. Never mounts,
+#                             unmounts or ejects. Needs UDisks2 installed.
 #
 # Tiers 2, 3, 3b and 3c each gate on the thing they actually ask, rather
 # than sharing one --ignored run: a check that silently never runs is
@@ -1214,6 +1218,36 @@ else
             grep -E '^test .* FAILED' <<<"$output" | head -20
         else
             ok "$(count_tests <<<"$output") fprintd tests passed"
+            while IFS= read -r reason; do
+                [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
+            done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^(]*\).*/\1/p' <<<"$output" | sort -u)
+        fi
+    fi
+
+    # Answers to UDisks2, the file manager's Devices section. Gated on the
+    # system bus knowing UDisks2's name — running or activatable, since
+    # it is bus-activated on some systems — and on nothing else: not on a
+    # compositor, and not on a drive being plugged in, because what it
+    # asks (are these property types and object paths UDisks2's) every
+    # machine with UDisks2 can answer from its own system disk.
+    #
+    # Read-only: it lists objects and reads properties. It never mounts,
+    # unmounts, ejects or powers off anything — a drive of the person
+    # using this machine is not a fixture.
+    step "Live tests against UDisks2"
+    if ! command -v busctl >/dev/null; then
+        skip "UDisks2 tests" "busctl not available to ask"
+    elif ! busctl --system list --acquired --activatable --no-legend 2>/dev/null \
+            | awk '{print $1}' | grep -qx 'org.freedesktop.UDisks2'; then
+        skip "UDisks2 tests" "UDisks2 isn't installed"
+    else
+        output=$(cargo test -p hyprforge-volumes --test live_udisks \
+            -- --ignored --test-threads=1 --nocapture 2>&1)
+        if grep -q "test result: FAILED" <<<"$output"; then
+            bad "UDisks2 tests failed — the code disagrees with the running UDisks2"
+            grep -E '^test .* FAILED' <<<"$output" | head -20
+        else
+            ok "$(count_tests <<<"$output") UDisks2 tests passed"
             while IFS= read -r reason; do
                 [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
             done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^(]*\).*/\1/p' <<<"$output" | sort -u)

@@ -23,6 +23,7 @@
 //! pins the property that matters: two browsers differing only in `Mode`
 //! feed `render` the exact same data.
 
+mod drives;
 mod searching;
 
 use crate::columns;
@@ -671,6 +672,10 @@ pub enum Outcome {
     /// searches — see [`crate::search`]. Results come back as
     /// [`Message::Search`].
     Search(crate::search::Ask),
+    /// Mount, unmount or eject a drive, or disconnect a share — see
+    /// [`crate::devices`]. The host carries it out and tells every tab
+    /// what changed through [`Message::DevicesChanged`].
+    Devices(crate::devices::Ask),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -794,6 +799,11 @@ pub enum Message {
     /// Anything about searching: the scope rail, chips, a walk's results
     /// and saved searches — see `browser/searching.rs`.
     Search(crate::search::SearchMessage),
+    /// The window's drives and shares changed — see [`crate::devices`].
+    /// Every tab gets the same copy.
+    DevicesChanged(Arc<crate::devices::Devices>),
+    /// A click on a drive's row, or on its eject mark.
+    Device(crate::devices::DeviceMessage),
 }
 
 /// Exactly what `render` needs, and nothing `Browser` has that it
@@ -846,6 +856,8 @@ struct ViewModel<'a> {
     prefs: &'a Prefs,
     sidebar: &'a [SidebarItem],
     pinned: &'a [PinnedItem],
+    /// The Devices and Remote sections' content.
+    devices: &'a crate::devices::Devices,
     /// The entry list's `scrollable` identity — see
     /// [`Browser::list_scrollable_id`]'s own doc for why this exists.
     list_scrollable_id: Id,
@@ -933,6 +945,10 @@ pub struct Browser {
     /// waiting to be filled: [`sidebar_sections`] renders no Pinned
     /// heading at all for an empty list, exactly like a fresh install.
     pinned: Vec<PinnedItem>,
+    /// The window's drives and shares, as last handed over — see
+    /// [`crate::devices`]. Behind an `Arc` because every tab holds the
+    /// same one.
+    devices: Arc<crate::devices::Devices>,
     media: Media,
     /// Theme icons by [`crate::icon::icon_key`], for the life of the
     /// window rather than one folder: `.png` is the same icon everywhere,
@@ -1027,6 +1043,7 @@ impl Browser {
             prefs,
             sidebar,
             pinned: Vec::new(),
+            devices: Arc::default(),
             media: Media::default(),
             icons: HashMap::new(),
             icons_asked: HashSet::new(),
@@ -1089,6 +1106,12 @@ impl Browser {
     /// see the field's own doc.
     pub fn pinned(&self) -> &[PinnedItem] {
         &self.pinned
+    }
+
+    /// The drives and shares, as last delivered by
+    /// [`Message::DevicesChanged`].
+    pub fn devices(&self) -> &crate::devices::Devices {
+        &self.devices
     }
 
     /// The entry list's `scrollable` identity.
@@ -1287,6 +1310,8 @@ impl Browser {
                 self.pinned = items;
                 Outcome::None
             }
+            Message::DevicesChanged(devices) => self.set_devices(devices),
+            Message::Device(message) => self.update_device(message),
             Message::ToggleProperties => self.toggle_properties(),
             Message::Properties(message) => self.update_properties(*message),
             Message::Adopt(setting) => {
@@ -1583,6 +1608,9 @@ impl Browser {
             // folder" honestly, rather than the listing being asked a
             // question that is not about it.
             focused_is_dir: match target {
+                // A drive that is not mounted is not a folder yet: there
+                // is nothing to open in a new tab.
+                Some(t) if self.devices.volume_named(t).is_some_and(|v| !v.is_mounted()) => None,
                 Some(_) => Some(true),
                 None => focused.map(|e| e.is_dir),
             },
@@ -1592,6 +1620,7 @@ impl Browser {
             has_parent: self.current_dir.parent().is_some(),
             searching: self.searching(),
             in_results: self.in_results(),
+            device: self.devices.target(target, &self.current_dir),
             in_trash: self.in_trash(),
             in_archive: self.in_archive(),
             // Every selected row is a file whose name this suite can
@@ -1872,6 +1901,7 @@ impl Browser {
         // all is asked for before it — a rule the navigation tests pin.
         if matches!(self.load_state, LoadState::Loaded) {
             let saved_icon = searching::saved_search_icon();
+            let drive_icons = self.device_icon_keys();
             let set = IconSet { icons: &self.icons, folders: &self.folder_icons };
             let panes = self
                 .ancestors
@@ -1886,7 +1916,8 @@ impl Browser {
                 .chain(panes)
                 .chain(self.folder_icons.values().map(String::as_str))
                 .chain(std::iter::once(icon::FOLDER_KEY))
-                .chain((!self.prefs.searches.is_empty()).then_some(saved_icon.as_str()));
+                .chain((!self.prefs.searches.is_empty()).then_some(saved_icon.as_str()))
+                .chain(drive_icons.iter().map(String::as_str));
             let mut keys: Vec<String> = Vec::new();
             for key in wanted {
                 if !self.icons.contains_key(key) && !self.icons_asked.contains(key) && !keys.iter().any(|k| k == key) {
@@ -2070,6 +2101,9 @@ impl Browser {
                 sources: self.selected_shown(),
                 into: self.current_dir.clone(),
             },
+            Action::Mount | Action::Unmount | Action::Eject | Action::Disconnect => {
+                self.device_action(action, target.as_deref())
+            }
             Action::Pin | Action::Unpin | Action::PinUp | Action::PinDown => {
                 let Some(target) = self.pin_target(target.as_deref()) else {
                     return Outcome::None;
@@ -2199,7 +2233,8 @@ impl Browser {
             | Action::PreviousTab
             | Action::Tab(_)
             | Action::Properties
-            | Action::Preferences => Outcome::Window(action),
+            | Action::Preferences
+            | Action::ConnectToServer => Outcome::Window(action),
         }
     }
 
@@ -2261,7 +2296,15 @@ impl Browser {
         self.renaming = None;
         self.path_edit = None;
         if let MenuSpot::Sidebar(path) = spot {
-            let kind = if self.prefs.pinned.contains(&path) { MenuKind::Pinned } else { MenuKind::Place };
+            let kind = if self.devices.volume_named(&path).is_some() {
+                MenuKind::Device
+            } else if self.devices.shares.iter().any(|s| s.path == path) {
+                MenuKind::Remote
+            } else if self.prefs.pinned.contains(&path) {
+                MenuKind::Pinned
+            } else {
+                MenuKind::Place
+            };
             let items = menus::build(
                 self.config.menus.get(kind),
                 &self.action_context_for(Some(&path)),
@@ -2745,6 +2788,7 @@ impl Browser {
             prefs: &self.prefs,
             sidebar: &self.sidebar,
             pinned: &self.pinned,
+            devices: &self.devices,
             list_scrollable_id: self.list_scrollable_id.clone(),
             can_go_back: !self.back_stack.is_empty(),
             can_go_forward: !self.forward_stack.is_empty(),
@@ -3630,6 +3674,9 @@ struct SidebarRow {
     /// instead of going to `path`, and it is no drop target and has no
     /// folder's menu — it is a question, not somewhere files live.
     search: Option<usize>,
+    /// A drive, a share, "Connect to Server…" or a note in their place
+    /// — see `browser/drives.rs`. `None` for every other section's rows.
+    device: Option<drives::DeviceRow>,
 }
 
 impl SidebarRow {
@@ -3650,11 +3697,10 @@ impl SidebarRow {
 /// Builds every section the sidebar could show, **already filtered** to
 /// the ones with content — see [`SidebarSection`]'s own doc. Places and
 /// Trash always have at least one row (Home always exists; Trash is a
-/// fixed path, not something that can fail to "have" rows), so in
-/// practice only Pinned can ever be absent, but the filter is applied
-/// uniformly rather than special-cased to Pinned: Tags and Remote will
-/// land here the same way once they exist, and neither should need this
-/// function taught a new special case to stay empty-safe.
+/// fixed path, not something that can fail to "have" rows); Pinned,
+/// Saved Searches, Devices and Remote can each be absent, and the filter
+/// is applied uniformly rather than special-cased to any of them — Tags
+/// will land here the same way once it exists.
 fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
     let places = SidebarSection {
         title: "Places",
@@ -3669,6 +3715,7 @@ fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
                 missing: false,
                 icon: row_icon(vm, &item.path),
                 search: None,
+                device: None,
             })
             .collect(),
     };
@@ -3697,6 +3744,7 @@ fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
                 missing: item.item_count.is_none(),
                 icon: row_icon(vm, &item.path),
                 search: None,
+                device: None,
             })
             .collect(),
     };
@@ -3713,6 +3761,7 @@ fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
             missing: false,
             icon: row_icon(vm, &sidebar::trash_path()),
             search: None,
+            device: None,
         }],
     });
     // After Pinned, which it is the sibling of — both are lists the user
@@ -3736,10 +3785,19 @@ fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
                 missing: false,
                 icon: searching::saved_search_icon(),
                 search: Some(index),
+                device: None,
             })
             .collect(),
     };
-    [Some(places), Some(pinned), Some(searches), trash].into_iter().flatten().filter(|s| !s.rows.is_empty()).collect()
+    // Devices and Remote after the lists the user built and before the
+    // Trash, which stays last: the mockup's order, Remote where its
+    // phase left room for it.
+    let [devices, remote] = drives::sections(vm);
+    [Some(places), Some(pinned), Some(searches), Some(devices), Some(remote), trash]
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.rows.is_empty())
+        .collect()
 }
 
 /// A sidebar row's icon key: its folder's own, or an ordinary folder's.
@@ -3786,7 +3844,7 @@ fn sidebar_rail<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
         }
         for row_item in section.rows {
             let (press, is_current) = sidebar_press(&row_item, vm);
-            let place = row_item.search.is_none().then(|| row_item.path.clone());
+            let place = drives::place(&row_item);
             let mark = sidebar_mark(&row_item, vm.icons, scale);
             let button = iced::widget::button(
                 container(mark).center_x(Length::Fill).center_y(Length::Fill),
@@ -3794,7 +3852,7 @@ fn sidebar_rail<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
             .width(Length::Fill)
             .height(Length::Fixed(density::row_height(scale)))
             .padding(0)
-            .on_press(press)
+            .on_press_maybe(press)
             .style(move |t: &iced::Theme, status| selectable_row_style(t, status, is_current));
             rail = rail.push(sidebar_place(button, place, vm));
         }
@@ -3827,22 +3885,26 @@ fn sidebar_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
         let mut group = column![heading].spacing(1.0);
         for row_item in section.rows {
             let (press, is_current) = sidebar_press(&row_item, vm);
-            let place = row_item.search.is_none().then(|| row_item.path.clone());
+            let place = drives::place(&row_item);
             let mark = sidebar_mark(&row_item, vm.icons, scale);
+            let eject = drives::eject_button(&row_item, scale);
             let label = if row_item.missing {
                 meta_text(row_item.label, density::ROW_TEXT_BASE, scale)
             } else {
                 scaled_text(row_item.label, density::ROW_TEXT_BASE, scale)
             };
-            let content: Element<'a, Message> = match row_item.meta {
-                Some(meta) => row![
-                    mark,
-                    label.width(Length::Fill),
-                    meta_text(meta, density::META_TEXT_BASE, scale),
-                ]
-                .spacing(spacing::SM)
-                .align_y(iced::Alignment::Center)
-                .into(),
+            // What sits at the row's end: a count or a state in words,
+            // or a mounted drive's eject mark — a button inside the row's
+            // button, which iced lets take its own press first.
+            let trailing: Option<Element<'a, Message>> = match (row_item.meta, eject) {
+                (Some(meta), _) => Some(meta_text(meta, density::META_TEXT_BASE, scale).into()),
+                (None, eject) => eject,
+            };
+            let content: Element<'a, Message> = match trailing {
+                Some(trailing) => row![mark, label.width(Length::Fill), trailing]
+                    .spacing(spacing::SM)
+                    .align_y(iced::Alignment::Center)
+                    .into(),
                 None => row![mark, label]
                     .spacing(spacing::SM)
                     .align_y(iced::Alignment::Center)
@@ -3856,7 +3918,7 @@ fn sidebar_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
             // instead of wrapping one of the two helpers.
             let button = iced::widget::button(content)
                 .width(Length::Fill)
-                .on_press(press)
+                .on_press_maybe(press)
                 .style(move |t: &iced::Theme, status| selectable_row_style(t, status, is_current));
             group = group.push(sidebar_place(button, place, vm));
         }
@@ -3874,32 +3936,43 @@ fn sidebar_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
 }
 
 /// What a sidebar row does when clicked, and whether it is the one on
-/// screen. A saved search runs; a place is gone to. While a saved search
-/// is showing, *it* is the current row — not also the folder it searches
-/// from, which would light two rows for one view.
-fn sidebar_press(row_item: &SidebarRow, vm: &ViewModel<'_>) -> (Message, bool) {
+/// screen. A saved search runs; a place is gone to; a drive is gone to,
+/// mounted first if it has to be. While a saved search is showing, *it*
+/// is the current row — not also the folder it searches from, which
+/// would light two rows for one view. `None` for a row that is only
+/// words — UDisks2 not running.
+fn sidebar_press(row_item: &SidebarRow, vm: &ViewModel<'_>) -> (Option<Message>, bool) {
+    if let Some(drive) = drives::press(row_item, vm) {
+        return drive;
+    }
     match row_item.search {
         Some(index) => (
-            Message::Search(crate::search::SearchMessage::Open(index)),
+            Some(Message::Search(crate::search::SearchMessage::Open(index))),
             vm.search.current == Some(index),
         ),
         None => (
-            Message::Navigate(row_item.path.clone()),
+            Some(Message::Navigate(row_item.path.clone())),
             row_item.path == vm.current_dir && vm.search.current.is_none(),
         ),
     }
 }
 
 /// A sidebar row's button, made a drop target with a folder's menu when
-/// it is a place — `place` is its folder, `None` for a saved search. A
+/// it is a place — see [`drives::RowPlace`] for which rows are. A
 /// saved search is neither: dropping files onto a question has no
 /// meaning, and Unpin is not how one is removed.
 fn sidebar_place<'a>(
     button: iced::widget::Button<'a, Message>,
-    place: Option<PathBuf>,
+    place: drives::RowPlace,
     vm: &ViewModel<'a>,
 ) -> Element<'a, Message> {
-    let Some(path) = place else { return button.into() };
+    let path = match place {
+        drives::RowPlace::Folder(path) => path,
+        // A drive not yet mounted: its menu, and no drop — there is
+        // nowhere for a file to land until it is mounted.
+        drives::RowPlace::MenuOnly(path) => return sidebar_menu_area(button, path),
+        drives::RowPlace::Plain => return button.into(),
+    };
     let hovered = vm.drop_hover == Some(path.as_path());
     let zone = drop_zone(button, &path, hovered);
     sidebar_menu_area(zone, path)
@@ -6630,6 +6703,7 @@ mod tests {
             prefs,
             sidebar,
             pinned,
+            devices: Box::leak(Box::default()),
             list_scrollable_id: Id::unique(),
             can_go_back: false,
             can_go_forward: false,
@@ -6684,7 +6758,7 @@ mod tests {
         assert_eq!(titles, ["Places", "Saved Searches", "Trash"]);
         let row = &sections[1].rows[0];
         let (press, current) = sidebar_press(row, &vm);
-        assert_eq!(press, Message::Search(crate::search::SearchMessage::Open(0)));
+        assert_eq!(press, Some(Message::Search(crate::search::SearchMessage::Open(0))));
         assert!(!current, "not the view on screen");
     }
 

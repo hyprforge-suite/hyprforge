@@ -170,6 +170,15 @@ Hyprland-facing
                             manager, the open/save dialog or a preview
                             pane all ask the same questions without any
                             of them pulling in a GUI toolkit.
+  hyprforge-volumes/       drives over UDisks2 and network shares over
+                            gvfs: what is plugged in, mounting,
+                            unmounting and ejecting it without root, and
+                            connecting to an smb:// or sftp:// address
+                            through `gio`, answering its password prompt
+                            without the password ever reaching a log.
+                            Backend traits with mocks; the data and
+                            decisions build without the D-Bus client,
+                            which is all the browser view takes.
   hyprforge-files-core/    the file browser's model and the browsing view
                             itself (the FsBackend seam it re-exports lives
                             in hyprforge-listing now). The view lives

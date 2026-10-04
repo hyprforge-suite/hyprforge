@@ -129,7 +129,7 @@ pub fn group(action: Action) -> &'static str {
         Trash | DeletePermanently | Restore | EmptyTrash | Copy | Cut | Paste | CopyPath | Rename | NewFolder
         | OpenWith | Extract | ExtractTo | Compress | Undo => "Files",
         ToggleHidden | TogglePreview | Properties | Preferences => "The window",
-        Pin | Unpin | PinUp | PinDown => "Sidebar",
+        Pin | Unpin | PinUp | PinDown | Mount | Unmount | Eject | Disconnect | ConnectToServer => "Sidebar",
         NewTab | CloseTab | NextTab | PreviousTab | Tab(_) => "Tabs",
     }
 }

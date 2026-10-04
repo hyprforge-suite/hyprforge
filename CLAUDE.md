@@ -616,12 +616,12 @@ instead of running a second copy to find out.
 
 ## The shape a D-Bus-backed module takes
 
-Four of these now exist — Network over NetworkManager, Bluetooth over
-BlueZ, power over systemd-logind, UPower and power-profiles-daemon, and
-the tray's item over StatusNotifierItem (its menu was served over
-dbusmenu until the tray began drawing its own) — and they were each
-better for being built in this order. It is
-written down so a fifth does not re-derive it.
+Five of these now exist — Network over NetworkManager, Bluetooth over
+BlueZ, power over systemd-logind, UPower and power-profiles-daemon, the
+tray's item over StatusNotifierItem (its menu was served over dbusmenu
+until the tray began drawing its own), and Files' drives over UDisks2 —
+and they were each better for being built in this order. It is
+written down so a sixth does not re-derive it.
 
 **The backend trait and its mock come before the D-Bus client.** Not
 after. The machine running tier 1 has no guaranteed NetworkManager, no
@@ -702,12 +702,12 @@ belongs in the design — not in a user's surprise.
 ./check.sh --quick  # tier 1 only: clippy + unit tests, no compositor
 ```
 
-Clippy must be silent and every test must pass before a commit. Nineteen
+Clippy must be silent and every test must pass before a commit. Twenty
 gated tiers beyond tier 1 now, each answering a different "does the system
 I'm talking to actually agree" question — Hyprland itself, the ecosystem
 daemons' parse tests, the system's own `unzip`/`tar`/`7z`, NetworkManager,
 BlueZ, hyprsunset, systemd-logind, trash entries written by another
-implementation, UPower, power-profiles-daemon, fprintd, the Wayland clipboard, icon
+implementation, UPower, power-profiles-daemon, fprintd, UDisks2, the Wayland clipboard, icon
 names against the installed theme, the installed shared MIME database, the
 open/save dialog's D-Bus interface against the one xdg-desktop-portal calls, a
 tray host, cargo's own packager (does every library crate `publish
@@ -821,6 +821,10 @@ hyprforge-archive   zip, tar and 7z: what is inside one as a directory tree,
                     Hyprforge dependency is hyprforge-secret, for archive
                     passwords — paths arrive from the caller, it never goes
                     looking for one
+hyprforge-volumes   drives over UDisks2 and network shares over gvfs: what
+                    is plugged in, mounting, ejecting, connecting to a
+                    server. Plain data and decisions without its `client`
+                    feature, which is all the browser view takes
 hyprforge-keys      the keyboard grammar every app binds keys through; no iced
 hyprforge-listing   a directory listing and its order, under both Files and
                     the image viewer so they agree which picture is next

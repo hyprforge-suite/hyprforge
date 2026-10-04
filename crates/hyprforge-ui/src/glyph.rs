@@ -1,6 +1,6 @@
 //! The marks every Hyprforge app draws — navigation, view modes, the
-//! sidebar toggle, the settings pages, signal strength and a battery —
-//! drawn rather than typed.
+//! sidebar toggle, the settings pages, signal strength, a battery and the
+//! eject mark — drawn rather than typed.
 //!
 //! These began in Files and moved here when Settings adopted the same
 //! design, because the reasoning below is about fonts, not about files.
@@ -661,6 +661,57 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for BatteryGlyph {
                 self.fill,
             );
         }
+        vec![frame.into_geometry()]
+    }
+}
+
+/// The eject mark: a triangle pointing up over a bar, as on every
+/// drive's button since the cassette deck.
+///
+/// Drawn, because `⏏` is in few fonts and wears whichever weight the one
+/// it falls back to has — and this sits beside drawn folder marks in a
+/// sidebar row, where a typed character would be the one thing out of
+/// line. Files' Devices section puts it on a mounted drive's row.
+pub fn eject<'a, Message: 'a>(side: f32, color: iced::Color) -> Element<'a, Message> {
+    canvas(EjectGlyph { color }).width(Length::Fixed(side)).height(Length::Fixed(side)).into()
+}
+
+struct EjectGlyph {
+    color: iced::Color,
+}
+
+impl<Message> canvas::Program<Message, Theme, Renderer> for EjectGlyph {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let side = bounds.width.min(bounds.height);
+        let extent = side * VIEW_EXTENT_FRACTION;
+        let left = bounds.width / 2.0 - extent / 2.0;
+        let top = bounds.height / 2.0 - extent / 2.0;
+        let fill = canvas::Fill::from(self.color);
+        // The triangle takes the top three fifths, a gap a fifth, and
+        // the bar the rest — the proportions of the symbol as printed on
+        // hardware, where the bar is as wide as the triangle's base.
+        let triangle = canvas::Path::new(|b| {
+            b.move_to(Point::new(left + extent / 2.0, top));
+            b.line_to(Point::new(left + extent, top + extent * 0.6));
+            b.line_to(Point::new(left, top + extent * 0.6));
+            b.close();
+        });
+        frame.fill(&triangle, fill);
+        frame.fill_rectangle(
+            Point::new(left, top + extent * 0.78),
+            iced::Size::new(extent, extent * 0.22),
+            fill,
+        );
         vec![frame.into_geometry()]
     }
 }

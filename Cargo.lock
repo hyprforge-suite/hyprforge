@@ -1997,9 +1997,11 @@ dependencies = [
  "hyprforge-mime",
  "hyprforge-paths",
  "hyprforge-process",
+ "hyprforge-secret",
  "hyprforge-thumbnails",
  "hyprforge-ui",
  "hyprforge-video",
+ "hyprforge-volumes",
  "iced",
  "serde",
  "serde_json",
@@ -2027,6 +2029,7 @@ dependencies = [
  "hyprforge-look",
  "hyprforge-paths",
  "hyprforge-ui",
+ "hyprforge-volumes",
  "iced",
  "serde",
  "tempfile",
@@ -2414,6 +2417,21 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tracing",
+]
+
+[[package]]
+name = "hyprforge-volumes"
+version = "0.1.5"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "hyprforge-process",
+ "hyprforge-secret",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "zbus",
 ]
 
 [[package]]

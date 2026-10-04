@@ -50,6 +50,11 @@ hyprforge-fileops.workspace = true
 # Archives browse as directories — see `archive.rs`. A leaf dependency,
 # like `hyprforge-fileops` beside it: nothing GUI, nothing Hyprland.
 hyprforge-archive.workspace = true
+# The Devices and Remote sidebar sections draw drives and shares — the
+# data and the decisions only. The workspace entry leaves its D-Bus
+# client off: talking to UDisks2 and gvfs is the window's, and the
+# open/save dialog renders this same view.
+hyprforge-volumes.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
