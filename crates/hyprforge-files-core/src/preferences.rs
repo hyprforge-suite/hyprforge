@@ -131,7 +131,7 @@ pub fn group(action: Action) -> &'static str {
         ToggleHidden | TogglePreview | QuickLook | Properties | Preferences | Transfers | TransferQueue => {
             "The window"
         }
-        Pin | Unpin | PinUp | PinDown => "Sidebar",
+        Pin | Unpin | PinUp | PinDown | Mount | Unmount | Eject | Disconnect | ConnectToServer => "Sidebar",
         NewTab | CloseTab | NextTab | PreviousTab | Tab(_) => "Tabs",
     }
 }

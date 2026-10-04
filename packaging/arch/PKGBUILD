@@ -115,6 +115,11 @@ package_hyprforge-files() {
     'xdg-utils: opening a file with the application you have chosen for it'
     'poppler: previews and thumbnails of PDFs (pdftoppm)'
     'ffmpeg: previews and thumbnails of videos'
+    # The sidebar's Devices and Remote sections say so when these are
+    # missing, rather than the sections vanishing.
+    'udisks2: the Devices section — mounting and ejecting drives'
+    'gvfs: Connect to Server, for sftp:// and ftp:// addresses'
+    'gvfs-smb: Connect to Server, for smb:// (Windows) shares'
   )
   cd "$startdir/../.."
   _bin hyprforge-files

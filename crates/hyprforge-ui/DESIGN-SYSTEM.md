@@ -89,6 +89,7 @@ machine:
 - `view` (list/grid/columns)
 - `page` (each Settings page)
 - `signal` (with `signal_bars`, the strength-to-bars rule), `battery`
+- `eject` (a triangle over a bar: a mounted drive's row in Files' sidebar)
 
 ## Widgets: `widgets`
 

@@ -31,6 +31,7 @@ pub mod config;
 pub mod config_edit;
 pub mod content;
 pub mod density;
+pub mod devices;
 pub mod drag;
 pub mod drop;
 pub mod format;

@@ -41,6 +41,10 @@ pub enum MenuKind {
     Place,
     /// A row in the sidebar's Pinned section.
     Pinned,
+    /// A drive in the sidebar's Devices section, mounted or not.
+    Device,
+    /// A share in the sidebar's Remote section.
+    Remote,
 }
 
 impl MenuKind {
@@ -55,10 +59,12 @@ impl MenuKind {
             MenuKind::Trash => "trash",
             MenuKind::Place => "place",
             MenuKind::Pinned => "pinned",
+            MenuKind::Device => "device",
+            MenuKind::Remote => "remote",
         }
     }
 
-    pub fn all() -> [MenuKind; 8] {
+    pub fn all() -> [MenuKind; 10] {
         [
             MenuKind::Entry,
             MenuKind::Folder,
@@ -68,6 +74,8 @@ impl MenuKind {
             MenuKind::Trash,
             MenuKind::Place,
             MenuKind::Pinned,
+            MenuKind::Device,
+            MenuKind::Remote,
         ]
     }
 }
@@ -102,6 +110,8 @@ pub struct MenuConfig {
     pub trash: Vec<MenuEntry>,
     pub place: Vec<MenuEntry>,
     pub pinned: Vec<MenuEntry>,
+    pub device: Vec<MenuEntry>,
+    pub remote: Vec<MenuEntry>,
 }
 
 impl Default for MenuConfig {
@@ -202,6 +212,10 @@ impl Default for MenuConfig {
             ],
             place: vec![A(OpenInNewTab), Sep, A(Pin)],
             pinned: vec![A(OpenInNewTab), Sep, A(PinUp), A(PinDown), Sep, A(Unpin)],
+            // Mount and Unmount both, greyed by turns, so the menu keeps
+            // one shape whether the drive is mounted or not.
+            device: vec![A(OpenInNewTab), Sep, A(Mount), A(Unmount), A(Eject)],
+            remote: vec![A(OpenInNewTab), Sep, A(Disconnect), Sep, A(ConnectToServer)],
             trash: vec![
                 A(Restore),
                 Sep,
@@ -277,6 +291,11 @@ impl MenuConfig {
             // Pins are the window's: a dialog does not rearrange them.
             place: Vec::new(),
             pinned: Vec::new(),
+            // Nor does it change the session's mounts. A drive's row
+            // still mounts it when clicked, because a stick you cannot
+            // open is one you cannot save to.
+            device: Vec::new(),
+            remote: Vec::new(),
         }
     }
 
@@ -290,6 +309,8 @@ impl MenuConfig {
             MenuKind::Trash => &self.trash,
             MenuKind::Place => &self.place,
             MenuKind::Pinned => &self.pinned,
+            MenuKind::Device => &self.device,
+            MenuKind::Remote => &self.remote,
         }
     }
 
@@ -303,6 +324,8 @@ impl MenuConfig {
             MenuKind::Trash => self.trash = entries,
             MenuKind::Place => self.place = entries,
             MenuKind::Pinned => self.pinned = entries,
+            MenuKind::Device => self.device = entries,
+            MenuKind::Remote => self.remote = entries,
         }
     }
 }
@@ -418,6 +441,8 @@ mod tests {
             MenuKind::Trash,
             MenuKind::Place,
             MenuKind::Pinned,
+            MenuKind::Device,
+            MenuKind::Remote,
         ] {
             for entry in menus.get(kind) {
                 if let MenuEntry::Action(action) = entry {

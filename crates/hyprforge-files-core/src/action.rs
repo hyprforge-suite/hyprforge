@@ -17,9 +17,10 @@
 //!
 //! Actions come in two scopes. Most are about the listing and belong to
 //! [`crate::browser::Browser`], which the open/save dialog also renders.
-//! A few — tabs, undo, the Properties inspector and Preferences — are
-//! about the *window*, which the dialog does not have. [`Scope`] says
-//! which, so a host can ignore what it has no notion of rather than
+//! A few — tabs, undo, the Properties inspector, Preferences and Connect
+//! to Server — are about the *window*, which the dialog does not have.
+//! [`Scope`] says which, so a host can ignore what it has no notion of
+//! rather than
 //! every host re-deriving the split.
 
 /// One thing a person can ask for.
@@ -122,6 +123,17 @@ pub enum Action {
     PinUp,
     /// Move a pin one place down the list.
     PinDown,
+    /// Mount a drive from the sidebar — see [`crate::devices`].
+    Mount,
+    /// Unmount the drive a sidebar row names, or the one the folder in
+    /// view is on.
+    Unmount,
+    /// Unmount everything on that drive and let go of it: power a stick
+    /// off, open a tray, detach a disk image.
+    Eject,
+    /// Disconnect a network share — the row's, or the one the folder in
+    /// view is on.
+    Disconnect,
     // Window scope: the tab strip, and undo — whose history spans tabs.
     /// Take back the most recent trash, rename, move, copy or new folder.
     Undo,
@@ -153,6 +165,10 @@ pub enum Action {
     /// Open or close the queue view behind the popover's "Show all":
     /// everything running, waiting and finished this session.
     TransferQueue,
+    /// Ask for a server's address and mount it through gvfs. Window
+    /// scope: the dialog it opens is the window's, and a file chooser
+    /// has no business changing the session's mounts.
+    ConnectToServer,
 }
 
 /// Whether an action is about the listing or about the window around it.
@@ -207,6 +223,10 @@ impl Action {
             Action::Unpin,
             Action::PinUp,
             Action::PinDown,
+            Action::Mount,
+            Action::Unmount,
+            Action::Eject,
+            Action::Disconnect,
             Action::Rename,
             Action::NewFolder,
             Action::ContextMenu,
@@ -217,7 +237,7 @@ impl Action {
             Action::PreviousTab,
         ];
         all.extend((1..=9).map(Action::Tab));
-        all.extend([Action::Properties, Action::Preferences, Action::Transfers, Action::TransferQueue]);
+        all.extend([Action::Properties, Action::Preferences, Action::Transfers, Action::TransferQueue, Action::ConnectToServer]);
         all
     }
 
@@ -261,6 +281,10 @@ impl Action {
             Action::Unpin => "unpin",
             Action::PinUp => "pin-up",
             Action::PinDown => "pin-down",
+            Action::Mount => "mount",
+            Action::Unmount => "unmount",
+            Action::Eject => "eject",
+            Action::Disconnect => "disconnect",
             Action::Rename => "rename",
             Action::NewFolder => "new-folder",
             Action::ContextMenu => "context-menu",
@@ -288,6 +312,7 @@ impl Action {
             Action::Preferences => "preferences",
             Action::Transfers => "transfers",
             Action::TransferQueue => "transfer-queue",
+            Action::ConnectToServer => "connect-to-server",
         }
     }
 
@@ -337,6 +362,10 @@ impl Action {
             Action::Unpin => "Unpin",
             Action::PinUp => "Move Up",
             Action::PinDown => "Move Down",
+            Action::Mount => "Mount",
+            Action::Unmount => "Unmount",
+            Action::Eject => "Eject",
+            Action::Disconnect => "Disconnect",
             Action::Rename => "Rename",
             Action::NewFolder => "New Folder",
             Action::ContextMenu => "Show Menu",
@@ -360,6 +389,7 @@ impl Action {
             Action::Preferences => "Preferences\u{2026}",
             Action::Transfers => "Transfers",
             Action::TransferQueue => "Transfer Queue",
+            Action::ConnectToServer => "Connect to Server\u{2026}",
         }
     }
 
@@ -374,7 +404,8 @@ impl Action {
             | Action::Properties
             | Action::Preferences
             | Action::Transfers
-            | Action::TransferQueue => Scope::Window,
+            | Action::TransferQueue
+            | Action::ConnectToServer => Scope::Window,
             _ => Scope::Browser,
         }
     }
@@ -457,6 +488,14 @@ impl Action {
             Action::Unpin => &[],
             Action::PinUp => &[],
             Action::PinDown => &[],
+            // Reached from a drive's or a share's row, and from the
+            // palette while browsing one. Nothing here is done often
+            // enough to hold a key, and Eject on a slip of the finger
+            // would power a drive off mid-thought.
+            Action::Mount => &[],
+            Action::Unmount => &[],
+            Action::Eject => &[],
+            Action::Disconnect => &[],
             Action::Rename => &["F2"],
             Action::NewFolder => &["Ctrl+Shift+N"],
             // The two keys every desktop uses for "the menu a right click
@@ -492,6 +531,9 @@ impl Action {
             // J for Chrome's downloads page, with the Shift that keeps
             // it off plain Ctrl+J for the reason above.
             Action::TransferQueue => &["Ctrl+Shift+J"],
+            // The sidebar's Remote section offers it, and so does the
+            // palette; GNOME's file chooser has no key for it either.
+            Action::ConnectToServer => &[],
         }
     }
 }
@@ -552,6 +594,9 @@ pub struct ActionContext {
     /// Whether the rows are a search's results from below this folder
     /// rather than the folder's own listing — see [`crate::search`].
     pub in_results: bool,
+    /// The drive or share the drive actions would act on — see
+    /// [`crate::devices::Devices::target`].
+    pub device: crate::devices::DeviceTarget,
 }
 
 /// What the pin actions would act on — see
@@ -625,6 +670,12 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         Action::Unpin => ctx.pin.pinned_at.is_some(),
         Action::PinUp => ctx.pin.pinned_at.is_some_and(|at| at > 0),
         Action::PinDown => ctx.pin.pinned_at.is_some_and(|at| at + 1 < ctx.pin.pins),
+        // Nothing is offered twice while it is already happening, and a
+        // locked (encrypted) drive cannot be mounted here at all.
+        Action::Mount => ctx.device.volume && !ctx.device.mounted && !ctx.device.busy && !ctx.device.locked,
+        Action::Unmount => ctx.device.volume && ctx.device.mounted && !ctx.device.busy,
+        Action::Eject => ctx.device.volume && ctx.device.can_eject && !ctx.device.busy,
+        Action::Disconnect => ctx.device.share,
         Action::Rename => ctx.selected >= 1 && !ctx.in_trash,
         // A folder with nothing in it is the one thing an archive
         // cannot hold by implication, so "New Folder" inside one would
@@ -657,7 +708,8 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         | Action::Properties
         | Action::Preferences
         | Action::Transfers
-        | Action::TransferQueue => true,
+        | Action::TransferQueue
+        | Action::ConnectToServer => true,
     }
 }
 
@@ -741,12 +793,12 @@ mod tests {
     }
 
     /// The window's own actions are the tab strip, undo (whose history
-    /// spans every tab), the Properties inspector, Preferences and the
-    /// transfers. The open/save dialog has none of them, and ignores
-    /// what is listed here — which is how Properties stays out of a file
-    /// chooser.
+    /// spans every tab), the Properties inspector, Preferences, the
+    /// transfers and the Connect to Server dialog. The open/save dialog
+    /// has none of them, and ignores what is listed here — which is how
+    /// Properties stays out of a file chooser.
     #[test]
-    fn only_tabs_undo_properties_preferences_and_transfers_belong_to_the_window() {
+    fn only_tabs_undo_properties_preferences_transfers_and_connecting_belong_to_the_window() {
         for action in Action::all() {
             let is_window = matches!(
                 action,
@@ -760,9 +812,34 @@ mod tests {
                     | Action::Preferences
                     | Action::Transfers
                     | Action::TransferQueue
+                    | Action::ConnectToServer
             );
             assert_eq!(action.scope() == Scope::Window, is_window, "{action:?}");
         }
+    }
+
+    /// Nothing is offered while it is already happening, Mount and
+    /// Unmount take turns, and a drive that cannot let go has no Eject.
+    #[test]
+    fn the_drive_actions_follow_the_drives_state() {
+        use crate::devices::DeviceTarget;
+        let unmounted = ActionContext {
+            device: DeviceTarget { volume: true, can_eject: true, ..DeviceTarget::default() },
+            ..ActionContext::default()
+        };
+        assert!(enabled(Action::Mount, &unmounted));
+        assert!(!enabled(Action::Unmount, &unmounted));
+        assert!(enabled(Action::Eject, &unmounted));
+        let mounted = ActionContext { device: DeviceTarget { mounted: true, ..unmounted.device }, ..unmounted };
+        assert!(!enabled(Action::Mount, &mounted));
+        assert!(enabled(Action::Unmount, &mounted));
+        let busy = ActionContext { device: DeviceTarget { busy: true, ..mounted.device }, ..mounted };
+        assert!(!enabled(Action::Unmount, &busy) && !enabled(Action::Eject, &busy));
+        let internal = ActionContext { device: DeviceTarget { can_eject: false, ..mounted.device }, ..mounted };
+        assert!(!enabled(Action::Eject, &internal));
+        let locked = ActionContext { device: DeviceTarget { locked: true, ..unmounted.device }, ..unmounted };
+        assert!(!enabled(Action::Mount, &locked), "unlocking is not built, so mounting cannot work");
+        assert!(!enabled(Action::Disconnect, &ActionContext::default()));
     }
 
     #[test]

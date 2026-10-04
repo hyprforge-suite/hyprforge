@@ -19,13 +19,9 @@
 //! Places) or via a message (for Pinned, since it can change after
 //! `Browser` already exists).
 //!
-//! Mounted shares are the next thing this sidebar will offer and are
-//! deliberately not built here yet — there is nothing in this workspace
-//! today that mounts one to build or test against. [`SidebarItem`] is
-//! shaped so adding a mounted-share entry later is "push another item
-//! with a different origin", not a rework: nothing downstream of this
-//! module — the browser, the two hosts — switches on where an item came
-//! from, only on its `path`.
+//! Drives and network shares — the Devices and Remote sections — are
+//! not built here: they are the window's live state rather than a list
+//! read once, and what they hold is [`crate::devices`]'s.
 
 use crate::backend::FsBackend;
 use crate::xdg_user_dirs::UserDirs;
