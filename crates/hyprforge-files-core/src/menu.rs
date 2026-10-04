@@ -132,6 +132,11 @@ impl Default for MenuConfig {
                 A(Cut),
                 A(Copy),
                 A(CopyPath),
+                // Greyed on a tab that is not split, rather than missing:
+                // a menu whose shape changes is one whose muscle memory
+                // never sets — see `build`.
+                A(CopyToOtherPane),
+                A(MoveToOtherPane),
                 A(Rename),
                 A(Compress),
                 Sep,
@@ -156,6 +161,8 @@ impl Default for MenuConfig {
                 A(Cut),
                 A(Copy),
                 A(CopyPath),
+                A(CopyToOtherPane),
+                A(MoveToOtherPane),
                 A(Rename),
                 Sep,
                 A(SelectAll),
@@ -194,6 +201,11 @@ impl Default for MenuConfig {
                 A(Cut),
                 A(Copy),
                 A(CopyPath),
+                // Greyed on a tab that is not split, rather than missing:
+                // a menu whose shape changes is one whose muscle memory
+                // never sets — see `build`.
+                A(CopyToOtherPane),
+                A(MoveToOtherPane),
                 A(Rename),
                 A(Compress),
                 Sep,
@@ -218,6 +230,7 @@ impl Default for MenuConfig {
                 Sep,
                 A(GoUp),
                 A(NewTab),
+                A(ToggleSplit),
                 A(OpenTerminal),
                 Sep,
                 A(Properties),

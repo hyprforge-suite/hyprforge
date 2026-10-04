@@ -12,14 +12,21 @@
 //!
 //! One id for the focused row, not one per row: tagging every row would
 //! allocate an id per row per frame to find one of them.
+//!
+//! One per *browser*, though, not one per process. A split tab draws two
+//! listings in one widget tree, each with a focused row of its own, and
+//! an operation looking for "the" focused row would scroll whichever
+//! listing it met first — the other pane's, half the time. So the id
+//! carries the browser's instance number ([`crate::Browser::instance`])
+//! and [`Reveal`] is told which one it is looking for.
 
 use iced::advanced::widget::operation::{self, Operation, Outcome};
 use iced::advanced::widget::Id;
 use iced::{Rectangle, Vector};
 
-/// The id the view gives the row the keyboard is on.
-pub fn focused_row() -> Id {
-    Id::from("hyprforge-focused-row")
+/// The id the view of browser `instance` gives the row the keyboard is on.
+pub fn focused_row(instance: u64) -> Id {
+    Id::from(format!("hyprforge-focused-row:{instance}"))
 }
 
 /// How far to scroll a viewport `height` tall, now at `offset`, so the
@@ -40,6 +47,8 @@ pub fn offset_for(top: f32, bottom: f32, offset: f32, height: f32) -> Option<f32
 /// Scrolls whichever scrollable holds the [`focused_row`] so the row is
 /// in sight. See the module doc.
 pub struct Reveal {
+    /// The [`focused_row`] being looked for — one browser's.
+    row: Id,
     /// Per level being walked: the scrollable that level is inside.
     frames: Vec<Option<Viewport>>,
     /// Set by `scrollable`, consumed by the `traverse` that follows it.
@@ -57,14 +66,9 @@ struct Viewport {
 }
 
 impl Reveal {
-    pub fn new() -> Reveal {
-        Reveal { frames: vec![None], entering: None, found: None }
-    }
-}
-
-impl Default for Reveal {
-    fn default() -> Reveal {
-        Reveal::new()
+    /// Looks for `row` — a [`focused_row`] — and scrolls it into sight.
+    pub fn new(row: Id) -> Reveal {
+        Reveal { row, frames: vec![None], entering: None, found: None }
     }
 }
 
@@ -80,7 +84,7 @@ impl<T: 'static> Operation<T> for Reveal {
     }
 
     fn container(&mut self, id: Option<&Id>, bounds: Rectangle) {
-        if id != Some(&focused_row()) || self.found.is_some() {
+        if id != Some(&self.row) || self.found.is_some() {
             return;
         }
         // The innermost scrollable, and only one with an id: an unnamed
@@ -162,7 +166,7 @@ mod tests {
             op.scrollable(id.as_ref(), rect(0.0, 80.0, 600.0, 400.0), rect(0.0, 80.0, 600.0, 5000.0), Vector::new(0.0, scrolled), &mut NoScroll);
             op.traverse(&mut |op| {
                 op.container(None, rect(0.0, 80.0, 600.0, 28.0));
-                op.container(Some(&focused_row()), rect(0.0, 80.0 + row * 28.0, 600.0, 28.0));
+                op.container(Some(&focused_row(0)), rect(0.0, 80.0 + row * 28.0, 600.0, 28.0));
             });
         });
     }
@@ -173,7 +177,7 @@ mod tests {
 
     #[test]
     fn the_operation_finds_the_row_in_its_scrollable_and_asks_for_the_least_scroll() {
-        let mut op = Reveal::new();
+        let mut op = Reveal::new(focused_row(0));
         walk(&mut op, Some(Id::from("list")), 20.0, 0.0);
         // Row 20 spans 560..588 of the content; a 400 view shows it
         // with its bottom at the bottom.
@@ -183,7 +187,7 @@ mod tests {
 
     #[test]
     fn a_row_on_screen_asks_for_nothing() {
-        let mut op = Reveal::new();
+        let mut op = Reveal::new(focused_row(0));
         walk(&mut op, Some(Id::from("list")), 3.0, 0.0);
         assert_eq!(wants(&op), None);
         assert!(matches!(Operation::<()>::finish(&op), Outcome::None));
@@ -191,15 +195,25 @@ mod tests {
 
     #[test]
     fn scrolled_past_the_row_brings_it_back_from_above() {
-        let mut op = Reveal::new();
+        let mut op = Reveal::new(focused_row(0));
         walk(&mut op, Some(Id::from("list")), 2.0, 300.0);
         assert_eq!(wants(&op), Some(56.0));
     }
 
     #[test]
     fn a_scrollable_with_no_id_cannot_be_scrolled_and_is_left_alone() {
-        let mut op = Reveal::new();
+        let mut op = Reveal::new(focused_row(0));
         walk(&mut op, None, 20.0, 0.0);
         assert_eq!(wants(&op), None);
+    }
+
+    /// Two browsers in one window — a split tab — each tag their own
+    /// focused row; revealing one never scrolls the other's list.
+    #[test]
+    fn another_browsers_focused_row_is_not_the_one_revealed() {
+        assert_ne!(focused_row(1), focused_row(2));
+        let mut op = Reveal::new(focused_row(7));
+        walk(&mut op, Some(Id::from("list")), 20.0, 0.0);
+        assert_eq!(wants(&op), None, "the row walked is browser 0's");
     }
 }

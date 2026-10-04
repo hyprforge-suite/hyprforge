@@ -25,11 +25,17 @@ use iced::{Point, Rectangle, Vector};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// The widget id of the container a drop onto `path` lands in. The same
-/// path gives the same id wherever it is drawn — a folder in the listing
-/// and the same folder in the sidebar are one target.
-pub fn target_id(path: &Path) -> Id {
-    Id::from(format!("hyprforge-drop:{}", path.display()))
+/// The widget id of the container a drop onto `path` lands in, in the
+/// view of browser `instance` ([`crate::Browser::instance`]). The same
+/// path gives the same id wherever one browser draws it — a folder in the
+/// listing and the same folder in the sidebar are one target.
+///
+/// Per browser, because a split tab draws two in one window and both can
+/// show the same folder: the host merges both browsers' targets, and an id
+/// that only named the path would leave it unable to tell which pane's row
+/// the drag is over — so it could light only both, or the wrong one.
+pub fn target_id(instance: u64, path: &Path) -> Id {
+    Id::from(format!("hyprforge-drop:{instance}:{}", path.display()))
 }
 
 /// Finds the innermost drop target holding a point.
@@ -44,11 +50,14 @@ pub fn target_id(path: &Path) -> Id {
 /// inside, and its visible bounds too: a row scrolled out of sight still
 /// has a layout, and must not catch a drop aimed at whatever is drawn
 /// where it would have been.
-pub struct HitTest {
+///
+/// Generic over what a target *is* to the host: a path for a window of
+/// one listing, a pane and a path for a window of two — see [`target_id`].
+pub struct HitTest<T = PathBuf> {
     point: Point,
-    targets: HashMap<Id, PathBuf>,
+    targets: HashMap<Id, T>,
     /// The innermost hit so far, and how deep it was.
-    found: Option<(usize, PathBuf)>,
+    found: Option<(usize, T)>,
     /// Per level being walked: the accumulated scroll translation, and
     /// the region actually visible at that level.
     frames: Vec<Frame>,
@@ -62,8 +71,8 @@ struct Frame {
     visible: Option<Rectangle>,
 }
 
-impl HitTest {
-    pub fn new(point: Point, targets: HashMap<Id, PathBuf>) -> HitTest {
+impl<T> HitTest<T> {
+    pub fn new(point: Point, targets: HashMap<Id, T>) -> HitTest<T> {
         HitTest {
             point,
             targets,
@@ -78,8 +87,8 @@ impl HitTest {
     }
 }
 
-impl Operation<Option<PathBuf>> for HitTest {
-    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<Option<PathBuf>>)) {
+impl<T: Clone + Send + 'static> Operation<Option<T>> for HitTest<T> {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<Option<T>>)) {
         let next = self.entering.take().unwrap_or_else(|| self.frame());
         self.frames.push(next);
         operate(self);
@@ -125,8 +134,8 @@ impl Operation<Option<PathBuf>> for HitTest {
         });
     }
 
-    fn finish(&self) -> Outcome<Option<PathBuf>> {
-        Outcome::Some(self.found.as_ref().map(|(_, path)| path.clone()))
+    fn finish(&self) -> Outcome<Option<T>> {
+        Outcome::Some(self.found.as_ref().map(|(_, target)| target.clone()))
     }
 }
 
@@ -306,7 +315,7 @@ mod tests {
     // --- the hit test, against the calls iced makes -------------------
 
     fn targets(paths: &[&str]) -> HashMap<Id, PathBuf> {
-        paths.iter().map(|s| (target_id(Path::new(s)), p(s))).collect()
+        paths.iter().map(|s| (target_id(0, Path::new(s)), p(s))).collect()
     }
 
     fn rect(x: f32, y: f32, w: f32, h: f32) -> Rectangle {
@@ -323,12 +332,12 @@ mod tests {
     /// A listing background holding a scrollable of two rows, as the
     /// browser lays it out — rows at content y 0 and 28.
     fn walk(op: &mut HitTest, scrolled: f32) {
-        op.container(Some(&target_id(Path::new("/here"))), rect(200.0, 50.0, 600.0, 400.0));
+        op.container(Some(&target_id(0, Path::new("/here"))), rect(200.0, 50.0, 600.0, 400.0));
         op.traverse(&mut |op| {
             op.scrollable(None, rect(200.0, 80.0, 600.0, 56.0), rect(200.0, 80.0, 600.0, 2000.0), Vector::new(0.0, scrolled), &mut NoScroll);
             op.traverse(&mut |op| {
-                op.container(Some(&target_id(Path::new("/here/a"))), rect(200.0, 80.0, 600.0, 28.0));
-                op.container(Some(&target_id(Path::new("/here/b"))), rect(200.0, 108.0, 600.0, 28.0));
+                op.container(Some(&target_id(0, Path::new("/here/a"))), rect(200.0, 80.0, 600.0, 28.0));
+                op.container(Some(&target_id(0, Path::new("/here/b"))), rect(200.0, 108.0, 600.0, 28.0));
             });
         });
     }
@@ -369,5 +378,24 @@ mod tests {
         let mut op = HitTest::new(Point::new(10.0, 10.0), targets(&["/here", "/here/a"]));
         walk(&mut op, 0.0);
         assert_eq!(found(&op), None);
+    }
+
+    /// Two panes showing the same folder: each draws its own targets, and
+    /// the hit says which pane's row the point is over.
+    #[test]
+    fn the_same_folder_in_two_panes_is_two_targets() {
+        assert_ne!(target_id(1, Path::new("/here")), target_id(2, Path::new("/here")));
+        let targets: HashMap<Id, (u64, PathBuf)> = [1, 2]
+            .into_iter()
+            .map(|pane| (target_id(pane, Path::new("/here")), (pane, p("/here"))))
+            .collect();
+        let mut op = HitTest::new(Point::new(700.0, 90.0), targets);
+        op.container(Some(&target_id(1, Path::new("/here"))), rect(0.0, 50.0, 500.0, 400.0));
+        op.container(Some(&target_id(2, Path::new("/here"))), rect(500.0, 50.0, 500.0, 400.0));
+        let found = match op.finish() {
+            Outcome::Some(found) => found,
+            _ => None,
+        };
+        assert_eq!(found, Some((2, p("/here"))), "the right-hand pane's");
     }
 }
