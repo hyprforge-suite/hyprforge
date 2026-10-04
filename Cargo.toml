@@ -138,6 +138,12 @@ hyprforge-files = { path = "crates/hyprforge-files", version = "0.1.0" }
 # dependencies; named here so files-core asks for it directly.
 memchr = "2"
 
+# The file manager's Recent: `recently-used.xbel`, the freedesktop
+# bookmark file every GTK application and the desktop portal write to.
+# Already in the tree through hyprforge-mesh's 3MF reader; named here so
+# files-core asks for it directly at the same version.
+quick-xml = "0.41"
+
 # Only hyprforge-lua-import depends on this — evaluating a user's own
 # hyprland.lua (with hl.* stubbed to record calls) to import hand-written
 # rules/binds/monitor config, rather than text-parsing it, which breaks on

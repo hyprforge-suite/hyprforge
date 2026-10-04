@@ -90,6 +90,7 @@ machine:
 - `page` (each Settings page)
 - `signal` (with `signal_bars`, the strength-to-bars rule), `battery`
 - `eject` (a triangle over a bar: a mounted drive's row in Files' sidebar)
+- `star` (a filled five-pointed star: a starred file's corner in Files' listing and grid)
 
 ## Widgets: `widgets`
 

@@ -65,6 +65,23 @@ pub enum Undoable {
 }
 
 impl Undoable {
+    /// What this moved, as `(where it was, where it is now)` — a rename
+    /// is a move within a folder. Empty for anything that moved nothing
+    /// a star could be on; a trashed file's star stays where it was and
+    /// is shown as missing, the way a pin is. See [`crate::starred`].
+    pub fn moves(&self) -> Vec<(PathBuf, PathBuf)> {
+        match self {
+            Undoable::Renamed { from, to } => vec![(from.clone(), to.clone())],
+            Undoable::RenamedAll(items) | Undoable::Moved(items) => items.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// What undoing this moves: [`Self::moves`], each the other way.
+    pub fn undo_moves(&self) -> Vec<(PathBuf, PathBuf)> {
+        self.moves().into_iter().map(|(was, now)| (now, was)).collect()
+    }
+
     /// What the notice offering to undo it says.
     pub fn describe(&self) -> String {
         match self {
@@ -158,6 +175,17 @@ mod tests {
 
     fn copied(n: usize) -> Undoable {
         Undoable::Copied((0..n).map(|i| PathBuf::from(format!("/c{i}"))).collect())
+    }
+
+    /// What stars follow: a rename and a move are moves, undoing one is
+    /// the move back, and a copy or a trash moves nothing.
+    #[test]
+    fn a_rename_is_a_move_and_undoing_it_is_the_move_back() {
+        let renamed = Undoable::Renamed { from: "/d/a".into(), to: "/d/b".into() };
+        assert_eq!(renamed.moves(), [(PathBuf::from("/d/a"), PathBuf::from("/d/b"))]);
+        assert_eq!(renamed.undo_moves(), [(PathBuf::from("/d/b"), PathBuf::from("/d/a"))]);
+        assert!(copied(2).moves().is_empty());
+        assert!(Undoable::Trashed(vec![("/t/a".into(), "/d/a".into(), "/t/a.info".into())]).moves().is_empty());
     }
 
     #[test]

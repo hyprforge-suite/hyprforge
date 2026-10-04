@@ -127,6 +127,7 @@ impl Default for MenuConfig {
             entry: vec![
                 A(Open),
                 A(OpenWith),
+                A(ToggleStar),
                 Sep,
                 A(Cut),
                 A(Copy),
@@ -185,6 +186,7 @@ impl Default for MenuConfig {
                 A(Open),
                 A(OpenInNewTab),
                 A(Pin),
+                A(ToggleStar),
                 Sep,
                 A(Cut),
                 A(Copy),
@@ -381,7 +383,7 @@ pub fn build(entries: &[MenuEntry], ctx: &ActionContext, keymap: &Keymap) -> Vec
             }
             MenuEntry::Action(action) => items.push(MenuItem::Action {
                 action: *action,
-                label: action.label(),
+                label: action::label_in(*action, ctx),
                 hint: keymap.combos_for(*action).first().map(|c| c.to_string()),
                 enabled: action::enabled(*action, ctx),
             }),

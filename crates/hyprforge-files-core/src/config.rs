@@ -35,6 +35,8 @@
 //! [sidebar]
 //! places = ["home", "downloads", "documents"]
 //! show-trash = true
+//! show-recent = true    # Recent and Starred, at the top of Places
+//! show-starred = true
 //! collapse-below = 760   # window width; 0 never collapses on its own
 //!
 //! [sidebar.icons]
@@ -71,6 +73,11 @@ pub struct SidebarConfig {
     /// is still left out.
     pub places: Vec<Place>,
     pub show_trash: bool,
+    /// `show-recent` and `show-starred`: the Recent and Starred rows at
+    /// the top of Places. Hiding a row hides the way in, not the data —
+    /// Files still records what it opens, and stars stay starred.
+    pub show_recent: bool,
+    pub show_starred: bool,
     /// The window width below which the sidebar folds to its rail on its
     /// own. `0` never folds it; the toggle still does.
     pub collapse_below: f32,
@@ -111,6 +118,8 @@ impl Default for SidebarConfig {
         SidebarConfig {
             places: Place::ALL.to_vec(),
             show_trash: true,
+            show_recent: true,
+            show_starred: true,
             collapse_below: crate::density::SIDEBAR_COLLAPSE_BELOW,
             icons: Vec::new(),
         }
@@ -248,6 +257,8 @@ struct RawConfig {
 struct RawSidebar {
     places: Option<toml::Value>,
     show_trash: Option<toml::Value>,
+    show_recent: Option<toml::Value>,
+    show_starred: Option<toml::Value>,
     collapse_below: Option<toml::Value>,
     icons: Option<toml::Value>,
 }
@@ -461,6 +472,8 @@ fn sidebar_with(raw: &RawSidebar, problems: &mut Vec<ConfigProblem>) -> SidebarC
         ))),
     }
     sidebar.show_trash = switch("[sidebar] show-trash", &raw.show_trash, sidebar.show_trash, problems);
+    sidebar.show_recent = switch("[sidebar] show-recent", &raw.show_recent, sidebar.show_recent, problems);
+    sidebar.show_starred = switch("[sidebar] show-starred", &raw.show_starred, sidebar.show_starred, problems);
     sidebar.collapse_below = number(
         "[sidebar] collapse-below",
         &raw.collapse_below,

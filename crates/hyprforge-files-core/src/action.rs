@@ -129,6 +129,10 @@ pub enum Action {
     PinUp,
     /// Move a pin one place down the list.
     PinDown,
+    /// Star the selection, or unstar it when every selected thing is
+    /// starred already — see [`crate::starred`]. One action for both, so
+    /// one key does both, the way a browser's bookmark star does.
+    ToggleStar,
     /// Mount a drive from the sidebar — see [`crate::devices`].
     Mount,
     /// Unmount the drive a sidebar row names, or the one the folder in
@@ -232,6 +236,7 @@ impl Action {
             Action::Unpin,
             Action::PinUp,
             Action::PinDown,
+            Action::ToggleStar,
             Action::Mount,
             Action::Unmount,
             Action::Eject,
@@ -293,6 +298,7 @@ impl Action {
             Action::Unpin => "unpin",
             Action::PinUp => "pin-up",
             Action::PinDown => "pin-down",
+            Action::ToggleStar => "star",
             Action::Mount => "mount",
             Action::Unmount => "unmount",
             Action::Eject => "eject",
@@ -377,6 +383,7 @@ impl Action {
             Action::Unpin => "Unpin",
             Action::PinUp => "Move Up",
             Action::PinDown => "Move Down",
+            Action::ToggleStar => "Star",
             Action::Mount => "Mount",
             Action::Unmount => "Unmount",
             Action::Eject => "Eject",
@@ -509,6 +516,12 @@ impl Action {
             Action::Unpin => &[],
             Action::PinUp => &[],
             Action::PinDown => &[],
+            // Not Ctrl+D, which is the key this action was first asked
+            // for: Pin already holds it, as Nautilus's and every
+            // browser's "bookmark this", and a key means one thing. The
+            // same letter with Shift is the nearest free key that still
+            // reads as "the other kind of bookmark".
+            Action::ToggleStar => &["Ctrl+Shift+D"],
             // Reached from a drive's or a share's row, and from the
             // palette while browsing one. Nothing here is done often
             // enough to hold a key, and Eject on a slip of the finger
@@ -618,6 +631,18 @@ pub struct ActionContext {
     /// The drive or share the drive actions would act on — see
     /// [`crate::devices::Devices::target`].
     pub device: crate::devices::DeviceTarget,
+    /// Whether everything selected is starred already — which turns
+    /// [`Action::ToggleStar`]'s "Star" into "Unstar". See [`label_in`].
+    pub starred: bool,
+}
+
+/// What a menu calls `action` here: its [`Action::label`], except where
+/// the one action does one of two things and the menu has to say which.
+pub fn label_in(action: Action, ctx: &ActionContext) -> &'static str {
+    match action {
+        Action::ToggleStar if ctx.starred => "Unstar",
+        _ => action.label(),
+    }
 }
 
 /// What the pin actions would act on — see
@@ -692,6 +717,11 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         Action::Unpin => ctx.pin.pinned_at.is_some(),
         Action::PinUp => ctx.pin.pinned_at.is_some_and(|at| at > 0),
         Action::PinDown => ctx.pin.pinned_at.is_some_and(|at| at + 1 < ctx.pin.pins),
+        // Something real to star: not a trashed item, whose path is the
+        // Trash's storage name, and not a member of an archive, whose
+        // path no other program — and no later Files, once the archive
+        // is rewritten — can be sure of finding.
+        Action::ToggleStar => ctx.selected > 0 && !ctx.in_trash && !ctx.in_archive,
         // Nothing is offered twice while it is already happening, and a
         // locked (encrypted) drive cannot be mounted here at all.
         Action::Mount => ctx.device.volume && !ctx.device.mounted && !ctx.device.busy && !ctx.device.locked,
@@ -920,6 +950,19 @@ mod tests {
         let last = ActionContext { pin: PinTarget { pinned_at: Some(1), ..unpinned.pin }, ..unpinned };
         assert!(enabled(Action::PinUp, &last));
         assert!(!enabled(Action::PinDown, &last), "already last");
+    }
+
+    /// One action, two words: the menu says Unstar exactly when starring
+    /// again would undo it, and nothing trashed or packed is offered.
+    #[test]
+    fn the_star_says_unstar_when_everything_selected_is_starred() {
+        let ctx = ActionContext { selected: 1, ..ActionContext::default() };
+        assert!(enabled(Action::ToggleStar, &ctx));
+        assert_eq!(label_in(Action::ToggleStar, &ctx), "Star");
+        assert_eq!(label_in(Action::ToggleStar, &ActionContext { starred: true, ..ctx }), "Unstar");
+        assert!(!enabled(Action::ToggleStar, &ActionContext { in_trash: true, ..ctx }));
+        assert!(!enabled(Action::ToggleStar, &ActionContext { in_archive: true, ..ctx }));
+        assert!(!enabled(Action::ToggleStar, &ActionContext::default()), "nothing selected");
     }
 
     #[test]

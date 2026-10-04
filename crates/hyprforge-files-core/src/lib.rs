@@ -49,9 +49,11 @@ pub mod prefs;
 pub mod preview;
 pub mod properties;
 pub mod query;
+pub mod recent;
 pub mod reveal;
 pub mod search;
 pub mod sidebar;
+pub mod starred;
 pub mod trash;
 pub mod undo;
 /// Moved to `hyprforge-paths` when the photo viewer's sidebar needed it

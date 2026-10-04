@@ -1,6 +1,6 @@
 //! The marks every Hyprforge app draws — navigation, view modes, the
-//! sidebar toggle, the settings pages, signal strength, a battery and the
-//! eject mark — drawn rather than typed.
+//! sidebar toggle, the settings pages, signal strength, a battery, the
+//! eject mark and the star — drawn rather than typed.
 //!
 //! These began in Files and moved here when Settings adopted the same
 //! design, because the reasoning below is about fonts, not about files.
@@ -712,6 +712,60 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for EjectGlyph {
             iced::Size::new(extent, extent * 0.22),
             fill,
         );
+        vec![frame.into_geometry()]
+    }
+}
+
+/// The star mark: a filled five-pointed star — what a starred file
+/// carries in Files' listing and grid.
+///
+/// Drawn, because `★` is one of the characters whose weight and size
+/// depend entirely on which font the desktop falls back to for it, and
+/// it sits on the corner of a drawn file icon, where a typed character
+/// would sit on its own baseline rather than on the icon.
+pub fn star<'a, Message: 'a>(side: f32, color: iced::Color) -> Element<'a, Message> {
+    canvas(StarGlyph { color }).width(Length::Fixed(side)).height(Length::Fixed(side)).into()
+}
+
+struct StarGlyph {
+    color: iced::Color,
+}
+
+impl<Message> canvas::Program<Message, Theme, Renderer> for StarGlyph {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let side = bounds.width.min(bounds.height);
+        // The whole box, nearly: at the size it is drawn — a corner of
+        // an icon — any margin is star that is not there.
+        let outer = side * 0.48;
+        // The regular star's inner radius, outer × sin 18° / sin 54°:
+        // straight edges from point to point, not a fat or a spiky star.
+        let inner = outer * 0.382;
+        let centre = Point::new(bounds.width / 2.0, bounds.height / 2.0 + side * 0.03);
+        let star = canvas::Path::new(|b| {
+            for i in 0..10 {
+                let r = if i % 2 == 0 { outer } else { inner };
+                // From straight up, a tenth of a turn at a time.
+                let angle = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+                let point = Point::new(centre.x + r * angle.cos(), centre.y + r * angle.sin());
+                if i == 0 {
+                    b.move_to(point);
+                } else {
+                    b.line_to(point);
+                }
+            }
+            b.close();
+        });
+        frame.fill(&star, canvas::Fill::from(self.color));
         vec![frame.into_geometry()]
     }
 }
