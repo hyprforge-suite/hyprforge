@@ -506,11 +506,15 @@ impl<F: Filesystem> Operation<F> {
                     return self.step();
                 }
             };
-            self.entries.push(Entry {
-                source_relative: PathBuf::new(),
-                dest_relative: PathBuf::new(),
-                kind: entry_kind_of(&root_status),
-            });
+            let kind = entry_kind_of(&root_status);
+            // The walk counts every file *under* a folder; a root that is
+            // itself a file is never walked, so its size is counted here.
+            // Without this a one-file copy reported `bytes_total` 0 and a
+            // window showed "5.9 GiB of 0 B" for a 24 GiB copy.
+            if let EntryKind::File { size } = kind {
+                self.bytes_total += size;
+            }
+            self.entries.push(Entry { source_relative: PathBuf::new(), dest_relative: PathBuf::new(), kind });
         }
 
         // A collision on the root is checked before anything else — in
@@ -1499,5 +1503,24 @@ mod tests {
         assert!(report.cancelled);
         assert!(!dest.exists(), "a cancelled mid-file copy must not leave a partial file behind");
         assert_eq!(fs::read(&source).unwrap().len(), CHUNK_SIZE * 3, "source must be untouched");
+    }
+
+    /// Found live in Files: a one-file copy reported a total of 0 bytes,
+    /// so its progress read "5.9 GiB of 0 B" and its bar could not fill.
+    #[test]
+    fn copying_one_file_reports_that_files_size_as_the_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("big.bin");
+        fs::write(&source, vec![7u8; CHUNK_SIZE * 2 + 5]).unwrap();
+        let mut op = Operation::real(OpKind::Copy, &source, dir.path().join("copy.bin"));
+        let totals: Vec<Option<u64>> = std::iter::from_fn(|| match op.step() {
+            StepOutcome::Progress(p) => Some(p.bytes_total),
+            _ => None,
+        })
+        .collect();
+        assert!(!totals.is_empty());
+        for total in totals.into_iter().flatten() {
+            assert_eq!(total, (CHUNK_SIZE * 2 + 5) as u64);
+        }
     }
 }

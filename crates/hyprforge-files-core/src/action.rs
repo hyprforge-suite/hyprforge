@@ -146,6 +146,13 @@ pub enum Action {
     /// Open the Preferences sheet: behaviour and key bindings. Window
     /// scope because the sheet is the window's, and the dialog has none.
     Preferences,
+    /// Open or close the transfers popover — what the tab strip's
+    /// control does when clicked. Window scope: the jobs are the
+    /// window's, and the open/save dialog has none to show.
+    Transfers,
+    /// Open or close the queue view behind the popover's "Show all":
+    /// everything running, waiting and finished this session.
+    TransferQueue,
 }
 
 /// Whether an action is about the listing or about the window around it.
@@ -210,7 +217,7 @@ impl Action {
             Action::PreviousTab,
         ];
         all.extend((1..=9).map(Action::Tab));
-        all.extend([Action::Properties, Action::Preferences]);
+        all.extend([Action::Properties, Action::Preferences, Action::Transfers, Action::TransferQueue]);
         all
     }
 
@@ -279,6 +286,8 @@ impl Action {
             },
             Action::Properties => "properties",
             Action::Preferences => "preferences",
+            Action::Transfers => "transfers",
+            Action::TransferQueue => "transfer-queue",
         }
     }
 
@@ -349,6 +358,8 @@ impl Action {
             },
             Action::Properties => "Properties",
             Action::Preferences => "Preferences\u{2026}",
+            Action::Transfers => "Transfers",
+            Action::TransferQueue => "Transfer Queue",
         }
     }
 
@@ -361,7 +372,9 @@ impl Action {
             | Action::PreviousTab
             | Action::Tab(_)
             | Action::Properties
-            | Action::Preferences => Scope::Window,
+            | Action::Preferences
+            | Action::Transfers
+            | Action::TransferQueue => Scope::Window,
             _ => Scope::Browser,
         }
     }
@@ -470,6 +483,15 @@ impl Action {
             Action::Properties => &["Alt+Enter"],
             // Ctrl+Comma is GNOME's and every editor's "preferences".
             Action::Preferences => &["Ctrl+,"],
+            // Firefox's key for its downloads, the nearest thing the
+            // desktop has to a convention for "what is being copied".
+            // Not Ctrl+J, Chrome's: that is the key this crate's own
+            // config tests rebind as one nothing holds, and a default
+            // there would quietly change what those tests prove.
+            Action::Transfers => &["Ctrl+Shift+Y"],
+            // J for Chrome's downloads page, with the Shift that keeps
+            // it off plain Ctrl+J for the reason above.
+            Action::TransferQueue => &["Ctrl+Shift+J"],
         }
     }
 }
@@ -633,7 +655,9 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         | Action::PreviousTab
         | Action::Tab(_)
         | Action::Properties
-        | Action::Preferences => true,
+        | Action::Preferences
+        | Action::Transfers
+        | Action::TransferQueue => true,
     }
 }
 
@@ -717,11 +741,12 @@ mod tests {
     }
 
     /// The window's own actions are the tab strip, undo (whose history
-    /// spans every tab), the Properties inspector and Preferences. The
-    /// open/save dialog has none of them, and ignores what is listed
-    /// here — which is how Properties stays out of a file chooser.
+    /// spans every tab), the Properties inspector, Preferences and the
+    /// transfers. The open/save dialog has none of them, and ignores
+    /// what is listed here — which is how Properties stays out of a file
+    /// chooser.
     #[test]
-    fn only_tabs_undo_properties_and_preferences_belong_to_the_window() {
+    fn only_tabs_undo_properties_preferences_and_transfers_belong_to_the_window() {
         for action in Action::all() {
             let is_window = matches!(
                 action,
@@ -733,6 +758,8 @@ mod tests {
                     | Action::Tab(_)
                     | Action::Properties
                     | Action::Preferences
+                    | Action::Transfers
+                    | Action::TransferQueue
             );
             assert_eq!(action.scope() == Scope::Window, is_window, "{action:?}");
         }

@@ -21,6 +21,9 @@ pub fn label(action: Action) -> &'static str {
         Action::Unpin => "Unpin from Sidebar",
         Action::Open => "Open Selected",
         Action::Restore => "Restore from Trash",
+        // "Transfers" alone reads as a heading in a list of verbs.
+        Action::Transfers => "Show Transfers",
+        Action::TransferQueue => "Show Transfer Queue",
         other => other.label(),
     }
 }
