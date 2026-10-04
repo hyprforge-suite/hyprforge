@@ -14,6 +14,7 @@ mod layout;
 mod progress;
 mod panel;
 mod ring;
+mod scrim;
 mod selection;
 mod suggestions;
 
@@ -31,6 +32,7 @@ pub use layout::{
 pub use progress::{popover_card, progress_line, progress_line_style};
 pub use panel::{fact, fact_row, panel_tabs};
 pub use ring::{countdown_ring, remaining_fraction};
+pub use scrim::{scrim, scrim_color, SCRIM_ALPHA};
 pub use selection::{section_label, selectable_row_style, spaced_caps, Tint};
 pub use suggestions::{suggestions, Suggestion};
 

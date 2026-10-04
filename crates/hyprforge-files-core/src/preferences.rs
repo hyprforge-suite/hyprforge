@@ -128,7 +128,7 @@ pub fn group(action: Action) -> &'static str {
         | ContextMenu => "Selecting",
         Trash | DeletePermanently | Restore | EmptyTrash | Copy | Cut | Paste | CopyPath | Rename | NewFolder
         | OpenWith | Extract | ExtractTo | Compress | Undo => "Files",
-        ToggleHidden | TogglePreview | Properties | Preferences => "The window",
+        ToggleHidden | TogglePreview | QuickLook | Properties | Preferences => "The window",
         Pin | Unpin | PinUp | PinDown => "Sidebar",
         NewTab | CloseTab | NextTab | PreviousTab | Tab(_) => "Tabs",
     }

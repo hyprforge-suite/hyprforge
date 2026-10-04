@@ -56,6 +56,9 @@ pub enum Action {
     ToggleHidden,
     /// Show or hide the preview pane beside the listing. Remembered.
     TogglePreview,
+    /// Show the focused entry large, over the window, until the next key
+    /// — see `browser/quicklook.rs`. Not remembered: it is a glance.
+    QuickLook,
     /// Move the selection to the trash.
     Trash,
     /// Delete the selection for good, bypassing the trash.
@@ -174,6 +177,7 @@ impl Action {
             Action::ClearSearch,
             Action::ToggleHidden,
             Action::TogglePreview,
+            Action::QuickLook,
             Action::Trash,
             Action::DeletePermanently,
             Action::Restore,
@@ -226,6 +230,7 @@ impl Action {
             Action::ClearSearch => "clear-search",
             Action::ToggleHidden => "show-hidden",
             Action::TogglePreview => "preview-pane",
+            Action::QuickLook => "quick-look",
             Action::Trash => "trash",
             Action::DeletePermanently => "delete-permanently",
             Action::Restore => "restore",
@@ -298,6 +303,7 @@ impl Action {
             Action::ClearSearch => "Clear Search",
             Action::ToggleHidden => "Show Hidden Files",
             Action::TogglePreview => "Preview Pane",
+            Action::QuickLook => "Quick Look",
             Action::Trash => "Move to Trash",
             Action::DeletePermanently => "Delete Permanently",
             Action::Restore => "Restore",
@@ -390,6 +396,11 @@ impl Action {
             // Alt+P is Windows Explorer's, the one file manager whose
             // preview pane has a key people already know.
             Action::TogglePreview => &["Alt+P"],
+            // The Finder's key, and Nautilus's with Sushi. The one bare
+            // text key bindable here: nothing typed into a search begins
+            // with a space, and one typed mid-query still reaches it —
+            // see `hyprforge_keys::Keymap::resolve_typing`.
+            Action::QuickLook => &["Space"],
             Action::Trash => &["Delete"],
             // Unbound on purpose. A single key that skips the trash is one
             // slip away from losing a file for good; anyone who wants
@@ -543,6 +554,8 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         | Action::SelectAll => ctx.shown > 0,
         Action::ClearSearch => ctx.searching,
         Action::ToggleHidden | Action::TogglePreview | Action::ContextMenu => true,
+        // Something to look at: the focused row, file or folder.
+        Action::QuickLook => ctx.focused_is_dir.is_some(),
         // Not inside an archive: there is no trash in a zip, and a
         // member removed from one is gone. `DeletePermanently` is the
         // action that means that, and it is the one offered there.

@@ -23,7 +23,10 @@
 //! pins the property that matters: two browsers differing only in `Mode`
 //! feed `render` the exact same data.
 
+mod quicklook;
 mod searching;
+
+pub use quicklook::quick_look_edge;
 
 use crate::columns;
 use crate::density;
@@ -671,6 +674,12 @@ pub enum Outcome {
     /// searches — see [`crate::search`]. Results come back as
     /// [`Message::Search`].
     Search(crate::search::Ask),
+    /// Find out what Quick Look shows for this entry — the preview pane's
+    /// [`Outcome::LoadPreview`], decoded for [`quick_look_edge`] rather
+    /// than the pane — and hand it back as [`Message::QuickLookLoaded`].
+    /// Asked on every focus move while the card is up; the host waits for
+    /// the arrows to settle and builds only the newest.
+    LoadQuickLook(PathBuf),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -794,6 +803,11 @@ pub enum Message {
     /// Anything about searching: the scope rail, chips, a walk's results
     /// and saved searches — see `browser/searching.rs`.
     Search(crate::search::SearchMessage),
+    /// The answer to [`Outcome::LoadQuickLook`]: `None` when there is
+    /// nothing to say beyond the listing.
+    QuickLookLoaded(PathBuf, Option<Preview>),
+    /// A press outside the Quick Look card.
+    QuickLookClose,
 }
 
 /// Exactly what `render` needs, and nothing `Browser` has that it
@@ -1003,6 +1017,8 @@ pub struct Browser {
     /// How many inspectors this browser has opened, so each one's
     /// answers carry a generation no earlier one shares.
     inspections: u64,
+    /// The Quick Look card — see `browser/quicklook.rs`.
+    quick_look: quicklook::QuickLook,
 }
 
 impl Browser {
@@ -1060,6 +1076,7 @@ impl Browser {
                 .map(|combo| combo.to_string()),
             inspector: None,
             inspections: 0,
+            quick_look: quicklook::QuickLook::default(),
         };
         browser.folder_icons = folder_icon_keys(&browser.sidebar, &browser.config.sidebar);
         // Column view's panes are read alongside the listing, not after
@@ -1159,15 +1176,34 @@ impl Browser {
     }
 
     pub fn update(&mut self, message: Message) -> Outcome {
+        // Whether a Space now is the query's or Quick Look's — see
+        // `Browser::typing_under_way`. Only gestures change it; an
+        // answer arriving from the host while someone types does not.
+        match &message {
+            Message::TypeToSearch(_) => self.note_typing(true),
+            Message::EntryClicked { .. } | Message::SearchChanged(_) | Message::SearchCleared => {
+                self.note_typing(false)
+            }
+            _ => {}
+        }
         let outcome = self.update_state(message);
         let outcome = self.with_columns(outcome);
         let outcome = self.with_reveal(outcome);
         let outcome = self.with_properties(outcome);
+        let outcome = self.with_quick_look(outcome);
         self.with_media(outcome)
     }
 
     fn update_state(&mut self, message: Message) -> Outcome {
         match message {
+            Message::QuickLookLoaded(path, found) => {
+                self.quick_look_loaded(path, found);
+                Outcome::None
+            }
+            Message::QuickLookClose => {
+                self.close_quick_look();
+                Outcome::None
+            }
             Message::ThumbnailLoaded(path, handle) => {
                 // Only what was asked for in this folder: a thumbnail for
                 // a folder already left has nowhere to go.
@@ -1707,6 +1743,7 @@ impl Browser {
         let outcome = self.with_columns(outcome);
         let outcome = self.with_reveal(outcome);
         let outcome = self.with_properties(outcome);
+        let outcome = self.with_quick_look(outcome);
         self.with_media(outcome)
     }
 
@@ -1926,7 +1963,11 @@ impl Browser {
     fn preview_target(&self) -> Option<PathBuf> {
         // Not while the inspector has the pane's place: a picture nobody
         // can see is a decode for nothing.
-        if !self.prefs.preview_pane || self.archive.is_some() || self.inspector.is_some() {
+        // Nor while Quick Look covers it: the card is decoding the same
+        // entry larger, and two full-size decodes of one photograph at
+        // once is the peak CLAUDE.md says to ask about. The pane catches
+        // up when the card closes.
+        if !self.prefs.preview_pane || self.archive.is_some() || self.inspector.is_some() || self.quick_look_open() {
             return None;
         }
         let selected = self.selected_shown();
@@ -1949,6 +1990,12 @@ impl Browser {
         // keyboard while it is focused, so a key reaching here was not
         // typed into it.
         self.renaming = None;
+        // Any action ends typing at the listing, and the Quick Look card
+        // takes the keys that are its own — see `browser/quicklook.rs`.
+        self.note_typing(false);
+        let Some(action) = self.quick_look_key(action) else {
+            return Outcome::None;
+        };
         // The palette keeps the arrows while it is open, as the path bar
         // does below.
         if let Some(palette) = &mut self.palette {
@@ -2028,6 +2075,7 @@ impl Browser {
             // index against a list that may have been re-sorted since
             // the focus was set.
             Action::Open => self.activate_focused(),
+            Action::QuickLook => self.open_quick_look(),
             Action::EditLocation => self.begin_path_edit(),
             Action::CommandPalette => self.open_palette(),
             // The focused row, like `Open` beside it — and like the
@@ -2358,6 +2406,9 @@ impl Browser {
     /// asked for, flipped away from any edge it would run off
     /// ([`menus::place`]).
     pub fn menu_overlay(&self, scale: FontScale, window: (f32, f32)) -> Option<Element<'_, Message>> {
+        if let Some(card) = self.quick_look_overlay(scale, window) {
+            return Some(card);
+        }
         if let Some(palette) = &self.palette {
             return Some(self.palette_overlay(palette, scale, window));
         }

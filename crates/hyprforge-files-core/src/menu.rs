@@ -232,6 +232,10 @@ pub const DIALOG_ACTIONS: &[Action] = &[
     Action::NewFolder,
     Action::ToggleHidden,
     Action::TogglePreview,
+    // A file chooser is where looking before choosing matters most —
+    // the macOS open panel takes Space for exactly this. It reads, and
+    // a dialog reads everything the window does (`hyprforge_files::host`).
+    Action::QuickLook,
     Action::Refresh,
     Action::GoUp,
     Action::GoBack,

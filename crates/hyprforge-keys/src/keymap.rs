@@ -153,6 +153,27 @@ impl<A: Bindable> Keymap<A> {
         press.text.filter(|c| !c.is_control()).map(Resolved::Text)
     }
 
+    /// [`Keymap::resolve`], for an app that knows whether something is
+    /// being typed right now — a type-to-search query under way, say.
+    ///
+    /// While `typing`, a Space with neither Ctrl, Alt nor Super held is
+    /// text whatever it is bound to: it is the gap between two words of
+    /// the query, not a request. Otherwise exactly [`Keymap::resolve`].
+    /// The other half of the rule that lets a bare Space be bound at
+    /// all — see [`Combo::would_swallow_typing`].
+    pub fn resolve_typing(&self, press: &KeyPress, typing: bool) -> Option<Resolved<A>> {
+        if typing
+            && self.bare == BareKeys::ReservedForTyping
+            && press.key == crate::combo::Key::Space
+            && !press.mods.any_shortcut_modifier()
+        {
+            if let Some(c) = press.text.filter(|c| !c.is_control()) {
+                return Some(Resolved::Text(c));
+            }
+        }
+        self.resolve(press)
+    }
+
     /// Every combo bound to `action`, sorted so a menu's hint is stable.
     pub fn combos_for(&self, action: A) -> Vec<Combo> {
         let mut combos: Vec<Combo> =
@@ -285,6 +306,21 @@ mod tests {
     fn a_viewer_never_resolves_a_press_to_text() {
         let keys: Keymap<TestAction> = Keymap::defaults(BareKeys::Bindable);
         assert_eq!(keys.resolve(&typed('z')), None);
+    }
+
+    /// A bare Space may be bound — and while something is being typed it
+    /// is still the space between two words, never the binding.
+    #[test]
+    fn a_bound_space_yields_to_a_query_being_typed() {
+        let keys: Keymap<TestAction> = Keymap::from_bindings(
+            [(Combo::parse("Space").unwrap(), TestAction::Open)],
+            BareKeys::ReservedForTyping,
+        );
+        let space = KeyPress { key: Key::Space, mods: Modifiers::default(), text: Some(' ') };
+        assert_eq!(keys.resolve_typing(&space, false), Some(Resolved::Action(TestAction::Open)));
+        assert_eq!(keys.resolve_typing(&space, true), Some(Resolved::Text(' ')));
+        let ctrl_space = KeyPress { mods: Modifiers { ctrl: true, ..Modifiers::default() }, ..space };
+        assert_eq!(keys.resolve_typing(&ctrl_space, true), None, "Ctrl+Space is nobody's text");
     }
 
     #[test]
