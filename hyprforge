@@ -1217,6 +1217,7 @@ install_media() {
         ok "installed $dst"
     fi
     flush_current
+    retire_photos
 
     # Like the file manager: a window, no service, no single-instance
     # lock. Nothing here makes it the default for pictures — that is
@@ -1224,10 +1225,28 @@ install_media() {
     # replaced so --undo puts it back.
 }
 
+# Media was Hyprforge Photos until 2026-09-26, and the rename installed
+# the new binary and entry beside the old ones without removing them, so
+# a machine installed before it had two identical viewers in the launcher —
+# one of them a frozen build that still held some MIME defaults. Guarded
+# on existence so a machine that never had Photos hears nothing about it.
+retire_photos() {
+    local entry="$DESKTOP_DIR/hyprforge-photos.desktop"
+    [[ -e $PREFIX/hyprforge-photos || -e $entry ]] || return 0
+    step "Image viewer: removing the old Hyprforge Photos"
+    [[ -e $PREFIX/hyprforge-photos ]] && remove_file "$PREFIX/hyprforge-photos"
+    if [[ -e $entry ]]; then
+        remove_user_path "$entry"
+        command -v update-desktop-database >/dev/null &&
+            update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
+    fi
+}
+
 uninstall_media() {
     step "Image viewer: removing"
     remove_file "$PREFIX/hyprforge-media"
     remove_user_path "$DESKTOP_DIR/hyprforge-media.desktop"
+    retire_photos
     # media.toml is the user's and stays, for the reason uninstall_files
     # gives for files.toml.
 }
