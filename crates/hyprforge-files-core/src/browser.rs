@@ -498,6 +498,15 @@ impl Selection {
         *self = Selection::default();
     }
 
+    /// What a rubber band has drawn over: `base` — what was selected
+    /// before it began, for a band held with Ctrl or Shift, or nothing —
+    /// and every path the band meets now. The focus does not follow while
+    /// the band moves; see `Browser::end_band`.
+    fn set_band(&mut self, base: &HashSet<PathBuf>, paths: &[PathBuf]) {
+        self.selected = base.clone();
+        self.selected.extend(paths.iter().cloned());
+    }
+
     /// Exactly `paths`, in the order given: the first is focused and
     /// anchors a following shift-click. Nothing at all selects nothing.
     fn select_only<'a>(&mut self, paths: impl IntoIterator<Item = &'a PathBuf>) {
@@ -621,6 +630,12 @@ pub enum Outcome {
     /// behind them, which is what every file manager that shows this
     /// column does.
     CountFolders(Vec<PathBuf>),
+    /// Ask how much room is left on this path's filesystem (`statvfs`,
+    /// off the UI thread) and answer with [`Message::SpaceMeasured`] —
+    /// see [`crate::space`]. Asked after every listing, a re-read
+    /// included, so the figure follows a paste or a delete without a
+    /// question of its own.
+    MeasureSpace(PathBuf),
     /// Move these to the trash. Only paths the user can currently see —
     /// see [`Browser::perform`].
     Trash(Vec<PathBuf>),
@@ -796,6 +811,10 @@ pub enum Message {
     /// could not be read — never `Some(0)`, which would claim it is
     /// empty.
     CountsLoaded(Vec<(PathBuf, Option<usize>)>),
+    /// The answer to [`Outcome::MeasureSpace`] for that path. `None` when
+    /// `statvfs` failed, which leaves the status bar saying nothing about
+    /// space rather than guessing.
+    SpaceMeasured(PathBuf, Option<crate::space::Space>),
     /// A thumbnail the host made, and the bucket it was made at — see
     /// [`Outcome::LoadThumbnails`].
     ThumbnailLoaded(PathBuf, Picture, u32),
@@ -870,9 +889,27 @@ pub enum Message {
     /// Type a character into the search box. The host decides a key
     /// press means this; see [`crate::keymap::Resolved::Text`].
     TypeToSearch(char),
+    /// A character typed at the listing, with when it arrived. What it
+    /// does is `[behaviour] typing`'s to say: a search, like
+    /// [`Self::TypeToSearch`], or a jump to the name it begins — see
+    /// [`crate::typeahead`]. The host stamps the time so the jump's
+    /// pause-to-start-again is testable and the browser keeps no clock.
+    Typed(char, std::time::Instant),
     /// A drag over the window is over this folder now, or over nothing
     /// a drop could land in.
     DropHover(Option<PathBuf>),
+    /// A press on empty space became a rubber band — see
+    /// `hyprforge_ui::widgets::marquee`. The rows are tagged from the next
+    /// frame on, so the band can ask the layout which it meets.
+    BandStarted,
+    /// The rows the band meets now, by index into the rows on screen,
+    /// and whether it adds to what was selected before it began.
+    Banded(Vec<usize>, bool),
+    /// The band was let go.
+    BandEnded,
+    /// A click on empty space that never became a band — what clears the
+    /// selection in every file manager.
+    BackgroundClicked,
     /// The command palette's text changed.
     PaletteInput(String),
     /// Enter in the command palette: run the highlighted match.
@@ -975,6 +1012,8 @@ struct ViewModel<'a> {
     /// How many entries here are dotfiles, shown or not — whether the
     /// status bar offers its show/hide switch.
     dotfiles: usize,
+    /// Free space on this folder's filesystem, as the status bar says it.
+    space: Option<&'a str>,
     /// What key that switch names, as configured. `None` if the action
     /// has been left unbound.
     hidden_key: Option<String>,
@@ -990,6 +1029,10 @@ struct ViewModel<'a> {
     columns: Vec<ColumnModel<'a>>,
     selection: &'a Selection,
     search_query: &'a str,
+    search_field_id: &'a Id,
+    /// Every row's band id while a rubber band is in progress, and `None`
+    /// otherwise — see `Browser::band_ids`.
+    band_ids: Option<&'a [Id]>,
     /// The chips, the scope rail and saved searches — see
     /// `browser/searching.rs`.
     search: searching::SearchModel<'a>,
@@ -1142,6 +1185,20 @@ pub struct Browser {
     renaming: Option<Renaming>,
     /// The path bar, while it is being typed into.
     path_edit: Option<PathEdit>,
+    /// What has been typed toward a jump — see [`crate::typeahead`].
+    typeahead: crate::typeahead::Typeahead,
+    /// A rubber band in progress: what was selected before it began, and
+    /// the paths it last met. `None` with no band, which is also what
+    /// keeps the rows untagged — see [`Self::band_ids`].
+    band: Option<(HashSet<PathBuf>, Vec<PathBuf>)>,
+    /// One container id per row, made once and reused, for the band to
+    /// find rows by. Grown when a band starts, never per frame: an id per
+    /// row per frame is the allocation `crate::reveal` was written to
+    /// avoid, and cloning one of these allocates nothing.
+    band_ids: Vec<Id>,
+    /// The search field's id, for [`Action::Find`] to focus. One per
+    /// browser, and stable: the field is always drawn.
+    search_field_id: Id,
     /// Which files show — see [`EntryFilter`]. `None` shows everything.
     entry_filter: Option<EntryFilter>,
     /// The output's scale factor and the font scale, from
@@ -1171,6 +1228,12 @@ pub struct Browser {
     /// and a directory with 100,000 entries was being walked on each of
     /// them for a number that only changes when the listing does.
     dotfiles: usize,
+    /// What the status bar says about free space here — "212.0 GiB free
+    /// of 931.0 GiB" — or `None` until the host has answered, or when it
+    /// could not. Kept as the words rather than the numbers for the same
+    /// reason as `dotfiles`: `view` runs every frame and the figure only
+    /// changes when the listing does.
+    space: Option<String>,
     /// The key bound to "show hidden files", as text for the status
     /// bar. Resolved when the configuration is set: working it out
     /// meant allocating a `Vec`, sorting it with a `String` per
@@ -1208,6 +1271,10 @@ impl Browser {
             view: Vec::new(),
             selection: Selection::default(),
             search_query: String::new(),
+            typeahead: crate::typeahead::Typeahead::default(),
+            band: None,
+            band_ids: Vec::new(),
+            search_field_id: Id::unique(),
             search: searching::SearchState::default(),
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
@@ -1247,6 +1314,7 @@ impl Browser {
             ancestors: Vec::new(),
             revealed: None,
             dotfiles: 0,
+            space: None,
             // The shipped default, until `set_config` says otherwise.
             hidden_key: Config::default()
                 .keymap
@@ -1380,6 +1448,35 @@ impl Browser {
         f(selection, &rows);
     }
 
+    /// The band was let go: the keyboard lands on the first row it met,
+    /// so Shift+Arrow carries on from the block it drew. Not while it
+    /// moved — focusing a row asks for it to be revealed, and that scroll
+    /// would fight the band's own near the edge.
+    fn end_band(&mut self) {
+        let Some((_, met)) = self.band.take() else { return };
+        if let Some(first) = met.first() {
+            self.selection.anchor = Some(first.clone());
+            self.selection.focused = Some(first.clone());
+        }
+    }
+
+    /// A letter typed with `[behaviour] typing = "jump"`: move to the row
+    /// whose name it begins, if any does. Only the focus and selection
+    /// move — nothing is filtered — and the reveal that follows every
+    /// update scrolls the row into view.
+    fn jump(&mut self, c: char, at: std::time::Instant) {
+        let Browser { typeahead, .. } = self;
+        let mut typeahead = std::mem::take(typeahead);
+        self.with_rows(|selection, rows| {
+            let focused = selection.focused().and_then(|f| rows.iter().position(|e| e.path == f));
+            let hit = typeahead.press(c, at, rows.iter().map(|e| e.name.as_str()), focused);
+            if let Some(entry) = hit.and_then(|i| rows.get(i)) {
+                selection.click(&entry.path);
+            }
+        });
+        self.typeahead = typeahead;
+    }
+
     pub fn update(&mut self, message: Message) -> Outcome {
         // Whether a Space now is the query's or Quick Look's — see
         // `Browser::typing_under_way`. Only gestures change it; an
@@ -1442,6 +1539,45 @@ impl Browser {
             Message::ColumnChose(path) => self.choose_in_column(path),
             Message::Zoom(by) => self.zoom(by),
             Message::CountsLoaded(counts) => self.apply_counts(counts),
+            Message::BandStarted => {
+                self.menu = None;
+                let rows = self.view.len();
+                while self.band_ids.len() < rows {
+                    self.band_ids.push(Id::unique());
+                }
+                self.band = Some((self.selection.selected_paths().clone(), Vec::new()));
+                Outcome::None
+            }
+            Message::Banded(indices, additive) => {
+                let Some((base, _)) = self.band.take() else { return Outcome::None };
+                let mut met = Vec::new();
+                let empty = HashSet::new();
+                self.with_rows(|selection, rows| {
+                    met = indices.iter().filter_map(|&i| rows.get(i)).map(|e| e.path.clone()).collect();
+                    selection.set_band(if additive { &base } else { &empty }, &met);
+                });
+                self.band = Some((base, met));
+                Outcome::None
+            }
+            Message::BandEnded => {
+                self.end_band();
+                Outcome::None
+            }
+            Message::BackgroundClicked => {
+                self.menu = None;
+                if self.renaming.is_none() {
+                    self.selection.clear();
+                }
+                Outcome::None
+            }
+            Message::SpaceMeasured(path, space) => {
+                // Guarded like a listing: an answer for a folder the user
+                // has since left must not land on the one they are in.
+                if path == crate::space::measured_at(&self.current_dir) {
+                    self.space = space.and_then(crate::space::label);
+                }
+                Outcome::None
+            }
             Message::GoBack => self.go_back(),
             Message::GoForward => self.go_forward(),
             Message::GoUp => self.go_up(),
@@ -1535,6 +1671,20 @@ impl Browser {
                 Outcome::PrefsChanged(self.prefs.clone())
             }
             Message::Perform(action) => self.perform(action),
+            // A search already under way keeps every letter, whatever the
+            // setting: the person is spelling a query, and a jump in the
+            // middle of one would scatter it.
+            Message::Typed(c, at)
+                if self.config.behaviour.typing == crate::config::Typing::Jump && !self.searching() =>
+            {
+                self.menu = None;
+                self.jump(c, at);
+                Outcome::None
+            }
+            Message::Typed(c, _) => {
+                self.note_typing(true);
+                self.update_state(Message::TypeToSearch(c))
+            }
             Message::TypeToSearch(c) => {
                 // Typing is a new thing to do; an open menu is not what
                 // it was aimed at.
@@ -2399,6 +2549,7 @@ impl Browser {
             Action::Open => self.activate_focused(),
             Action::QuickLook => self.open_quick_look(),
             Action::EditLocation => self.begin_path_edit(),
+            Action::Find => Outcome::FocusPath { id: self.search_field_id.clone(), select_all: true },
             Action::CommandPalette => self.open_palette(),
             // The focused row, like `Open` beside it — and like the
             // check that enables it, which reads `focused_is_dir`.
@@ -2586,6 +2737,7 @@ impl Browser {
             // Handled above; listed so a new window action is a compile
             // error here rather than a silent fall-through.
             Action::Undo
+            | Action::UndoHistory
             | Action::NewTab
             | Action::CloseTab
             | Action::NextTab
@@ -2945,7 +3097,16 @@ impl Browser {
         let folders: Vec<PathBuf> =
             self.entries.iter().filter(|e| e.is_dir).map(|e| e.path.clone()).collect();
         let counts = if folders.is_empty() { Outcome::None } else { Outcome::CountFolders(folders) };
-        let counts = many(vec![counts, research]);
+        // A folder that would not list says nothing about its disk either:
+        // the status bar is blank for an error, and the figure with it.
+        let space = match self.load_state {
+            LoadState::Loaded => Outcome::MeasureSpace(crate::space::measured_at(&self.current_dir)),
+            _ => {
+                self.space = None;
+                Outcome::None
+            }
+        };
+        let counts = many(vec![counts, space, research]);
 
         // Something the host asked to have selected once it showed up —
         // a folder just made, a file just renamed. If it is not here yet
@@ -3053,6 +3214,9 @@ impl Browser {
         self.select_first = false;
         self.current_dir = path.clone();
         self.selection.clear();
+        // Somewhere else may be another filesystem; the old figure would
+        // be a claim about a disk this folder is not on.
+        self.space = None;
         // Recent or Starred, if one was open: going anywhere is leaving
         // it, as it is leaving a search's results.
         self.search.collection = None;
@@ -3217,6 +3381,7 @@ impl Browser {
             viewport_width,
             hidden_count: self.hidden_count(),
             dotfiles: self.dotfiles,
+            space: self.space.as_deref(),
             hidden_key: self.hidden_key.clone(),
             show_trash: self.config.sidebar.show_trash,
             show_collections: (self.config.sidebar.show_recent, self.config.sidebar.show_starred),
@@ -3237,6 +3402,8 @@ impl Browser {
                 .collect(),
             selection: &self.selection,
             search_query: &self.search_query,
+            search_field_id: &self.search_field_id,
+            band_ids: self.band.as_ref().map(|_| self.band_ids.as_slice()),
             search: self.search_model(),
             load_state: &self.load_state,
             prefs: &self.prefs,
@@ -4100,6 +4267,14 @@ fn status_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> 
             dotfile_switch,
             preview_switch,
             iced::widget::Space::new().width(Length::Fill),
+            // Free space, right-hand with the other facts about *where*
+            // rather than *what*. Not for Recent or Starred: their rows
+            // come from anywhere, and one disk's figure would be a claim
+            // about none of them in particular.
+            match vm.space.filter(|_| vm.collection.is_none()) {
+                Some(space) => Element::from(meta_text(space.to_string(), density::META_TEXT_BASE, scale)),
+                None => iced::widget::Space::new().into(),
+            },
             meta_text(
                 match vm.prefs.view_mode == ViewMode::Grid && grid_draw_scale(vm, scale).1 {
                     // Said, because a zoom that does less than its name
@@ -4843,6 +5018,15 @@ fn body_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         container(body_content(vm, zoomed)).width(Length::Fill).height(Length::Fill),
     )
     .on_right_press(Message::OpenContextMenu { spot: MenuSpot::Background, at: (0.0, 0.0) });
+    // Around everything the rows are in, so a band can start in the empty
+    // space beside or below them — see `hyprforge_ui::widgets::marquee`.
+    let body = hyprforge_ui::widgets::marquee(body)
+        .targets(band_targets(vm))
+        .scroll(vm.list_scrollable_id.clone())
+        .on_start(Message::BandStarted)
+        .on_select(Message::Banded)
+        .on_end(Message::BandEnded)
+        .on_clear(Message::BackgroundClicked);
     // Outermost, so Ctrl+wheel is a zoom before the listing's scrollable
     // can take it as a scroll — see `hyprforge_ui::widgets::wheel_zoom`.
     wheel_zoom(body, Message::Zoom).into()
@@ -4946,7 +5130,7 @@ fn column_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message>
                 } else {
                     row
                 };
-                list = list.push(reveal_tag(row, vm.instance, focused == Some(entry.path.as_path())));
+                list = list.push(reveal_tag(row, vm.instance, focused == Some(entry.path.as_path()), vm.band_ids, index));
             }
             scrollable(container(list).padding([0, spacing::XS as u16]))
                 .height(Length::Fill)
@@ -4976,9 +5160,37 @@ fn column_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message>
 /// it is the keyboard's row. Every row gets the container, focused or
 /// not, so moving the focus changes an id rather than the shape of the
 /// widget tree — which would reset the state of every row after it.
-fn reveal_tag<'a>(row: Element<'a, Message>, instance: u64, focused: bool) -> Element<'a, Message> {
+fn reveal_tag<'a>(row: Element<'a, Message>, instance: u64, focused: bool, band: Option<&[Id]>, index: usize) -> Element<'a, Message> {
     let tagged = container(row);
-    if focused { tagged.id(crate::reveal::focused_row(instance)) } else { tagged }.into()
+    // The focused row keeps the id `Reveal` looks for, and the band's
+    // targets name it by that id instead — see `band_targets`. Every
+    // other row is tagged only while a band is in progress.
+    if focused {
+        tagged.id(crate::reveal::focused_row(instance))
+    } else if let Some(id) = band.and_then(|ids| ids.get(index)) {
+        tagged.id(id.clone())
+    } else {
+        tagged
+    }
+    .into()
+}
+
+/// What the rubber band can select: each row's id, to its index. Empty
+/// with no band in progress, so the widget asks the layout nothing.
+fn band_targets(vm: &ViewModel<'_>) -> HashMap<Id, usize> {
+    let Some(ids) = vm.band_ids else { return HashMap::new() };
+    let focused = vm.selection.focused();
+    vm.rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            if focused == Some(entry.path.as_path()) {
+                Some((crate::reveal::focused_row(vm.instance), index))
+            } else {
+                ids.get(index).map(|id| (id.clone(), index))
+            }
+        })
+        .collect()
 }
 
 /// The status bar's left-hand words.
@@ -5670,7 +5882,7 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         } else {
             row
         };
-        list = list.push(reveal_tag(row, vm.instance, vm.selection.focused() == Some(entry.path.as_path())));
+        list = list.push(reveal_tag(row, vm.instance, vm.selection.focused() == Some(entry.path.as_path()), vm.band_ids, index));
     }
     // `.id(..)` is what lets a host restore this list's scroll position
     // across a tab switch — see `Browser::list_scrollable_id`'s own doc.
@@ -5750,6 +5962,7 @@ fn grid_view<'a>(vm: &ViewModel<'a>, text: FontScale) -> Element<'a, Message> {
     // much room there actually is and fills it.
     let renaming = vm.renaming;
     let (drop_hover, in_trash, instance) = (vm.drop_hover, vm.in_trash, vm.instance);
+    let band_ids = vm.band_ids;
     // The listing's id, as the list's: one of the two is ever drawn, and
     // it is what `Reveal` scrolls.
     let scroll_id = vm.list_scrollable_id.clone();
@@ -5782,7 +5995,7 @@ fn grid_view<'a>(vm: &ViewModel<'a>, text: FontScale) -> Element<'a, Message> {
             } else {
                 cell
             };
-            current = current.push(reveal_tag(cell, instance, focused == Some(entry.path.as_path())));
+            current = current.push(reveal_tag(cell, instance, focused == Some(entry.path.as_path()), band_ids, index));
         }
         // The last row is padded out with empty space to a full set of
         // columns, so its cells keep the width the rows above gave them
@@ -6143,6 +6356,16 @@ mod tests {
 
     /// `outcome` without the icon request a loaded listing always adds —
     /// for the tests about what *else* a listing asks for.
+    /// Every part of an outcome, flattened — for asserting that a request
+    /// is among the things asked rather than the only one.
+    fn parts(outcome: Outcome) -> Vec<Outcome> {
+        match outcome {
+            Outcome::Many(inner) => inner.into_iter().flat_map(parts).collect(),
+            Outcome::None => vec![],
+            other => vec![other],
+        }
+    }
+
     fn without_icons(outcome: Outcome) -> Outcome {
         match outcome {
             Outcome::LoadIcons(_) => Outcome::None,
@@ -7139,6 +7362,123 @@ mod tests {
         assert_eq!(outcome, Outcome::Activated(PathBuf::from("/dir/b.txt")));
     }
 
+    // --- rubber band ---------------------------------------------------------
+
+    /// What the band meets is what is selected, replacing the selection.
+    #[test]
+    fn a_band_selects_exactly_the_rows_it_meets() {
+        let mut browser = loaded_browser(&["a.txt", "b.txt", "c.txt", "d.txt"]);
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+        browser.update(Message::BandStarted);
+        browser.update(Message::Banded(vec![1, 2], false));
+        let selected = browser.selection.selected_paths();
+        assert_eq!(selected.len(), 2);
+        assert!(selected.contains(Path::new("/dir/b.txt")) && selected.contains(Path::new("/dir/c.txt")));
+        // Shrinking the band takes rows back out.
+        browser.update(Message::Banded(vec![2], false));
+        assert_eq!(browser.selection.selected_paths().len(), 1);
+    }
+
+    /// With Ctrl or Shift held the band adds to what was selected before it
+    /// began — and only to that: rows it passed over and left are not kept.
+    #[test]
+    fn a_band_held_with_a_modifier_adds_to_the_earlier_selection() {
+        let mut browser = loaded_browser(&["a.txt", "b.txt", "c.txt", "d.txt"]);
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+        browser.update(Message::BandStarted);
+        browser.update(Message::Banded(vec![2, 3], true));
+        browser.update(Message::Banded(vec![3], true));
+        let selected = browser.selection.selected_paths();
+        assert!(selected.contains(Path::new("/dir/a.txt")), "the earlier selection stays");
+        assert!(!selected.contains(Path::new("/dir/c.txt")), "a row the band left is not kept");
+        assert!(selected.contains(Path::new("/dir/d.txt")));
+    }
+
+    /// Letting go puts the keyboard on the first row met, not before: a
+    /// focus that moved with the band would ask to be revealed, and that
+    /// scroll would fight the band's own.
+    #[test]
+    fn the_focus_lands_on_the_band_only_when_it_is_let_go() {
+        let mut browser = loaded_browser(&["a.txt", "b.txt", "c.txt"]);
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+        browser.update(Message::BandStarted);
+        browser.update(Message::Banded(vec![1, 2], false));
+        assert_eq!(browser.selection.focused(), Some(Path::new("/dir/a.txt")));
+        browser.update(Message::BandEnded);
+        assert_eq!(browser.selection.focused(), Some(Path::new("/dir/b.txt")));
+    }
+
+    /// Rows are tagged for the band only while one is in progress — an
+    /// ordinary frame gives the view no band ids at all.
+    #[test]
+    fn rows_carry_band_ids_only_during_a_band() {
+        let mut browser = loaded_browser(&["a.txt", "b.txt"]);
+        assert!(browser.view_model(1200.0).band_ids.is_none());
+        browser.update(Message::BandStarted);
+        assert_eq!(browser.view_model(1200.0).band_ids.map(<[Id]>::len), Some(2));
+        browser.update(Message::BandEnded);
+        assert!(browser.view_model(1200.0).band_ids.is_none());
+    }
+
+    #[test]
+    fn a_click_on_empty_space_clears_the_selection() {
+        let mut browser = loaded_browser(&["a.txt", "b.txt"]);
+        browser.update(Message::EntryClicked { index: 1, ctrl: false, shift: false });
+        browser.update(Message::BackgroundClicked);
+        assert!(browser.selection.selected_paths().is_empty());
+    }
+
+    fn jumping(browser: &mut Browser) {
+        let mut config = Config::default();
+        config.behaviour.typing = crate::config::Typing::Jump;
+        browser.set_config(Arc::new(config));
+    }
+
+    /// Out of the box a typed letter still searches — the setting changes
+    /// nothing for anyone who has not chosen it.
+    #[test]
+    fn a_typed_letter_searches_by_default() {
+        let mut browser = loaded_browser(&["alpha.txt", "beta.txt"]);
+        browser.update(Message::Typed('b', std::time::Instant::now()));
+        assert_eq!(browser.search_query, "b");
+        assert_eq!(browser.rows().len(), 1, "filtered");
+    }
+
+    /// With typing set to jump, letters move the focus and filter nothing.
+    #[test]
+    fn with_jump_set_a_typed_name_moves_the_focus_and_filters_nothing() {
+        let mut browser = loaded_browser(&["alpha.txt", "beta.txt", "bravo.txt"]);
+        jumping(&mut browser);
+        let now = std::time::Instant::now();
+        browser.update(Message::Typed('b', now));
+        browser.update(Message::Typed('r', now + std::time::Duration::from_millis(100)));
+        assert_eq!(browser.selection.focused(), Some(Path::new("/dir/bravo.txt")));
+        assert!(browser.selection.is_selected(Path::new("/dir/bravo.txt")));
+        assert!(browser.search_query.is_empty());
+        assert_eq!(browser.rows().len(), 3, "nothing filtered");
+    }
+
+    /// A search already being typed keeps its letters even with jump set:
+    /// Ctrl+F then "notes" is a query, not five jumps.
+    #[test]
+    fn a_search_under_way_keeps_its_letters_with_jump_set() {
+        let mut browser = loaded_browser(&["alpha.txt", "beta.txt"]);
+        jumping(&mut browser);
+        browser.update(Message::SearchChanged("a".into()));
+        browser.update(Message::Typed('l', std::time::Instant::now()));
+        assert_eq!(browser.search_query, "al");
+    }
+
+    /// Ctrl+F puts the keyboard in the search field, by the field's own id.
+    #[test]
+    fn find_focuses_the_search_field() {
+        let mut browser = loaded_browser(&["a.txt"]);
+        let keys = Config::default().keymap.combos_for(Action::Find);
+        assert!(!keys.is_empty(), "Find ships bound");
+        let outcome = browser.perform(Action::Find);
+        assert_eq!(outcome, Outcome::FocusPath { id: browser.search_field_id.clone(), select_all: true });
+    }
+
     #[test]
     fn typing_a_character_searches_and_escape_clears_it() {
         let mut browser = loaded_browser(&["alpha.txt", "beta.txt"]);
@@ -7265,14 +7605,14 @@ mod tests {
         let entries = vec![entry("sub", true), entry("a.txt", false), entry("other", true)];
         let outcome =
             browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(entries)));
-        match without_icons(outcome) {
-            Outcome::CountFolders(folders) => {
-                assert_eq!(folders.len(), 2, "both directories, and neither file");
-                assert!(folders.iter().all(|p| p.to_string_lossy().contains("sub")
-                    || p.to_string_lossy().contains("other")));
-            }
-            other => panic!("expected a count request, got {other:?}"),
-        }
+        let counts = parts(outcome).into_iter().find_map(|p| match p {
+            Outcome::CountFolders(folders) => Some(folders),
+            _ => None,
+        });
+        let folders = counts.expect("a listing with folders asks for them to be counted");
+        assert_eq!(folders.len(), 2, "both directories, and neither file");
+        assert!(folders.iter().all(|p| p.to_string_lossy().contains("sub")
+            || p.to_string_lossy().contains("other")));
     }
 
     /// A directory of nothing but files asks for nothing. Sending an
@@ -7283,7 +7623,65 @@ mod tests {
             Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
         let entries = vec![entry("a.txt", false), entry("b.txt", false)];
         let outcome = browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(entries)));
-        assert!(matches!(without_icons(outcome), Outcome::None));
+        assert!(!parts(outcome).iter().any(|p| matches!(p, Outcome::CountFolders(_))));
+    }
+
+    // --- free space --------------------------------------------------------------
+
+    /// Every listing asks how much room is left where it is, a re-read
+    /// included — that is how the figure follows a paste with no
+    /// question of its own.
+    #[test]
+    fn every_listing_asks_for_the_free_space_where_it_is() {
+        let (mut browser, _) =
+            Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
+        for _ in 0..2 {
+            let outcome = browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(vec![entry("a.txt", false)])));
+            assert!(parts(outcome).contains(&Outcome::MeasureSpace(PathBuf::from("/dir"))));
+        }
+    }
+
+    /// The answer reaches the status bar's words; an answer for a folder
+    /// the user has left does not.
+    #[test]
+    fn free_space_lands_only_on_the_folder_it_was_measured_for() {
+        let gib = 1024 * 1024 * 1024;
+        let space = crate::space::Space { free: 10 * gib, total: 100 * gib };
+        let (mut browser, _) =
+            Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
+        browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(vec![])));
+
+        browser.update(Message::SpaceMeasured(PathBuf::from("/elsewhere"), Some(space)));
+        assert_eq!(browser.space, None, "a stale answer is dropped");
+
+        browser.update(Message::SpaceMeasured(PathBuf::from("/dir"), Some(space)));
+        assert_eq!(browser.space.as_deref(), Some("10.0 GiB free of 100.0 GiB"));
+    }
+
+    /// Going somewhere else forgets the old figure at once: the new folder
+    /// may be on another disk, and showing the old one until the answer
+    /// arrives would be a claim about the wrong filesystem.
+    #[test]
+    fn leaving_a_folder_forgets_its_free_space() {
+        let space = crate::space::Space { free: 1, total: 2 };
+        let (mut browser, _) =
+            Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
+        browser.update(Message::DirLoaded(PathBuf::from("/dir"), Ok(vec![entry("sub", true)])));
+        browser.update(Message::SpaceMeasured(PathBuf::from("/dir"), Some(space)));
+        assert!(browser.space.is_some());
+
+        browser.update(Message::Navigate(PathBuf::from("/dir/sub")));
+        assert_eq!(browser.space, None);
+    }
+
+    /// A folder that would not list says nothing about its disk.
+    #[test]
+    fn a_listing_that_failed_asks_for_no_free_space() {
+        let (mut browser, _) =
+            Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
+        let denied = DirError { kind: DirErrorKind::PermissionDenied, message: "no".into() };
+        let outcome = browser.update(Message::DirLoaded(PathBuf::from("/dir"), Err(denied)));
+        assert!(!parts(outcome).iter().any(|p| matches!(p, Outcome::MeasureSpace(_))));
     }
 
     /// A count lands on the folder it was asked about.
@@ -7523,6 +7921,7 @@ mod tests {
         // before the equality check below, which is about `Mode`
         // specifically.
         dialog.list_scrollable_id = app.list_scrollable_id.clone();
+        dialog.search_field_id = app.search_field_id.clone();
         // The same for the instance number every other id is prefixed
         // with — see `Browser::instance`.
         dialog.instance = app.instance;
@@ -7568,6 +7967,7 @@ mod tests {
             viewport_width: 1000.0,
             hidden_count: 0,
             dotfiles: 0,
+            space: None,
             hidden_key: Some("Ctrl+H".to_string()),
             show_trash: true,
             // Off, so a test about Places is about the places it built;
@@ -7582,6 +7982,9 @@ mod tests {
             columns: Vec::new(),
             selection,
             search_query: "",
+            // Leaked: a test fixture borrows for `'a` and owns nothing to borrow from.
+            search_field_id: Box::leak(Box::new(Id::unique())),
+            band_ids: None,
             search: searching::SearchModel::idle(),
             load_state,
             prefs,

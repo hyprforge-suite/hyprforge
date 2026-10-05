@@ -167,6 +167,19 @@ impl UndoHistory {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Everything remembered, **newest first** — the order the history
+    /// list shows, and the order Ctrl+Z works through. Only the first can
+    /// be undone now: each undo checks the folder still looks the way the
+    /// record left it, and taking an older one back first would check
+    /// against a state the newer one has since changed.
+    pub fn newest_first(&self) -> impl Iterator<Item = &Undoable> {
+        self.entries.iter().rev()
+    }
 }
 
 #[cfg(test)]
@@ -186,6 +199,19 @@ mod tests {
         assert_eq!(renamed.undo_moves(), [(PathBuf::from("/d/b"), PathBuf::from("/d/a"))]);
         assert!(copied(2).moves().is_empty());
         assert!(Undoable::Trashed(vec![("/t/a".into(), "/d/a".into(), "/t/a.info".into())]).moves().is_empty());
+    }
+
+    /// The history list and Ctrl+Z agree about what comes next: the list's
+    /// first row is what `pop` takes.
+    #[test]
+    fn the_history_lists_newest_first_and_its_first_row_is_what_undo_takes() {
+        let mut history = UndoHistory::new(10);
+        history.push(copied(1));
+        history.push(Undoable::MadeFolder("/new".into()));
+        let listed: Vec<Undoable> = history.newest_first().cloned().collect();
+        assert_eq!(listed, [Undoable::MadeFolder("/new".into()), copied(1)]);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history.pop().as_ref(), listed.first());
     }
 
     #[test]

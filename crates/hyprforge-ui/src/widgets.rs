@@ -13,6 +13,7 @@ mod clamped_text;
 mod controls;
 mod field;
 mod layout;
+mod marquee;
 mod progress;
 mod panel;
 mod ring;
@@ -34,6 +35,7 @@ pub use layout::{
     hero_card, hint_text, page_header, pending_bar, pending_label, setting_list, setting_row,
     setting_row_style, status_dot, SETTING_ROW_GAP,
 };
+pub use marquee::{band_rect, edge_scroll, marquee, Marquee};
 pub use progress::{popover_card, progress_line, progress_line_style};
 pub use panel::{fact, fact_row, panel_tabs};
 pub use ring::{countdown_ring, remaining_fraction};

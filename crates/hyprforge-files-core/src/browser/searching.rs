@@ -583,7 +583,7 @@ pub(super) fn search_box<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a
         .enumerate()
         .map(|(i, chip)| removable_chip(chip.source.clone(), Message::Search(SearchMessage::RemoveChip(i)), scale))
         .collect();
-    hyprforge_ui::widgets::token_field(&placeholder, vm.search_query, tokens, Message::SearchChanged, None, None, scale)
+    hyprforge_ui::widgets::token_field(&placeholder, vm.search_query, tokens, Message::SearchChanged, None, Some(vm.search_field_id.clone()), scale)
         .width(Length::Fixed(field_width(chips, scale)))
         .into()
 }

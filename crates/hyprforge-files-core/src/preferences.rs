@@ -28,7 +28,7 @@
 //! than write a file the loader would then have to complain about.
 
 use crate::action::{Action, Scope};
-use crate::config::{Behaviour, OnConflict, SidebarConfig};
+use crate::config::{Behaviour, OnConflict, SidebarConfig, Typing};
 use crate::config_edit::{BehaviourValue, Edit};
 use crate::keymap::{Combo, KeyPress, Keymap, Resolved};
 use crate::prefs::{Prefs, SidebarPref, ViewMode};
@@ -84,6 +84,8 @@ pub enum BehaviourSetting {
     /// `grid-name-lines`: how much of a name a grid cell shows before
     /// "…", one to three.
     GridNameLines(u8),
+    /// `[behaviour] typing`: search or jump.
+    Typing(Typing),
 }
 
 impl BehaviourSetting {
@@ -98,6 +100,7 @@ impl BehaviourSetting {
                 Edit::Behaviour("watch-network-every", BehaviourValue::Number(seconds as i64))
             }
             BehaviourSetting::GridNameLines(n) => Edit::Behaviour("grid-name-lines", BehaviourValue::Number(n.into())),
+            BehaviourSetting::Typing(typing) => Edit::Behaviour("typing", BehaviourValue::Word(typing_id(typing))),
         }
     }
 
@@ -111,6 +114,7 @@ impl BehaviourSetting {
             BehaviourSetting::GridNameLines(n) => behaviour.grid_name_lines == n,
             BehaviourSetting::Watch(on) => behaviour.watch == on,
             BehaviourSetting::WatchNetworkEvery(seconds) => behaviour.watch_network_every == seconds,
+            BehaviourSetting::Typing(typing) => behaviour.typing == typing,
         }
     }
 }
@@ -228,6 +232,26 @@ pub fn conflict_id(policy: OnConflict) -> &'static str {
     }
 }
 
+/// The two answers to "what does a typed letter do", in the order the
+/// sheet shows them.
+pub const TYPING_CHOICES: [Typing; 2] = [Typing::Search, Typing::Jump];
+
+/// The word `[behaviour] typing` uses.
+pub fn typing_id(typing: Typing) -> &'static str {
+    match typing {
+        Typing::Search => "search",
+        Typing::Jump => "jump",
+    }
+}
+
+/// What the sheet calls each answer.
+pub fn typing_label(typing: Typing) -> &'static str {
+    match typing {
+        Typing::Search => "Search",
+        Typing::Jump => "Jump to name",
+    }
+}
+
 /// What the sheet calls a policy.
 pub fn conflict_label(policy: OnConflict) -> &'static str {
     match policy {
@@ -270,13 +294,13 @@ pub const CONFLICT_POLICIES: [OnConflict; 4] =
 pub fn group(action: Action) -> &'static str {
     use Action::*;
     match action {
-        Open | OpenInNewTab | ShowInFolder | GoUp | GoBack | GoForward | EditLocation | CommandPalette | Refresh => {
+        Open | OpenInNewTab | ShowInFolder | GoUp | GoBack | GoForward | EditLocation | Find | CommandPalette | Refresh => {
             "Going places"
         }
         FocusUp | FocusDown | FocusLeft | FocusRight | ExtendUp | ExtendDown | SelectAll | ClearSearch
         | NextSearchScope | ContextMenu => "Selecting",
         Trash | DeletePermanently | Restore | EmptyTrash | Copy | Cut | Paste | CopyPath | Rename | NewFolder
-        | OpenWith | Extract | ExtractTo | Compress | Undo | CopyToOtherPane | MoveToOtherPane => "Files",
+        | OpenWith | Extract | ExtractTo | Compress | Undo | UndoHistory | CopyToOtherPane | MoveToOtherPane => "Files",
         ToggleHidden | TogglePreview | ZoomIn | ZoomOut | ZoomReset | QuickLook | Properties | Preferences | Transfers
         | TransferQueue | OpenTerminal => "The window",
         Pin | Unpin | PinUp | PinDown | ToggleStar | Mount | Unmount | Eject | Disconnect | ConnectToServer => "Sidebar",

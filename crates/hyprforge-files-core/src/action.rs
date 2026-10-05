@@ -40,6 +40,10 @@ pub enum Action {
     GoForward,
     /// Type where to go, in the path bar — see [`crate::jump`].
     EditLocation,
+    /// Put the keyboard in the search field. What starts a search when
+    /// typing jumps instead (`[behaviour] typing = "jump"`), and a way to
+    /// reach the field without the pointer either way.
+    Find,
     /// Find any action by typing its name — see [`crate::palette`].
     CommandPalette,
     /// Move the keyboard focus one row, collapsing the selection onto it.
@@ -168,6 +172,9 @@ pub enum Action {
     // Window scope: the tab strip, and undo — whose history spans tabs.
     /// Take back the most recent trash, rename, move, copy or new folder.
     Undo,
+    /// Show what is remembered for undo, newest first — the thing Ctrl+Z
+    /// would take back next, and what waits behind it.
+    UndoHistory,
     NewTab,
     CloseTab,
     NextTab,
@@ -233,6 +240,7 @@ impl Action {
             Action::GoBack,
             Action::GoForward,
             Action::EditLocation,
+            Action::Find,
             Action::CommandPalette,
             Action::FocusUp,
             Action::FocusDown,
@@ -278,6 +286,7 @@ impl Action {
             Action::NewFolder,
             Action::ContextMenu,
             Action::Undo,
+            Action::UndoHistory,
             Action::NewTab,
             Action::CloseTab,
             Action::NextTab,
@@ -306,6 +315,7 @@ impl Action {
             Action::GoBack => "go-back",
             Action::GoForward => "go-forward",
             Action::EditLocation => "edit-location",
+            Action::Find => "find",
             Action::CommandPalette => "command-palette",
             Action::FocusUp => "focus-up",
             Action::FocusDown => "focus-down",
@@ -351,6 +361,7 @@ impl Action {
             Action::NewFolder => "new-folder",
             Action::ContextMenu => "context-menu",
             Action::Undo => "undo",
+            Action::UndoHistory => "undo-history",
             Action::NewTab => "new-tab",
             Action::CloseTab => "close-tab",
             Action::NextTab => "next-tab",
@@ -396,6 +407,7 @@ impl Action {
             Action::GoBack => "Back",
             Action::GoForward => "Forward",
             Action::EditLocation => "Go to Location…",
+            Action::Find => "Find",
             Action::CommandPalette => "Command Palette",
             Action::FocusUp => "Previous Item",
             Action::FocusDown => "Next Item",
@@ -441,6 +453,7 @@ impl Action {
             Action::NewFolder => "New Folder",
             Action::ContextMenu => "Show Menu",
             Action::Undo => "Undo",
+            Action::UndoHistory => "Undo History",
             Action::NewTab => "New Tab",
             Action::CloseTab => "Close Tab",
             Action::NextTab => "Next Tab",
@@ -469,6 +482,7 @@ impl Action {
     pub fn scope(self) -> Scope {
         match self {
             Action::Undo
+            | Action::UndoHistory
             | Action::NewTab
             | Action::CloseTab
             | Action::NextTab
@@ -508,6 +522,8 @@ impl Action {
             // What every browser and GTK's own file chooser use for
             // "type a location".
             Action::EditLocation => &["Ctrl+L"],
+            // Every application's find.
+            Action::Find => &["Ctrl+F"],
             // The key every editor and launcher with a palette uses.
             Action::CommandPalette => &["Ctrl+K"],
             Action::FocusUp => &["Up"],
@@ -596,6 +612,10 @@ impl Action {
             // would open".
             Action::ContextMenu => &["Menu", "Shift+F10"],
             Action::Undo => &["Ctrl+Z"],
+            // Unbound: the notice's History button and the palette reach
+            // it, and Ctrl+Shift+Z — the obvious key — is redo everywhere
+            // else, which this crate may yet want.
+            Action::UndoHistory => &[],
             Action::NewTab => &["Ctrl+T"],
             Action::CloseTab => &["Ctrl+W"],
             Action::NextTab => &["Ctrl+Tab"],
@@ -742,7 +762,7 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         Action::GoUp => ctx.has_parent,
         Action::GoBack => ctx.can_go_back,
         Action::GoForward => ctx.can_go_forward,
-        Action::EditLocation | Action::CommandPalette => true,
+        Action::EditLocation | Action::Find | Action::CommandPalette => true,
         Action::FocusUp
         | Action::FocusDown
         | Action::FocusLeft
@@ -834,6 +854,7 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         // the folder in view, which is what every file manager's
         // Properties does from the background.
         Action::Undo
+        | Action::UndoHistory
         | Action::NewTab
         | Action::CloseTab
         | Action::NextTab
@@ -939,6 +960,7 @@ mod tests {
             let is_window = matches!(
                 action,
                 Action::Undo
+                    | Action::UndoHistory
                     | Action::NewTab
                     | Action::CloseTab
                     | Action::NextTab

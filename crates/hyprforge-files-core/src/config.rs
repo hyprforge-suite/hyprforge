@@ -239,6 +239,9 @@ pub struct Behaviour {
     /// How many lines of its name a grid cell shows before "…", one to
     /// three. The selected cell shows the whole name whatever this says.
     pub grid_name_lines: u8,
+    /// What a letter typed at the listing does: search (the default), or
+    /// jump to the first name it begins — see [`crate::typeahead`].
+    pub typing: Typing,
 }
 
 impl Default for Behaviour {
@@ -253,6 +256,31 @@ impl Default for Behaviour {
             watch: true,
             watch_network_every: 3,
             grid_name_lines: 2,
+            typing: Typing::Search,
+        }
+    }
+}
+
+/// What a letter typed at the listing means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Typing {
+    /// Filter the folder by what is typed — Nautilus's answer, and this
+    /// app's from the start, so it stays the default: changing what every
+    /// letter does under someone's hands is not a default to change.
+    #[default]
+    Search,
+    /// Move to the first name that begins with what is typed — Explorer's,
+    /// Finder's and Dolphin's answer. Search is then Ctrl+F, or a click
+    /// on the field.
+    Jump,
+}
+
+impl Typing {
+    fn parse(text: &str) -> Option<Typing> {
+        match text.trim() {
+            "search" => Some(Typing::Search),
+            "jump" => Some(Typing::Jump),
+            _ => None,
         }
     }
 }
@@ -371,6 +399,7 @@ struct RawBehaviour {
     watch_network_every: Option<toml::Value>,
     terminal: Option<toml::Value>,
     grid_name_lines: Option<toml::Value>,
+    typing: Option<String>,
 }
 
 /// A number within `range`, or a problem naming it. `name` includes
@@ -494,6 +523,14 @@ pub fn parse(text: &str, path: &Path) -> (Config, Vec<ConfigProblem>) {
             None => problems.push(problem(format!(
                 "[behaviour] on-conflict = \"{text}\": use ask, keep-both, skip or replace — \
                  asking until this is fixed"
+            ))),
+        }
+    }
+    if let Some(text) = &raw.behaviour.typing {
+        match Typing::parse(text) {
+            Some(choice) => behaviour.typing = choice,
+            None => problems.push(problem(format!(
+                "[behaviour] typing = \"{text}\": use search or jump — searching until this is fixed"
             ))),
         }
     }
@@ -907,6 +944,23 @@ mod tests {
         assert_eq!(problems.len(), 2, "{problems:?}");
         assert!(problems.iter().any(|p| p.message.contains("frobnicate")));
         assert!(problems.iter().any(|p| p.message.contains("sidebar")));
+    }
+
+    #[test]
+    fn typing_searches_unless_the_file_says_jump() {
+        assert_eq!(Config::default().behaviour.typing, Typing::Search);
+        let (config, problems) = parsed("[behaviour]\ntyping = \"jump\"\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(config.behaviour.typing, Typing::Jump);
+    }
+
+    /// A misspelling keeps the default rather than guessing, and says so.
+    #[test]
+    fn a_misspelled_typing_choice_keeps_searching_and_says_so() {
+        let (config, problems) = parsed("[behaviour]\ntyping = \"leap\"\n");
+        assert_eq!(config.behaviour.typing, Typing::Search);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].message.contains("leap"));
     }
 
     #[test]

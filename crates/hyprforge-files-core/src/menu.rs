@@ -219,6 +219,10 @@ impl Default for MenuConfig {
             empty: vec![
                 A(Paste),
                 A(NewFolder),
+                // Beside Paste, where Explorer's background menu keeps
+                // "Undo Move": what was done in this folder is a question
+                // asked of its empty space.
+                A(UndoHistory),
                 Sep,
                 A(SelectAll),
                 A(ToggleHidden),
