@@ -635,6 +635,11 @@ pub enum Outcome {
     /// does, having no business raising privileges on behalf of the
     /// program that opened it.
     OpenAsAdmin(PathBuf),
+    /// Stop browsing as administrator, and read this folder again as
+    /// this user. The browser has already gone back to
+    /// [`Admin::Offered`]; the host reads the folder through the
+    /// ordinary backend from here on.
+    LeaveAdmin(PathBuf),
     /// A file (never a directory — see `Browser::activate`) was
     /// activated. The app opens it; the dialog treats it as the chosen
     /// path. `Browser` does not know or care which.
@@ -828,6 +833,8 @@ pub enum Message {
     /// What the host can do as administrator for this browser — see
     /// [`Admin`].
     SetAdmin(Admin),
+    /// The banner's "Leave administrator": back to browsing as this user.
+    LeaveAdmin,
     DirLoaded(PathBuf, Result<Vec<Entry>, DirError>),
     /// A pane's folder, read — the answer to [`Outcome::ReadColumns`].
     ColumnLoaded(PathBuf, Result<Vec<Entry>, DirError>),
@@ -927,6 +934,13 @@ pub enum Message {
     /// A drag over the window is over this folder now, or over nothing
     /// a drop could land in.
     DropHover(Option<PathBuf>),
+    /// How much of the wait before the folder under a drag opens has
+    /// passed, `0.0`–`1.0`. Sent by the host on every frame of the wait.
+    DropOpening(f32),
+    /// How covered the listing still is as a folder a drag opened fades
+    /// in, `1.0` to `0.0`. Sent by the host on every frame of the fade,
+    /// so a spring-loaded folder arrives rather than snaps in.
+    Arriving(f32),
     /// A press on empty space became a rubber band — see
     /// `hyprforge_ui::widgets::marquee`. The rows are tagged from the next
     /// frame on, so the band can ask the layout which it meets.
@@ -1033,6 +1047,10 @@ struct ViewModel<'a> {
     path_edit: Option<&'a PathEdit>,
     /// The folder a drag is over, if one is — see [`crate::drop`].
     drop_hover: Option<&'a Path>,
+    /// See [`Browser::drop_opening`].
+    drop_opening: f32,
+    /// See [`Browser::arriving`].
+    arriving: f32,
     column_picker_open: bool,
     /// Whether the sidebar is collapsed right now — the resolved answer,
     /// not the preference, so `render` never has to ask twice.
@@ -1249,6 +1267,13 @@ pub struct Browser {
     /// The folder a drag over the window is over — told by the host,
     /// which is the one that hears the compositor. See [`crate::drop`].
     drop_hover: Option<PathBuf>,
+    /// How much of the wait before [`Browser::drop_hover`] opens has
+    /// passed, `0.0`–`1.0` — the host's spring-loading clock, told with
+    /// [`Message::DropOpening`] so the folder can show it coming.
+    drop_opening: f32,
+    /// How much of a just-opened folder is still covered as it fades in,
+    /// `1.0` covered to `0.0` clear — see [`Message::Arriving`].
+    arriving: f32,
     /// See [`Message::AfterListing`].
     after_listing: Option<(PathBuf, bool)>,
     /// See [`Message::SelectWhenListed`]. Empty when nothing waits.
@@ -1347,6 +1372,8 @@ impl Browser {
             font_scale: FontScale::default(),
             palette: None,
             drop_hover: None,
+            drop_opening: 0.0,
+            arriving: 0.0,
             after_listing: None,
             select_when_listed: Vec::new(),
             select_first: false,
@@ -1579,6 +1606,11 @@ impl Browser {
                 self.admin = admin;
                 Outcome::None
             }
+            Message::LeaveAdmin if self.admin == Admin::Elevated => {
+                self.admin = Admin::Offered;
+                Outcome::LeaveAdmin(self.current_dir.clone())
+            }
+            Message::LeaveAdmin => Outcome::None,
             Message::DirLoaded(path, result) => self.apply_dir_loaded(path, result),
             Message::ColumnLoaded(dir, result) => self.apply_column_loaded(dir, result),
             Message::ColumnChose(path) => self.choose_in_column(path),
@@ -1760,7 +1792,18 @@ impl Browser {
                 Outcome::None
             }
             Message::DropHover(over) => {
+                if over != self.drop_hover {
+                    self.drop_opening = 0.0;
+                }
                 self.drop_hover = over;
+                Outcome::None
+            }
+            Message::DropOpening(opening) => {
+                self.drop_opening = opening;
+                Outcome::None
+            }
+            Message::Arriving(cover) => {
+                self.arriving = cover;
                 Outcome::None
             }
             Message::PaletteInput(query) => {
@@ -1865,6 +1908,10 @@ impl Browser {
                     add(&entry.path);
                 }
             }
+        }
+        // The path bar's crumbs: every folder above this one.
+        for ancestor in self.current_dir.ancestors().skip(1) {
+            add(ancestor);
         }
         for item in &self.sidebar {
             add(&item.path);
@@ -3429,6 +3476,8 @@ impl Browser {
             renaming: self.renaming.as_ref(),
             path_edit: self.path_edit.as_ref(),
             drop_hover: self.drop_hover.as_deref(),
+            drop_opening: self.drop_opening,
+            arriving: self.arriving,
             column_picker_open: self.column_picker_open,
             sidebar_collapsed,
             viewport_width,
@@ -3919,9 +3968,13 @@ fn file_area<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         .height(Length::Fill)
         .style(move |_t: &iced::Theme| container::Style {
             background: Some(iced::Background::Color(hyprforge_ui::theme::surface::card())),
+            // The same outline a folder under a drag takes — see
+            // `hyprforge_ui::widgets::drop_target_style` — so "it lands
+            // in the folder you are looking at" reads the way "it lands
+            // in that folder" does.
             border: iced::Border {
-                color: hyprforge_ui::theme::text_dim(),
-                width: if hovered { 1.0 } else { 0.0 },
+                color: iced::Color { a: 0.85, ..hyprforge_ui::theme::text() },
+                width: if hovered { 1.5 } else { 0.0 },
                 ..iced::Border::default()
             },
             ..container::Style::default()
@@ -3933,14 +3986,17 @@ fn file_area<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
 /// [`crate::drop::target_id`], and takes the hover step while a drag is
 /// over it — the same fill a row takes under the pointer, never the
 /// accent, which means selected.
-fn drop_zone<'a>(inner: impl Into<Element<'a, Message>>, instance: u64, path: &Path, hovered: bool) -> Element<'a, Message> {
+fn drop_zone<'a>(
+    inner: impl Into<Element<'a, Message>>,
+    instance: u64,
+    path: &Path,
+    (hover, opening): (Option<&Path>, f32),
+) -> Element<'a, Message> {
+    use hyprforge_ui::widgets::{drop_target_style, DropLook};
+    let look = if hover == Some(path) { DropLook::Over { opening } } else { DropLook::Idle };
     container(inner)
         .id(crate::drop::target_id(instance, path))
-        .style(move |_t: &iced::Theme| container::Style {
-            background: hovered.then(|| iced::Background::Color(hyprforge_ui::theme::surface::row())),
-            border: iced::Border { radius: density::nested_radius().into(), ..iced::Border::default() },
-            ..container::Style::default()
-        })
+        .style(move |_t: &iced::Theme| drop_target_style(look))
         .into()
 }
 
@@ -4264,33 +4320,18 @@ fn status_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> 
 
     let summary = status_line(vm);
 
-    // Left: what is in here. Right: where "here" is on disk, which is
-    // the other question a status bar is asked and the one the path bar
-    // only half answers — it elides the middle of a long path, and this
-    // does not.
     // The dotfile switch, where the count of what is hidden is — Ctrl+H
     // is not something anyone finds by looking. Only offered when there
-    // are dotfiles here to show or hide.
-    // The count is already in the summary beside it, so the switch says
-    // only what it does — and names its key, which is the half nobody
-    // can guess.
-    let dotfile_switch: Element<'a, Message> = if vm.dotfiles > 0 {
+    // are dotfiles here to show or hide. The count is already in the
+    // summary beside it, so the switch says only what it does — and
+    // names its key, which is the half nobody can guess.
+    let dotfiles = (vm.dotfiles > 0).then(|| {
         let verb = if vm.prefs.show_hidden { "Hide" } else { "Show" };
-        let label = match &vm.hidden_key {
+        match &vm.hidden_key {
             Some(key) => format!("{verb} ({key})"),
             None => verb.to_string(),
-        };
-        // `scaled_text`, not `meta_text`: a colour set on the text
-        // would override the button's, and the hover colour with it.
-        iced::widget::button(scaled_text(label, density::META_TEXT_BASE, scale))
-            .padding([0, spacing::XS as u16])
-            .on_press(Message::Perform(Action::ToggleHidden))
-            .style(quiet_link_style)
-            .into()
-    } else {
-        iced::widget::Space::new().into()
-    };
-
+        }
+    });
     // The preview pane's switch, beside the dotfiles one and for the same
     // reason: a key nobody finds by looking. It names what is on screen,
     // not the setting — the two part company on a narrow window, and a
@@ -4299,61 +4340,150 @@ fn status_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> 
     // turn off a setting the user cannot see the effect of either way.
     // With Properties in the pane's place the width is not why, so it is
     // the button again: "Show preview" gives the slot back.
-    let preview_switch: Element<'a, Message> =
-        if vm.prefs.preview_pane && vm.preview.is_none() && vm.inspector.is_none() {
-        meta_text("Preview needs a wider window", density::META_TEXT_BASE, scale).into()
+    let preview: (String, bool) = if vm.prefs.preview_pane && vm.preview.is_none() && vm.inspector.is_none() {
+        ("Preview needs a wider window".to_string(), false)
     } else {
-        iced::widget::button(scaled_text(
-            if vm.preview.is_some() { "Hide preview" } else { "Show preview" },
-            density::META_TEXT_BASE,
-            scale,
-        ))
-        .padding([0, spacing::XS as u16])
-        .on_press(Message::Perform(Action::TogglePreview))
-        .style(quiet_link_style)
-        .into()
+        ((if vm.preview.is_some() { "Hide preview" } else { "Show preview" }).to_string(), true)
     };
+    // Free space, right-hand with the other facts about *where* rather
+    // than *what*. Not for Recent or Starred: their rows come from
+    // anywhere, and one disk's figure would be a claim about none of them
+    // in particular.
+    let space = vm.space.filter(|_| vm.collection.is_none()).map(str::to_string);
+    let size = match vm.prefs.view_mode == ViewMode::Grid && grid_draw_scale(vm, scale).1 {
+        // Said, because a zoom that does less than its name with nothing
+        // to say why reads as the zoom broken.
+        true => format!("{}, smaller to fit the window", size_label(vm.prefs)),
+        false => size_label(vm.prefs),
+    };
+    let path = crate::format::tilde_path(vm.current_dir, home_dir().as_deref());
 
+    // Left: what is in here. Right: where "here" is on disk, which is the
+    // other question a status bar is asked and the one the path bar only
+    // half answers.
+    //
+    // Every item is one line. When they do not all fit, the least needed
+    // go first — the path (the path bar has it), the zoom's name, free
+    // space, then the switches — rather than each wrapping onto a second
+    // line and out of the bar, which is what a narrow window did. The
+    // summary stays, and is cut with "…" last of all.
     plane(
-        row![
-            meta_text(summary, density::META_TEXT_BASE, scale),
-            dotfile_switch,
-            preview_switch,
-            iced::widget::Space::new().width(Length::Fill),
-            // Free space, right-hand with the other facts about *where*
-            // rather than *what*. Not for Recent or Starred: their rows
-            // come from anywhere, and one disk's figure would be a claim
-            // about none of them in particular.
-            match vm.space.filter(|_| vm.collection.is_none()) {
-                Some(space) => Element::from(meta_text(space.to_string(), density::META_TEXT_BASE, scale)),
-                None => iced::widget::Space::new().into(),
-            },
-            meta_text(
-                match vm.prefs.view_mode == ViewMode::Grid && grid_draw_scale(vm, scale).1 {
-                    // Said, because a zoom that does less than its name
-                    // with nothing to say why reads as the zoom broken.
-                    true => format!("{}, smaller to fit the window", size_label(vm.prefs)),
-                    false => size_label(vm.prefs),
-                },
-                density::META_TEXT_BASE,
+        iced::widget::responsive(move |bounds| {
+            let fit = status_fit(
+                bounds.width,
                 scale,
-            ),
-            // One line, with "~" for home and "…" where it runs out: in a
-            // split pane the status bar is half the window, and the whole
-            // path wrapped onto a second line and out of the bar.
-            container(
-                clamped_text(crate::format::tilde_path(vm.current_dir, home_dir().as_deref()), 1)
+                StatusWidths {
+                    summary: &summary,
+                    dotfiles: dotfiles.as_deref(),
+                    preview: &preview.0,
+                    space: space.as_deref(),
+                    size: &size,
+                    path: &path,
+                },
+            );
+            let line = |text: String| -> Element<'static, Message> {
+                clamped_text(text, 1)
+                    .wrapping(iced::widget::text::Wrapping::None)
                     .size(scale.apply(density::META_TEXT_BASE))
                     .color(hyprforge_ui::theme::text_dim())
-                    .wrapping(iced::widget::text::Wrapping::Glyph),
-            )
-            .width(Length::Shrink)
-            .max_width(scale.apply(480.0)),
-        ]
-        .spacing(spacing::MD)
-        .align_y(iced::Alignment::Center)
+                    .width(Length::Shrink)
+                    .into()
+            };
+            let link = |text: String, message: Message| -> Element<'static, Message> {
+                // `scaled_text`, not `meta_text`: a colour set on the text
+                // would override the button's, and the hover colour with it.
+                iced::widget::button(
+                    scaled_text(text, density::META_TEXT_BASE, scale).wrapping(iced::widget::text::Wrapping::None),
+                )
+                .padding([0, spacing::XS as u16])
+                .on_press(message)
+                .style(quiet_link_style)
+                .into()
+            };
+            let mut bar = row![container(line(summary.clone())).width(Length::Shrink)]
+                .spacing(spacing::MD)
+                .align_y(iced::Alignment::Center);
+            if fit.dotfiles {
+                if let Some(label) = &dotfiles {
+                    bar = bar.push(link(label.clone(), Message::Perform(Action::ToggleHidden)));
+                }
+            }
+            if fit.preview {
+                bar = bar.push(match preview.1 {
+                    true => link(preview.0.clone(), Message::Perform(Action::TogglePreview)),
+                    false => line(preview.0.clone()),
+                });
+            }
+            bar = bar.push(iced::widget::Space::new().width(Length::Fill));
+            if fit.space {
+                if let Some(space) = &space {
+                    bar = bar.push(line(space.clone()));
+                }
+            }
+            if fit.size && !size.is_empty() {
+                bar = bar.push(line(size.clone()));
+            }
+            if fit.path {
+                bar = bar.push(container(line(path.clone())).width(Length::Shrink).max_width(scale.apply(480.0)));
+            }
+            bar.into()
+        })
         .into(),
     )
+}
+
+/// The texts a status bar would show, for [`status_fit`].
+struct StatusWidths<'s> {
+    summary: &'s str,
+    dotfiles: Option<&'s str>,
+    preview: &'s str,
+    space: Option<&'s str>,
+    size: &'s str,
+    path: &'s str,
+}
+
+/// Which of the status bar's optional items fit beside the summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StatusFit {
+    dotfiles: bool,
+    preview: bool,
+    space: bool,
+    size: bool,
+    path: bool,
+}
+
+/// Decides what the status bar has room for in `width` logical pixels.
+///
+/// Measured from character counts at a generous average glyph width
+/// rather than shaped: this runs on every layout, and erring wide only
+/// means an item goes a few pixels before it strictly had to — where
+/// erring narrow is the wrapping this exists to stop. The path is cut
+/// with "…" anyway, so it is counted at its cap, not its length.
+fn status_fit(width: f32, scale: FontScale, texts: StatusWidths<'_>) -> StatusFit {
+    let em = scale.apply(density::META_TEXT_BASE);
+    let measure = |text: &str| text.chars().count() as f32 * em * 0.62;
+    let gap = spacing::MD;
+    let button = 2.0 * spacing::XS;
+    // Room left once the bar's own padding and the summary are placed.
+    let mut left = width - 2.0 * spacing::MD - measure(texts.summary);
+    let mut take = |needed: f32| {
+        if needed + gap <= left {
+            left -= needed + gap;
+            true
+        } else {
+            false
+        }
+    };
+    // In order of what is worth keeping: the switches are the only way
+    // to find two keys, free space is a fact nothing else on screen
+    // states, the zoom's name says what Ctrl+wheel did, and the path is
+    // in the path bar already.
+    let dotfiles = texts.dotfiles.is_some_and(|t| take(measure(t) + button));
+    let preview = take(measure(texts.preview) + button);
+    let space = texts.space.is_some_and(|t| take(measure(t)));
+    let size = texts.size.is_empty() || take(measure(texts.size));
+    let path = take(measure(texts.path).min(scale.apply(480.0)).min(scale.apply(160.0).max(0.0)));
+    StatusFit { dotfiles, preview, space, size, path }
 }
 
 /// What size the listing is drawn at, for the status bar: the preset's
@@ -4773,8 +4903,7 @@ fn sidebar_place<'a>(
         drives::RowPlace::MenuOnly(path) => return sidebar_menu_area(button, path),
         drives::RowPlace::Plain => return button.into(),
     };
-    let hovered = vm.drop_hover == Some(path.as_path());
-    let zone = drop_zone(button, vm.instance, &path, hovered);
+    let zone = drop_zone(button, vm.instance, &path, (vm.drop_hover, vm.drop_opening));
     sidebar_menu_area(zone, path)
 }
 
@@ -4816,9 +4945,18 @@ fn path_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
             // sidebar marks its current location with, so the header and
             // the sidebar agree about where you are rather than each
             // making its own claim.
+            //
+            // Cut with "…" to the room the field has left: a long name
+            // (a hash-named zip) otherwise ran straight on across the
+            // search field beside it. `Shrink`, so a short name keeps a
+            // chip its own size rather than one stretched to the end.
             crumbs = crumbs.push(
                 container(
-                    scaled_text(label, density::META_TEXT_BASE, scale).font(hyprforge_ui::theme::mono_font()),
+                    clamped_text(label, 1)
+                        .wrapping(iced::widget::text::Wrapping::None)
+                        .size(scale.apply(density::META_TEXT_BASE))
+                        .font(hyprforge_ui::theme::mono_font())
+                        .width(Length::Shrink),
                 )
                 .padding([1, 5])
                 .style(|_t: &iced::Theme| container::Style {
@@ -4842,7 +4980,10 @@ fn path_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
             // selection the moment the eye drops into the list.
             crumbs = crumbs.push(crumb_button(label, path, scale, true));
         } else {
-            crumbs = crumbs.push(crumb_button(label, path, scale, false));
+            // An ancestor is somewhere a drop can land — "up a level"
+            // by dragging, as Finder and Dolphin allow.
+            let zone = drop_zone(crumb_button(label, path.clone(), scale, false), vm.instance, &path, (vm.drop_hover, vm.drop_opening));
+            crumbs = crumbs.push(zone);
         }
     }
 
@@ -5068,6 +5209,19 @@ fn body_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // menu. Rows capture their own right press first — see
     // `with_row_menu` — so this only sees the empty space.
     let content = body_content(vm, zoomed);
+    // A folder a resting drag just opened fades in under a cover of the
+    // card's own colour, so the listing changes without a jolt.
+    let content: Element<'a, Message> = if vm.arriving > 0.0 {
+        let cover = iced::Color { a: vm.arriving.clamp(0.0, 1.0), ..hyprforge_ui::theme::surface::card() };
+        iced::widget::stack![
+            content,
+            container(iced::widget::Space::new().width(Length::Fill).height(Length::Fill))
+                .style(move |_: &iced::Theme| container::Style { background: Some(cover.into()), ..container::Style::default() }),
+        ]
+        .into()
+    } else {
+        content
+    };
     let content: Element<'a, Message> =
         if vm.elevated { column![elevated_banner(scale), content].into() } else { content };
     let body = iced::widget::mouse_area(
@@ -5123,7 +5277,16 @@ fn load_error<'a>(vm: &ViewModel<'a>, err: &DirError, scale: FontScale) -> Eleme
 /// Across the top of an elevated browser's listing, for as long as it
 /// is one: what is done here is done to the whole system.
 fn elevated_banner<'a>(scale: FontScale) -> Element<'a, Message> {
-    container(scaled_text("Administrator — changes here affect the whole system", BASE_TEXT_SIZE, scale))
+    let leave = hyprforge_ui::widgets::secondary_button("Leave administrator").on_press(Message::LeaveAdmin);
+    container(
+        row![
+            scaled_text("Administrator — changes here affect the whole system", BASE_TEXT_SIZE, scale)
+                .width(Length::Fill),
+            leave,
+        ]
+        .spacing(spacing::MD)
+        .align_y(iced::Alignment::Center),
+    )
         .padding([spacing::XS, spacing::MD])
         .width(Length::Fill)
         .style(|_: &iced::Theme| container::Style {
@@ -5204,7 +5367,7 @@ fn column_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message>
             for (index, entry) in vm.rows.iter().copied().enumerate() {
                 let row = entry_row(index, entry, vm.selection.is_selected(&entry.path), &ctx);
                 let row = if entry.is_dir && !vm.in_trash {
-                    drop_zone(row, vm.instance, &entry.path, vm.drop_hover == Some(entry.path.as_path()))
+                    drop_zone(row, vm.instance, &entry.path, (vm.drop_hover, vm.drop_opening))
                 } else {
                     row
                 };
@@ -5306,7 +5469,7 @@ fn column_pane<'a>(pane: &ColumnModel<'a>, vm: &ViewModel<'a>, ctx: &RowContext<
         let on_trail = pane.trail.as_deref() == Some(entry.path.as_path());
         let content = row![
             entry_icon(entry.kind, ctx.icons.for_entry(entry), 20.0, scale),
-            list_cell(scaled_text(&entry.name, density::ROW_TEXT_BASE, scale), NAME_PORTION),
+            clamped_cell(entry.name.clone(), hyprforge_ui::theme::text(), density::ROW_TEXT_BASE, NAME_PORTION, scale),
         ]
         .spacing(spacing::SM)
         .align_y(iced::Alignment::Center);
@@ -5316,7 +5479,7 @@ fn column_pane<'a>(pane: &ColumnModel<'a>, vm: &ViewModel<'a>, ctx: &RowContext<
             .height(Length::Fixed(density::row_height(scale)))
             .style(move |t: &iced::Theme, status| trail_row_style(t, status, on_trail));
         list = list.push(if entry.is_dir {
-            drop_zone(button, vm.instance, &entry.path, vm.drop_hover == Some(entry.path.as_path()))
+            drop_zone(button, vm.instance, &entry.path, (vm.drop_hover, vm.drop_opening))
         } else {
             button.into()
         });
@@ -5365,14 +5528,20 @@ fn trail_row_style(theme: &iced::Theme, status: iced::widget::button::Status, on
 /// switchable for exactly this reason. The *name* is the one cell that
 /// does get an ellipsis, through `clamped_text`: it is the column people
 /// read, and the one most often too long.
-fn list_cell<'a>(
-    content: iced::widget::Text<'a>,
-    portion: u16,
-) -> Element<'a, Message> {
-    container(content.wrapping(iced::widget::text::Wrapping::None))
-        .width(Length::FillPortion(portion))
-        .clip(true)
-        .into()
+/// One line of a list row, cut with "…" at its column's edge rather
+/// than sliced through a letter — "DESKTOP fil" was the report — and
+/// clipped as well, for the frame laid out before the cut caught up.
+fn clamped_cell<'a>(text: String, color: iced::Color, base: f32, portion: u16, scale: FontScale) -> Element<'a, Message> {
+    container(
+        clamped_text(text, 1)
+            .wrapping(iced::widget::text::Wrapping::None)
+            .size(scale.apply(base))
+            .color(color)
+            .width(Length::Fill),
+    )
+    .width(Length::FillPortion(portion))
+    .clip(true)
+    .into()
 }
 
 /// A list row's name: one line, cut with "…" at its column's edge —
@@ -5541,12 +5710,8 @@ fn entry_row<'a>(
         // washed-out and half-erased on the other. A selected row uses
         // the full text colour throughout, so selecting something makes
         // its details easier to read rather than harder.
-        let text = if selected {
-            scaled_text(cell, density::META_TEXT_BASE, scale).color(hyprforge_ui::theme::text())
-        } else {
-            meta_text(cell, density::META_TEXT_BASE, scale)
-        };
-        row_content = row_content.push(list_cell(text, column_portion(column)));
+        let color = if selected { hyprforge_ui::theme::text() } else { hyprforge_ui::theme::text_dim() };
+        row_content = row_content.push(clamped_cell(cell, color, density::META_TEXT_BASE, column_portion(column), scale));
     }
 
     // `secondary_button`/`primary_button` wrap a `text` fragment; this
@@ -5807,12 +5972,15 @@ fn list_header<'a>(
         } else {
             label.to_string()
         };
-        let content = if active {
-            scaled_text(text, density::META_TEXT_BASE, scale)
-        } else {
-            meta_text(text, density::META_TEXT_BASE, scale)
-        };
-        iced::widget::button(content.wrapping(iced::widget::text::Wrapping::None))
+        // Cut with "…" like the cells below it — a narrow column used
+        // to show "Owne" and "Permissior".
+        let content = clamped_text(text, 1)
+            .wrapping(iced::widget::text::Wrapping::None)
+            .size(scale.apply(density::META_TEXT_BASE))
+            .width(Length::Fill);
+        // The sorted column in the button's own colour, the rest dim.
+        let content = if active { content } else { content.color(hyprforge_ui::theme::text_dim()) };
+        iced::widget::button(content)
             .on_press(Message::SortBy(column))
             .width(Length::FillPortion(portion))
             .clip(true)
@@ -5948,7 +6116,7 @@ fn list_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         // A folder is somewhere a drop can go; a file is not, and nor is
         // anything in the Trash.
         let row = if entry.is_dir && !vm.in_trash {
-            drop_zone(row, vm.instance, &entry.path, vm.drop_hover == Some(entry.path.as_path()))
+            drop_zone(row, vm.instance, &entry.path, (vm.drop_hover, vm.drop_opening))
         } else {
             row
         };
@@ -6031,7 +6199,7 @@ fn grid_view<'a>(vm: &ViewModel<'a>, text: FontScale) -> Element<'a, Message> {
     // which is most of why it read as squashed. This asks the layout how
     // much room there actually is and fills it.
     let renaming = vm.renaming;
-    let (drop_hover, in_trash, instance) = (vm.drop_hover, vm.in_trash, vm.instance);
+    let (drop_hover, drop_opening, in_trash, instance) = (vm.drop_hover, vm.drop_opening, vm.in_trash, vm.instance);
     let band_ids = vm.band_ids;
     // The listing's id, as the list's: one of the two is ever drawn, and
     // it is what `Reveal` scrolls.
@@ -6044,12 +6212,15 @@ fn grid_view<'a>(vm: &ViewModel<'a>, text: FontScale) -> Element<'a, Message> {
         // than a list row, and the column count has to be exact or the
         // last column gets squeezed.
         let columns = density::grid_columns(size.width, scale);
+        // Across, the leftover is shared out between the columns; down,
+        // the gap stays the gap.
+        let across = density::grid_spread(size.width, scale, columns);
         let mut grid = column![].spacing(gap);
-        let mut current = row![].spacing(gap);
+        let mut current = row![].spacing(across);
         for (position, (index, entry, selected)) in cells.iter().copied().enumerate() {
             if position > 0 && position % columns == 0 {
                 grid = grid.push(current);
-                current = row![].spacing(gap);
+                current = row![].spacing(across);
             }
             let folder = results_root
                 .map(|root| searching::elide_folder(&searching::found_in(entry, root), density::GRID_FOLDER_CHARS));
@@ -6061,7 +6232,7 @@ fn grid_view<'a>(vm: &ViewModel<'a>, text: FontScale) -> Element<'a, Message> {
                 grid_cell(index, entry, look, renaming, thumbnails.get(&entry.path), icons.for_entry(entry), folder, scale);
             let cell = collections::starred_cell(cell, stars.contains(&entry.path), selected, scale.text);
             let cell = if entry.is_dir && !in_trash {
-                drop_zone(cell, instance, &entry.path, drop_hover == Some(entry.path.as_path()))
+                drop_zone(cell, instance, &entry.path, (drop_hover, drop_opening))
             } else {
                 cell
             };
@@ -7984,6 +8155,44 @@ mod tests {
     }
 
     #[test]
+    fn leaving_administrator_reads_the_folder_again_as_this_user() {
+        let (mut browser, _) = Browser::new(Mode::App, Prefs::default(), PathBuf::from("/root"), vec![]);
+        browser.update(Message::SetAdmin(Admin::Elevated));
+        assert_eq!(browser.update(Message::LeaveAdmin), Outcome::LeaveAdmin(PathBuf::from("/root")));
+        assert!(!browser.elevated());
+        assert!(browser.view_model(1000.0).offer_admin, "the way back in is offered again");
+        assert_eq!(browser.update(Message::LeaveAdmin), Outcome::None, "only an elevated browser can leave");
+    }
+
+    fn status_texts() -> StatusWidths<'static> {
+        StatusWidths {
+            summary: "16 folders, 8 files · 162.9 KiB · 59 hidden · 1 selected",
+            dotfiles: Some("Show (Ctrl+H)"),
+            preview: "Show preview",
+            space: Some("207.6 GiB free of 930.5 GiB"),
+            size: "Small icons",
+            path: "~/Documents/Projects",
+        }
+    }
+
+    #[test]
+    fn a_wide_status_bar_shows_everything() {
+        let fit = status_fit(1600.0, FontScale(1.0), status_texts());
+        assert_eq!(fit, StatusFit { dotfiles: true, preview: true, space: true, size: true, path: true });
+    }
+
+    /// The window in the bug report: free space and the zoom's name
+    /// wrapped onto a second line. They go instead, path first.
+    #[test]
+    fn a_narrow_status_bar_drops_the_least_needed_first() {
+        let fit = status_fit(900.0, FontScale(1.0), status_texts());
+        assert!(!fit.path, "{fit:?}");
+        assert!(fit.dotfiles, "the switches are the last to go: {fit:?}");
+        let tight = status_fit(420.0, FontScale(1.0), status_texts());
+        assert_eq!(tight, StatusFit { dotfiles: false, preview: false, space: false, size: false, path: false });
+    }
+
+    #[test]
     fn view_never_branches_on_mode() {
         let (mut app, _) = Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
         let (mut dialog, _) =
@@ -8055,6 +8264,8 @@ mod tests {
             renaming: None,
             path_edit: None,
             drop_hover: None,
+            drop_opening: 0.0,
+            arriving: 0.0,
             column_picker_open: false,
             sidebar_collapsed: false,
             viewport_width: 1000.0,
@@ -8813,6 +9024,7 @@ mod drop_target_tests {
         assert_eq!(targets.get(&target_id(browser.instance(), Path::new("/dir/docs"))), Some(&PathBuf::from("/dir/docs")));
         assert!(!targets.contains_key(&target_id(browser.instance(), Path::new("/dir/notes.txt"))));
         assert!(targets.contains_key(&target_id(browser.instance(), Path::new("/dir"))), "the folder in view, for a drop on its background");
+        assert!(targets.contains_key(&target_id(browser.instance(), Path::new("/"))), "the path bar's crumbs: up a level by dragging");
     }
 
     #[test]

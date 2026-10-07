@@ -395,6 +395,24 @@ pub fn grid_columns(pane_width: f32, scale: impl Into<GridScale>) -> usize {
     (((usable + gap) / (cell + gap)).floor() as usize).max(1)
 }
 
+/// The gap between grid columns once the row is spread across the pane:
+/// the room [`grid_columns`] left over, shared between the gaps, so the
+/// columns reach from one side of the pane to the other instead of
+/// sitting at the left with a strip of nothing down the right.
+///
+/// Never less than [`grid_gap`], and just that for a single column,
+/// which has no gap to widen.
+pub fn grid_spread(pane_width: f32, scale: impl Into<GridScale>, columns: usize) -> f32 {
+    let scale = scale.into();
+    let gap = grid_gap(scale);
+    if columns < 2 {
+        return gap;
+    }
+    let usable = pane_width - 2.0 * gap - scale.text.apply(SCROLLBAR_LANE);
+    let spare = usable - columns as f32 * grid_cell_width(scale);
+    (spare / (columns - 1) as f32).max(gap)
+}
+
 /// The gap between grid cells, both directions.
 pub fn grid_gap(scale: impl Into<GridScale>) -> f32 {
     scale.into().text.apply(GRID_GAP)
@@ -705,5 +723,20 @@ mod grid_tests {
         assert_eq!(grid_cell_width(extra_large) - grid_cell_width(plain), grid_icon_size(plain));
         assert_eq!(grid_cell_width(plain), 132.0);
         assert_eq!(grid_cell_height(plain, 2), 132.0);
+    }
+
+    /// The bug report: three columns and a strip of nothing down the
+    /// right. Spread, the last column's right edge is the usable width's.
+    #[test]
+    fn a_grid_row_reaches_across_the_whole_pane() {
+        let scale = FontScale::default();
+        let width = 840.0;
+        let columns = grid_columns(width, scale);
+        let spread = grid_spread(width, scale, columns);
+        let usable = width - 2.0 * grid_gap(scale) - scale.apply(SCROLLBAR_LANE);
+        let used = columns as f32 * grid_cell_width(scale) + (columns - 1) as f32 * spread;
+        assert!((used - usable).abs() < 0.01, "{used} of {usable}");
+        assert!(spread >= grid_gap(scale));
+        assert_eq!(grid_spread(width, scale, 1), grid_gap(scale), "one column has no gap to widen");
     }
 }
