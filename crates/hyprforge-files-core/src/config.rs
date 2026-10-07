@@ -242,6 +242,10 @@ pub struct Behaviour {
     /// What a letter typed at the listing does: search (the default), or
     /// jump to the first name it begins — see [`crate::typeahead`].
     pub typing: Typing,
+    /// Where a folder asked for from outside — "Show in folder" in
+    /// another application, `hyprforge-files PATH` — opens: a tab in the
+    /// Files window used last (the default), or a window of its own.
+    pub open_in: OpenIn,
 }
 
 impl Default for Behaviour {
@@ -257,6 +261,30 @@ impl Default for Behaviour {
             watch_network_every: 3,
             grid_name_lines: 2,
             typing: Typing::Search,
+            open_in: OpenIn::Tab,
+        }
+    }
+}
+
+/// Where a folder asked for from outside opens — see
+/// [`Behaviour::open_in`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OpenIn {
+    /// A new tab in the Files window used last, which is brought forward
+    /// — a browser's "Show in folder" fifty times is one window, not
+    /// fifty.
+    #[default]
+    Tab,
+    /// A new window every time, as before.
+    Window,
+}
+
+impl OpenIn {
+    fn parse(text: &str) -> Option<OpenIn> {
+        match text.trim() {
+            "tab" => Some(OpenIn::Tab),
+            "window" => Some(OpenIn::Window),
+            _ => None,
         }
     }
 }
@@ -400,6 +428,7 @@ struct RawBehaviour {
     terminal: Option<toml::Value>,
     grid_name_lines: Option<toml::Value>,
     typing: Option<String>,
+    open_in: Option<String>,
 }
 
 /// A number within `range`, or a problem naming it. `name` includes
@@ -523,6 +552,14 @@ pub fn parse(text: &str, path: &Path) -> (Config, Vec<ConfigProblem>) {
             None => problems.push(problem(format!(
                 "[behaviour] on-conflict = \"{text}\": use ask, keep-both, skip or replace — \
                  asking until this is fixed"
+            ))),
+        }
+    }
+    if let Some(text) = &raw.behaviour.open_in {
+        match OpenIn::parse(text) {
+            Some(choice) => behaviour.open_in = choice,
+            None => problems.push(problem(format!(
+                "[behaviour] open-in = \"{text}\": use tab or window — opening tabs until this is fixed"
             ))),
         }
     }
@@ -944,6 +981,17 @@ mod tests {
         assert_eq!(problems.len(), 2, "{problems:?}");
         assert!(problems.iter().any(|p| p.message.contains("frobnicate")));
         assert!(problems.iter().any(|p| p.message.contains("sidebar")));
+    }
+
+    #[test]
+    fn a_folder_from_outside_opens_as_a_tab_unless_the_file_says_window() {
+        assert_eq!(Config::default().behaviour.open_in, OpenIn::Tab);
+        let (config, problems) = parsed("[behaviour]\nopen-in = \"window\"\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(config.behaviour.open_in, OpenIn::Window);
+        let (config, problems) = parsed("[behaviour]\nopen-in = \"popup\"\n");
+        assert_eq!(config.behaviour.open_in, OpenIn::Tab);
+        assert_eq!(problems.len(), 1, "a misspelling is said, not ignored");
     }
 
     #[test]

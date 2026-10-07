@@ -193,6 +193,8 @@ impl Default for MenuConfig {
             folder: vec![
                 A(Open),
                 A(OpenInNewTab),
+                A(OpenInNewWindow),
+                A(OpenOnWorkspace),
                 A(Pin),
                 A(ToggleStar),
                 A(EditTags),

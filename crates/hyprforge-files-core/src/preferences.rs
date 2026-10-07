@@ -28,7 +28,7 @@
 //! than write a file the loader would then have to complain about.
 
 use crate::action::{Action, Scope};
-use crate::config::{Behaviour, OnConflict, SidebarConfig, Typing};
+use crate::config::{Behaviour, OnConflict, OpenIn, SidebarConfig, Typing};
 use crate::config_edit::{BehaviourValue, Edit};
 use crate::keymap::{Combo, KeyPress, Keymap, Resolved};
 use crate::prefs::{Prefs, SidebarPref, ViewMode};
@@ -86,6 +86,8 @@ pub enum BehaviourSetting {
     GridNameLines(u8),
     /// `[behaviour] typing`: search or jump.
     Typing(Typing),
+    /// `[behaviour] open-in`: tab or window.
+    OpenIn(OpenIn),
 }
 
 impl BehaviourSetting {
@@ -101,6 +103,7 @@ impl BehaviourSetting {
             }
             BehaviourSetting::GridNameLines(n) => Edit::Behaviour("grid-name-lines", BehaviourValue::Number(n.into())),
             BehaviourSetting::Typing(typing) => Edit::Behaviour("typing", BehaviourValue::Word(typing_id(typing))),
+            BehaviourSetting::OpenIn(open_in) => Edit::Behaviour("open-in", BehaviourValue::Word(open_in_id(open_in))),
         }
     }
 
@@ -115,6 +118,7 @@ impl BehaviourSetting {
             BehaviourSetting::Watch(on) => behaviour.watch == on,
             BehaviourSetting::WatchNetworkEvery(seconds) => behaviour.watch_network_every == seconds,
             BehaviourSetting::Typing(typing) => behaviour.typing == typing,
+            BehaviourSetting::OpenIn(open_in) => behaviour.open_in == open_in,
         }
     }
 }
@@ -244,6 +248,26 @@ pub fn typing_id(typing: Typing) -> &'static str {
     }
 }
 
+/// The two answers to "where does a folder from outside open", in the
+/// order the sheet shows them.
+pub const OPEN_IN_CHOICES: [OpenIn; 2] = [OpenIn::Tab, OpenIn::Window];
+
+/// The word `[behaviour] open-in` uses.
+pub fn open_in_id(open_in: OpenIn) -> &'static str {
+    match open_in {
+        OpenIn::Tab => "tab",
+        OpenIn::Window => "window",
+    }
+}
+
+/// What the sheet calls each answer.
+pub fn open_in_label(open_in: OpenIn) -> &'static str {
+    match open_in {
+        OpenIn::Tab => "New tab",
+        OpenIn::Window => "New window",
+    }
+}
+
 /// What the sheet calls each answer.
 pub fn typing_label(typing: Typing) -> &'static str {
     match typing {
@@ -294,7 +318,7 @@ pub const CONFLICT_POLICIES: [OnConflict; 4] =
 pub fn group(action: Action) -> &'static str {
     use Action::*;
     match action {
-        Open | OpenInNewTab | ShowInFolder | GoUp | GoBack | GoForward | EditLocation | Find | CommandPalette | Refresh => {
+        Open | OpenInNewTab | OpenInNewWindow | OpenOnWorkspace | ShowInFolder | GoUp | GoBack | GoForward | EditLocation | Find | CommandPalette | Refresh => {
             "Going places"
         }
         FocusUp | FocusDown | FocusLeft | FocusRight | ExtendUp | ExtendDown | SelectAll | ClearSearch

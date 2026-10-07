@@ -683,6 +683,9 @@ pub enum Outcome {
     EmptyTrash,
     /// Open this folder in a new tab. A host without tabs ignores it.
     OpenInNewTab(PathBuf),
+    /// Open this folder in a window of its own — on this Hyprland
+    /// workspace when `workspace` is true, which the host asks for.
+    OpenInNewWindow { path: PathBuf, workspace: bool },
     /// Put these files on the clipboard.
     SetClipboard(crate::clipboard::FileClip),
     /// Put this text on the clipboard — the paths, for Copy Path.
@@ -2671,6 +2674,14 @@ impl Browser {
                 (None, Some(path)) => Outcome::OpenInNewTab(path.to_path_buf()),
                 (None, None) => Outcome::None,
             },
+            Action::OpenInNewWindow | Action::OpenOnWorkspace => {
+                let workspace = action == Action::OpenOnWorkspace;
+                match (target, self.selection.focused()) {
+                    (Some(path), _) => Outcome::OpenInNewWindow { path, workspace },
+                    (None, Some(path)) => Outcome::OpenInNewWindow { path: path.to_path_buf(), workspace },
+                    (None, None) => Outcome::None,
+                }
+            }
             Action::Extract => Outcome::Extract {
                 archives: self.selected_shown(),
                 // No destination: each archive gets a folder beside

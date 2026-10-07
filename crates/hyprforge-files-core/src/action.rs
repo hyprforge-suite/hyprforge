@@ -31,6 +31,11 @@ pub enum Action {
     Open,
     /// Open the focused folder in a new tab.
     OpenInNewTab,
+    /// Open the focused folder in a window of its own.
+    OpenInNewWindow,
+    /// Open the focused folder in a window of its own, on a Hyprland
+    /// workspace the host asks which of.
+    OpenOnWorkspace,
     /// Go to the folder a search result is in, with it selected — see
     /// [`crate::search`]. Only among the results of a search below a
     /// folder, which are the one listing whose rows live elsewhere.
@@ -239,6 +244,8 @@ impl Action {
         let mut all = vec![
             Action::Open,
             Action::OpenInNewTab,
+            Action::OpenInNewWindow,
+            Action::OpenOnWorkspace,
             Action::ShowInFolder,
             Action::GoUp,
             Action::GoBack,
@@ -315,6 +322,8 @@ impl Action {
         match self {
             Action::Open => "open",
             Action::OpenInNewTab => "open-in-new-tab",
+            Action::OpenInNewWindow => "open-in-new-window",
+            Action::OpenOnWorkspace => "open-on-workspace",
             Action::ShowInFolder => "show-in-folder",
             Action::GoUp => "go-up",
             Action::GoBack => "go-back",
@@ -408,6 +417,8 @@ impl Action {
         match self {
             Action::Open => "Open",
             Action::OpenInNewTab => "Open in New Tab",
+            Action::OpenInNewWindow => "Open in New Window",
+            Action::OpenOnWorkspace => "Open in New Window on Workspace\u{2026}",
             Action::ShowInFolder => "Show in Folder",
             Action::GoUp => "Go Up",
             Action::GoBack => "Back",
@@ -516,6 +527,10 @@ impl Action {
         match self {
             Action::Open => &["Enter"],
             Action::OpenInNewTab => &["Ctrl+Enter"],
+            // Shift for "the bigger version of Ctrl+Enter", as a browser's
+            // Shift+click is a new window where a middle click is a tab.
+            Action::OpenInNewWindow => &["Ctrl+Shift+Enter"],
+            Action::OpenOnWorkspace => &[],
             // Nautilus's "Open Item Location". It also heads a result's
             // menu, added there rather than to every configured menu,
             // where it would sit greyed out outside a search.
@@ -768,6 +783,7 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
     match action {
         Action::Open => ctx.focused_is_dir.is_some(),
         Action::OpenInNewTab => ctx.focused_is_dir == Some(true),
+        Action::OpenInNewWindow | Action::OpenOnWorkspace => ctx.focused_is_dir == Some(true),
         Action::ShowInFolder => ctx.in_results && ctx.focused_is_dir.is_some(),
         Action::GoUp => ctx.has_parent,
         Action::GoBack => ctx.can_go_back,
