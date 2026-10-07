@@ -167,6 +167,9 @@ pub enum Action {
     /// The window opens a sheet for it: tags are kept on the files, so
     /// reading and writing them is the host's.
     EditTags,
+    /// Older copies of the focused file or folder, from snapper's
+    /// snapshots — see [`crate::snapshots`].
+    PreviousVersions,
     /// Mount a drive from the sidebar — see [`crate::devices`].
     Mount,
     /// Unmount the drive a sidebar row names, or the one the folder in
@@ -290,6 +293,7 @@ impl Action {
             Action::PinDown,
             Action::ToggleStar,
             Action::EditTags,
+            Action::PreviousVersions,
             Action::Mount,
             Action::Unmount,
             Action::Eject,
@@ -368,6 +372,7 @@ impl Action {
             Action::PinDown => "pin-down",
             Action::ToggleStar => "star",
             Action::EditTags => "tags",
+            Action::PreviousVersions => "previous-versions",
             Action::Mount => "mount",
             Action::Unmount => "unmount",
             Action::Eject => "eject",
@@ -463,6 +468,7 @@ impl Action {
             Action::PinDown => "Move Down",
             Action::ToggleStar => "Star",
             Action::EditTags => "Tags\u{2026}",
+            Action::PreviousVersions => "Previous Versions\u{2026}",
             Action::Mount => "Mount",
             Action::Unmount => "Unmount",
             Action::Eject => "Eject",
@@ -623,6 +629,7 @@ impl Action {
             // No key: putting tags on is a sheet with a field in it, and
             // the palette reaches it by name.
             Action::EditTags => &[],
+            Action::PreviousVersions => &[],
             // Reached from a drive's or a share's row, and from the
             // palette while browsing one. Nothing here is done often
             // enough to hold a key, and Eject on a slip of the finger
@@ -854,6 +861,10 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         // tag is kept on the file itself, which a trashed item's storage
         // name or an archive's member is not.
         Action::EditTags => ctx.selected > 0 && !ctx.in_trash && !ctx.in_archive,
+        // One thing at a time — the versions of *this* — and a real path:
+        // a trashed item's storage name and an archive's member have no
+        // copy in a snapshot to find.
+        Action::PreviousVersions => ctx.selected == 1 && !ctx.in_trash && !ctx.in_archive,
         // Nothing is offered twice while it is already happening, and a
         // locked (encrypted) drive cannot be mounted here at all.
         Action::Mount => ctx.device.volume && !ctx.device.mounted && !ctx.device.busy && !ctx.device.locked,

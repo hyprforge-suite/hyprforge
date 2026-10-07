@@ -21,6 +21,10 @@ pub struct Env {
     pub data_dirs: Vec<PathBuf>,
     /// Every `mimeapps.list` that applies, most specific first.
     pub mimeapps_paths: Vec<PathBuf>,
+    /// Where snapper's configs are — `/etc/snapper/configs`.
+    pub snapper_configs: PathBuf,
+    /// This user's login name, as snapper's `ALLOW_USERS` names users.
+    pub user: String,
 }
 
 impl Env {
@@ -31,6 +35,8 @@ impl Env {
             data_home: hyprforge_paths::data_home(),
             data_dirs: hyprforge_mime::data_dirs(),
             mimeapps_paths: hyprforge_mime::mimeapps_paths(),
+            snapper_configs: PathBuf::from("/etc/snapper/configs"),
+            user: std::env::var("USER").unwrap_or_default(),
         }
     }
 
@@ -43,6 +49,8 @@ impl Env {
         Env {
             mimeapps_paths: vec![config_home.join("mimeapps.list")],
             data_dirs: vec![data_home.clone()],
+            snapper_configs: root.join("snapper"),
+            user: "alex".to_string(),
             config_home,
             data_home,
         }

@@ -44,13 +44,19 @@
 //! in place, and applying would overwrite the only record of what was
 //! there before.
 //!
+//! **One item is done as root, and none by default.** "Previous versions
+//! of your files" lets this user read snapper's snapshots of `/home`,
+//! which takes snapper's own `set-config` through `pkexec` — a password
+//! prompt — so it is off unless ticked. Everything else setup does is in
+//! files this user owns.
+//!
 //! # What is where
 //!
 //! [`Env`] is every path, explicit so a test can point all of it at a
 //! temp directory; [`System`] is every other process (`systemctl --user`,
 //! `hyprctl`, `pgrep`, the session bus), with [`RealSystem`] bounding each
 //! call and `mock::MockSystem` (feature `mock`) standing in for all of
-//! it; [`record`] is `setup.toml`; [`state`] is the four states and the
+//! it, `pkexec snapper` included; [`record`] is `setup.toml`; [`state`] is the four states and the
 //! `--porcelain` line the installer parses.
 
 mod env;

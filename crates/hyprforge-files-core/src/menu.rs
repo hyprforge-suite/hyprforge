@@ -129,6 +129,7 @@ impl Default for MenuConfig {
                 A(OpenWith),
                 A(ToggleStar),
                 A(EditTags),
+                A(PreviousVersions),
                 Sep,
                 A(Cut),
                 A(Copy),
@@ -198,6 +199,7 @@ impl Default for MenuConfig {
                 A(Pin),
                 A(ToggleStar),
                 A(EditTags),
+                A(PreviousVersions),
                 // Beside the other ways into the folder: a terminal there
                 // is one more place to open it.
                 A(OpenTerminal),

@@ -327,7 +327,7 @@ pub fn group(action: Action) -> &'static str {
         | OpenWith | Extract | ExtractTo | Compress | Undo | UndoHistory | CopyToOtherPane | MoveToOtherPane => "Files",
         ToggleHidden | TogglePreview | ZoomIn | ZoomOut | ZoomReset | QuickLook | Properties | Preferences | Transfers
         | TransferQueue | OpenTerminal => "The window",
-        Pin | Unpin | PinUp | PinDown | ToggleStar | EditTags | Mount | Unmount | Eject | Disconnect | ConnectToServer => "Sidebar",
+        Pin | Unpin | PinUp | PinDown | ToggleStar | EditTags | PreviousVersions | Mount | Unmount | Eject | Disconnect | ConnectToServer => "Sidebar",
         NewTab | CloseTab | NextTab | PreviousTab | Tab(_) | ToggleSplit | OtherPane => "Tabs",
     }
 }

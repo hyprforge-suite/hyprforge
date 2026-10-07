@@ -18,6 +18,7 @@ mod gtk;
 mod idle;
 mod portal;
 mod services;
+mod snapshots;
 mod wiring;
 
 pub use portal::{with_file_chooser, without_file_chooser, PortalEdit};
@@ -85,6 +86,7 @@ enum Kind {
     PortalDialog,
     ShowInFolder,
     GtkPortal,
+    PreviousVersions,
 }
 
 impl Item {
@@ -111,6 +113,7 @@ impl Item {
             Kind::Defaults(spec) => spec.requires,
             Kind::PortalDialog | Kind::GtkPortal => &["hyprforge-files-portal"],
             Kind::ShowInFolder => &["hyprforge-files"],
+            Kind::PreviousVersions => &["hyprforge-files", "snapper", "pkexec"],
         }
     }
 
@@ -138,6 +141,7 @@ impl Item {
             Kind::PortalDialog => portal::check(cx),
             Kind::ShowInFolder => filemanager::check(cx),
             Kind::GtkPortal => gtk::check(cx),
+            Kind::PreviousVersions => snapshots::check(cx),
         }
     }
 
@@ -154,6 +158,7 @@ impl Item {
             Kind::PortalDialog => portal::apply(cx),
             Kind::ShowInFolder => filemanager::apply(cx),
             Kind::GtkPortal => gtk::apply(cx),
+            Kind::PreviousVersions => snapshots::apply(cx),
         }
     }
 
@@ -179,6 +184,9 @@ impl Item {
                 filemanager::undo(cx, previous.as_deref())
             }
             (Kind::GtkPortal, Change::GtkPortal {}) => gtk::undo(cx),
+            (Kind::PreviousVersions, Change::Snapper { allow_users, sync_acl }) => {
+                snapshots::undo(cx, allow_users, sync_acl)
+            }
             // A record edited by hand into the wrong shape for its item.
             // Refused rather than guessed at.
             _ => Err(format!("setup.toml records a change {} didn't make", self.id)),
@@ -187,7 +195,7 @@ impl Item {
 }
 
 /// Every item, in order. See the module doc for why the order matters.
-pub static ITEMS: [Item; 18] = [
+pub static ITEMS: [Item; 19] = [
     Item::new(
         "wiring",
         "Connect Hyprforge to your Hyprland config",
@@ -314,6 +322,13 @@ pub static ITEMS: [Item; 18] = [
         false,
         Kind::GtkPortal,
     ),
+    Item::new(
+        "previous-versions",
+        "Previous versions of your files",
+        "Lets you read snapper's snapshots of /home, so Files can show and restore older copies. Asks for your password once.",
+        false,
+        Kind::PreviousVersions,
+    ),
 ];
 
 /// The item with this id.
@@ -351,15 +366,16 @@ mod tests {
                 "portal-dialog",
                 "show-in-folder",
                 "gtk-portal",
+                "previous-versions",
             ]
         );
     }
 
-    /// The plan's one opt-in: a variable every GTK app inherits is not
-    /// something to set without being asked.
+    /// The opt-ins: a variable every GTK app inherits, and a change
+    /// that asks for a password, are not things to do without being asked.
     #[test]
-    fn only_the_gtk_portal_variable_is_off_by_default() {
+    fn only_the_gtk_portal_variable_and_snapshots_are_off_by_default() {
         let off: Vec<&str> = ITEMS.iter().filter(|i| !i.default_on).map(|i| i.id).collect();
-        assert_eq!(off, ["gtk-portal"]);
+        assert_eq!(off, ["gtk-portal", "previous-versions"]);
     }
 }

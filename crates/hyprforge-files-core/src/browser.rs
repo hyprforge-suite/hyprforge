@@ -641,6 +641,9 @@ pub enum Outcome {
     ReadTagged { tag: String, paths: Vec<PathBuf> },
     /// Open the sheet that puts tags on these and takes them off.
     EditTags(Vec<PathBuf>),
+    /// List this path's older copies from snapper's snapshots — see
+    /// [`crate::snapshots`].
+    PreviousVersions(PathBuf),
     /// Stop browsing as administrator, and read this folder again as
     /// this user. The browser has already gone back to
     /// [`Admin::Offered`]; the host reads the folder through the
@@ -2716,6 +2719,10 @@ impl Browser {
             Action::EditTags => match self.selected_shown() {
                 paths if paths.is_empty() => Outcome::None,
                 paths => Outcome::EditTags(paths),
+            },
+            Action::PreviousVersions => match self.selected_shown().as_slice() {
+                [one] => Outcome::PreviousVersions(one.clone()),
+                _ => Outcome::None,
             },
             Action::Pin | Action::Unpin | Action::PinUp | Action::PinDown => {
                 let Some(target) = self.pin_target(target.as_deref()) else {

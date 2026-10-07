@@ -53,7 +53,16 @@ fn rig() -> Rig {
     desktop_entry(&env, "nemo.desktop", "Nemo", &nemo, "inode/directory;");
     std::fs::write(env.mimeapps_list(), "[Default Applications]\ninode/directory=nemo.desktop\n")
         .unwrap();
-    Rig { dir, env, sys: MockSystem::with_suite_installed() }
+    let sys = MockSystem::with_suite_installed();
+    // snapper's `home` config, as Arch ships it with one other user
+    // already allowed — for Previous Versions.
+    sys.install_binary("snapper");
+    sys.install_binary("pkexec");
+    std::fs::create_dir_all(&env.snapper_configs).unwrap();
+    let snapper_home = env.snapper_configs.join("home");
+    std::fs::write(&snapper_home, "SUBVOLUME=\"/home\"\nALLOW_USERS=\"sam\"\nSYNC_ACL=\"no\"\n").unwrap();
+    sys.with_snapper_config("home", snapper_home);
+    Rig { dir, env, sys }
 }
 
 impl Rig {
@@ -559,4 +568,39 @@ fn an_item_whose_program_isnt_installed_is_unavailable_not_todo() {
         let State::Unavailable { why } = &state else { panic!("{id}: {state:?}") };
         assert!(why.contains(binary), "{why}");
     }
+}
+
+/// Previous Versions: [`rig`] already has snapper's `home` config.
+fn snapper_rig() -> Rig {
+    rig()
+}
+
+#[test]
+fn previous_versions_adds_this_user_beside_the_others_and_turns_on_the_acl() {
+    let r = snapper_rig();
+    assert!(matches!(r.state("previous-versions"), State::Todo { .. }));
+    r.apply("previous-versions").unwrap();
+    assert_eq!(r.sys.calls().last().unwrap(), "snapper -c home set-config ALLOW_USERS=sam alex SYNC_ACL=yes");
+    assert_eq!(r.state("previous-versions"), State::Done, "the check reads what snapper wrote");
+}
+
+/// Undo takes the user off while syncing is still on — so snapper takes
+/// the ACL back off `.snapshots` — then puts syncing back.
+#[test]
+fn previous_versions_undo_removes_the_user_before_the_acl_syncing() {
+    let r = snapper_rig();
+    r.apply("previous-versions").unwrap();
+    r.undo("previous-versions").unwrap();
+    let calls = r.sys.calls();
+    let n = calls.len();
+    assert_eq!(calls[n - 2], "snapper -c home set-config ALLOW_USERS=sam");
+    assert_eq!(calls[n - 1], "snapper -c home set-config SYNC_ACL=no");
+    assert!(matches!(r.state("previous-versions"), State::Todo { .. }));
+}
+
+#[test]
+fn previous_versions_is_unavailable_without_a_home_config() {
+    let r = rig();
+    std::fs::remove_file(r.env.snapper_configs.join("home")).unwrap();
+    assert!(matches!(r.state("previous-versions"), State::Unavailable { .. }));
 }

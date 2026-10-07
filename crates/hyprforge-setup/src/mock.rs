@@ -37,6 +37,8 @@ struct Inner {
     lua_rejects: Option<String>,
     systemctl_unanswered: bool,
     calls: Vec<String>,
+    /// snapper configs by name, as files a set-config rewrites.
+    snapper_files: BTreeMap<String, PathBuf>,
 }
 
 /// See the module doc.
@@ -56,6 +58,7 @@ impl Default for MockSystem {
                 lua_rejects: None,
                 systemctl_unanswered: false,
                 calls: Vec::new(),
+                snapper_files: BTreeMap::new(),
             }),
         }
     }
@@ -139,6 +142,11 @@ impl MockSystem {
     /// `apply-lua /…/keybinds.lua`, `restart-idle`, ….
     pub fn calls(&self) -> Vec<String> {
         self.inner.borrow().calls.clone()
+    }
+
+    /// Points snapper's `config` at `path`, for set-config to rewrite.
+    pub fn with_snapper_config(&self, config: &str, path: PathBuf) {
+        self.inner.borrow_mut().snapper_files.insert(config.to_string(), path);
     }
 
     fn record(&self, call: String) {
@@ -251,5 +259,24 @@ impl System for MockSystem {
     fn reload_session_bus(&self) -> Result<(), String> {
         self.record("reload-session-bus".to_string());
         Ok(())
+    }
+
+    /// Recorded, and written into the config file the mock was pointed
+    /// at — which is what snapper itself does — so a check after an apply
+    /// sees the change.
+    fn snapper_set_config(&self, config: &str, settings: &[(String, String)]) -> Result<(), String> {
+        let pairs: Vec<String> = settings.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        self.record(format!("snapper -c {config} set-config {}", pairs.join(" ")));
+        let Some(path) = self.inner.borrow().snapper_files.get(config).cloned() else { return Ok(()) };
+        let mut text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        for (key, value) in settings {
+            let wanted = format!("{key}=\"{value}\"");
+            let lines: Vec<String> = text
+                .lines()
+                .map(|l| if l.trim_start().starts_with(&format!("{key}=")) { wanted.clone() } else { l.to_string() })
+                .collect();
+            text = lines.join("\n") + "\n";
+        }
+        std::fs::write(&path, text).map_err(|e| e.to_string())
     }
 }

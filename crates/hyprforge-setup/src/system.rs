@@ -117,6 +117,9 @@ pub trait System {
     fn restart_idle(&self) -> Result<(), String>;
     /// Asks the session bus to re-read its service files.
     fn reload_session_bus(&self) -> Result<(), String>;
+    /// `pkexec snapper -c <config> set-config KEY=VALUE…`: the one change
+    /// setup makes as root — see `items/snapshots.rs`.
+    fn snapper_set_config(&self, config: &str, settings: &[(String, String)]) -> Result<(), String>;
 }
 
 /// The real system: `systemctl --user`, `pgrep`, `hyprctl`, `busctl`.
@@ -230,6 +233,25 @@ impl System for RealSystem {
 
     fn restart_idle(&self) -> Result<(), String> {
         hyprforge_ecosystem::apply::restart_idle().map_err(|e| e.to_string())
+    }
+
+    fn snapper_set_config(&self, config: &str, settings: &[(String, String)]) -> Result<(), String> {
+        let mut command = Command::new("pkexec");
+        command.args(["snapper", "-c", config, "set-config"]);
+        for (key, value) in settings {
+            command.arg(format!("{key}={value}"));
+        }
+        // Two minutes, not the shared bound: someone is reading a prompt
+        // and typing a password.
+        let out = hyprforge_process::output(&mut command, std::time::Duration::from_secs(120))
+            .map_err(|e| format!("couldn't run pkexec: {e}"))?;
+        match out.status.code() {
+            Some(0) => Ok(()),
+            // pkexec's own: the prompt was dismissed, or no one may.
+            Some(126) => Err("the password prompt was dismissed".to_string()),
+            Some(127) => Err("this account isn't allowed to change snapper's settings".to_string()),
+            _ => Err(format!("snapper said: {}", String::from_utf8_lossy(&out.stderr).trim())),
+        }
     }
 
     fn reload_session_bus(&self) -> Result<(), String> {

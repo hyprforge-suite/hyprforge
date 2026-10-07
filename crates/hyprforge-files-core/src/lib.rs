@@ -55,6 +55,7 @@ pub mod reveal;
 pub mod search;
 pub mod space;
 pub mod sidebar;
+pub mod snapshots;
 pub mod starred;
 pub mod tags;
 pub mod trash;

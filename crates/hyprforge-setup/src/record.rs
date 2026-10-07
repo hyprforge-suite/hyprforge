@@ -118,6 +118,8 @@ pub enum Change {
     },
     /// `GTK_USE_PORTAL=1` appended to `session.toml`.
     GtkPortal {},
+    /// snapper's `home` config, and what its two settings said before.
+    Snapper { allow_users: String, sync_acl: String },
 }
 
 /// A competing notification daemon that was turned off.
@@ -198,6 +200,7 @@ mod tests {
             Change::Portal { created_file: false, added_section: true, added_default: true, previous: None },
             Change::FileManager1 { previous: Some("[D-BUS Service]\n".into()) },
             Change::GtkPortal {},
+            Change::Snapper { allow_users: String::new(), sync_acl: "no".into() },
         ];
         for (i, change) in changes.into_iter().enumerate() {
             record.items.insert(format!("item-{i}"), Entry { applied: format!("did {i}"), change });
