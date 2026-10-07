@@ -222,6 +222,24 @@ pub enum Mode {
     Dialog(DialogKind),
 }
 
+/// What the host can do as administrator for one browser. Set by the
+/// host with [`Message::SetAdmin`], never inferred from [`Mode`] — the
+/// view takes nothing that says which host it is in (see
+/// `view_never_branches_on_mode`), and the window is what knows whether
+/// the helper is installed at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Admin {
+    /// No administrator access: the open/save dialog, or a window whose
+    /// helper is not installed.
+    #[default]
+    Unavailable,
+    /// A folder this user may not read offers "Open as administrator".
+    Offered,
+    /// This browser's folders are read and changed as administrator,
+    /// and a banner across the listing says so.
+    Elevated,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DialogKind {
     Open,
@@ -611,6 +629,12 @@ pub enum Outcome {
     /// off the UI thread) and feed the result back as
     /// [`Message::DirLoaded`].
     ReadDir(PathBuf),
+    /// Open this folder as administrator — asked from the "couldn't
+    /// open this folder" message of a folder this user may not read.
+    /// Only when the host said [`Admin::Offered`]: a file chooser never
+    /// does, having no business raising privileges on behalf of the
+    /// program that opened it.
+    OpenAsAdmin(PathBuf),
     /// A file (never a directory — see `Browser::activate`) was
     /// activated. The app opens it; the dialog treats it as the chosen
     /// path. `Browser` does not know or care which.
@@ -799,6 +823,11 @@ pub enum Outcome {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
     Navigate(PathBuf),
+    /// "Open as administrator", on a folder this user may not read.
+    OpenAsAdmin,
+    /// What the host can do as administrator for this browser — see
+    /// [`Admin`].
+    SetAdmin(Admin),
     DirLoaded(PathBuf, Result<Vec<Entry>, DirError>),
     /// A pane's folder, read — the answer to [`Outcome::ReadColumns`].
     ColumnLoaded(PathBuf, Result<Vec<Entry>, DirError>),
@@ -988,6 +1017,10 @@ struct ViewModel<'a> {
     instance: u64,
     /// Drawn as a split tab's second pane — see [`Chrome::Bare`].
     bare: bool,
+    /// See [`Admin::Elevated`].
+    elevated: bool,
+    /// See [`Admin::Offered`].
+    offer_admin: bool,
     current_dir: &'a Path,
     /// Whether this listing is the Trash — which changes its columns.
     in_trash: bool,
@@ -1103,6 +1136,11 @@ struct PreviewModel<'a> {
 #[derive(Debug, Clone)]
 pub struct Browser {
     mode: Mode,
+    /// Whether the host offers administrator access, or is already
+    /// reading and changing this browser's folders as administrator —
+    /// see [`Admin`]. The browser does no I/O either way; this only
+    /// changes what it draws and offers.
+    admin: Admin,
     current_dir: PathBuf,
     /// The raw listing for `current_dir`, as last reported by
     /// [`Message::DirLoaded`] — unsorted, unfiltered.
@@ -1266,6 +1304,7 @@ impl Browser {
             stars,
             column_picker_open: false,
             mode,
+            admin: Admin::Unavailable,
             current_dir: start_dir.clone(),
             entries: Vec::new(),
             view: Vec::new(),
@@ -1534,6 +1573,12 @@ impl Browser {
                 Outcome::None
             }
             Message::Navigate(path) => self.go_to(path),
+            Message::OpenAsAdmin if self.admin == Admin::Offered => Outcome::OpenAsAdmin(self.current_dir.clone()),
+            Message::OpenAsAdmin => Outcome::None,
+            Message::SetAdmin(admin) => {
+                self.admin = admin;
+                Outcome::None
+            }
             Message::DirLoaded(path, result) => self.apply_dir_loaded(path, result),
             Message::ColumnLoaded(dir, result) => self.apply_column_loaded(dir, result),
             Message::ColumnChose(path) => self.choose_in_column(path),
@@ -3350,6 +3395,12 @@ impl Browser {
         }
     }
 
+    /// Whether this browser's folders are read and changed as
+    /// administrator — see [`Admin::Elevated`].
+    pub fn elevated(&self) -> bool {
+        self.admin == Admin::Elevated
+    }
+
     // The tests read the full view model; the window and the dialog go
     // through `view_as`.
     #[cfg(test)]
@@ -3370,6 +3421,8 @@ impl Browser {
         ViewModel {
             instance: self.instance,
             bare,
+            elevated: self.admin == Admin::Elevated,
+            offer_admin: self.admin == Admin::Offered,
             current_dir: &self.current_dir,
             in_trash: self.in_trash(),
             archive: self.archive.as_deref(),
@@ -5014,8 +5067,11 @@ fn body_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // Right-clicking anywhere the rows are not opens the folder's own
     // menu. Rows capture their own right press first — see
     // `with_row_menu` — so this only sees the empty space.
+    let content = body_content(vm, zoomed);
+    let content: Element<'a, Message> =
+        if vm.elevated { column![elevated_banner(scale), content].into() } else { content };
     let body = iced::widget::mouse_area(
-        container(body_content(vm, zoomed)).width(Length::Fill).height(Length::Fill),
+        container(content).width(Length::Fill).height(Length::Fill),
     )
     .on_right_press(Message::OpenContextMenu { spot: MenuSpot::Background, at: (0.0, 0.0) });
     // Around everything the rows are in, so a band can start in the empty
@@ -5048,6 +5104,36 @@ fn grid_draw_scale(vm: &ViewModel<'_>, scale: FontScale) -> (density::GridScale,
     density::grid_scale(asked, listing_width(vm), scale.0 * crate::prefs::Zoom::FACTORS[0])
 }
 
+/// "Couldn't open this folder", and why — with a way in as
+/// administrator when the reason is permission and the host offers one.
+fn load_error<'a>(vm: &ViewModel<'a>, err: &DirError, scale: FontScale) -> Element<'a, Message> {
+    let mut message = column![
+        scaled_text("Couldn't open this folder", 16.0, scale).color(hyprforge_ui::theme::warning()),
+        meta_text(err.message.clone(), BASE_TEXT_SIZE, scale),
+    ]
+    .spacing(spacing::SM);
+    if err.kind == DirErrorKind::PermissionDenied && vm.offer_admin {
+        message = message.push(
+            hyprforge_ui::widgets::secondary_button("Open as administrator").on_press(Message::OpenAsAdmin),
+        );
+    }
+    container(message).padding(spacing::LG).into()
+}
+
+/// Across the top of an elevated browser's listing, for as long as it
+/// is one: what is done here is done to the whole system.
+fn elevated_banner<'a>(scale: FontScale) -> Element<'a, Message> {
+    container(scaled_text("Administrator — changes here affect the whole system", BASE_TEXT_SIZE, scale))
+        .padding([spacing::XS, spacing::MD])
+        .width(Length::Fill)
+        .style(|_: &iced::Theme| container::Style {
+            background: Some(hyprforge_ui::theme::warning().scale_alpha(0.18).into()),
+            text_color: Some(hyprforge_ui::theme::warning()),
+            ..container::Style::default()
+        })
+        .into()
+}
+
 fn body_content<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
     // Column view draws its panes whatever state the folder in view is
     // in — an empty folder is still somewhere, with folders to its left —
@@ -5060,15 +5146,7 @@ fn body_content<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
             .center_x(Length::Fill)
             .padding(spacing::LG)
             .into(),
-        LoadState::Error(err) => container(
-            column![
-                scaled_text("Couldn't open this folder", 16.0, scale).color(hyprforge_ui::theme::warning()),
-                meta_text(err.message.clone(), BASE_TEXT_SIZE, scale),
-            ]
-            .spacing(spacing::SM),
-        )
-        .padding(spacing::LG)
-        .into(),
+        LoadState::Error(err) => load_error(vm, err, scale),
         LoadState::Loaded if vm.rows.is_empty() => {
             let message = match collections::empty_message(vm) {
                 Some(message) => message,
@@ -5143,15 +5221,7 @@ fn column_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message>
         LoadState::Loaded if !vm.search.active => pane_message("This folder is empty.", scale),
         LoadState::Loaded => pane_message(searching::empty_message(vm), scale),
         LoadState::Loading => pane_message("Loading\u{2026}", scale),
-        LoadState::Error(err) => container(
-            column![
-                scaled_text("Couldn't open this folder", 16.0, scale).color(hyprforge_ui::theme::warning()),
-                meta_text(err.message.clone(), BASE_TEXT_SIZE, scale),
-            ]
-            .spacing(spacing::SM),
-        )
-        .padding(spacing::LG)
-        .into(),
+        LoadState::Error(err) => load_error(vm, err, scale),
     };
     panes.push(container(current).width(Length::Fill).height(Length::Fill)).into()
 }
@@ -7893,6 +7963,27 @@ mod tests {
     /// two browsers differing *only* in `Mode`, after the same messages,
     /// feed `render` exactly the same data.
     #[test]
+    fn a_folder_this_user_may_not_read_offers_a_way_in_only_where_the_host_offers_one() {
+        let denied = DirError { kind: DirErrorKind::PermissionDenied, message: "no".into() };
+        let (mut browser, _) = Browser::new(Mode::App, Prefs::default(), PathBuf::from("/root"), vec![]);
+        browser.update(Message::DirLoaded(PathBuf::from("/root"), Err(denied)));
+        assert_eq!(browser.update(Message::OpenAsAdmin), Outcome::None, "nothing offered, nothing done");
+        browser.update(Message::SetAdmin(Admin::Offered));
+        assert_eq!(browser.update(Message::OpenAsAdmin), Outcome::OpenAsAdmin(PathBuf::from("/root")));
+        assert!(browser.view_model(1000.0).offer_admin);
+    }
+
+    #[test]
+    fn an_elevated_browser_says_so_and_offers_nothing_more() {
+        let (mut browser, _) = Browser::new(Mode::App, Prefs::default(), PathBuf::from("/root"), vec![]);
+        browser.update(Message::SetAdmin(Admin::Elevated));
+        assert!(browser.elevated());
+        let vm = browser.view_model(1000.0);
+        assert!(vm.elevated && !vm.offer_admin);
+        assert_eq!(browser.update(Message::OpenAsAdmin), Outcome::None);
+    }
+
+    #[test]
     fn view_never_branches_on_mode() {
         let (mut app, _) = Browser::new(Mode::App, Prefs::default(), PathBuf::from("/dir"), vec![]);
         let (mut dialog, _) =
@@ -7957,6 +8048,8 @@ mod tests {
     ) -> ViewModel<'a> {
         ViewModel {
             current_dir,
+            elevated: false,
+            offer_admin: false,
             in_trash: false,
             archive: None,
             renaming: None,

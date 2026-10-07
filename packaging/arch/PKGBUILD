@@ -186,9 +186,18 @@ package_hyprforge-files() {
     # nothing to ask for it, and Settings -> Set up's "open/save dialog"
     # item has no portals.conf to write that anything would read.
     'xdg-desktop-portal: other applications using Files as their open/save dialog'
+    # "Open as administrator" runs the helper through pkexec; without
+    # polkit a folder this user cannot read just says so.
+    'polkit: opening and changing folders as administrator'
   )
   cd "$startdir/../.."
   _bin hyprforge-files
+  # The administrator helper and the polkit action naming it — see
+  # crates/hyprforge-files/src/admin.rs. The action's exec.path is
+  # /usr/bin's, which is where _bin puts it.
+  _bin hyprforge-files-admin
+  install -Dm644 crates/hyprforge-files/packaging/org.hyprforge.files.admin.policy \
+    "$pkgdir/usr/share/polkit-1/actions/org.hyprforge.files.admin.policy"
   install -Dm644 crates/hyprforge-files/packaging/hyprforge-files.desktop \
     "$pkgdir/usr/share/applications/hyprforge-files.desktop"
   # The open/save dialog: registered with xdg-desktop-portal and started

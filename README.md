@@ -249,7 +249,10 @@ Apps
                             second binary, hyprforge-files-portal: the
                             desktop's open/save dialog, served to
                             xdg-desktop-portal and opted into, never
-                            switched on by installing it.
+                            switched on by installing it. And a third,
+                            hyprforge-files-admin: the small helper
+                            pkexec runs for "Open as administrator", so
+                            the window itself never runs as root.
   hyprforge-media/        the photo, video and 3D model viewer, in the
                             file manager's shell: a Places sidebar, and
                             Photo, Grid and Library as modes of one window.

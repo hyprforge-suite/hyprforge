@@ -925,6 +925,8 @@ reload_session_bus() {
 uninstall_files() {
     step "File manager: removing"
     remove_file "$PREFIX/hyprforge-files"
+    remove_file "$PREFIX/hyprforge-files-admin"
+    remove_file "$POLKIT_ACTIONS_DIR/org.hyprforge.files.admin.policy"
     remove_user_path "$DESKTOP_DIR/hyprforge-files.desktop"
     remove_file "$PREFIX/hyprforge-files-portal"
     remove_file "$PORTAL_DIR/hyprforge.portal"
@@ -1113,13 +1115,27 @@ readonly PORTAL_DIR=/usr/share/xdg-desktop-portal/portals
 readonly DBUS_SERVICES_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/dbus-1/services"
 readonly PORTAL_BUS_NAME=org.freedesktop.impl.portal.desktop.hyprforge
 readonly FILE_MANAGER1_NAME=org.freedesktop.FileManager1
+# Where polkit reads actions from. There is no per-user directory: an
+# action is the system's say-so about what may be run as root.
+readonly POLKIT_ACTIONS_DIR=/usr/share/polkit-1/actions
 
 install_files() {
     COMPONENT_CHANGED=false
     # One crate, two binaries: the window and the open/save dialog.
-    build hyprforge-files hyprforge-files hyprforge-files-portal
+    build hyprforge-files hyprforge-files hyprforge-files-portal hyprforge-files-admin
     step "File manager"
     install_file target/release/hyprforge-files "$PREFIX/hyprforge-files" 755
+
+    # "Open as administrator": the helper, and the polkit action that
+    # names it. pkexec matches the action by the helper's full path, so
+    # the packaged file's /usr/bin is rewritten to this install's prefix.
+    install_file target/release/hyprforge-files-admin "$PREFIX/hyprforge-files-admin" 755
+    local policy
+    policy=$(mktemp)
+    sed "s|/usr/bin/hyprforge-files-admin|$PREFIX/hyprforge-files-admin|" \
+        crates/hyprforge-files/packaging/org.hyprforge.files.admin.policy > "$policy"
+    install_file "$policy" "$POLKIT_ACTIONS_DIR/org.hyprforge.files.admin.policy" 644
+    rm -f "$policy"
 
     local entry=crates/hyprforge-files/packaging/hyprforge-files.desktop
     local dst="$DESKTOP_DIR/hyprforge-files.desktop"
@@ -1635,6 +1651,7 @@ show_status() {
     status_binary hyprforge-emojimenu
     status_binary hyprforge-files
     status_binary hyprforge-files-portal
+    status_binary hyprforge-files-admin
     status_binary hyprforge-media
     status_binary hyprforge-mimetype
     status_binary hyprforge-mimeopen
