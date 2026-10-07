@@ -23,19 +23,22 @@ use std::path::{Path, PathBuf};
 
 /// A list the sidebar offers that is not a folder: what it shows comes
 /// from many folders, the way a search's results do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Collection {
     /// What was opened lately, by anything — see [`crate::recent`].
     Recent,
     /// What the person starred.
     Starred,
+    /// What has this tag — see [`crate::tags`].
+    Tag(String),
 }
 
 impl Collection {
-    pub fn label(self) -> &'static str {
+    pub fn label(&self) -> &str {
         match self {
             Collection::Recent => "Recent",
             Collection::Starred => "Starred",
+            Collection::Tag(tag) => tag,
         }
     }
 
@@ -49,10 +52,11 @@ impl Collection {
     /// `starred` alone, a theme such as Dracula — which has no `starred`
     /// but does have `folder` — answered with its plain folder before the
     /// star its parent theme has was ever reached.
-    pub fn icon_name(self) -> &'static str {
+    pub fn icon_name(&self) -> &'static str {
         match self {
             Collection::Recent => "folder-recent,document-open-recent",
             Collection::Starred => "folder-favorites,starred,emblem-favorite",
+            Collection::Tag(_) => "tag,tag-symbolic,emblem-documents",
         }
     }
 }

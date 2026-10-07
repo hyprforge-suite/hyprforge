@@ -158,6 +158,10 @@ pub enum Action {
     /// starred already — see [`crate::starred`]. One action for both, so
     /// one key does both, the way a browser's bookmark star does.
     ToggleStar,
+    /// Put tags on the selection or take them off — see [`crate::tags`].
+    /// The window opens a sheet for it: tags are kept on the files, so
+    /// reading and writing them is the host's.
+    EditTags,
     /// Mount a drive from the sidebar — see [`crate::devices`].
     Mount,
     /// Unmount the drive a sidebar row names, or the one the folder in
@@ -278,6 +282,7 @@ impl Action {
             Action::PinUp,
             Action::PinDown,
             Action::ToggleStar,
+            Action::EditTags,
             Action::Mount,
             Action::Unmount,
             Action::Eject,
@@ -353,6 +358,7 @@ impl Action {
             Action::PinUp => "pin-up",
             Action::PinDown => "pin-down",
             Action::ToggleStar => "star",
+            Action::EditTags => "tags",
             Action::Mount => "mount",
             Action::Unmount => "unmount",
             Action::Eject => "eject",
@@ -445,6 +451,7 @@ impl Action {
             Action::PinUp => "Move Up",
             Action::PinDown => "Move Down",
             Action::ToggleStar => "Star",
+            Action::EditTags => "Tags\u{2026}",
             Action::Mount => "Mount",
             Action::Unmount => "Unmount",
             Action::Eject => "Eject",
@@ -598,6 +605,9 @@ impl Action {
             // same letter with Shift is the nearest free key that still
             // reads as "the other kind of bookmark".
             Action::ToggleStar => &["Ctrl+Shift+D"],
+            // No key: putting tags on is a sheet with a field in it, and
+            // the palette reaches it by name.
+            Action::EditTags => &[],
             // Reached from a drive's or a share's row, and from the
             // palette while browsing one. Nothing here is done often
             // enough to hold a key, and Eject on a slip of the finger
@@ -824,6 +834,10 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         // path no other program — and no later Files, once the archive
         // is rewritten — can be sure of finding.
         Action::ToggleStar => ctx.selected > 0 && !ctx.in_trash && !ctx.in_archive,
+        // The same things a star can go on, for the same reasons — and a
+        // tag is kept on the file itself, which a trashed item's storage
+        // name or an archive's member is not.
+        Action::EditTags => ctx.selected > 0 && !ctx.in_trash && !ctx.in_archive,
         // Nothing is offered twice while it is already happening, and a
         // locked (encrypted) drive cannot be mounted here at all.
         Action::Mount => ctx.device.volume && !ctx.device.mounted && !ctx.device.busy && !ctx.device.locked,

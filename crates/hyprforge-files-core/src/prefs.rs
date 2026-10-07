@@ -363,6 +363,9 @@ pub struct Prefs {
     /// made inside Files, and a star whose file has gone some other way
     /// stays here and is shown as missing.
     pub starred: Vec<PathBuf>,
+    /// What Files tagged, by tag — see [`crate::tags`]. Only an index:
+    /// the tag itself is on the file, and a tag view checks it there.
+    pub tags: crate::tags::Index,
     /// How big the listing is drawn in each view — see [`Zoom`].
     pub zoom: Zoom,
     /// Whether the window opens on the tabs it had when it last closed.
@@ -411,6 +414,7 @@ impl Default for Prefs {
             pinned: Vec::new(),
             searches: Vec::new(),
             starred: Vec::new(),
+            tags: crate::tags::Index::new(),
             zoom: Zoom::default(),
             restore_tabs: true,
             split_new_tabs: false,

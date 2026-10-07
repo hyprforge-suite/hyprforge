@@ -56,6 +56,7 @@ pub mod search;
 pub mod space;
 pub mod sidebar;
 pub mod starred;
+pub mod tags;
 pub mod trash;
 pub mod typeahead;
 pub mod undo;

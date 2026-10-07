@@ -54,14 +54,14 @@ pub(super) struct CollectionModel<'a> {
 
 impl CollectionModel<'_> {
     pub(super) fn kind(&self) -> Collection {
-        self.kind
+        self.kind.clone()
     }
 }
 
 impl Browser {
     /// Which collection is on screen, if one is.
     pub fn collection(&self) -> Option<Collection> {
-        self.search.collection.as_ref().map(|l| l.kind)
+        self.search.collection.as_ref().map(|l| l.kind.clone())
     }
 
     /// The window's starred list changed; this tab's copy follows it. A
@@ -73,7 +73,18 @@ impl Browser {
         self.stars = starred.iter().cloned().collect();
         self.prefs.starred = starred;
         match self.collection() {
-            Some(Collection::Starred) if changed => self.read_collection(Collection::Starred),
+            Some(Collection::Starred) if changed => self.read_collection(&Collection::Starred),
+            _ => Outcome::None,
+        }
+    }
+
+    /// The window's tag index changed — see [`crate::tags`]. The sidebar
+    /// follows it, and a tag's view on screen is read again.
+    pub fn set_tags(&mut self, tags: crate::tags::Index) -> Outcome {
+        let changed = tags != self.prefs.tags;
+        self.prefs.tags = tags;
+        match self.collection() {
+            Some(kind @ Collection::Tag(_)) if changed => self.read_collection(&kind),
             _ => Outcome::None,
         }
     }
@@ -86,16 +97,21 @@ impl Browser {
         self.renaming = None;
         self.path_edit = None;
         self.selection.clear();
+        let read = self.read_collection(&kind);
         self.search.collection = Some(Listed { kind, results: Vec::new(), reading: true, problem: None, missing: Vec::new() });
         self.refresh_view();
-        many(vec![stop, self.read_collection(kind)])
+        many(vec![stop, read])
     }
 
     /// The question to ask the host for `kind`.
-    pub(super) fn read_collection(&self, kind: Collection) -> Outcome {
+    pub(super) fn read_collection(&self, kind: &Collection) -> Outcome {
         match kind {
             Collection::Recent => Outcome::ReadRecent,
             Collection::Starred => Outcome::ReadStarred(self.prefs.starred.clone()),
+            Collection::Tag(tag) => Outcome::ReadTagged {
+                tag: tag.clone(),
+                paths: self.prefs.tags.get(tag).cloned().unwrap_or_default(),
+            },
         }
     }
 
@@ -128,7 +144,7 @@ impl Browser {
     /// F5. A collection on screen may name a file that has just moved,
     /// so it is read again too.
     pub(super) fn collection_after_refresh(&self) -> Outcome {
-        self.collection().map_or(Outcome::None, |kind| self.read_collection(kind))
+        self.collection().map_or(Outcome::None, |kind| self.read_collection(&kind))
     }
 
     /// Star or unstar the selection — see [`crate::starred::toggle`].
@@ -180,7 +196,7 @@ impl Browser {
     pub(super) fn collection_model(&self) -> Option<CollectionModel<'_>> {
         let listed = self.search.collection.as_ref()?;
         Some(CollectionModel {
-            kind: listed.kind,
+            kind: listed.kind.clone(),
             shown: listed.results.len(),
             reading: listed.reading,
             problem: listed.problem.as_deref(),
@@ -198,17 +214,19 @@ pub(super) fn rail<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Option<Element<'
         return None;
     }
     let text_size = super::density::META_TEXT_BASE;
-    let mut strip = row![scaled_text(model.kind.label(), text_size, scale)]
+    let mut strip = row![scaled_text(model.kind.label().to_string(), text_size, scale)]
         .spacing(spacing::SM)
         .align_y(iced::Alignment::Center);
     let status = match (model.reading, model.problem) {
         (true, _) => Some("Reading\u{2026}".to_string()),
         (false, Some(_)) => None,
-        (false, None) => Some(match (model.kind, model.shown) {
+        (false, None) => Some(match (&model.kind, model.shown) {
             (Collection::Recent, 1) => "1 file, newest first".to_string(),
             (Collection::Recent, n) => format!("{n} files, newest first"),
             (Collection::Starred, 1) => "1 starred".to_string(),
             (Collection::Starred, n) => format!("{n} starred"),
+            (Collection::Tag(_), 1) => "1 tagged".to_string(),
+            (Collection::Tag(_), n) => format!("{n} tagged"),
         }),
     };
     if let Some(status) = status {
@@ -256,17 +274,18 @@ pub(super) fn empty_message(vm: &ViewModel<'_>) -> Option<&'static str> {
     if vm.search.active {
         return None;
     }
-    Some(match (model.kind, model.reading, model.problem.is_some()) {
+    Some(match (&model.kind, model.reading, model.problem.is_some()) {
         (_, true, _) => "Reading\u{2026}",
         (Collection::Recent, false, true) => "Recent couldn\u{2019}t be read.",
         (Collection::Recent, false, false) => "Nothing has been opened lately.",
         (Collection::Starred, false, _) if model.missing > 0 => "None of the starred items can be found.",
         (Collection::Starred, false, _) => "Nothing is starred. Star a file from its menu.",
+        (Collection::Tag(_), false, _) => "Nothing has this tag any more.",
     })
 }
 
 /// The icon key a collection's sidebar row asks the theme for.
-pub(super) fn icon(kind: Collection) -> String {
+pub(super) fn icon(kind: &Collection) -> String {
     crate::icon::themed_key(kind.icon_name())
 }
 
@@ -339,7 +358,7 @@ mod tests {
 
     fn reads(outcome: &Outcome) -> Vec<Outcome> {
         match outcome {
-            Outcome::ReadRecent | Outcome::ReadStarred(_) => vec![outcome.clone()],
+            Outcome::ReadRecent | Outcome::ReadStarred(_) | Outcome::ReadTagged { .. } => vec![outcome.clone()],
             Outcome::Many(parts) => parts.iter().flat_map(reads).collect(),
             _ => Vec::new(),
         }
@@ -426,6 +445,50 @@ mod tests {
         assert_eq!(names(&browser), ["b.txt"]);
     }
 
+    fn tagged(tag: &str, paths: &[&str]) -> crate::tags::Index {
+        crate::tags::apply(
+            &crate::tags::Index::new(),
+            &crate::tags::TagChange::Add { tag: tag.into(), paths: paths.iter().map(PathBuf::from).collect() },
+        )
+    }
+
+    /// A Tags section with a row per tag, and none at all with no tags —
+    /// a heading with nothing under it reads as broken.
+    #[test]
+    fn each_tag_is_a_row_under_tags_and_no_tags_is_no_section() {
+        let mut browser = browser_at("/d", vec![]);
+        let none = super::super::sidebar_sections(&browser.view_model(1000.0));
+        assert!(none.iter().all(|s| s.title != "Tags"));
+        browser.set_tags(tagged("work", &["/x/a.txt", "/y/b.txt"]));
+        let sections = super::super::sidebar_sections(&browser.view_model(1000.0));
+        let tags = sections.iter().find(|s| s.title == "Tags").expect("a Tags section");
+        assert_eq!(tags.rows.len(), 1);
+        assert_eq!(tags.rows[0].label, "work");
+        assert_eq!(tags.rows[0].meta.as_deref(), Some("2"));
+        assert_eq!(tags.rows[0].search.as_ref().and_then(|q| q.collection()), Some(Collection::Tag("work".into())));
+    }
+
+    /// A tag's view asks the host for exactly what the index lists, and
+    /// shows what comes back — read again when the index changes.
+    #[test]
+    fn a_tag_view_asks_for_its_files_and_follows_the_index() {
+        let mut browser = browser_at("/d", vec![]);
+        browser.set_tags(tagged("work", &["/x/a.txt"]));
+        let outcome = browser.update(Message::ShowCollection(Collection::Tag("work".into())));
+        assert_eq!(reads(&outcome), [Outcome::ReadTagged { tag: "work".into(), paths: vec![PathBuf::from("/x/a.txt")] }]);
+        browser.update(Message::TaggedRead { tag: "work".into(), entries: vec![file("/x", "a.txt")] });
+        assert_eq!(names(&browser), ["a.txt"]);
+        let again = browser.set_tags(tagged("work", &["/x/a.txt", "/x/c.txt"]));
+        assert_eq!(reads(&again).len(), 1, "read again with the new list");
+    }
+
+    #[test]
+    fn tags_are_offered_on_a_selection_and_go_to_the_host() {
+        let mut browser = browser_at("/d", vec![file("/d", "a.txt")]);
+        browser.update(Message::EntryClicked { index: 0, ctrl: false, shift: false });
+        assert_eq!(browser.update(Message::Perform(crate::action::Action::EditTags)), Outcome::EditTags(vec![PathBuf::from("/d/a.txt")]));
+    }
+
     /// The sidebar's two rows head Places, keyed as collections rather
     /// than as a path — and each switch in `[sidebar]` takes its row away.
     #[test]
@@ -434,7 +497,7 @@ mod tests {
         let vm = browser.view_model(1000.0);
         let sections = super::super::sidebar_sections(&vm);
         let places = sections.iter().find(|s| s.title == "Places").unwrap();
-        let first: Vec<Option<Collection>> = places.rows.iter().take(2).map(|r| r.search.and_then(|q| q.collection())).collect();
+        let first: Vec<Option<Collection>> = places.rows.iter().take(2).map(|r| r.search.as_ref().and_then(|q| q.collection())).collect();
         assert_eq!(first, [Some(Collection::Recent), Some(Collection::Starred)]);
 
         let mut browser = browser_at("/d", vec![]);
@@ -444,8 +507,8 @@ mod tests {
         let vm = browser.view_model(1000.0);
         let sections = super::super::sidebar_sections(&vm);
         let rows = &sections.iter().find(|s| s.title == "Places").unwrap().rows;
-        assert!(rows.iter().all(|r| r.search.and_then(|q| q.collection()) != Some(Collection::Recent)));
-        assert!(rows.iter().any(|r| r.search.and_then(|q| q.collection()) == Some(Collection::Starred)));
+        assert!(rows.iter().all(|r| r.search.as_ref().and_then(|q| q.collection()) != Some(Collection::Recent)));
+        assert!(rows.iter().any(|r| r.search.as_ref().and_then(|q| q.collection()) == Some(Collection::Starred)));
     }
 
     /// A refresh of the folder behind — after a rename, say — reads the

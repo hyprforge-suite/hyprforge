@@ -11,6 +11,7 @@ pub mod localtime;
 pub mod ops;
 pub mod percent;
 pub mod trash;
+pub mod xattr;
 
 pub use fs::{FileStatus, Filesystem, RealFilesystem};
 pub use ops::{

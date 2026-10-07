@@ -205,6 +205,10 @@ pub const BATCH_SIZE: usize = 250;
 /// [`crate::content::open_regular`], or [`crate::content::in_archive`]
 /// for a walk inside one. Never called for a query without one.
 ///
+/// `tags_of` reads a file's tags for a `tag:` filter — the host's, from
+/// the file's attribute ([`crate::tags`]). Never called for a query
+/// without one.
+///
 /// `emit` returning `false` means nobody is listening any more, and the
 /// walk stops. `cancel` is checked before every folder, and before every
 /// file whose contents are read.
@@ -214,6 +218,7 @@ pub fn walk<B: FsBackend + ?Sized>(
     cancel: &AtomicBool,
     elsewhere: &dyn Fn(&Path) -> bool,
     open: Opener<'_>,
+    tags_of: &dyn Fn(&Path) -> Vec<String>,
     emit: &mut dyn FnMut(Vec<Entry>) -> bool,
 ) -> Summary {
     let started = Instant::now();
@@ -259,6 +264,11 @@ pub fn walk<B: FsBackend + ?Sized>(
                 }
             }
             if request.matcher.matches(&entry) {
+                // Tags before contents: one attribute read, where a
+                // content filter may read the whole file.
+                if request.matcher.asks_tags() && !request.matcher.tags_hold(&tags_of(&entry.path)) {
+                    continue;
+                }
                 if let Some(scanner) = scanner.as_mut() {
                     // Reading a file is the slow part of a content
                     // search, so the walk's own limits are asked again
@@ -446,7 +456,7 @@ mod tests {
 
     fn run(backend: &MockBackend, request: &Request) -> (Vec<Entry>, Summary) {
         let mut found = Vec::new();
-        let summary = walk(backend, request, &AtomicBool::new(false), &|_| false, &never, &mut |batch| {
+        let summary = walk(backend, request, &AtomicBool::new(false), &|_| false, &never, &|_| Vec::new(), &mut |batch| {
             found.extend(batch);
             true
         });
@@ -521,14 +531,14 @@ mod tests {
         backend.make_unreadable("/r/sub/deep");
         let request = request("/r", "ext:rs");
         let mut found = Vec::new();
-        let summary = walk(&backend, &request, &AtomicBool::new(false), &|_| false, &never, &mut |b| {
+        let summary = walk(&backend, &request, &AtomicBool::new(false), &|_| false, &never, &|_| Vec::new(), &mut |b| {
             found.extend(b);
             true
         });
         assert_eq!(summary.unreadable, 1);
         assert_eq!(summary.end, End::Complete);
 
-        let summary = walk(&tree(), &request, &AtomicBool::new(false), &|p| p.ends_with("sub"), &never, &mut |_| true);
+        let summary = walk(&tree(), &request, &AtomicBool::new(false), &|p| p.ends_with("sub"), &never, &|_| Vec::new(), &mut |_| true);
         assert_eq!(summary.elsewhere, 1);
         assert_eq!(summary.folders, 1, "the other filesystem was not entered");
     }
@@ -543,9 +553,23 @@ mod tests {
 
     #[test]
     fn cancelling_stops_before_the_next_folder() {
-        let summary = walk(&tree(), &request("/r", "ext:rs"), &AtomicBool::new(true), &|_| false, &never, &mut |_| true);
+        let summary = walk(&tree(), &request("/r", "ext:rs"), &AtomicBool::new(true), &|_| false, &never, &|_| Vec::new(), &mut |_| true);
         assert_eq!(summary.end, End::Stopped);
         assert_eq!(summary.folders, 0);
+    }
+
+    /// `tag:` asks the host for each candidate's tags — read off the
+    /// file — and nothing else does.
+    #[test]
+    fn a_tag_search_keeps_only_what_the_host_says_is_tagged() {
+        let mut found = Vec::new();
+        let tags_of = |p: &Path| if p.ends_with("c.rs") { vec!["Work".to_string()] } else { Vec::new() };
+        let never: Opener<'_> = &|_| unreachable!("no content filter, no file read");
+        walk(&tree(), &request("/r", "tag:work"), &AtomicBool::new(false), &|_| false, &never, &tags_of, &mut |b| {
+            found.extend(b);
+            true
+        });
+        assert_eq!(found.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["c.rs"]);
     }
 
     #[test]
@@ -554,7 +578,7 @@ mod tests {
         backend.seed_many("/big", BATCH_SIZE + 1);
         let mut request = request("/big", "");
         request.root = PathBuf::from("/big");
-        let summary = walk(&backend, &request, &AtomicBool::new(false), &|_| false, &never, &mut |_| false);
+        let summary = walk(&backend, &request, &AtomicBool::new(false), &|_| false, &never, &|_| Vec::new(), &mut |_| false);
         assert_eq!(summary.end, End::Stopped);
     }
 
@@ -592,7 +616,7 @@ mod tests {
         backend.seed("/wide", (0..500).map(|i| MockBackend::dir(root, &format!("d{i}"))).collect());
         let mut request = request("/wide", "nothing-matches-this");
         request.budget.folders = 10;
-        let summary = walk(&backend, &request, &AtomicBool::new(false), &|_| false, &never, &mut |_| true);
+        let summary = walk(&backend, &request, &AtomicBool::new(false), &|_| false, &never, &|_| Vec::new(), &mut |_| true);
         assert_eq!(summary.end, End::FolderLimit);
         assert_eq!(summary.folders, 10);
     }
@@ -604,7 +628,7 @@ mod tests {
         let request = request("/big", "");
         let mut batches = 0;
         let mut total = 0;
-        walk(&backend, &request, &AtomicBool::new(false), &|_| false, &never, &mut |b| {
+        walk(&backend, &request, &AtomicBool::new(false), &|_| false, &never, &|_| Vec::new(), &mut |b| {
             batches += 1;
             total += b.len();
             true
@@ -628,7 +652,7 @@ mod tests {
 
     fn run_reading(request: &Request) -> (Vec<Entry>, Summary) {
         let mut found = Vec::new();
-        let summary = walk(&tree(), request, &AtomicBool::new(false), &|_| false, &says, &mut |b| {
+        let summary = walk(&tree(), request, &AtomicBool::new(false), &|_| false, &says, &|_| Vec::new(), &mut |b| {
             found.extend(b);
             true
         });
@@ -684,7 +708,7 @@ mod tests {
             cancel.store(true, Ordering::Relaxed);
             says(path)
         };
-        let summary = walk(&tree(), &request("/r", "content:x"), &cancel, &|_| false, &open, &mut |_| true);
+        let summary = walk(&tree(), &request("/r", "content:x"), &cancel, &|_| false, &open, &|_| Vec::new(), &mut |_| true);
         assert_eq!(summary.end, End::Stopped);
         assert_eq!(opened.get(), 1);
     }

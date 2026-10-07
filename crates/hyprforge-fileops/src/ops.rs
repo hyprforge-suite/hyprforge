@@ -821,7 +821,7 @@ impl<F: Filesystem> Operation<F> {
                 self.index += 1;
                 return StepOutcome::Progress(self.progress_snapshot(copy.source_path));
             }
-            preserve_attrs(&copy.writer, &copy.dest_path, &copy.src_meta, "file");
+            preserve_attrs(&copy.writer, &copy.source_path, &copy.dest_path, &copy.src_meta, "file");
             self.succeeded.push(copy.dest_path.clone());
             self.index += 1;
             return StepOutcome::Progress(self.progress_snapshot(copy.source_path));
@@ -937,7 +937,7 @@ impl<F: Filesystem> Operation<F> {
             let src = self.source.join(&self.entries[i].source_relative);
             let dst = self.dest.join(&self.entries[i].dest_relative);
             if let (Ok(meta), Ok(dir)) = (fs::symlink_metadata(&src), File::open(&dst)) {
-                preserve_attrs(&dir, &dst, &meta, "directory");
+                preserve_attrs(&dir, &src, &dst, &meta, "directory");
             }
         }
 
@@ -1037,7 +1037,11 @@ fn renamed_sibling(dest: &Path) -> io::Result<PathBuf> {
 /// difference there ever was between the file and directory versions of
 /// this — setting `accessed` on a directory is as harmless as setting it
 /// on a file, and both are already best-effort.
-fn preserve_attrs(handle: &File, dest_path: &Path, src_meta: &fs::Metadata, what: &'static str) {
+///
+/// The source's `user.*` extended attributes come across too — a file's
+/// tags among them — see `crate::xattr`.
+fn preserve_attrs(handle: &File, source: &Path, dest_path: &Path, src_meta: &fs::Metadata, what: &'static str) {
+    crate::xattr::copy_user(source, handle, dest_path);
     if let Err(e) = fs::set_permissions(dest_path, fs::Permissions::from_mode(src_meta.mode() & 0o7777)) {
         tracing::warn!(path = %dest_path.display(), error = %e, "could not preserve {what} permissions");
     }
@@ -1087,6 +1091,30 @@ mod tests {
 
     fn no_collisions(_: &Collision) -> CollisionDecision {
         panic!("no collision was expected in this test");
+    }
+
+    /// A copy keeps what the person put on a file — its tags above all —
+    /// and a folder's too.
+    #[test]
+    fn a_copy_keeps_the_user_attributes_of_files_and_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_root = dir.path().join("src");
+        write_file(&src_root.join("a.txt"), "hello");
+        let tagged = |p: &Path| crate::xattr::set(p, "user.xdg.tags", b"work");
+        if let Err(e) = tagged(&src_root.join("a.txt")) {
+            eprintln!("HYPRFORGE-SKIP: the temporary directory holds no user extended attributes ({e})");
+            return;
+        }
+        tagged(&src_root).unwrap();
+        crate::xattr::set(&src_root.join("a.txt"), "user.xdg.origin.url", b"https://example.org").unwrap();
+        let dest = dir.path().join("dest");
+        let mut op = Operation::real(OpKind::Copy, &src_root, &dest);
+        let report = drive(&mut op, no_collisions);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        let get = |p: &Path, n: &str| crate::xattr::get(p, n).unwrap();
+        assert_eq!(get(&dest.join("a.txt"), "user.xdg.tags").as_deref(), Some(&b"work"[..]));
+        assert_eq!(get(&dest.join("a.txt"), "user.xdg.origin.url").as_deref(), Some(&b"https://example.org"[..]));
+        assert_eq!(get(&dest, "user.xdg.tags").as_deref(), Some(&b"work"[..]), "the folder's own tag");
     }
 
     #[test]

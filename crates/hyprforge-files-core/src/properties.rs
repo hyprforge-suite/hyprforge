@@ -169,6 +169,8 @@ pub struct Facts {
     /// Whether this process may change the mode: it owns the file or is
     /// root, and the file is not a link (whose own mode Linux ignores).
     pub can_change_mode: bool,
+    /// Its tags, read off the file — see [`crate::tags`].
+    pub tags: Vec<String>,
 }
 
 /// How far a recursive measurement has got.
@@ -304,6 +306,9 @@ pub enum Message {
     /// selection, and the one action there that reads naturally from a
     /// summary of several things.
     Compress,
+    /// "Edit" beside the tags: the window's Tags sheet, for what is
+    /// being described.
+    EditTags,
 }
 
 /// What the browser should do after the inspector has updated itself.
@@ -315,6 +320,8 @@ pub enum Effect {
     /// The window's Open With chooser, for this file.
     OpenWith(PathBuf),
     Compress,
+    /// The Tags sheet, for these.
+    EditTags(Vec<PathBuf>),
     /// Read the folder again — a mode changed, so the listing's
     /// Permissions column is out of date.
     Refresh,
@@ -498,6 +505,12 @@ impl Inspector {
                     Effect::None
                 }
             }
+            // On real files only: a trashed item's path is its storage
+            // name, and an archive's member has no attributes to hold one.
+            Message::EditTags => match self.place {
+                Place::Folder => Effect::EditTags(self.subjects.iter().map(|s| s.path.clone()).collect()),
+                _ => Effect::None,
+            },
         }
     }
 
@@ -812,6 +825,21 @@ fn general<'a>(inspector: &'a Inspector, home: Option<&Path>, scale: FontScale) 
                 (None, None) => "Folder".to_string(),
             };
             lines = lines.push(fact("Kind", kind, scale));
+            if let (Some(facts), Place::Folder) = (facts, inspector.place) {
+                let said = if facts.tags.is_empty() { "None".to_string() } else { facts.tags.join(", ") };
+                lines = lines.push(fact_row(
+                    "Tags",
+                    row![
+                        hyprforge_ui::widgets::scaled_text(said, BASE_TEXT_SIZE, scale)
+                            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                            .width(Length::Fill),
+                        hyprforge_ui::widgets::secondary_button("Edit").on_press(Message::EditTags),
+                    ]
+                    .spacing(spacing::SM)
+                    .align_y(iced::Alignment::Center),
+                    scale,
+                ));
+            }
             if let Some(mime) = facts.and_then(|f| f.mime.clone()) {
                 lines = lines.push(fact_row("Type", config_line(mime, scale).color(hyprforge_ui::theme::text()), scale));
             }

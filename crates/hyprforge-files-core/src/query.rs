@@ -56,7 +56,7 @@ use crate::types::{Entry, EntryKind, EntrySize};
 use std::time::{Duration, SystemTime};
 
 /// Every key this module understands, in the order a hint lists them.
-pub const KEYS: [&str; 7] = ["ext", "kind", "size", "modified", "name", "is", "content"];
+pub const KEYS: [&str; 8] = ["ext", "kind", "size", "modified", "name", "is", "content", "tag"];
 
 /// What was typed into the search box, understood.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -107,6 +107,11 @@ pub enum Test {
     /// module, so a [`Matcher`] passes it over and the search walk
     /// answers it, last, for whatever the other filters let through.
     Content(String),
+    /// The file has this tag — see [`crate::tags`]. Like `content:`, a
+    /// question about the file rather than the listing, so the search
+    /// walk answers it ([`Matcher::tags_hold`]). Compared ignoring case: a
+    /// person who tagged "Work" and searches `tag:work` means it.
+    Tag(String),
 }
 
 /// `kind:` — [`EntryKind`] as a person names it, plus `file`, which is
@@ -234,6 +239,7 @@ fn expected(key: &str) -> &'static str {
         "modified" => "write an age, like modified:<7d or modified:>1y, or modified:today.",
         "name" => "write part of a name, or a pattern like name:*.rs.",
         "content" => "write the text to look for, like content:TODO or content:\"to do\".",
+        "tag" => "write a tag, like tag:work.",
         _ => "is takes hidden or link.",
     }
 }
@@ -249,10 +255,11 @@ impl Query {
         self.filters.iter().any(|f| !f.negated && f.test == Test::Hidden)
     }
 
-    /// Whether this asks what files *say* — a `content:` filter, which
-    /// only the search walk can answer.
+    /// Whether this asks the files themselves — what they say
+    /// (`content:`) or what they are tagged (`tag:`) — which only the
+    /// search walk can answer, the listing holding neither.
     pub fn reads_contents(&self) -> bool {
-        self.filters.iter().any(|f| matches!(f.test, Test::Content(_)))
+        self.filters.iter().any(|f| matches!(f.test, Test::Content(_) | Test::Tag(_)))
     }
 
     /// The query written back out the way it would be typed: filters
@@ -286,6 +293,14 @@ impl Query {
                 .iter()
                 .filter_map(|f| match &f.test {
                     Test::Content(text) => Some(crate::content::Needle::new(text, f.negated)),
+                    _ => None,
+                })
+                .collect(),
+            tags: self
+                .filters
+                .iter()
+                .filter_map(|f| match &f.test {
+                    Test::Tag(tag) => Some((f.negated, tag.clone())),
                     _ => None,
                 })
                 .collect(),
@@ -445,6 +460,7 @@ fn read_token(token: &str) -> Read {
             _ => None,
         },
         "content" | "contains" => (!value.is_empty()).then(|| Test::Content(value.to_string())),
+        "tag" | "tagged" => (!value.trim().is_empty()).then(|| Test::Tag(value.trim().to_string())),
         _ => return Read::Unknown(Problem::UnknownKey { key }),
     };
     match test {
@@ -544,6 +560,9 @@ pub struct Matcher {
     /// `content:` filters, which [`Matcher::matches`] does not decide —
     /// see [`Test::Content`].
     content: Vec<crate::content::Needle>,
+    /// `tag:` filters — negated, and the tag — which [`Matcher::matches`]
+    /// does not decide either.
+    tags: Vec<(bool, String)>,
 }
 
 /// A [`Test`] with its times resolved.
@@ -592,7 +611,7 @@ impl Pinned {
             Test::Name(pattern) => Pinned::Name(NamePattern::Contains(pattern.clone())),
             Test::Hidden => Pinned::Hidden,
             Test::Link => Pinned::Link,
-            Test::Content(_) => return None,
+            Test::Content(_) | Test::Tag(_) => return None,
         })
     }
 
@@ -646,7 +665,18 @@ impl Matcher {
 
     /// Nothing asked: every entry matches.
     pub fn is_empty(&self) -> bool {
-        self.text.is_empty() && self.filters.is_empty() && self.content.is_empty()
+        self.text.is_empty() && self.filters.is_empty() && self.content.is_empty() && self.tags.is_empty()
+    }
+
+    /// Whether a file with `tags` passes every `tag:` filter — the walk's
+    /// to ask, having read them from the file.
+    pub fn tags_hold(&self, tags: &[String]) -> bool {
+        self.tags.iter().all(|(negated, wanted)| tags.iter().any(|t| t.eq_ignore_ascii_case(wanted)) != *negated)
+    }
+
+    /// Whether there are `tag:` filters, so the walk reads tags at all.
+    pub fn asks_tags(&self) -> bool {
+        !self.tags.is_empty()
     }
 
     /// The `content:` filters, for the search walk to answer.
@@ -987,5 +1017,18 @@ mod tests {
         let name = "a".repeat(200);
         let pattern = "*a".repeat(50) + "b";
         assert!(!glob(pattern.as_bytes(), name.as_bytes()));
+    }
+
+    #[test]
+    fn a_tag_filter_is_the_walks_to_answer_ignoring_case() {
+        let query = parse("tag:Work report");
+        assert!(query.problems.is_empty(), "{:?}", query.problems);
+        assert!(query.reads_contents(), "the listing cannot answer it, so a walk does");
+        let matcher = query.matcher_now();
+        assert!(matcher.asks_tags());
+        assert!(matcher.tags_hold(&["work".to_string()]));
+        assert!(!matcher.tags_hold(&["draft".to_string()]));
+        let not = parse("-tag:work").matcher_now();
+        assert!(not.tags_hold(&[]) && !not.tags_hold(&["work".to_string()]));
     }
 }

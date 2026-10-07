@@ -635,6 +635,12 @@ pub enum Outcome {
     /// does, having no business raising privileges on behalf of the
     /// program that opened it.
     OpenAsAdmin(PathBuf),
+    /// Read the files the index says have `tag`, checking each one's
+    /// attribute — see [`crate::tags`] — and answer with
+    /// [`Message::TaggedRead`].
+    ReadTagged { tag: String, paths: Vec<PathBuf> },
+    /// Open the sheet that puts tags on these and takes them off.
+    EditTags(Vec<PathBuf>),
     /// Stop browsing as administrator, and read this folder again as
     /// this user. The browser has already gone back to
     /// [`Admin::Offered`]; the host reads the folder through the
@@ -1011,6 +1017,10 @@ pub enum Message {
     /// A click on Recent's or Starred's sidebar row — see
     /// `browser/collections.rs`.
     ShowCollection(crate::starred::Collection),
+    /// The answer to [`Outcome::ReadTagged`]: what still has the tag.
+    /// What was in the index and no longer has it is the host's to
+    /// forget, so there is nothing "missing" to show.
+    TaggedRead { tag: String, entries: Vec<Entry> },
     /// The answer to [`Outcome::ReadRecent`]: what to show, or why the
     /// file could not be read.
     RecentRead(Result<Vec<Entry>, String>),
@@ -1708,6 +1718,9 @@ impl Browser {
             }
             Message::StarredRead { entries, missing } => {
                 self.collection_read(crate::starred::Collection::Starred, Ok((entries, missing)))
+            }
+            Message::TaggedRead { tag, entries } => {
+                self.collection_read(crate::starred::Collection::Tag(tag), Ok((entries, Vec::new())))
             }
             Message::UnstarMissing => self.unstar_missing(),
             Message::SortBy(column) => {
@@ -2468,7 +2481,8 @@ impl Browser {
             // the theme like any place — asked for here, or they would be
             // the tint's plain block forever.
             let collection_icons: Vec<String> = [crate::starred::Collection::Recent, crate::starred::Collection::Starred]
-                .into_iter()
+                .iter()
+                .chain([crate::starred::Collection::Tag(String::new())].iter())
                 .map(collections::icon)
                 .collect();
             let set = IconSet { icons: &self.icons, folders: &self.folder_icons };
@@ -2688,6 +2702,10 @@ impl Browser {
                 self.device_action(action, target.as_deref())
             }
             Action::ToggleStar => self.toggle_star(),
+            Action::EditTags => match self.selected_shown() {
+                paths if paths.is_empty() => Outcome::None,
+                paths => Outcome::EditTags(paths),
+            },
             Action::Pin | Action::Unpin | Action::PinUp | Action::PinDown => {
                 let Some(target) = self.pin_target(target.as_deref()) else {
                     return Outcome::None;
@@ -3612,6 +3630,7 @@ impl Browser {
             }
             Effect::OpenWith(path) => Outcome::OpenWith(path),
             Effect::Compress => self.perform_action(Action::Compress),
+            Effect::EditTags(paths) => Outcome::EditTags(paths),
             Effect::Refresh => self.perform_action(Action::Refresh),
         }
     }
@@ -4564,19 +4583,19 @@ struct SidebarRow {
 }
 
 /// What a sidebar row that is not a place asks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum RowQuestion {
     /// The saved search at this index.
     Saved(usize),
-    /// Recent or Starred.
+    /// Recent, Starred or a tag.
     Collection(crate::starred::Collection),
 }
 
 impl RowQuestion {
     #[cfg(test)]
-    fn collection(self) -> Option<crate::starred::Collection> {
+    fn collection(&self) -> Option<crate::starred::Collection> {
         match self {
-            RowQuestion::Collection(kind) => Some(kind),
+            RowQuestion::Collection(kind) => Some(kind.clone()),
             RowQuestion::Saved(_) => None,
         }
     }
@@ -4627,11 +4646,11 @@ fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
                 // only ever say the cap.
                 meta: (kind == crate::starred::Collection::Starred && !vm.prefs.starred.is_empty())
                     .then(|| vm.prefs.starred.len().to_string()),
+                icon: collections::icon(&kind),
                 // Info, as a saved search's: a view onto files that live
                 // elsewhere, not one more folder.
                 tint: sidebar::Tint::Info,
                 missing: false,
-                icon: collections::icon(kind),
                 search: Some(RowQuestion::Collection(kind)),
                 device: None,
             })
@@ -4673,6 +4692,29 @@ fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
                 icon: row_icon(vm, &item.path),
                 search: None,
                 device: None,
+            })
+            .collect(),
+    };
+    // A row per tag, like Starred's: a view onto files that live
+    // elsewhere. Absent with no tags, by the filter below.
+    let tags = SidebarSection {
+        title: "Tags",
+        rows: vm
+            .prefs
+            .tags
+            .iter()
+            .map(|(tag, paths)| {
+                let kind = crate::starred::Collection::Tag(tag.clone());
+                SidebarRow {
+                    label: tag.clone(),
+                    path: vm.current_dir.to_path_buf(),
+                    meta: Some(paths.len().to_string()),
+                    tint: sidebar::Tint::Info,
+                    missing: false,
+                    icon: collections::icon(&kind),
+                    search: Some(RowQuestion::Collection(kind)),
+                    device: None,
+                }
             })
             .collect(),
     };
@@ -4721,7 +4763,7 @@ fn sidebar_sections(vm: &ViewModel<'_>) -> Vec<SidebarSection> {
     // Trash, which stays last: the mockup's order, Remote where its
     // phase left room for it.
     let [devices, remote] = drives::sections(vm);
-    [Some(places), Some(pinned), Some(searches), Some(devices), Some(remote), trash]
+    [Some(places), Some(pinned), Some(tags), Some(searches), Some(devices), Some(remote), trash]
         .into_iter()
         .flatten()
         .filter(|s| !s.rows.is_empty())
@@ -4874,12 +4916,17 @@ fn sidebar_press(row_item: &SidebarRow, vm: &ViewModel<'_>) -> (Option<Message>,
         return drive;
     }
     let in_collection = vm.collection.as_ref().map(|c| c.kind());
-    match row_item.search {
-        Some(RowQuestion::Saved(index)) => (
+    match &row_item.search {
+        Some(RowQuestion::Saved(index)) => {
+            let index = *index;
+            (
             Some(Message::Search(crate::search::SearchMessage::Open(index))),
             vm.search.current == Some(index) && in_collection.is_none(),
-        ),
-        Some(RowQuestion::Collection(kind)) => (Some(Message::ShowCollection(kind)), in_collection == Some(kind)),
+        )
+        }
+        Some(RowQuestion::Collection(kind)) => {
+            (Some(Message::ShowCollection(kind.clone())), in_collection.as_ref() == Some(kind))
+        }
         None => (
             Some(Message::Navigate(row_item.path.clone())),
             row_item.path == vm.current_dir && vm.search.current.is_none() && in_collection.is_none(),

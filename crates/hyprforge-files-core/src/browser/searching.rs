@@ -200,9 +200,9 @@ impl Browser {
     /// One request per change, never per result: each keystroke is "look
     /// again", and the host keeps one walk per tab running.
     ///
-    /// A `content:` filter walks even in "This folder", one level deep:
-    /// the listing in memory holds names, not what the files say, and
-    /// reading them is I/O the browser never does.
+    /// A `content:` or `tag:` filter walks even in "This folder", one
+    /// level deep: the listing in memory holds names, not what the files
+    /// say or are tagged, and reading them is I/O the browser never does.
     pub(super) fn search_again(&mut self) -> Outcome {
         let reads = self.query().reads_contents();
         let walk = (self.search.scope.walks() || reads) && self.walk_offered() && self.searching();
@@ -460,7 +460,7 @@ impl Browser {
             // The one place a content filter cannot run: the Trash's
             // files are stored under names that are not theirs. Said,
             // rather than quietly matching on the name alone.
-            problems.push("Contents aren\u{2019}t searched in the Trash, so content: isn\u{2019}t applied.".to_string());
+            problems.push("Contents and tags aren\u{2019}t searched in the Trash, so content: and tag: aren\u{2019}t applied.".to_string());
         }
         let status = self.search.run.as_ref().map(|run| status_line(run.results.len(), run.summary.as_ref()));
         SearchModel {
