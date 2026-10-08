@@ -20,9 +20,9 @@ mock = []
 # writing a second copy of the format: shortcuts.toml through
 # hyprforge-shortcuts, window-rules.toml through hyprforge-windowrules,
 # idle.toml through hyprforge-ecosystem, session.toml through
-# hyprforge-session, mimeapps.list through hyprforge-mime. Input, system
-# and appearance are here only for their require lines and the empty file
-# each one's line points at.
+# hyprforge-session, system.toml through hyprforge-system (lock restore),
+# mimeapps.list through hyprforge-mime. Input and appearance are here only
+# for their require lines and the empty file each one's line points at.
 hyprforge-core.workspace = true
 hyprforge-paths.workspace = true
 hyprforge-process.workspace = true

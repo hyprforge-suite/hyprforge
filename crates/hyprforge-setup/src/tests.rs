@@ -504,6 +504,65 @@ fn notif_blur_writes_layer_rules_hyprland_reads() {
     assert!(lua.contains("[[^notif-center$]]"), "{lua}");
 }
 
+// --- lock restore ------------------------------------------------------------
+
+#[test]
+fn lock_restore_writes_the_option_hyprland_reads_into_system_lua() {
+    let r = rig();
+    r.apply("lock-restore").unwrap();
+    let lua = r.read(&r.env.system_lua());
+    assert!(lua.contains("allow_session_lock_restore = true"), "{lua}");
+    assert!(r.read(&r.env.system_toml()).contains("\"misc:allow_session_lock_restore\" = true"));
+}
+
+/// Everything else the System page owns survives an apply and an undo,
+/// and a value the user had before comes back rather than being cleared.
+#[test]
+fn lock_restore_undo_puts_back_what_system_toml_held_and_keeps_the_rest() {
+    let r = rig();
+    std::fs::create_dir_all(r.env.hyprforge_dir()).unwrap();
+    std::fs::write(
+        r.env.system_toml(),
+        "\"misc:vrr\" = 1\n\"misc:allow_session_lock_restore\" = false\n",
+    )
+    .unwrap();
+    r.apply("lock-restore").unwrap();
+    r.undo("lock-restore").unwrap();
+    let toml = r.read(&r.env.system_toml());
+    assert!(toml.contains("\"misc:allow_session_lock_restore\" = false"), "{toml}");
+    assert!(toml.contains("\"misc:vrr\" = 1"), "{toml}");
+}
+
+/// Turned off by hand on the System page after setup turned it on: that
+/// is the user's choice now, and undo does not override it.
+#[test]
+fn lock_restore_undo_leaves_a_value_the_user_changed_since() {
+    let r = rig();
+    r.apply("lock-restore").unwrap();
+    std::fs::write(r.env.system_toml(), "\"misc:allow_session_lock_restore\" = false\n").unwrap();
+    let files = r.snapshot();
+    let said = r.undo("lock-restore").unwrap();
+    assert!(said.contains("changed since"), "{said}");
+    let mut after = r.snapshot();
+    after.remove(&r.env.setup_toml());
+    let mut before = files;
+    before.remove(&r.env.setup_toml());
+    assert_eq!(after, before, "nothing but the record moved");
+}
+
+/// Hyprland refusing the generated file leaves `system.toml` as it was,
+/// so the page and the running compositor still agree.
+#[test]
+fn a_rejected_system_lua_leaves_system_toml_as_it_was() {
+    let r = rig();
+    std::fs::create_dir_all(r.env.hyprforge_dir()).unwrap();
+    std::fs::write(r.env.system_toml(), "\"misc:vrr\" = 1\n").unwrap();
+    r.sys.reject_lua(Some("system.lua:1: bad"));
+    assert!(r.apply("lock-restore").is_err());
+    assert_eq!(r.read(&r.env.system_toml()), "\"misc:vrr\" = 1\n");
+    assert!(is_todo(&r.state("lock-restore")));
+}
+
 #[test]
 fn a_hyprland_conf_only_setup_cannot_be_wired() {
     let r = rig();
@@ -545,10 +604,16 @@ fn an_unparseable_setup_toml_refuses_undo_and_apply() {
 fn a_check_that_cannot_read_its_file_is_unknown_never_done() {
     let r = rig();
     std::fs::create_dir_all(r.env.hyprforge_dir()).unwrap();
-    for path in [r.env.shortcuts_toml(), r.env.idle_toml(), r.env.window_rules_toml(), r.env.session_toml()] {
+    for path in [
+        r.env.shortcuts_toml(),
+        r.env.idle_toml(),
+        r.env.window_rules_toml(),
+        r.env.session_toml(),
+        r.env.system_toml(),
+    ] {
         std::fs::write(path, "= not toml").unwrap();
     }
-    for id in ["bind-files", "idle-lock", "notif-blur", "gtk-portal"] {
+    for id in ["bind-files", "idle-lock", "lock-restore", "notif-blur", "gtk-portal"] {
         assert!(matches!(r.state(id), State::Unknown { .. }), "{id}: {:?}", r.state(id));
     }
 }
@@ -559,6 +624,7 @@ fn an_item_whose_program_isnt_installed_is_unavailable_not_todo() {
     for (binary, id) in [
         ("hyprforge-clipmenu", "bind-clipboard"),
         ("hypridle", "idle-lock"),
+        ("hyprforge-lock", "lock-restore"),
         ("notifd", "notif-blur"),
         ("hyprforge-files-portal", "portal-dialog"),
         ("hyprforge-files", "show-in-folder"),

@@ -115,7 +115,9 @@ holding the lock leaves the session locked with nothing left to unlock
 it — that is the design, not a bug, and it is what makes writing your own
 lock screen reasonable rather than reckless. Restarting the nested
 compositor is the clean way back; the other is
-`hyprctl --instance <N> eval 'hl.clear_crashed_lockscreen()'`.
+`hyprctl --instance <N> eval 'hl.clear_crashed_lockscreen()'`. Killing
+only the child starts another one (see "When it crashes, it starts
+again" below); to abandon a test lock, kill the supervisor first.
 
 | Flag | For |
 |---|---|
@@ -200,6 +202,52 @@ Authentication also starts only *after* the compositor grants the lock.
 Building the conversation is what starts PAM talking, so doing it any
 earlier held the screen unlocked for as long as a slow module took.
 
+### When it crashes, it starts again
+
+A lock client that dies leaves the session locked — Hyprland's choice,
+and the right one — behind Hyprland's own "lockscreen app died" screen.
+So the binary you run is a supervisor: it starts a second copy of itself
+with `--child`, which does all the work, and waits. The parent never
+connects to Wayland and never renders, so nothing in iced or tiny-skia
+can take it down.
+
+| The child | The supervisor |
+|---|---|
+| unlocked (exit 0) | exits 0 |
+| crashed (a panic, or killed by a signal) | starts it again, and Hyprland hands the dead lock to the new copy |
+| crashed a second time | starts it in safe mode: the default theme, no wallpaper, no avatar, no status line or power menu, no fingerprint reader |
+| crashed a fourth time within a minute | stops (exit 4); the session stays locked behind Hyprland's screen |
+| was refused the lock after a relaunch | stops (exit 3), naming `misc:allow_session_lock_restore` |
+
+The takeover needs `misc:allow_session_lock_restore`, which Hyprland
+leaves off: with it off, the relaunched copy's request is refused, and
+the session stays exactly as locked as the crash left it. Set up's
+"Restart the lock screen if it crashes" turns it on, through the System
+page's own `system.toml`. While a lock is dead, any client of yours can
+then take it over — but a process running as you can already clear a
+crashed lock with `hyprctl`, so no trust boundary moves, and someone at
+the keyboard who crashes the lock has no shell to start a client from.
+
+Measured on a nested compositor (debug build, `kill -ABRT` on the child
+mid-unlock): the supervisor noticed 0.46–0.65s after the signal — most
+of it the core dump — and the new copy held the lock 1.8s after that, the
+time its first frame takes with the wallpaper; in safe mode, 0.24s. The
+unlock then finished as normal. Hyprland paints its own error screen
+after `misc:lockdead_screen_delay` (1s by default), so a slow relaunch
+shows it briefly.
+
+Safe mode is sticky, and none of it is prevention: `screen::renderable`
+and the panic sweep below are what stop a crash; this is only what
+happens after one gets through. Nothing the supervisor does unlocks —
+its only success is a child that unlocked itself.
+
+`kill -SEGV` sent from outside does not crash it, which matters when
+testing this: Rust's standard library installs a SIGSEGV handler to
+detect stack overflows, and for a signal that is not a guard-page fault
+it resets the handler and returns, so the process carries on. Use
+`kill -ABRT` (or `-KILL`) on the child — found as the child of the
+supervisor, `pgrep -P <pid>` — to stand in for a crash.
+
 ### Never log a keystroke
 
 Not the character, and **not the keysym either** — `XK_a` is `a`,
@@ -230,8 +278,13 @@ and it is why this ships its own PAM file rather than borrowing one.
 Four gaps, none of them a security hole, the first three things an
 established lock screen has:
 
-- **No input-method support.** A password typed through an IME cannot be
-  entered. swaylock is the same; it still means some users cannot log in.
+- **No input-method support in the lock screen.** A password typed through
+  an IME cannot be entered there. swaylock is the same; it still means some
+  users cannot log in. The greeter has the client half: it asks for an input
+  method while a question is open (secure purpose for a password) and takes
+  what one commits. Nothing starts an input method in the greeter's own
+  compositor yet, so in practice it does nothing until one is running there;
+  see `crates/hyprforge-greet/README.md`.
 - **The password is erased on this side, and PAM keeps its own copy.**
   `Secret<T>` zeroes its value when it goes out of scope, which matters
   more than it looks: a typed password is not appended to in place — the

@@ -100,6 +100,11 @@ impl Env {
         self.generated_dir().join("input.lua")
     }
 
+    /// `system.toml`, the System page's canonical file.
+    pub fn system_toml(&self) -> PathBuf {
+        self.hyprforge_dir().join("system.toml")
+    }
+
     pub fn system_lua(&self) -> PathBuf {
         self.generated_dir().join("system.lua")
     }

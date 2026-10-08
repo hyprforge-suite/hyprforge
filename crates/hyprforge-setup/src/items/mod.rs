@@ -16,6 +16,7 @@ mod defaults;
 mod filemanager;
 mod gtk;
 mod idle;
+mod lock_restore;
 mod portal;
 mod services;
 mod snapshots;
@@ -81,6 +82,7 @@ enum Kind {
     Notifd,
     Bind(&'static binds::BindSpec),
     IdleLock,
+    LockRestore,
     NotifBlur,
     Defaults(&'static defaults::DefaultsSpec),
     PortalDialog,
@@ -109,6 +111,7 @@ impl Item {
             Kind::Notifd => &["notifd"],
             Kind::Bind(spec) => spec.requires,
             Kind::IdleLock => &["hypridle", "hyprforge-lock"],
+            Kind::LockRestore => &["hyprforge-lock"],
             Kind::NotifBlur => &["notifd"],
             Kind::Defaults(spec) => spec.requires,
             Kind::PortalDialog | Kind::GtkPortal => &["hyprforge-files-portal"],
@@ -136,6 +139,7 @@ impl Item {
             Kind::Notifd => services::check_notifd(cx),
             Kind::Bind(spec) => binds::check(cx, spec),
             Kind::IdleLock => idle::check(cx),
+            Kind::LockRestore => lock_restore::check(cx),
             Kind::NotifBlur => blur::check(cx),
             Kind::Defaults(spec) => defaults::check(cx, spec),
             Kind::PortalDialog => portal::check(cx),
@@ -153,6 +157,7 @@ impl Item {
             Kind::Notifd => services::apply_notifd(cx),
             Kind::Bind(spec) => binds::apply(cx, spec),
             Kind::IdleLock => idle::apply(cx),
+            Kind::LockRestore => lock_restore::apply(cx),
             Kind::NotifBlur => blur::apply(cx),
             Kind::Defaults(spec) => defaults::apply(cx, spec),
             Kind::PortalDialog => portal::apply(cx),
@@ -173,6 +178,9 @@ impl Item {
             }
             (Kind::Bind(spec), Change::Bind { name }) => binds::undo(cx, spec, name),
             (Kind::IdleLock, Change::IdleLock { previous }) => idle::undo(cx, previous),
+            (Kind::LockRestore, Change::LockRestore { previous }) => {
+                lock_restore::undo(cx, previous.as_ref())
+            }
             (Kind::NotifBlur, Change::LayerRules { names, previous }) => {
                 blur::undo(cx, names, previous)
             }
@@ -195,7 +203,7 @@ impl Item {
 }
 
 /// Every item, in order. See the module doc for why the order matters.
-pub static ITEMS: [Item; 19] = [
+pub static ITEMS: [Item; 20] = [
     Item::new(
         "wiring",
         "Connect Hyprforge to your Hyprland config",
@@ -281,6 +289,13 @@ pub static ITEMS: [Item; 19] = [
         Kind::IdleLock,
     ),
     Item::new(
+        "lock-restore",
+        "Restart the lock screen if it crashes",
+        "Lets a new hyprforge-lock take over a lock whose screen died, instead of leaving the session stuck behind Hyprland's error screen.",
+        true,
+        Kind::LockRestore,
+    ),
+    Item::new(
         "notif-blur",
         "Blur behind notifications",
         "Hyprland blurs what is behind notification popups and the centre panel.",
@@ -360,6 +375,7 @@ mod tests {
                 "bind-files",
                 "bind-lock",
                 "idle-lock",
+                "lock-restore",
                 "notif-blur",
                 "default-folders",
                 "default-images",

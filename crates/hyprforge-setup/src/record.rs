@@ -93,6 +93,14 @@ pub enum Change {
     Bind { name: String },
     /// `idle.toml`'s `lock_cmd` before setup set it.
     IdleLock { previous: String },
+    /// `misc:allow_session_lock_restore` set in `system.toml`, and what
+    /// `system.toml` held for it before — absent when it did not own the
+    /// key, so undo gives it back to Hyprland and the user's own config
+    /// rather than writing a value nobody chose.
+    LockRestore {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous: Option<hyprforge_core::hlconfig::Value>,
+    },
     /// Layer rules added to `window-rules.toml`, and any rule of the same
     /// name they replaced.
     LayerRules {
@@ -189,6 +197,8 @@ mod tests {
             },
             Change::Bind { name: "hyprforge-files-1".into() },
             Change::IdleLock { previous: "hyprlock".into() },
+            Change::LockRestore { previous: None },
+            Change::LockRestore { previous: Some(hyprforge_core::hlconfig::Value::Bool(false)) },
             Change::LayerRules { names: vec!["hyprforge-notif-blur".into()], previous: vec![] },
             Change::Defaults {
                 app: "hyprforge-files.desktop".into(),

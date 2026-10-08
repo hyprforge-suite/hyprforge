@@ -1397,7 +1397,7 @@ setup_ids_for() {
         emoji)     echo bind-emoji ;;
         files)     echo bind-files default-folders portal-dialog show-in-folder ;;
         media)     echo default-images ;;
-        lock)      echo bind-lock idle-lock ;;
+        lock)      echo bind-lock idle-lock lock-restore ;;
     esac
 }
 
