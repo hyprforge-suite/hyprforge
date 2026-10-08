@@ -1,6 +1,6 @@
 # Splitting Hyprforge into repositories
 
-The goal, in the owner's words: *"I want them to feel like they are
+The goal, in the project author's words: *"I want them to feel like they are
 intertwined and connected like a software suite, but if someone wants our
 clipboard they should be able to install that without needing
 everything."*
@@ -12,15 +12,15 @@ Two things have to be true at once, and they are not the same thing:
   `web-colors` bug was a single `default-features = false` rather than
   the same edit in five apps.
 - **Install one part** — already solved, and not by repository layout.
-  `packaging/arch/PKGBUILD` builds one source tree into ten packages
-  (nine components and the `hyprforge` metapackage);
+  `packaging/arch/PKGBUILD` builds one source tree into eleven packages
+  (ten components and the `hyprforge` metapackage);
   `pacman -S hyprforge-clipboard` installs two binaries and no other
   Hyprforge package. Packaging granularity and repository granularity are
   different questions.
 
 What repositories add on top of that is **identity**: a project someone
 can star, file an issue against, and clone without the other
-thirty-nine crates. That is a real thing to want, and it is what this plan is for.
+forty-three crates. That is a real thing to want, and it is what this plan is for.
 
 ## The mechanism now: submodules (since 2026-10-03, issue #2)
 

@@ -3,8 +3,9 @@
 //! A keysym name *is* the character it names, and the same is true of a
 //! typed password and a Wi-Fi passphrase: the moment a `Debug` impl, a
 //! `tracing::debug!(?x)`, or a panic message prints the value, it is on
-//! disk in a barely-encoded form, and in an agent session it reaches the
-//! session transcript through tool output. That rule got written by hand
+//! disk in a barely-encoded form, and anything that captures a program's
+//! output — a CI log, a terminal recording, a coding assistant's
+//! transcript — keeps a copy of it. That rule got written by hand
 //! three separate times in this workspace — the lock screen's typed
 //! password, the Wi-Fi passphrase, and the clipboard's remembered content
 //! — and each of those was a fresh chance to get it wrong: to forget a

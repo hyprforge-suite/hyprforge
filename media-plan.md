@@ -28,8 +28,8 @@ Phase 3 gives about writing to someone's original; its toolbar button
 is shown disabled. The mode switch is drawn in the quiet style rather
 than the design's purple, because purple means *selected* here.
 
-**2026-09-26: 3D models.** The viewer took over view3d, the owner's
-separate STL/3MF/OBJ viewer, rather than the suite gaining a second
+**2026-09-26: 3D models.** The viewer took over view3d, the project
+author's separate STL/3MF/OBJ viewer, rather than the suite gaining a second
 window for it. Its loaders, mesh and camera became `hyprforge-mesh`, a
 leaf like `hyprforge-image`; its wgpu renderer moved into this crate
 (`src/model/`) as an iced `shader` primitive, because its wgpu has to be

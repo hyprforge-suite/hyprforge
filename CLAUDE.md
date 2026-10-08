@@ -501,7 +501,7 @@ daemon whose right-click spawns a program the repository does not
 contain, and a clipboard daemon with no way to see the history. What
 made it invisible is that it degrades well: the daemon logs a warning
 and carries on, exactly as the rule about an absent sibling says it
-should. What made it *confusing* is that `hyprforge-settings` has seventeen
+should. What made it *confusing* is that `hyprforge-settings` has eighteen
 crates outside its repository and is fine — because those are libraries
 its manifest names by version, and Cargo fetches them. Nothing fetches a
 second executable into someone's `$PATH`. A package that installs two
