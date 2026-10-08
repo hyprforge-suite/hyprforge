@@ -403,6 +403,51 @@ async-io and panic — and three things follow from that shape:
   is recorded here with `git subtree merge`, so later splits descend from
   it and the published history fast-forwards from what was archived.
 
+## Releases: one version, cut by `tools/release.sh`
+
+The whole suite shares one version — the libraries (which inherit
+`[workspace.package].version`), the ten components, notif's crates and
+the PKGBUILD's `pkgver`. The PKGBUILD already builds one tree into
+eleven packages at one version, so "Hyprforge 0.2.0" should name one
+tree too. Before this was decided (2026-10-08) only the libraries moved:
+by v0.1.8 the clipboard and tray (published, so they had to) were at
+0.1.8 and the other seven components and notif still said 0.1.0.
+
+`tools/release.sh X.Y.Z` prints every step and does nothing; with
+`--execute` it does them, stopping at the first failure:
+
+1. `./check.sh`, in full.
+2. Every version moved (`tools/versions.py --set`), the changelogs filed
+   (`tools/changelog.py release`, which refuses an Unreleased section
+   that is still an unedited draft), the AUR package re-rendered
+   (`tools/aur.py --write`), and `./check.sh --quick` over the result.
+   A bump that is not caret-compatible (0.1.x to 0.2.0) also moves every
+   Hyprforge sibling requirement, because cargo silently ignores a
+   `[patch]` whose version does not satisfy one.
+3. Each component committed and pushed to its `main`.
+4. The suite — pins, versions, changelog, packaging — in one
+   "Release vX.Y.Z" commit, pushed.
+5. The tag, pushed; `publish.yml` publishes the libraries.
+6. Every component tagged at its pin; a GitHub Release for the suite and
+   for each component whose pin moved since the previous tag (worked out
+   before step 3, which moves them all).
+7. The AUR push, printed for a person to run.
+
+**Changelogs.** `CHANGELOG.md` here and one per component, Keep a
+Changelog style. `tools/changelog.py draft` drafts from git: a library's
+commits by path here, a component's from its own repository between the
+pin at the previous tag and the pin now — this repository's log for a
+component's path is only pin bumps.
+
+**The AUR.** `packaging/arch/PKGBUILD` builds the checkout it sits in.
+`tools/aur.py` renders `packaging/aur/hyprforge` from it with real
+sources: the suite at `#tag=v$pkgver` and the ten component repositories,
+each submodule pointed at makepkg's copy in `prepare`. A render only
+builds when the tag carries the same packaging, which is why it is made
+at release time: today's render at 0.1.8 fetches and prepares against
+`v0.1.8`, then would fail in `package()`, because `v0.1.8` predates the
+files helper and polkit policy the current packaging installs.
+
 ## Status
 
 - [x] Foundation extracted so the leaves are genuinely leaves
@@ -468,6 +513,13 @@ async-io and panic — and three things follow from that shape:
       is on its repository's `main`, and that every component builds
       against the published libraries; CI and the PKGBUILD check out
       the submodules
+- [x] Release tooling (2026-10-08): `tools/release.sh`,
+      `tools/versions.py`, `tools/changelog.py`, `tools/aur.py`, the
+      suite's `CHANGELOG.md`, and check.sh's "Versions agree", "Changelog
+      has a section for the version", "AUR PKGBUILD matches
+      packaging/arch" and the gated clean-chroot tier
+- [ ] First lockstep release through `tools/release.sh`, and the first
+      push to the AUR
 
 ## Staying in sync after the push (retired with `sync.sh`)
 

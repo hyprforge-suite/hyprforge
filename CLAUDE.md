@@ -622,8 +622,8 @@ instead of running a second copy to find out.
 
 Five of these now exist — Network over NetworkManager, Bluetooth over
 BlueZ, power over systemd-logind, UPower and power-profiles-daemon, the
-tray's item over StatusNotifierItem (its menu was served over dbusmenu
-until the tray began drawing its own), and Files' drives over UDisks2 —
+tray's item over StatusNotifierItem (its menu is drawn by its own popup on
+Hyprland and served over dbusmenu everywhere else), and Files' drives over UDisks2 —
 and they were each better for being built in this order. It is
 written down so a sixth does not re-derive it.
 
@@ -706,7 +706,7 @@ belongs in the design — not in a user's surprise.
 ./check.sh --quick  # tier 1 only: clippy + unit tests, no compositor
 ```
 
-Clippy must be silent and every test must pass before a commit. Twenty-one
+Clippy must be silent and every test must pass before a commit. Twenty-two
 gated tiers beyond tier 1 now, each answering a different "does the system
 I'm talking to actually agree" question — Hyprland itself, the ecosystem
 daemons' parse tests, the system's own `unzip`/`tar`/`7z`, NetworkManager,
@@ -719,7 +719,9 @@ tray host, cargo's own packager (does every library crate `publish
 the pre-commit hook), the component repositories (is every submodule pin a
 commit on its repository's `main`), and crates.io itself (does every
 component build on its own against the published libraries, the way its CI
-will) — and each gates on the thing it actually asks rather
+will), and the AUR package built in a clean chroot (gated on devtools,
+because it takes minutes and this machine has every dependency installed,
+which is the one thing a clean chroot does not) — and each gates on the thing it actually asks rather
 than riding another tier's `--ignored` run, for the reason in the
 rule above about a check that silently never runs. Tier 1 now also includes
 "Components are submodules", which runs first and stops everything with
@@ -732,7 +734,11 @@ point back at `crates/` — "Docs build without warnings", because a broken
 intra-doc link is plain text on docs.rs and only rustdoc can see it —
 "Library READMEs match their crate docs", because those READMEs are
 rendered from the `//!` docs by `tools/crate-readme.py` and a hand edit to
-either side is drift — and "Docs name things that exist",
+either side is drift — "Versions agree", "Changelog has a section for the
+version" and "AUR PKGBUILD matches packaging/arch", which hold the one
+suite version, its changelog and the rendered AUR package to what
+`tools/release.sh` will need (`docs/testing.md` says what each one
+enforces and what it only reports) — and "Docs name things that exist",
 which fails on a doc naming a source file that is gone or a repository count
 that no longer matches, on a Settings page the Settings README does not name
 or miscounts, on a shared `hyprforge-ui` widget, size or mark that

@@ -1,0 +1,137 @@
+pkgbase = hyprforge
+	pkgdesc = Native Hyprland desktop applications
+	pkgver = 0.1.8
+	pkgrel = 1
+	url = https://github.com/hyprforge-suite/hyprforge
+	arch = x86_64
+	license = MIT
+	makedepends = cargo
+	makedepends = git
+	options = !lto
+	source = hyprforge::git+https://github.com/hyprforge-suite/hyprforge.git#tag=v0.1.8
+	source = hyprforge-clipboard::git+https://github.com/hyprforge-suite/hyprforge-clipboard.git
+	source = hyprforge-displayd::git+https://github.com/hyprforge-suite/hyprforge-displayd.git
+	source = hyprforge-emojimenu::git+https://github.com/hyprforge-suite/hyprforge-emojimenu.git
+	source = hyprforge-files::git+https://github.com/hyprforge-suite/hyprforge-files.git
+	source = hyprforge-greet::git+https://github.com/hyprforge-suite/hyprforge-greet.git
+	source = hyprforge-lock::git+https://github.com/hyprforge-suite/hyprforge-lock.git
+	source = hyprforge-media::git+https://github.com/hyprforge-suite/hyprforge-media.git
+	source = hyprforge-notif::git+https://github.com/hyprforge-suite/hyprforge-notif.git
+	source = hyprforge-settings::git+https://github.com/hyprforge-suite/hyprforge-settings.git
+	source = hyprforge-tray::git+https://github.com/hyprforge-suite/hyprforge-tray.git
+	sha256sums = SKIP
+	sha256sums = SKIP
+	sha256sums = SKIP
+	sha256sums = SKIP
+	sha256sums = SKIP
+	sha256sums = SKIP
+	sha256sums = SKIP
+	sha256sums = SKIP
+	sha256sums = SKIP
+	sha256sums = SKIP
+	sha256sums = SKIP
+
+pkgname = hyprforge-settings
+	pkgdesc = Settings application for Hyprland
+	install = hyprforge-settings.install
+	depends = wayland
+	depends = libxkbcommon
+	optdepends = hyprforge-displayd: monitor arrangement that remembers your setups
+	optdepends = hyprforge-tray: tray icons for Wi-Fi, Bluetooth, keep awake and night light
+	optdepends = hyprpaper: wallpaper
+	optdepends = hyprsunset: night light
+	optdepends = hypridle: idle timeouts, and locking when idle (Set up)
+	optdepends = hyprforge-lock: the lock screen Set up binds and points hypridle at
+	optdepends = hyprforge-clipboard: clipboard history, which Set up binds to Super+V
+	optdepends = hyprforge-emojimenu: the emoji picker, which Set up binds to Super+.
+	optdepends = hyprforge-notif: notifications, whose center Set up binds to Super+N
+	optdepends = hyprforge-files: the file manager Set up makes the default for folders
+	optdepends = hyprforge-media: the viewer Set up makes the default for pictures
+
+pkgname = hyprforge-lock
+	pkgdesc = Lock screen for Hyprland (ext-session-lock-v1)
+	depends = wayland
+	depends = libxkbcommon
+	depends = pam
+
+pkgname = hyprforge-greet
+	pkgdesc = greetd greeter sharing the lock screen's look
+	depends = wayland
+	depends = libxkbcommon
+	depends = pam
+	depends = greetd
+
+pkgname = hyprforge-displayd
+	pkgdesc = Display daemon that remembers monitor layouts
+	install = hyprforge-displayd.install
+	depends = wayland
+
+pkgname = hyprforge-tray
+	pkgdesc = Tray icons for Wi-Fi, Bluetooth, keep awake and night light
+	install = hyprforge-tray.install
+	depends = wayland
+	depends = libxkbcommon
+	optdepends = networkmanager: the Wi-Fi icon
+	optdepends = bluez: the Bluetooth icon
+	optdepends = hyprsunset: the night light icon
+	optdepends = hyprforge-settings: the screens its icons open
+
+pkgname = hyprforge-clipboard
+	pkgdesc = Clipboard history with a popup at the pointer
+	install = hyprforge-clipboard.install
+	depends = wayland
+	depends = libxkbcommon
+
+pkgname = hyprforge-emojimenu
+	pkgdesc = Emoji picker popup at the pointer
+	depends = wayland
+	depends = libxkbcommon
+	depends = noto-fonts-emoji
+	optdepends = noto-fonts-cjk: kaomoji that use Japanese characters, like the shrug
+
+pkgname = hyprforge-files
+	pkgdesc = File manager for Hyprland
+	depends = wayland
+	depends = libxkbcommon
+	optdepends = xdg-utils: opening a file with the application you have chosen for it
+	optdepends = poppler: previews and thumbnails of PDFs (pdftoppm)
+	optdepends = ffmpeg: previews and thumbnails of videos
+	optdepends = udisks2: the Devices section — mounting and ejecting drives
+	optdepends = gvfs: Connect to Server, for sftp:// and ftp:// addresses
+	optdepends = gvfs-smb: Connect to Server, for smb:// (Windows) shares
+	optdepends = xdg-desktop-portal: other applications using Files as their open/save dialog
+	optdepends = polkit: opening and changing folders as administrator
+
+pkgname = hyprforge-media
+	pkgdesc = Photo, video and 3D model viewer for Hyprland
+	depends = wayland
+	depends = libxkbcommon
+	optdepends = glib2: "Open With…" hands a picture to another program through gio
+	optdepends = hyprpaper: "Set as Wallpaper" shows it now, not only at next login
+	optdepends = hyprforge-files: "Show in Files"
+	optdepends = mpv: playing videos
+	optdepends = ffmpeg: thumbnails of videos, from their first real frame
+
+pkgname = hyprforge-notif
+	pkgdesc = Notification daemon and notification center, with notifctl to drive them
+	install = hyprforge-notif.install
+	depends = gcc-libs
+	depends = glibc
+	provides = notif
+	provides = notif-git
+	conflicts = notif
+	conflicts = notif-git
+	replaces = notif-git
+
+pkgname = hyprforge
+	pkgdesc = Native Hyprland desktop applications (everything)
+	depends = hyprforge-settings
+	depends = hyprforge-lock
+	depends = hyprforge-displayd
+	depends = hyprforge-tray
+	depends = hyprforge-clipboard
+	depends = hyprforge-emojimenu
+	depends = hyprforge-files
+	depends = hyprforge-media
+	depends = hyprforge-notif
+	optdepends = hyprforge-greet: replace your display manager

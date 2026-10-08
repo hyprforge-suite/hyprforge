@@ -35,6 +35,24 @@ Cargo.toml), so `cargo test --workspace` never reaches it, and a
 component whose tests silently never run is exactly the failure this
 project keeps naming.
 
+Three tier-1 steps hold what `tools/release.sh` needs to be true before
+a release can be cut. **Versions agree** runs `tools/versions.py
+--check`: the suite has one version, which the libraries inherit and
+the components, notif's crates and the PKGBUILD's `pkgver` spell by
+hand. It fails on `pkgver`, on a library spelling a version of its own,
+and on the clipboard and tray, whose versions crates.io already shows.
+The other seven components and notif were never bumped before lockstep
+was decided and still say 0.1.0, so they are reported in yellow rather
+than failed — a step that is red until the next release is a step nobody
+reads — and each one is held to the version from the first release that
+tags its repository. **Changelog has a section for the version** asks
+that `CHANGELOG.md` has a section for the workspace version and an
+Unreleased one above it. **AUR PKGBUILD matches packaging/arch** asks
+that `packaging/aur/hyprforge` is exactly what `tools/aur.py` renders
+from `packaging/arch/PKGBUILD`, `.SRCINFO` included when makepkg is
+installed: two PKGBUILDs kept in step by hand would drift the way the
+standalone crates' dependency pins did.
+
 Past tier 1, every further step answers a different question and gates
 on the thing it actually asks, rather than sharing one `--ignored` run:
 
@@ -55,6 +73,7 @@ on the thing it actually asks, rather than sharing one `--ignored` run:
 | Icon names against the installed theme | do the tray's icon names resolve in the **installed icon theme**? | an icon theme to ask (via `gsettings`) |
 | The installed shared MIME database | does this machine's **shared MIME database** say what the parsers expect? | shared-mime-info installed |
 | Live tests against a tray host | does a real **tray host** accept these icons? | a `StatusNotifierWatcher` running (a bar with a tray) |
+| The AUR package builds in a clean chroot | does the **AUR package** build with nothing but its declared dependencies? It builds this checkout's committed HEAD (`tools/aur.py --local-into`), not the published tag | devtools installed (`extra-x86_64-build`) |
 
 Tier 1 catches a mistake in the code. Every step below it catches the far
 nastier kind: code that is internally consistent and wrong about the system

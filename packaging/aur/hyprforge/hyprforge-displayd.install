@@ -1,0 +1,41 @@
+# pacman scriptlet for hyprforge-displayd. Sourced by bash, as root,
+# inside the transaction. The displayd, tray and clipboard scriptlets
+# are the same file with another unit name;
+# a scriptlet is copied into pacman's database on its own, so it cannot
+# source a shared helper, and three short copies beat one clever one.
+#
+# Nothing here may fail the transaction. A unit that could not be
+# enabled is a sentence and a command to run; a package that will not
+# install over it is a much bigger problem than the one it reports.
+
+_unit=hyprforge-displayd.service
+
+# Install only. `systemctl --global preset` applies the package's
+# 80-hyprforge-displayd.preset ("enable"): a link in
+# /etc/systemd/user/graphical-session.target.wants/, so the daemon
+# starts at every user's next login. It talks to no running manager;
+# --global only writes links, so a chroot or a machine with nobody
+# logged in is fine.
+post_install() {
+  if ! timeout 30 systemctl --global preset "$_unit" >/dev/null 2>&1; then
+    echo ":: could not enable $_unit for every user; each user can run:"
+    echo "     systemctl --user enable --now $_unit"
+  fi
+}
+
+# Deliberately nothing. `preset` on upgrade would re-enable a unit the
+# administrator has since disabled with `systemctl --global disable`,
+# and an upgrade quietly undoing that decision is the thing a preset
+# must never do. Someone who installed before presets existed enables it
+# from Settings -> Set up, which says when it is not on.
+post_upgrade() {
+  :
+}
+
+# Before the unit file goes, so the global link does not dangle. Only the
+# global link: a user's own `systemctl --user enable` lives in their
+# home, and root removing a package is not a reason to reach into it —
+# a link to a missing unit is ignored by systemd anyway.
+pre_remove() {
+  timeout 30 systemctl --global disable "$_unit" >/dev/null 2>&1 || true
+}

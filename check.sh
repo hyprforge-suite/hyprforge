@@ -1005,6 +1005,69 @@ else
     grep -v '^STALE' <<<"$output" | head -5
 fi
 
+# The suite has one version (docs/design/repo-plan.md): the libraries
+# inherit it, and the components, notif's crates and the PKGBUILD spell
+# it by hand, which drifts with no symptom. What fails and what is only
+# reported is tools/versions.py's call, and its doc says why: the seven
+# components and notif still at 0.1.0 predate lockstep, and a check that
+# is red until the next release is a check nobody reads. A component is
+# held to the version once it has a `v*` tag — tools/release.sh makes
+# one — and a NOTE line here says, in yellow, what is not held yet.
+step "Versions agree"
+if ! command -v python3 >/dev/null; then
+    skip "version check" "python3 not available to parse the manifests"
+else
+    if output=$(python3 tools/versions.py --check 2>&1); then versions_ok=true; else versions_ok=false; fi
+    read -r _ want counted noted < <(grep '^CHECKED' <<<"$output" || echo "CHECKED ? 0 0")
+    if ! grep -q '^CHECKED' <<<"$output"; then
+        bad "tools/versions.py failed without a result"
+        tail -5 <<<"$output"
+    elif ! $versions_ok; then
+        bad "$(grep -c '^DRIFT' <<<"$output") version(s) disagree with the workspace's $want"
+        sed -n 's/^DRIFT /    • /p' <<<"$output"
+    else
+        ok "$((counted - noted)) stated version(s) match the workspace's $want"
+    fi
+    if [[ "$noted" -gt 0 ]]; then
+        skip "$noted manifest(s) not held to $want yet" "not released in lockstep — the next tools/release.sh moves them"
+    fi
+fi
+
+# A changelog that says nothing about the version being shipped is one
+# nobody kept. Between releases the workspace version is the last one
+# released, so its section must exist, and so must Unreleased, which is
+# where the next one is written — tools/release.sh renames it.
+step "Changelog has a section for the version"
+version=$(python3 -c 'import tomllib;print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])' 2>/dev/null || echo "?")
+if [[ ! -f CHANGELOG.md ]]; then
+    bad "no CHANGELOG.md"
+elif ! grep -qF "## [$version]" CHANGELOG.md; then
+    bad "CHANGELOG.md has no '## [$version]' section for the workspace version"
+elif ! grep -qF "## [Unreleased]" CHANGELOG.md; then
+    bad "CHANGELOG.md has no '## [Unreleased]' section for the next release to be written in"
+else
+    ok "CHANGELOG.md covers $version, with an Unreleased section above it"
+fi
+
+# packaging/aur/hyprforge is rendered from packaging/arch by tools/aur.py
+# and never edited by hand: two PKGBUILDs kept in step by hand would
+# drift exactly as the standalone crates' dependency pins did. .SRCINFO
+# is the AUR's parsed copy of the PKGBUILD, and is compared too when
+# makepkg is here to produce it.
+step "AUR PKGBUILD matches packaging/arch"
+if ! command -v python3 >/dev/null; then
+    skip "AUR check" "python3 not available to render the PKGBUILD"
+elif output=$(python3 tools/aur.py --check 2>&1); then
+    ok "packaging/aur/hyprforge is packaging/arch, rendered"
+    grep -q '^NOSRCINFO' <<<"$output" && skip ".SRCINFO not compared" "makepkg not installed"
+elif ! grep -q '^STALE' <<<"$output"; then
+    bad "tools/aur.py failed without naming a stale file"
+    tail -5 <<<"$output"
+else
+    bad "packaging/aur/hyprforge differs from a fresh render — run: tools/aur.py --write"
+    sed -n 's/^STALE /    • /p' <<<"$output"
+fi
+
 # Two ways this step can produce a tick without having tested anything,
 # and both happened on the same evening: `cargo test` killed partway
 # through prints no "test result: FAILED" line (there was no result), and
@@ -1656,6 +1719,27 @@ else
         bad "component(s) that do not build on their own against crates.io: ${broken[*]} — a Hyprforge library named above needs a release first (see docs/design/repo-plan.md)"
     else
         ok "all $(wc -w <<<"$submodules") components build against the published libraries"
+    fi
+    # The AUR package, built the way an AUR helper's clean chroot would
+    # build it: from nothing but its sources, with only `depends` and
+    # `makedepends` installed — which is the one thing tier 1 cannot ask,
+    # because this machine has everything installed. Built from this
+    # checkout's committed HEAD and its submodule clones (tools/aur.py
+    # --local-into), not the published tag: what is being checked is this
+    # packaging, and the tag is what it will become. Uncommitted changes
+    # are not in it. Gated on devtools; minutes long, so never in the hook.
+    step "The AUR package builds in a clean chroot"
+    if ! command -v extra-x86_64-build >/dev/null; then
+        skip "clean-chroot build" "devtools not installed — pacman -S devtools"
+    else
+        aur_dir=$(mktemp -d "${TMPDIR:-/tmp}/hyprforge-aur.XXXXXX")
+        if python3 tools/aur.py --local-into "$aur_dir" >/dev/null \
+            && (cd "$aur_dir" && extra-x86_64-build) >"$aur_dir.log" 2>&1; then
+            ok "$(ls "$aur_dir"/*.pkg.tar.* 2>/dev/null | wc -l) package(s) built in a clean chroot"
+        else
+            bad "the AUR package did not build in a clean chroot — log: $aur_dir.log"
+            tail -n 15 "$aur_dir.log" | sed 's/^/     /'
+        fi
     fi
 fi
 
