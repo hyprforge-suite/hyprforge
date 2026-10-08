@@ -190,6 +190,9 @@ Hyprland-facing
                             connecting to an smb:// or sftp:// address
                             through `gio`, answering its password prompt
                             without the password ever reaching a log.
+                            Phones and cameras through gvfs's MTP and
+                            gPhoto2 backends, and the kernel's USB
+                            listing for one no backend here can read.
                             Backend traits with mocks; the data and
                             decisions build without the D-Bus client,
                             which is all the browser view takes.

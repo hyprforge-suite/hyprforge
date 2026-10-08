@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 readme = "README.md"
-description = "Drives over UDisks2 and network shares over gvfs and the mount table: what is plugged in, mounting, unmounting and ejecting it, and connecting to a server, behind backend traits with a mock"
+description = "Drives over UDisks2, phones and cameras over gvfs MTP and gPhoto2, and network shares over gvfs and the mount table: what is plugged in, mounting, unmounting and ejecting it, and connecting to a server, behind backend traits with a mock"
 
 [dependencies]
 # A typed password for a server goes to `gio`'s standard input and
@@ -34,6 +34,9 @@ futures-util = { workspace = true, optional = true }
 # The bounded wait for `gio info`, `umount` and `fusermount3` — see
 # `network`. A leaf with no dependencies of its own.
 hyprforge-process = { workspace = true, optional = true }
+# Hearing a phone or camera plugged in when no gvfs monitor is
+# installed to hear it — see `network::watch_usb`.
+inotify = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util", "process", "io-util", "net"] }
@@ -41,7 +44,7 @@ tempfile = "3"
 
 [features]
 default = ["client"]
-client = ["dep:zbus", "dep:tokio", "dep:async-trait", "dep:futures-util", "dep:hyprforge-process"]
+client = ["dep:zbus", "dep:tokio", "dep:async-trait", "dep:futures-util", "dep:hyprforge-process", "dep:inotify"]
 # Exposes `backend::mock`, so the file manager's own tests can drive a
 # window against drives that mount, refuse and vanish on cue, without a
 # bus.

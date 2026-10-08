@@ -2413,6 +2413,13 @@ impl Browser {
     /// asked for at a smaller bucket is asked for again at the bigger,
     /// and keeps its old picture until the new one arrives.
     fn thumbnail_asks(&mut self, grid: bool) -> Vec<Outcome> {
+        // On a phone or camera every file read is a USB round trip and a
+        // thumbnail reads the whole photograph; a folder of two thousand
+        // would keep the device busy for minutes. Its files keep their
+        // icons, as Nautilus's do on MTP.
+        if self.devices.gadget_holding(&self.current_dir).is_some() {
+            return Vec::new();
+        }
         let bucket = crate::preview::bucket_for(self.thumbnail_edge());
         let smallest = crate::preview::BUCKETS[0];
         let big = thumbnails_at(bucket);
@@ -3224,7 +3231,10 @@ impl Browser {
         // own `Entry`, and the entries were just replaced wholesale.
         let folders: Vec<PathBuf> =
             self.entries.iter().filter(|e| e.is_dir).map(|e| e.path.clone()).collect();
-        let counts = if folders.is_empty() { Outcome::None } else { Outcome::CountFolders(folders) };
+        // Not on a phone or camera, for the reason thumbnails are not:
+        // a count is a listing of every folder, each one over USB.
+        let on_gadget = self.devices.gadget_holding(&self.current_dir).is_some();
+        let counts = if folders.is_empty() || on_gadget { Outcome::None } else { Outcome::CountFolders(folders) };
         // A folder that would not list says nothing about its disk either:
         // the status bar is blank for an error, and the figure with it.
         let space = match self.load_state {
@@ -5379,7 +5389,7 @@ fn body_content<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message
             let message = match collections::empty_message(vm) {
                 Some(message) => message,
                 None if vm.search.active => searching::empty_message(vm),
-                None => "This folder is empty.",
+                None => drives::empty_message(vm).unwrap_or("This folder is empty."),
             };
             container(meta_text(message, BASE_TEXT_SIZE, scale))
                 .center_x(Length::Fill)
@@ -5446,7 +5456,9 @@ fn column_view<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message>
         LoadState::Loaded if collections::empty_message(vm).is_some() => {
             pane_message(collections::empty_message(vm).unwrap_or_default(), scale)
         }
-        LoadState::Loaded if !vm.search.active => pane_message("This folder is empty.", scale),
+        LoadState::Loaded if !vm.search.active => {
+            pane_message(drives::empty_message(vm).unwrap_or("This folder is empty."), scale)
+        }
         LoadState::Loaded => pane_message(searching::empty_message(vm), scale),
         LoadState::Loading => pane_message("Loading\u{2026}", scale),
         LoadState::Error(err) => load_error(vm, err, scale),

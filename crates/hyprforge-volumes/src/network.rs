@@ -9,6 +9,7 @@
 //! exception.
 
 use crate::backend::ShareBackend;
+use crate::gadgets::{self, GadgetKind, Gadgets, UsbDevice};
 use crate::gvfs::{self, Conversation, Reply};
 use crate::mountinfo;
 use crate::types::{Answers, ConnectError, Gvfs, Share, ShareKind};
@@ -37,6 +38,8 @@ pub struct SystemShares {
     fuse_root: PathBuf,
     /// Every `gvfs/mounts` directory in `$XDG_DATA_DIRS`.
     mounts_dirs: Vec<PathBuf>,
+    /// `/sys/bus/usb/devices`, where the kernel lists what is on USB.
+    usb_root: PathBuf,
 }
 
 impl Default for SystemShares {
@@ -60,12 +63,19 @@ impl SystemShares {
             gio: vec!["gio".to_string()],
             fuse_root: runtime.join("gvfs"),
             mounts_dirs: data_dirs.split(':').map(|d| Path::new(d).join("gvfs/mounts")).collect(),
+            usb_root: PathBuf::from("/sys/bus/usb/devices"),
         }
     }
 
     /// The same, running `gio` as `command` — for tests.
     pub fn with_gio(command: Vec<String>, fuse_root: PathBuf, mounts_dirs: Vec<PathBuf>) -> Self {
-        SystemShares { gio: command, fuse_root, mounts_dirs }
+        SystemShares { gio: command, fuse_root, mounts_dirs, usb_root: PathBuf::from("/nonexistent") }
+    }
+
+    /// The same, reading USB devices from `usb_root` — for tests.
+    pub fn with_usb(mut self, usb_root: PathBuf) -> Self {
+        self.usb_root = usb_root;
+        self
     }
 
     fn gio_command(&self) -> tokio::process::Command {
@@ -140,7 +150,11 @@ impl ShareBackend for SystemShares {
             let Ok(entries) = std::fs::read_dir(&root) else { return Vec::new() };
             let mut shares: Vec<Share> = entries
                 .flatten()
-                .filter_map(|e| gvfs::share(&root, &e.file_name().to_string_lossy()))
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                // A phone's or camera's mount is listed with the
+                // drives, by `gadgets`, not as a server.
+                .filter(|name| !gadgets::is_gadget_mount(name))
+                .filter_map(|name| gvfs::share(&root, &name))
                 .collect();
             shares.sort_by(|a, b| a.label.cmp(&b.label));
             shares
@@ -199,11 +213,140 @@ impl ShareBackend for SystemShares {
         }
     }
 
+    async fn gadgets(&self) -> Gadgets {
+        let schemes = match self.gvfs().await {
+            Gvfs::Available { schemes } => schemes,
+            Gvfs::Absent(_) => Vec::new(),
+        };
+        let mut command = [self.gio.clone(), vec!["mount".into(), "-li".into()]].concat();
+        let gio_found = self.gio_found();
+        let listed = blocking(TIMEOUT + Duration::from_secs(1), move || {
+            if !gio_found {
+                return String::new();
+            }
+            let mut c = std::process::Command::new(command.remove(0));
+            c.args(&command).env("LC_ALL", "C.UTF-8").env_remove("LANGUAGE").stdin(Stdio::null());
+            match hyprforge_process::output(&mut c, TIMEOUT) {
+                Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
+                Err(e) => {
+                    tracing::warn!("gio mount -li: {e}");
+                    String::new()
+                }
+            }
+        })
+        .await
+        .unwrap_or_default();
+        let (root, usb_root) = (self.fuse_root.clone(), self.usb_root.clone());
+        let (names, usb) = blocking(TIMEOUT, move || {
+            let names: Vec<String> = std::fs::read_dir(&root)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .filter(|n| gadgets::is_gadget_mount(n))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (names, read_usb(&usb_root))
+        })
+        .await
+        .unwrap_or_default();
+        let have = |kind: GadgetKind| schemes.iter().any(|s| s == kind.scheme());
+        gadgets::assemble(&gadgets::volumes(&listed), &self.fuse_root, &names, &gadgets::usb(&usb), have)
+    }
+
+    async fn release(&self, uri: &str) -> Result<(), String> {
+        let mut command = self.gio.clone();
+        command.extend(["mount".to_string(), "-u".to_string(), uri.to_string()]);
+        run_bounded(command).await
+    }
+
     async fn watch(&self) -> mpsc::Receiver<()> {
         let (tx, rx) = mpsc::channel(1);
         watch_mount_table(tx.clone());
+        watch_usb(tx.clone());
         tokio::spawn(watch_gvfs(tx));
         rx
+    }
+}
+
+/// Runs `command` to completion within [`TIMEOUT`]; `Err` is what it
+/// said, in its words.
+async fn run_bounded(command: Vec<String>) -> Result<(), String> {
+    let output = blocking(TIMEOUT + Duration::from_secs(1), move || {
+        let mut c = std::process::Command::new(&command[0]);
+        c.args(&command[1..]).env("LC_ALL", "C.UTF-8").stdin(Stdio::null());
+        hyprforge_process::output(&mut c, TIMEOUT)
+    })
+    .await;
+    match output {
+        None => Err(format!("It didn't finish within {}s.", TIMEOUT.as_secs())),
+        Some(Err(e)) if e.kind() == std::io::ErrorKind::TimedOut => {
+            Err(format!("It didn't finish within {}s.", TIMEOUT.as_secs()))
+        }
+        Some(Err(e)) => Err(format!("Couldn't start the program that does it: {e}")),
+        Some(Ok(out)) if out.status.success() => Ok(()),
+        Some(Ok(out)) => Err(gvfs::failure(&String::from_utf8_lossy(&out.stderr))),
+    }
+}
+
+/// What is on USB, from the kernel's own description of it: each
+/// device's directory under `root` (`1-2.3`) with `busnum`, `devnum`,
+/// `manufacturer` and `product`, and its interfaces' (`1-2.3:1.0`)
+/// `bInterfaceClass` and `interface`. A file a device does not have —
+/// plenty have no product string — is `None`, never a reason to skip it.
+pub fn read_usb(root: &Path) -> Vec<UsbDevice> {
+    let Ok(entries) = std::fs::read_dir(root) else { return Vec::new() };
+    let names: Vec<String> = entries.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    let read = |dir: &str, file: &str| {
+        std::fs::read_to_string(root.join(dir).join(file)).ok().map(|s| s.trim().to_string())
+    };
+    let mut devices: Vec<UsbDevice> = names
+        .iter()
+        // `usb1` is a root hub; `1-2:1.0` an interface.
+        .filter(|n| !n.contains(':') && !n.starts_with("usb"))
+        .filter_map(|n| {
+            let bus = read(n, "busnum")?.parse().ok()?;
+            let dev = read(n, "devnum")?.parse().ok()?;
+            let prefix = format!("{n}:");
+            let mut interfaces: Vec<(String, Option<String>)> = names
+                .iter()
+                .filter(|i| i.starts_with(&prefix))
+                .filter_map(|i| Some((read(i, "bInterfaceClass")?, read(i, "interface"))))
+                .collect();
+            interfaces.sort();
+            Some(UsbDevice { bus, dev, manufacturer: read(n, "manufacturer"), product: read(n, "product"), interfaces })
+        })
+        .collect();
+    devices.sort_by_key(|d| (d.bus, d.dev));
+    devices
+}
+
+/// Fires `tx` whenever something is plugged into USB or pulled out.
+///
+/// The kernel makes a node under `/dev/bus/usb/<bus>/` for every USB
+/// device as it arrives and removes it as it goes, so inotify on those
+/// directories hears a phone arrive with no daemon in between — which
+/// is the whole point when the daemon that would have heard it, gvfs's
+/// MTP monitor, is not installed. On its own thread, because inotify's
+/// read blocks; it ends at the first event after nobody is listening.
+fn watch_usb(tx: mpsc::Sender<()>) {
+    let Ok(mut inotify) = inotify::Inotify::init() else { return };
+    let Ok(buses) = std::fs::read_dir("/dev/bus/usb") else { return };
+    for bus in buses.flatten() {
+        let _ = inotify.watches().add(bus.path(), inotify::WatchMask::CREATE | inotify::WatchMask::DELETE);
+    }
+    let spawned = std::thread::Builder::new().name("usb-watch".into()).spawn(move || {
+        let mut buffer = [0u8; 1024];
+        while inotify.read_events_blocking(&mut buffer).is_ok() {
+            if tx.is_closed() {
+                break;
+            }
+            let _ = tx.try_send(());
+        }
+    });
+    if let Err(e) = spawned {
+        tracing::warn!("couldn't watch USB for phones and cameras: {e}");
     }
 }
 
@@ -319,16 +462,25 @@ async fn watch_gvfs(tx: mpsc::Sender<()>) {
         tracing::warn!("no session bus to hear gvfs on; shares will refresh after this window's own changes");
         return;
     };
-    let rule = zbus::MatchRule::builder()
-        .msg_type(zbus::message::Type::Signal)
-        .interface("org.gtk.vfs.MountTracker")
-        .map(|b| b.build());
-    let Ok(rule) = rule else { return };
-    let Ok(Ok(mut stream)) = tokio::time::timeout(TIMEOUT, zbus::MessageStream::for_match_rule(rule, &connection, Some(8))).await
-    else {
+    // The mount tracker says a mount came or went; the remote volume
+    // monitors (MTP's, gPhoto2's) that a phone or camera did. The second
+    // interface is gvfs's private protocol, used here only as "look
+    // again" — what changed is read from `gio` either way.
+    let mut streams = Vec::new();
+    for interface in ["org.gtk.vfs.MountTracker", "org.gtk.Private.RemoteVolumeMonitor"] {
+        let rule = zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).interface(interface).map(|b| b.build());
+        let Ok(rule) = rule else { continue };
+        if let Ok(Ok(stream)) =
+            tokio::time::timeout(TIMEOUT, zbus::MessageStream::for_match_rule(rule, &connection, Some(8))).await
+        {
+            streams.push(stream);
+        }
+    }
+    if streams.is_empty() {
         return;
-    };
+    }
     use futures_util::StreamExt;
+    let mut stream = futures_util::stream::select_all(streams);
     while stream.next().await.is_some() {
         if tx.is_closed() {
             break;
@@ -434,6 +586,53 @@ exit 2
         let shares = SystemShares::with_gio(vec!["/nonexistent/gio".into()], PathBuf::from("/nonexistent"), vec![]);
         assert!(matches!(shares.connect("smb://h/x", Answers::default()).await, Err(ConnectError::Absent(_))));
         assert!(matches!(shares.gvfs().await, Gvfs::Absent(_)));
+    }
+
+    /// A sysfs tree shaped as the kernel writes it: a phone with its
+    /// MTP interface, a mouse, and a root hub.
+    fn sysfs(dir: &Path) {
+        let put = |path: &str, text: &str| {
+            let at = dir.join(path);
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(at, format!("{text}\n")).unwrap();
+        };
+        for (file, text) in [("busnum", "1"), ("devnum", "9"), ("manufacturer", "Google"), ("product", "Pixel 8")] {
+            put(&format!("1-4/{file}"), text);
+        }
+        put("1-4:1.0/bInterfaceClass", "06");
+        put("1-4:1.0/interface", "MTP");
+        for (file, text) in [("busnum", "1"), ("devnum", "4"), ("product", "2.4G Dual Mode Mouse")] {
+            put(&format!("1-2.3/{file}"), text);
+        }
+        put("1-2.3:1.0/bInterfaceClass", "03");
+        put("usb1/busnum", "1");
+    }
+
+    #[test]
+    fn usb_devices_are_read_with_their_interfaces() {
+        let dir = tempfile::tempdir().unwrap();
+        sysfs(dir.path());
+        let found = read_usb(dir.path());
+        assert_eq!(found.len(), 2, "the root hub is not a device: {found:?}");
+        let phone = found.iter().find(|d| d.dev == 9).unwrap();
+        assert_eq!(phone.product.as_deref(), Some("Pixel 8"));
+        assert_eq!(phone.interfaces, [("06".to_string(), Some("MTP".to_string()))]);
+        let mouse = found.iter().find(|d| d.dev == 4).unwrap();
+        assert_eq!(mouse.manufacturer, None, "a missing file is None, not a skipped device");
+    }
+
+    /// With no gvfs at all the phone on USB is still a row, saying what
+    /// to install; and a phone's mount never shows up as a server.
+    #[tokio::test]
+    async fn a_phone_with_no_gvfs_is_a_row_and_its_mount_is_not_a_share() {
+        let (dir, shares) = fake("exit 0");
+        let shares = shares.with_usb(dir.path().join("usb"));
+        sysfs(&dir.path().join("usb"));
+        std::fs::create_dir_all(dir.path().join("gvfs/mtp:host=Google_Pixel_8_X")).unwrap();
+        let found = shares.gadgets().await;
+        assert_eq!(found.unreadable.len(), 1, "{found:?}");
+        assert_eq!(found.unreadable[0].label, "Google Pixel 8");
+        assert!(shares.shares().await.is_empty());
     }
 
     #[tokio::test]

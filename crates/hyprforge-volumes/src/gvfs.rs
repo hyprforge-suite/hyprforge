@@ -147,7 +147,7 @@ pub fn share(fuse_root: &Path, name: &str) -> Option<Share> {
 }
 
 /// `%2C` back to `,`. A malformed escape is kept as written.
-fn unescape(value: &str) -> String {
+pub(crate) fn unescape(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

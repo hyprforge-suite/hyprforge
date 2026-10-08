@@ -16,7 +16,9 @@
 //! the same drive in every other: its "Mounting…" has to show
 //! everywhere, and two tabs must never both ask to mount it.
 
-pub use hyprforge_volumes::{Gvfs, Operation, Share, ShareKind, Volume, VolumeError, VolumeId};
+pub use hyprforge_volumes::{
+    Gadget, GadgetKind, Gadgets, Gvfs, Operation, Share, ShareKind, Unreadable, Volume, VolumeError, VolumeId,
+};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -46,6 +48,11 @@ pub struct Devices {
     pub shares: Vec<Share>,
     /// Shares a disconnect is under way for.
     pub disconnecting: BTreeSet<PathBuf>,
+    /// Phones and cameras, and those on USB that nothing installed here
+    /// can open — see `hyprforge_volumes::gadgets`.
+    pub gadgets: Gadgets,
+    /// Phones and cameras being opened or let go of, by URI.
+    pub gadget_busy: BTreeMap<String, Operation>,
     /// Whether this host changes the session's mounts beyond opening a
     /// drive: the Remote section's "Connect to Server…" and a mounted
     /// drive's eject mark. The window does; the open/save dialog does
@@ -63,6 +70,10 @@ pub enum DeviceMessage {
     Open(VolumeId),
     /// The eject mark on a mounted drive's row.
     Eject(VolumeId),
+    /// A phone's or camera's row, by URI: go there, opening it first.
+    OpenGadget(String),
+    /// The eject mark on an open phone's or camera's row.
+    ReleaseGadget(String),
 }
 
 /// What the host is asked to do.
@@ -75,6 +86,10 @@ pub enum Ask {
     Eject(VolumeId),
     /// Disconnect the share mounted at this path.
     Disconnect(PathBuf),
+    /// Open the phone or camera at this URI — and go there when `open`.
+    MountGadget { uri: String, open: bool },
+    /// Let go of the phone or camera at this URI.
+    ReleaseGadget(String),
 }
 
 /// What a drive's own action would act on — see
@@ -117,6 +132,15 @@ impl Devices {
     /// the command palette means while you are browsing a stick.
     pub fn volume_holding(&self, path: &Path) -> Option<&Volume> {
         hyprforge_volumes::inventory::mounted_at(self.volumes(), path)
+    }
+
+    pub fn gadget(&self, uri: &str) -> Option<&Gadget> {
+        self.gadgets.list.iter().find(|g| g.uri == uri)
+    }
+
+    /// The open phone or camera `path` is on.
+    pub fn gadget_holding(&self, path: &Path) -> Option<&Gadget> {
+        self.gadgets.list.iter().find(|g| g.mounted.as_deref().is_some_and(|m| path.starts_with(m)))
     }
 
     /// The share `path` is on.
@@ -204,6 +228,8 @@ impl Devices {
     /// every other icon.
     pub fn icon_names(&self) -> Vec<&'static str> {
         let mut names: Vec<&'static str> = self.volumes().iter().map(Volume::icon_name).collect();
+        names.extend(self.gadgets.list.iter().map(Gadget::icon_name));
+        names.extend(self.gadgets.unreadable.iter().map(|u| u.kind.icon_name()));
         if !self.shares.is_empty() {
             names.push("folder-remote");
         }

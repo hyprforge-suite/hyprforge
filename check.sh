@@ -39,6 +39,9 @@
 #                             its block devices and drives are the shape
 #                             hyprforge-volumes claims. Never mounts,
 #                             unmounts or ejects. Needs UDisks2 installed.
+#   3h. Phones and cameras  — does gio's `mount -li`, and the kernel's USB
+#                             listing, read the way hyprforge-volumes'
+#                             gadgets module claims? Read-only. Needs gio.
 #
 # Tiers 2, 3, 3b and 3c each gate on the thing they actually ask, rather
 # than sharing one --ignored run: a check that silently never runs is
@@ -871,6 +874,7 @@ for crate in sorted(set(listed) - set(standalone)):
 # The counts in prose, spelled out: "## Nine repositories" is the
 # components plus this one, "Eight of these directories" the components.
 WORDS = "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty".split()
+WORDS += [f"twenty-{w}" for w in WORDS[1:10]] + ["thirty"]
 def spelled(n):
     return WORDS[n] if n < len(WORDS) else str(n)
 
@@ -889,7 +893,7 @@ if directories and directories.group(1).lower() != spelled(len(standalone)):
         f"there are {spelled(len(standalone))}"
     )
 
-# CLAUDE.md's "Fifteen gated tiers": the indented `step` lines below
+# CLAUDE.md's "Twenty-one gated tiers": the indented `step` lines below
 # are the gated tiers — `--quick` skips the block they sit in — less the
 # one that only announces the skip. It said twelve while there were
 # fourteen, and named neither of the two it was missing.
@@ -898,7 +902,8 @@ tiers = [
     for t in re.findall(r'^[ \t]+step "([^"]+)"', Path("check.sh").read_text(), re.M)
     if not t.startswith("Skipping")
 ]
-claimed = re.search(r"(\w+)\s+gated\s+tiers", Path("CLAUDE.md").read_text(), re.I)
+# `[\w-]`, so "Twenty-one" is read whole rather than as "one".
+claimed = re.search(r"([\w-]+)\s+gated\s+tiers", Path("CLAUDE.md").read_text(), re.I)
 if not claimed:
     problems.append("CLAUDE.md no longer says how many gated tiers there are")
 elif claimed.group(1).lower() != spelled(len(tiers)):
@@ -1407,6 +1412,28 @@ else
             show_failures <<<"$output"
         else
             ok "$(count_tests <<<"$output") UDisks2 tests passed"
+            while IFS= read -r reason; do
+                [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
+            done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^(]*\).*/\1/p' <<<"$output" | sort -u)
+        fi
+    fi
+
+    # Phones and cameras: gio's `mount -li` read against the installed
+    # gio, and the kernel's USB listing. Gated on `gio` — which is what it
+    # asks — and not on gvfs-mtp or a phone: with neither, the listing
+    # still has to read as no phones rather than as something else, and
+    # the test says it saw none. Read-only: it never mounts anything.
+    step "Live tests against gio's phone and camera listing"
+    if ! command -v gio >/dev/null; then
+        skip "phone and camera tests" "gio isn't installed"
+    else
+        output=$(cargo test -p hyprforge-volumes --test live_gadgets \
+            -- --ignored --test-threads=1 --nocapture 2>&1)
+        if grep -q "test result: FAILED" <<<"$output"; then
+            bad "phone and camera tests failed — the code disagrees with gio or the kernel"
+            show_failures <<<"$output"
+        else
+            ok "$(count_tests <<<"$output") phone and camera tests passed"
             while IFS= read -r reason; do
                 [[ -n "$reason" ]] && skip "  a check inside them was skipped" "$reason"
             done < <(sed -n 's/.*HYPRFORGE-SKIP: \([^(]*\).*/\1/p' <<<"$output" | sort -u)

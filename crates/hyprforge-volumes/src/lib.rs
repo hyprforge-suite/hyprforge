@@ -1,5 +1,6 @@
-//! Drives and network shares: what is plugged in, mounting, unmounting
-//! and ejecting it over UDisks2, and connecting to a server through
+//! Drives, phones and network shares: what is plugged in, mounting,
+//! unmounting and ejecting it over UDisks2, phones and cameras through
+//! gvfs's MTP and gPhoto2 backends, and connecting to a server through
 //! gvfs — the sidebar's Devices and Remote sections in the Hyprforge
 //! file manager.
 //!
@@ -21,6 +22,8 @@
 //!   devices are volumes a person wants, and what to call them),
 //!   [`mountinfo`] (which mounts are network shares), [`gvfs`] (what it
 //!   can reach, what an address means, and answering `gio`'s prompts),
+//!   [`gadgets`] (phones and cameras: what gvfs's MTP and gPhoto2
+//!   monitors list, and what is on USB that no installed backend reads),
 //!   and [`types::sentence`] (what to say when it fails).
 //! - **The seams** — `backend`'s `VolumeBackend` and `ShareBackend`,
 //!   each with a mock behind the `mock` feature, so a window's handling
@@ -49,6 +52,7 @@
 //! last is gvfs's `network://`, and a list of whatever answered a
 //! broadcast is a different feature from "connect to this address".
 
+pub mod gadgets;
 pub mod gvfs;
 pub mod inventory;
 pub mod mountinfo;
@@ -63,6 +67,7 @@ pub mod settle;
 #[cfg(feature = "client")]
 pub mod udisks;
 
+pub use gadgets::{Gadget, GadgetKind, Gadgets, Unreadable};
 pub use types::{
     sentence, Answers, ConnectError, Detach, Gvfs, Login, Operation, Question, Share, ShareKind, Volume, VolumeError,
     VolumeId, VolumeKind,

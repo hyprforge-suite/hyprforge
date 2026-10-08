@@ -1,9 +1,10 @@
 # hyprforge-volumes
 
-Drives over UDisks2 and network shares over gvfs and the mount table: what is plugged in, mounting, unmounting and ejecting it, and connecting to a server, behind backend traits with a mock.
+Drives over UDisks2, phones and cameras over gvfs MTP and gPhoto2, and network shares over gvfs and the mount table: what is plugged in, mounting, unmounting and ejecting it, and connecting to a server, behind backend traits with a mock.
 
-Drives and network shares: what is plugged in, mounting, unmounting
-and ejecting it over UDisks2, and connecting to a server through
+Drives, phones and network shares: what is plugged in, mounting,
+unmounting and ejecting it over UDisks2, phones and cameras through
+gvfs's MTP and gPhoto2 backends, and connecting to a server through
 gvfs — the sidebar's Devices and Remote sections in the Hyprforge
 file manager.
 
@@ -25,6 +26,8 @@ order it was built:
   devices are volumes a person wants, and what to call them),
   `mountinfo` (which mounts are network shares), `gvfs` (what it
   can reach, what an address means, and answering `gio`'s prompts),
+  `gadgets` (phones and cameras: what gvfs's MTP and gPhoto2
+  monitors list, and what is on USB that no installed backend reads),
   and `types::sentence` (what to say when it fails).
 - **The seams** — `backend`'s `VolumeBackend` and `ShareBackend`,
   each with a mock behind the `mock` feature, so a window's handling

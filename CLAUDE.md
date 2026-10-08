@@ -706,12 +706,12 @@ belongs in the design — not in a user's surprise.
 ./check.sh --quick  # tier 1 only: clippy + unit tests, no compositor
 ```
 
-Clippy must be silent and every test must pass before a commit. Twenty
+Clippy must be silent and every test must pass before a commit. Twenty-one
 gated tiers beyond tier 1 now, each answering a different "does the system
 I'm talking to actually agree" question — Hyprland itself, the ecosystem
 daemons' parse tests, the system's own `unzip`/`tar`/`7z`, NetworkManager,
 BlueZ, hyprsunset, systemd-logind, trash entries written by another
-implementation, UPower, power-profiles-daemon, fprintd, UDisks2, the Wayland clipboard, icon
+implementation, UPower, power-profiles-daemon, fprintd, UDisks2, gio's phone and camera listing, the Wayland clipboard, icon
 names against the installed theme, the installed shared MIME database, the
 open/save dialog's D-Bus interface against the one xdg-desktop-portal calls, a
 tray host, cargo's own packager (does every library crate `publish
@@ -826,9 +826,9 @@ hyprforge-archive   zip, tar and 7z: what is inside one as a directory tree,
                     Hyprforge dependency is hyprforge-secret, for archive
                     passwords — paths arrive from the caller, it never goes
                     looking for one
-hyprforge-volumes   drives over UDisks2 and network shares over gvfs: what
-                    is plugged in, mounting, ejecting, connecting to a
-                    server. Plain data and decisions without its `client`
+hyprforge-volumes   drives over UDisks2, phones and cameras and network shares
+                    over gvfs: what is plugged in, mounting, ejecting,
+                    connecting to a server. Plain data and decisions without its `client`
                     feature, which is all the browser view takes
 hyprforge-keys      the keyboard grammar every app binds keys through; no iced
 hyprforge-listing   a directory listing and its order, under both Files and

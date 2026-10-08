@@ -2471,6 +2471,7 @@ dependencies = [
  "futures-util",
  "hyprforge-process",
  "hyprforge-secret",
+ "inotify",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",

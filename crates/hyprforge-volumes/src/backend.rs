@@ -7,6 +7,7 @@
 //! lifetimes. A machine can have one without the other, and nothing that
 //! asks about drives should fail because gvfs is missing.
 
+use crate::gadgets::Gadgets;
 use crate::types::{Answers, ConnectError, Gvfs, Share, Volume, VolumeError, VolumeId};
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
@@ -54,8 +55,17 @@ pub trait ShareBackend: Send + Sync {
 
     async fn disconnect(&self, share: &Share) -> Result<(), String>;
 
+    /// Phones and cameras: what gvfs's MTP and gPhoto2 monitors list,
+    /// and what is on USB that no installed backend reads — see
+    /// [`crate::gadgets`]. Opening one is [`Self::connect`] on its URI.
+    async fn gadgets(&self) -> Gadgets;
+
+    /// Unmounts the phone or camera at `uri`. `Err` is gio's words.
+    async fn release(&self, uri: &str) -> Result<(), String>;
+
     /// Fires whenever gvfs mounts or unmounts something — gvfs's own
-    /// signal, so a share mounted by another program arrives too.
+    /// signal, so a share mounted by another program arrives too — and
+    /// whenever a phone or camera is plugged in or pulled out.
     async fn watch(&self) -> mpsc::Receiver<()>;
 }
 
@@ -190,6 +200,8 @@ pub mod mock {
         /// What `connect` answers, in order; the last repeats.
         answers: Mutex<Vec<Result<Option<PathBuf>, ConnectError>>>,
         connects: Mutex<Vec<(String, Answers)>>,
+        gadgets: Mutex<Gadgets>,
+        releases: Mutex<Vec<String>>,
     }
 
     impl MockShares {
@@ -199,7 +211,19 @@ pub mod mock {
                 shares: Mutex::new(shares),
                 answers: Mutex::new(vec![Ok(None)]),
                 connects: Mutex::new(Vec::new()),
+                gadgets: Mutex::new(Gadgets::default()),
+                releases: Mutex::new(Vec::new()),
             }
+        }
+
+        /// What [`ShareBackend::gadgets`] answers from now on.
+        pub fn set_gadgets(&self, gadgets: Gadgets) {
+            *self.gadgets.lock().unwrap() = gadgets;
+        }
+
+        /// Every `release` so far.
+        pub fn releases(&self) -> Vec<String> {
+            self.releases.lock().unwrap().clone()
         }
 
         pub fn answer(&self, answers: Vec<Result<Option<PathBuf>, ConnectError>>) {
@@ -235,6 +259,20 @@ pub mod mock {
 
         async fn disconnect(&self, share: &Share) -> Result<(), String> {
             self.shares.lock().unwrap().retain(|s| s.path != share.path);
+            Ok(())
+        }
+
+        async fn gadgets(&self) -> Gadgets {
+            self.gadgets.lock().unwrap().clone()
+        }
+
+        async fn release(&self, uri: &str) -> Result<(), String> {
+            self.releases.lock().unwrap().push(uri.to_string());
+            for g in &mut self.gadgets.lock().unwrap().list {
+                if g.uri == uri {
+                    g.mounted = None;
+                }
+            }
             Ok(())
         }
 

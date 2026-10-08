@@ -38,6 +38,14 @@ pub(super) enum DeviceRow {
         eject: bool,
     },
     Share,
+    /// A phone or camera, by its URI.
+    Gadget {
+        uri: String,
+        mounted: bool,
+        /// Shows the eject mark: open, nothing happening to it, and a
+        /// host that lets go of things.
+        eject: bool,
+    },
     /// "Connect to Server…".
     Connect,
     /// A sentence where rows would be — UDisks2 not running. Not a
@@ -60,9 +68,14 @@ pub(super) fn place(row: &SidebarRow) -> RowPlace {
         return RowPlace::Plain;
     }
     match &row.device {
-        None | Some(DeviceRow::Share) | Some(DeviceRow::Volume { mounted: true, .. }) => RowPlace::Folder(row.path.clone()),
+        None
+        | Some(DeviceRow::Share)
+        | Some(DeviceRow::Volume { mounted: true, .. })
+        | Some(DeviceRow::Gadget { mounted: true, .. }) => RowPlace::Folder(row.path.clone()),
         Some(DeviceRow::Volume { mounted: false, .. }) => RowPlace::MenuOnly(row.path.clone()),
-        Some(DeviceRow::Connect | DeviceRow::Note) => RowPlace::Plain,
+        // A phone not yet open has no folder and no menu: the click
+        // opens it, and that is everything there is to do with it.
+        Some(DeviceRow::Gadget { mounted: false, .. } | DeviceRow::Connect | DeviceRow::Note) => RowPlace::Plain,
     }
 }
 
@@ -73,6 +86,9 @@ pub(super) fn press(row: &SidebarRow, vm: &ViewModel<'_>) -> Option<(Option<Mess
     Some(match row.device.as_ref()? {
         DeviceRow::Volume { id, mounted, .. } => (Some(Message::Device(DeviceMessage::Open(id.clone()))), *mounted && here),
         DeviceRow::Share => (Some(Message::Navigate(row.path.clone())), here),
+        DeviceRow::Gadget { uri, mounted, .. } => {
+            (Some(Message::Device(DeviceMessage::OpenGadget(uri.clone()))), *mounted && here)
+        }
         DeviceRow::Connect => (Some(Message::Perform(Action::ConnectToServer)), false),
         DeviceRow::Note => (None, false),
     })
@@ -81,7 +97,11 @@ pub(super) fn press(row: &SidebarRow, vm: &ViewModel<'_>) -> Option<(Option<Mess
 /// The mark at the end of a mounted drive's row: press it to eject.
 /// `None` for every other row.
 pub(super) fn eject_button<'a>(row: &SidebarRow, scale: FontScale) -> Option<Element<'a, Message>> {
-    let Some(DeviceRow::Volume { id, eject: true, .. }) = &row.device else { return None };
+    let message = match &row.device {
+        Some(DeviceRow::Volume { id, eject: true, .. }) => DeviceMessage::Eject(id.clone()),
+        Some(DeviceRow::Gadget { uri, eject: true, .. }) => DeviceMessage::ReleaseGadget(uri.clone()),
+        _ => return None,
+    };
     // The icon's size, not the folder mark's: the glyph fills only half
     // its box, and at the mark's 13 pixels it was a speck. In the
     // foreground colour, because the row it sits on may be the current
@@ -90,7 +110,7 @@ pub(super) fn eject_button<'a>(row: &SidebarRow, scale: FontScale) -> Option<Ele
     Some(
         iced::widget::button(hyprforge_ui::glyph::eject(side, hyprforge_ui::theme::text()))
             .padding(0)
-            .on_press(Message::Device(DeviceMessage::Eject(id.clone())))
+            .on_press(Message::Device(message))
             .style(super::quiet_link_style)
             .into(),
     )
@@ -138,6 +158,31 @@ pub(super) fn sections(vm: &ViewModel<'_>) -> [SidebarSection; 2] {
             }
         }
     }
+    for gadget in &devices.gadgets.list {
+        let busy = devices.gadget_busy.get(&gadget.uri).copied();
+        let mounted = gadget.mounted.is_some();
+        drives.push(SidebarRow {
+            label: gadget.label.clone(),
+            path: gadget.mounted.clone().unwrap_or_default(),
+            meta: busy.map(|op| op.doing().to_string()),
+            tint: Tint::Info,
+            missing: false,
+            icon: icon::themed_key(gadget.icon_name()),
+            search: None,
+            device: Some(DeviceRow::Gadget {
+                uri: gadget.uri.clone(),
+                mounted,
+                eject: devices.manages_mounts && mounted && busy.is_none(),
+            }),
+        });
+    }
+    // Plugged in, and nothing here can read it: a sentence where its row
+    // would be, never nothing — nothing would say it is not plugged in.
+    for unreadable in &devices.gadgets.unreadable {
+        let mut row = note(&unreadable.sentence());
+        row.icon = icon::themed_key(unreadable.kind.icon_name());
+        drives.push(row);
+    }
     let mut remote: Vec<SidebarRow> = devices
         .shares
         .iter()
@@ -165,6 +210,16 @@ pub(super) fn sections(vm: &ViewModel<'_>) -> [SidebarSection; 2] {
         });
     }
     [SidebarSection { title: "Devices", rows: drives }, SidebarSection { title: "Remote", rows: remote }]
+}
+
+/// What an empty folder says when it is the top of an open phone:
+/// that the phone is locked or charging only, which is nearly always
+/// why — see `hyprforge_volumes::gadgets::EMPTY_PHONE`. Deeper in, an
+/// empty folder is only empty.
+pub(super) fn empty_message(vm: &ViewModel<'_>) -> Option<&'static str> {
+    let gadget = vm.devices.gadget_holding(vm.current_dir)?;
+    (gadget.kind == hyprforge_volumes::GadgetKind::Phone && gadget.mounted.as_ref().is_some_and(|m| m.as_path() == vm.current_dir))
+        .then_some(hyprforge_volumes::gadgets::EMPTY_PHONE)
 }
 
 fn note(text: &str) -> SidebarRow {
@@ -239,6 +294,22 @@ impl Browser {
                     return Outcome::None;
                 }
                 Outcome::Devices(Ask::Eject(id))
+            }
+            DeviceMessage::OpenGadget(uri) => {
+                let Some(gadget) = self.devices.gadget(&uri) else { return Outcome::None };
+                if let Some(point) = gadget.mounted.clone() {
+                    return self.update(Message::Navigate(point));
+                }
+                if self.devices.gadget_busy.contains_key(&uri) {
+                    return Outcome::None;
+                }
+                Outcome::Devices(Ask::MountGadget { uri, open: true })
+            }
+            DeviceMessage::ReleaseGadget(uri) => {
+                if self.devices.gadget_busy.contains_key(&uri) {
+                    return Outcome::None;
+                }
+                Outcome::Devices(Ask::ReleaseGadget(uri))
             }
         }
     }
@@ -528,5 +599,89 @@ mod tests {
         );
         let again = browser.update(Message::DevicesChanged(Arc::new(listed(vec![stick("B", None)]))));
         assert_eq!(again, Outcome::None);
+    }
+
+    fn phone(mounted: Option<&str>) -> hyprforge_volumes::Gadget {
+        hyprforge_volumes::Gadget {
+            label: "SAMSUNG Android".into(),
+            kind: hyprforge_volumes::GadgetKind::Phone,
+            uri: "mtp://SAMSUNG_SAMSUNG_Android_R58M83EFHJY/".into(),
+            mounted: mounted.map(PathBuf::from),
+        }
+    }
+
+    fn with_gadgets(gadgets: hyprforge_volumes::Gadgets) -> Browser {
+        with(Devices { gadgets, ..listed(vec![]) })
+    }
+
+    /// A phone is a device you plug in, so it sits with the drives —
+    /// not with the servers, though gvfs mounts both.
+    #[test]
+    fn a_phone_is_a_device_and_a_click_opens_it_then_goes_there() {
+        let mut browser =
+            with_gadgets(hyprforge_volumes::Gadgets { list: vec![phone(None)], unreadable: vec![] });
+        let rows = section(&browser, "Devices").rows;
+        assert_eq!(rows[0].label, "SAMSUNG Android");
+        assert!(matches!(rows[0].device, Some(DeviceRow::Gadget { mounted: false, eject: false, .. })));
+        let uri = "mtp://SAMSUNG_SAMSUNG_Android_R58M83EFHJY/".to_string();
+        let outcome = browser.update(Message::Device(DeviceMessage::OpenGadget(uri.clone())));
+        assert_eq!(outcome, Outcome::Devices(Ask::MountGadget { uri: uri.clone(), open: true }));
+
+        let at = "/run/user/1000/gvfs/mtp:host=SAMSUNG_SAMSUNG_Android_R58M83EFHJY";
+        let mut open = with_gadgets(hyprforge_volumes::Gadgets { list: vec![phone(Some(at))], unreadable: vec![] });
+        let rows = section(&open, "Devices").rows;
+        assert!(matches!(rows[0].device, Some(DeviceRow::Gadget { mounted: true, eject: true, .. })));
+        let outcome = open.update(Message::Device(DeviceMessage::OpenGadget(uri)));
+        assert_eq!(outcome, Outcome::ReadDir(PathBuf::from(at)), "an open phone is a place");
+    }
+
+    /// Plugged in with no gvfs-mtp: still a row, saying what would open
+    /// it, and not a button.
+    #[test]
+    fn a_phone_nothing_can_read_says_what_to_install() {
+        let browser = with_gadgets(hyprforge_volumes::Gadgets {
+            list: vec![],
+            unreadable: vec![hyprforge_volumes::Unreadable {
+                label: "Google Pixel 8".into(),
+                kind: hyprforge_volumes::GadgetKind::Phone,
+            }],
+        });
+        let rows = section(&browser, "Devices").rows;
+        assert_eq!(rows[0].label, "Install gvfs-mtp to open \u{201C}Google Pixel 8\u{201D}");
+        assert_eq!(rows[0].device, Some(DeviceRow::Note));
+        assert_eq!(rows[0].icon, icon::themed_key("phone"));
+    }
+
+    /// A locked phone mounts and lists nothing; its top folder says
+    /// why rather than claiming the phone is empty.
+    #[test]
+    fn an_empty_phone_asks_to_be_unlocked() {
+        let at = "/run/user/1000/gvfs/mtp:host=X";
+        let mut browser = with_gadgets(hyprforge_volumes::Gadgets { list: vec![phone(Some(at))], unreadable: vec![] });
+        browser.update(Message::Navigate(PathBuf::from(at)));
+        browser.update(Message::DirLoaded(PathBuf::from(at), Ok(vec![])));
+        assert_eq!(empty_message(&browser.view_model(1000.0)), Some(hyprforge_volumes::gadgets::EMPTY_PHONE));
+        browser.update(Message::Navigate(PathBuf::from(at).join("DCIM")));
+        browser.update(Message::DirLoaded(PathBuf::from(at).join("DCIM"), Ok(vec![])));
+        assert_eq!(empty_message(&browser.view_model(1000.0)), None, "deeper in, empty is empty");
+    }
+
+    /// A photograph on a phone is read whole over USB to thumbnail it;
+    /// a folder of them would keep the phone busy for minutes.
+    #[test]
+    fn a_phone_folder_asks_for_no_thumbnails_or_counts() {
+        let at = PathBuf::from("/run/user/1000/gvfs/mtp:host=X/DCIM");
+        let mut browser = with_gadgets(hyprforge_volumes::Gadgets {
+            list: vec![phone(Some("/run/user/1000/gvfs/mtp:host=X"))],
+            unreadable: vec![],
+        });
+        browser.update(Message::Navigate(at.clone()));
+        let entries = vec![
+            crate::backend::mock::MockBackend::file(&at, "a.jpg", 1),
+            crate::backend::mock::MockBackend::dir(&at, "Camera"),
+        ];
+        let outcome = browser.update(Message::DirLoaded(at, Ok(entries)));
+        let text = format!("{outcome:?}");
+        assert!(!text.contains("LoadThumbnails") && !text.contains("CountFolders"), "{text}");
     }
 }
