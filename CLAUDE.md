@@ -550,7 +550,7 @@ video frame handed over as a new `image::Handle` thirty times a second —
 3.3MB each — never finished uploading before it was replaced, so a
 playing video showed an empty pane and only the last frame appeared once
 it stopped. A picture that changes every frame belongs in a `shader`
-primitive that writes one texture (`hyprforge-media/src/film.rs`); a
+primitive that writes one texture (`hyprforge-viewer/src/film.rs`); a
 still is fine as a handle.
 
 **A killed test run has no "FAILED" line, and a check that only greps for
@@ -839,6 +839,8 @@ hyprforge-mesh      STL/3MF/OBJ into a welded mesh, fstl's camera, and a CPU
                     window, on iced's wgpu
 hyprforge-video     play a video into memory through libmpv (dlopen'd, so mpv
                     is optional), and a video's first real frame via ffmpeg
+hyprforge-viewer    the video and model panes on iced's wgpu, above video and
+                    mesh: what Media's viewer and Files' Quick Look both draw
 hyprforge-ui        the iced layer; knows nothing about Hyprland
 hyprforge-core      Hyprland config machinery — a new app should never need it
 hyprforge-setup     the steps that finish an install, each checked, applied and

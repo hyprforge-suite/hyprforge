@@ -37,6 +37,7 @@ members = [
     "crates/hyprforge-image",
     "crates/hyprforge-mesh",
     "crates/hyprforge-video",
+    "crates/hyprforge-viewer",
     "crates/hyprforge-media",
     "crates/hyprforge-archive",
     "crates/hyprforge-files-core",
@@ -115,6 +116,9 @@ hyprforge-listing = { path = "crates/hyprforge-listing", version = "0.1.0" }
 hyprforge-image = { path = "crates/hyprforge-image", version = "0.1.0" }
 hyprforge-mesh = { path = "crates/hyprforge-mesh", version = "0.1.0" }
 hyprforge-video = { path = "crates/hyprforge-video", version = "0.1.0" }
+# A playing video and a 3D model as panes of a window — Media's viewer
+# and Files' Quick Look draw the same ones.
+hyprforge-viewer = { path = "crates/hyprforge-viewer", version = "0.1.0" }
 hyprforge-media = { path = "crates/hyprforge-media", version = "0.1.0" }
 hyprforge-files-core = { path = "crates/hyprforge-files-core", version = "0.1.0" }
 # Drives over UDisks2 and network shares over gvfs. default-features =
@@ -328,5 +332,6 @@ hyprforge-thumbnails = { path = "crates/hyprforge-thumbnails" }
 hyprforge-tray = { path = "crates/hyprforge-tray" }
 hyprforge-ui = { path = "crates/hyprforge-ui" }
 hyprforge-video = { path = "crates/hyprforge-video" }
+hyprforge-viewer = { path = "crates/hyprforge-viewer" }
 hyprforge-volumes = { path = "crates/hyprforge-volumes" }
 hyprforge-windowrules = { path = "crates/hyprforge-windowrules" }

@@ -1,0 +1,25 @@
+[package]
+name = "hyprforge-viewer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "A playing video and a turnable 3D model as panes of an iced window, shared by Hyprforge's media viewer and its file manager's Quick Look."
+
+# Above hyprforge-video and hyprforge-mesh, which have no iced, and
+# hyprforge-ui; below the two windows that show what they draw.
+[dependencies]
+hyprforge-video.workspace = true
+hyprforge-mesh.workspace = true
+hyprforge-ui.workspace = true
+# `shader` widgets and the wgpu they draw with.
+iced.workspace = true
+glam = "0.25"
+bytemuck = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# Every WGSL shader here is parsed and validated by the compiler wgpu
+# itself uses — at the version wgpu 27 pins.
+naga = { version = "27", features = ["wgsl-in"] }

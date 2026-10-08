@@ -29,7 +29,7 @@ mod searching;
 mod collections;
 mod launching;
 
-pub use quicklook::quick_look_edge;
+pub use quicklook::{picture_box as quick_look_picture_box, quick_look_card, quick_look_edge};
 use launching::PaletteChoice;
 
 use crate::columns;

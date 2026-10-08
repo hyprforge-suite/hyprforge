@@ -62,6 +62,15 @@ drains the channel and collapses a run of seeks into one
 (`hyprforge-video`'s `player::batch`). Video, like 3D, needs the GPU:
 under iced's software renderer the pane says so.
 
+**2026-10-07: the panes leave the app.** Files' Quick Look wanted a
+video that plays and a model that turns, and the honest way to give it
+both was not a second copy: `film.rs` and `model/` moved into a new
+library, `hyprforge-viewer`, with the player's and the camera's input
+handling around them (`VideoPane`, `ModelPane`). Media now draws those
+panes and keeps only what is its own — paging, the slideshow, the
+inspector, autoreload. The entries above that name `src/film.rs` and
+`src/model/` describe where the code was written.
+
 **2026-09-27: where the plan below turned out different.** Read the
 rest of this file as the plan it was; these are the places the code
 went another way.

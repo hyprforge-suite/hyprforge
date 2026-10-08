@@ -104,7 +104,7 @@ fn card_size(window: (f32, f32)) -> (f32, f32) {
 
 /// The picture's box inside the card, logical: the card less its padding,
 /// the title and facts above and the key hint below.
-pub(super) fn picture_box(window: (f32, f32), scale: FontScale) -> (f32, f32) {
+pub fn picture_box(window: (f32, f32), scale: FontScale) -> (f32, f32) {
     let (w, h) = card_size(window);
     let header = scale.apply(TITLE_BASE) * LINE + scale.apply(density::META_TEXT_BASE) * LINE;
     let footer = scale.apply(density::META_TEXT_BASE) * LINE;
@@ -243,6 +243,40 @@ impl Browser {
         many(vec![outcome, Outcome::LoadQuickLook(target)])
     }
 
+    /// The entry the card is showing, while it is up — what a host that
+    /// draws something live in the card (a playing video) keys it on.
+    pub fn quick_look_showing(&self) -> Option<&Path> {
+        self.quick_look.glance.as_ref()?.showing.as_deref()
+    }
+
+    /// The entry on show, once the host has answered for it — when a
+    /// host may start something costly for it, such as a player. The
+    /// answer itself waits out a held arrow key (`hyprforge_files::
+    /// quicklook`), so this does not change thirty times a second.
+    pub fn quick_look_settled(&self) -> Option<&Path> {
+        self.quick_look.glance.as_ref().filter(|g| g.answered)?.showing.as_deref()
+    }
+
+    /// The card's name-and-facts header and its key hint, for a host
+    /// that fills the middle itself — see [`quick_look_card`]. `None`
+    /// while the card is closed.
+    pub fn quick_look_parts(&self, scale: FontScale) -> Option<(Element<'_, Message>, Element<'_, Message>)> {
+        let glance = self.quick_look.glance.as_ref()?;
+        let path = glance.showing.as_deref()?;
+        let entry = self.listed().iter().find(|e| e.path == path)?;
+        let icons = IconSet { icons: &self.icons, folders: &self.folder_icons };
+        let header = column![title(entry, icons, scale), facts(entry, glance.found.as_ref(), scale)].spacing(spacing::SM);
+        Some((header.into(), keys(&self.quick_look_hint(), scale)))
+    }
+
+    fn quick_look_hint(&self) -> String {
+        self.config
+            .keymap
+            .combos_for(Action::QuickLook)
+            .first()
+            .map_or_else(|| "Esc".to_string(), |c| format!("{c} or Esc"))
+    }
+
     /// The card, when it is up — drawn over everything by the host, from
     /// `menu_overlay`, so a host that already stacks the context menu
     /// needed no change to stack this.
@@ -251,41 +285,75 @@ impl Browser {
         let path = glance.showing.as_deref()?;
         let entry = self.listed().iter().find(|e| e.path == path)?;
         let icons = IconSet { icons: &self.icons, folders: &self.folder_icons };
-        let hint = self
-            .config
-            .keymap
-            .combos_for(Action::QuickLook)
-            .first()
-            .map_or_else(|| "Esc".to_string(), |c| format!("{c} or Esc"));
-        let (width, height) = card_size(window);
-        let card = card(entry, glance, icons, &hint, scale);
-        let card = container(card)
-            .padding(PADDING)
-            .width(Length::Fixed(width))
-            .height(Length::Fixed(height))
-            .style(|_t: &iced::Theme| container::Style {
-                background: Some(iced::Background::Color(hyprforge_ui::theme::surface::sidebar())),
-                border: iced::Border {
-                    color: hyprforge_ui::theme::surface::card_border(),
-                    width: 1.0,
-                    radius: density::outer_radius().into(),
-                },
-                ..container::Style::default()
-            });
-        Some(hyprforge_ui::widgets::scrim(card, Some(Message::QuickLookClose)))
+        let card = card(entry, glance, icons, &self.quick_look_hint(), scale);
+        Some(frame(card, window, Message::QuickLookClose))
     }
+}
+
+/// The card around `content`, over the dimmed window, `close` sent by a
+/// press on the dim layer — generic over the message, so a host can fill
+/// the card with something of its own ([`Browser::quick_look_parts`])
+/// and still draw exactly this card.
+pub fn quick_look_card<'a, M: Clone + 'a>(
+    header: Element<'a, M>,
+    body: Element<'a, M>,
+    keys: Element<'a, M>,
+    window: (f32, f32),
+    close: M,
+) -> Element<'a, M> {
+    let content = column![
+        header,
+        container(body).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).center_y(Length::Fill),
+        keys,
+    ]
+    .spacing(spacing::SM);
+    frame(content, window, close)
+}
+
+/// The card's own frame and the scrim it sits on.
+fn frame<'a, M: Clone + 'a>(content: impl Into<Element<'a, M>>, window: (f32, f32), close: M) -> Element<'a, M> {
+    let (width, height) = card_size(window);
+    let card = container(content)
+        .padding(PADDING)
+        .width(Length::Fixed(width))
+        .height(Length::Fixed(height))
+        .style(|_t: &iced::Theme| container::Style {
+            background: Some(iced::Background::Color(hyprforge_ui::theme::surface::sidebar())),
+            border: iced::Border {
+                color: hyprforge_ui::theme::surface::card_border(),
+                width: 1.0,
+                radius: density::outer_radius().into(),
+            },
+            ..container::Style::default()
+        });
+    hyprforge_ui::widgets::scrim(card, Some(close))
+}
+
+/// The name, beside its icon.
+fn title<'a>(entry: &'a Entry, icons: IconSet<'a>, scale: FontScale) -> Element<'a, Message> {
+    row![
+        container(entry_icon(entry.kind, icons.for_entry(entry), density::ROW_ICON, scale)),
+        scaled_text(entry.name.clone(), TITLE_BASE, scale).wrapping(iced::widget::text::Wrapping::None),
+    ]
+    .spacing(spacing::SM)
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
+/// Which keys do what.
+fn keys<'a>(hint: &str, scale: FontScale) -> Element<'a, Message> {
+    meta_text(
+        format!("{hint} closes \u{00b7} the arrows look at the next \u{00b7} Enter opens"),
+        density::META_TEXT_BASE,
+        scale,
+    )
+    .into()
 }
 
 /// The card's contents: the name and its facts, what the host found, and
 /// which keys do what.
 fn card<'a>(entry: &'a Entry, glance: &'a Glance, icons: IconSet<'a>, hint: &str, scale: FontScale) -> Element<'a, Message> {
     let found = glance.found.as_ref();
-    let title = row![
-        container(entry_icon(entry.kind, icons.for_entry(entry), density::ROW_ICON, scale)),
-        scaled_text(entry.name.clone(), TITLE_BASE, scale).wrapping(iced::widget::text::Wrapping::None),
-    ]
-    .spacing(spacing::SM)
-    .align_y(iced::Alignment::Center);
 
     let body: Element<'a, Message> = if let Some(picture) = found.and_then(|f| f.picture.as_ref()) {
         picture.view_fill()
@@ -306,16 +374,11 @@ fn card<'a>(entry: &'a Entry, glance: &'a Glance, icons: IconSet<'a>, hint: &str
         container(lone).center_x(Length::Fill).center_y(Length::Fill).into()
     };
 
-    let keys = meta_text(
-        format!("{hint} closes \u{00b7} the arrows look at the next \u{00b7} Enter opens"),
-        density::META_TEXT_BASE,
-        scale,
-    );
     column![
-        title,
+        title(entry, icons, scale),
         facts(entry, found, scale),
         container(body).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).center_y(Length::Fill),
-        keys,
+        keys(hint, scale),
     ]
     .spacing(spacing::SM)
     .into()

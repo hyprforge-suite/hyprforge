@@ -85,6 +85,11 @@ Shared by every app in the suite
                             opens a picture. Memory-mapped, parallel
                             parsing. No iced, no wgpu; carries its own MIT
                             LICENSE with fstl's copyright line.
+  hyprforge-viewer/        a playing video and a turnable 3D model as panes
+                            of an iced window — the player, its frame
+                            texture, the GPU renderer and the hands on
+                            them — so Media's viewer and Files' Quick Look
+                            show both the same way.
 
 Hyprland-facing
   hyprforge-core/          the config machinery: hlconfig (the generic

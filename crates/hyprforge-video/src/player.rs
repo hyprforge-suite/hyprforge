@@ -56,8 +56,9 @@ pub struct Playback {
     pub video_size: Option<(u32, u32)>,
 }
 
-/// What the player tells the window.
-#[derive(Debug, Clone)]
+/// What the player tells the window. Comparable so a window's message
+/// type that carries it can be; comparing two frames compares pixels.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Update {
     Frame(Arc<Frame>),
     Playback(Playback),

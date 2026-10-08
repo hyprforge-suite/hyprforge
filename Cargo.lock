@@ -2003,6 +2003,7 @@ dependencies = [
  "hyprforge-thumbnails",
  "hyprforge-ui",
  "hyprforge-video",
+ "hyprforge-viewer",
  "hyprforge-volumes",
  "iced",
  "inotify",
@@ -2170,9 +2171,7 @@ dependencies = [
 name = "hyprforge-media"
 version = "0.1.0"
 dependencies = [
- "bytemuck",
  "chrono",
- "glam",
  "hyprforge-appearance",
  "hyprforge-clipboard",
  "hyprforge-core",
@@ -2189,9 +2188,9 @@ dependencies = [
  "hyprforge-thumbnails",
  "hyprforge-ui",
  "hyprforge-video",
+ "hyprforge-viewer",
  "iced",
  "image",
- "naga",
  "serde",
  "serde_json",
  "tempfile",
@@ -2449,6 +2448,19 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tracing",
+]
+
+[[package]]
+name = "hyprforge-viewer"
+version = "0.1.8"
+dependencies = [
+ "bytemuck",
+ "glam",
+ "hyprforge-mesh",
+ "hyprforge-ui",
+ "hyprforge-video",
+ "iced",
+ "naga",
 ]
 
 [[package]]
