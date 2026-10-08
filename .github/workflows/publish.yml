@@ -7,7 +7,7 @@
 # its binaries is a feature. Cargo
 # 1.90+'s `publish --workspace` orders the rest by dependency and waits for
 # each wave to appear on the index before publishing the next, so the five
-# waves repo-plan.md lists are cargo's problem rather than this file's.
+# waves docs/design/repo-plan.md lists are cargo's problem rather than this file's.
 #
 # The very first publish of each crate is not done here: crates.io
 # rate-limits new crate names from one account (a small burst, then a slow
@@ -18,7 +18,7 @@
 # exists and only versions move.
 #
 # Versions are lockstep: `version.workspace = true` in every library, so
-# one tag is one version for the whole set. See repo-plan.md.
+# one tag is one version for the whole set. See docs/design/repo-plan.md.
 
 name: Publish to crates.io
 

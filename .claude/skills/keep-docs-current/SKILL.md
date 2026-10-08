@@ -29,9 +29,9 @@ stale when the mechanism under the reason changes, and it is the one
 kind of claim a name search can never find.
 
 `check.sh`'s **"Docs name things that exist"** step catches the part a
-machine can: source paths that don't exist; the README's repository
-table and its spelled-out counts against the crates that are actually
-standalone; CLAUDE.md's gated-tier count against `check.sh` itself. This skill is the part it can't.
+machine can: source and doc paths that don't exist; the README's
+repository table and its spelled-out counts, and `docs/architecture.md`'s,
+against the crates that are actually standalone; CLAUDE.md's gated-tier count against `check.sh` itself. This skill is the part it can't.
 
 ## 1. Say what the change made true or false
 
@@ -61,9 +61,10 @@ a gap for the person you are working with, or a check for step 6.
 |---|---|---|
 | `crates/<crate>/README.md` | what the crate is, its files, protocols | **Published** — it is the front page of the split repository |
 | `crates/<crate>/Cargo.toml` `description` | one-line summary | Published the same way, and usually lists features |
-| `README.md` | workspace layout, the repository table, counts | The only place that says the other repositories exist |
-| `hyprforge-vision.md` | component inventory (the Status column), "Where things stand" | Its "as of" date is part of the claim — update it with the facts |
-| `repo-plan.md` | the Status checklist | A split, a new check, a finished step |
+| `README.md` | the repository table and its counts, install, the list of docs | The landing page, and the only place that says the other repositories exist |
+| `docs/*.md` | the workspace layout (`architecture.md`), displays, config integration, lock and greeter, the `check.sh` tiers (`testing.md`) | The reference the README links to; each explains how something works now |
+| `docs/design/vision.md` | component inventory (the Status column), "Where things stand" | Its "as of" date is part of the claim — update it with the facts |
+| `docs/design/repo-plan.md` | the Status checklist | A split, a new check, a finished step |
 | `CLAUDE.md` | rules, the tier count in "Checking your work", the layering diagram | Add a rule only for a mistake that was not obvious in advance |
 | `//!` module docs of every file touched | what the module does and does not do | Lists of items, backends and "the four …" live here too |
 | Comments and messages in `check.sh`, `hyprforge`, `.gitmodules` | why a step exists, why it runs in this order | These explain the mechanism they guard, and print it to whoever runs them — a stale reason here is believed |

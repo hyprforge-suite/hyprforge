@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds (if needed) and launches hyprforge-displayd + hyprforge-settings
 # for local development/testing. Not a replacement for the systemd unit —
-# see README.md for installing hyprforge-displayd as a proper user service.
+# see docs/displays.md for installing hyprforge-displayd as a proper user service.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 

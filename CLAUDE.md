@@ -2,8 +2,8 @@
 
 A suite of native Hyprland desktop apps. One cargo workspace, layered so that an
 app which has never heard of Hyprland can still use the bottom of it. Start with
-the "Workspace layout" section of `README.md`; `hyprforge-vision.md` has the
-whole-suite scope.
+`docs/architecture.md`, which has the workspace layout; `docs/design/vision.md`
+has the whole-suite scope, and `README.md` links the rest of `docs/`.
 
 ## The rules that came from being wrong
 
@@ -763,7 +763,7 @@ a spare VT.
 ### Working with the components
 
 The ten components are **git submodules** at `crates/<component>`, each
-the real home of its code (issue #2; `repo-plan.md` has the mechanism and
+the real home of its code (issue #2; `docs/design/repo-plan.md` has the mechanism and
 the history). Clone with `--recurse-submodules`, or run `git submodule
 update --init` — `check.sh` says so first when one is empty, and so does
 the installer. A new git worktree starts with them empty too, so run that

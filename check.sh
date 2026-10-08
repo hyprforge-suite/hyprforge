@@ -55,7 +55,7 @@
 # Not covered here: the lock screen's live behaviour. Its unit tests run
 # in tier 1 like everything else, but proving it actually locks, draws
 # and unlocks needs a nested compositor, and must never be pointed at the
-# session you are using. See "The lock screen" in the README and
+# session you are using. See `docs/lock-and-greeter.md` and
 # crates/hyprforge-lock/testing/nested.sh.
 #
 # Usage:
@@ -192,7 +192,7 @@ else
 fi
 
 # hyprforge-clipboard, hyprforge-lock and hyprforge-greet are prepared to
-# become their own repositories (see repo-plan.md), which means each of
+# become their own repositories (see docs/design/repo-plan.md), which means each of
 # them now spells out every third-party dependency's version and feature
 # set in full — a crate that is its own repository root has no
 # `[workspace.dependencies]` to inherit from, so `serde.workspace = true`
@@ -204,7 +204,7 @@ fi
 # updated to match, cargo resolves both happily. Clippy stays silent,
 # every test stays green, and the suite quietly builds two different
 # versions of the same dependency — the "one place to fix a shared
-# thing" property (see CLAUDE.md and repo-plan.md) failing with no
+# thing" property (see CLAUDE.md and docs/design/repo-plan.md) failing with no
 # symptom at all. Nothing else here would ever notice, because nothing
 # else compares a standalone crate's manifest against the root one.
 #
@@ -214,7 +214,7 @@ fi
 # `foo.workspace = true` dependency. That is deliberately stronger than
 # "has its own version number": hyprforge-paths, hyprforge-look,
 # hyprforge-secret, hyprforge-process and hyprforge-ui also carry their
-# own version (repo-plan.md step 1, for publishing to crates.io) while
+# own version (docs/design/repo-plan.md step 1, for publishing to crates.io) while
 # every one of their dependencies is still `.workspace = true` — they
 # are publish-ready, not standalone-ready, and have nothing to drift.
 # Discovering the list this way means the next crate someone prepares
@@ -352,7 +352,7 @@ PYEOF
     fi
 fi
 
-# The rule this exists for is in repo-plan.md under "The shape a package
+# The rule this exists for is in docs/design/repo-plan.md under "The shape a package
 # has to have", and in CLAUDE.md: one installable package is one crate
 # directory is one repository, because a library can be fetched and a
 # binary cannot.
@@ -807,9 +807,11 @@ problems = []
 #
 # A crate's own docs resolve `src/`, `tests/` and the like against that
 # crate, strictly: it is what someone reading the published repository
-# will look for. `crates/` and `packaging/` in those same docs may point
-# back at the monorepo ("this repository is a split of `crates/x`"), so
-# they also resolve from the root. The root docs name a crate in prose and then
+# will look for. `crates/`, `packaging/` and `docs/` in those same docs
+# may point back at the monorepo ("the suite's `docs/displays.md`"), so
+# they also resolve from the root. `docs/` is here because the README's
+# reference sections moved there, and a doc naming one that has since
+# moved again is exactly the drift this exists to catch. The root docs name a crate in prose and then
 # give a path inside it, so a path there passes if any crate has it —
 # which still catches a file deleted outright, the case that actually
 # happened.
@@ -824,7 +826,7 @@ docs = subprocess.run(
 docs = [Path(d) for d in docs]
 crates = sorted(p for p in Path("crates").iterdir() if p.is_dir())
 path_in_backticks = re.compile(
-    r"`((?:crates/|src/|tests/|testing/|config/|packaging/)[A-Za-z0-9_./-]+)`"
+    r"`((?:crates/|src/|tests/|testing/|config/|packaging/|docs/)[A-Za-z0-9_./-]+)`"
 )
 named = 0
 for doc in docs:
@@ -833,7 +835,7 @@ for doc in docs:
     for match in path_in_backticks.finditer(text):
         path = match.group(1).rstrip("/.")
         named += 1
-        if in_crate and not path.startswith(("crates/", "packaging/")):
+        if in_crate and not path.startswith(("crates/", "packaging/", "docs/")):
             candidates = [doc.parent / path]
         elif in_crate:
             # A crate can have a `packaging/` of its own (the unit files
@@ -886,10 +888,16 @@ elif heading.group(1).lower() != spelled(len(standalone) + 1):
         f"README.md says '{heading.group(1)} repositories'; there are "
         f"{spelled(len(standalone) + 1)} ({len(standalone)} components and this one)"
     )
-directories = re.search(r"^(\w+) of these directories", readme, re.M)
-if directories and directories.group(1).lower() != spelled(len(standalone)):
+# Required, not optional: this sentence moved from the README to
+# docs/architecture.md with the workspace layout, and a check written
+# as "if it is there" would have stopped checking without a word.
+architecture = Path("docs/architecture.md").read_text()
+directories = re.search(r"^(\w+) of these directories", architecture, re.M)
+if not directories:
+    problems.append("docs/architecture.md no longer says how many of its directories are repositories")
+elif directories.group(1).lower() != spelled(len(standalone)):
     problems.append(
-        f"README.md says '{directories.group(1)} of these directories' are repositories; "
+        f"docs/architecture.md says '{directories.group(1)} of these directories' are repositories; "
         f"there are {spelled(len(standalone))}"
     )
 
@@ -1645,7 +1653,7 @@ else
         rm -rf "$dir" "$log"
     done
     if [[ ${#broken[@]} -gt 0 ]]; then
-        bad "component(s) that do not build on their own against crates.io: ${broken[*]} — a Hyprforge library named above needs a release first (see repo-plan.md)"
+        bad "component(s) that do not build on their own against crates.io: ${broken[*]} — a Hyprforge library named above needs a release first (see docs/design/repo-plan.md)"
     else
         ok "all $(wc -w <<<"$submodules") components build against the published libraries"
     fi

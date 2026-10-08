@@ -661,7 +661,7 @@ install_displayd() {
     # A user unit, so no sudo and no run_root.
     #
     # The packaged unit's ExecStart points at ~/.cargo/bin, which is
-    # where `cargo install` puts things and is what the README's manual
+    # where `cargo install` puts things and is what docs/displays.md's manual
     # route uses. This script installs to $PREFIX instead, so the path
     # is rewritten on the way in. Installing it verbatim would produce a
     # unit that fails with a status=203/EXEC nobody would connect to an
