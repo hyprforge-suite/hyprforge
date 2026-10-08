@@ -207,19 +207,18 @@ Hyprland-facing
                             battery/power-profile and display-layout icons
                             in whatever bar is running. A tray icon is a
                             D-Bus object, not a widget — which is why it
-                            needs no GTK or Qt. The right-click menu is
-                            hyprforge-traymenu, a sibling popup this daemon
-                            spawns directly; the item advertises no `Menu`
-                            property at all, rather than serving
-                            com.canonical.dbusmenu for a bar to draw
-                            itself. The cost is real and stated plainly in
-                            the crate's own module doc: before this, any
-                            spec-compliant tray host could show these
-                            menus, styled however that host chose; now
-                            only hyprforge-traymenu can, and a bar with no
-                            Hyprforge installed sees an icon with no menu
-                            at all, its right-click falling back to the
-                            icon's primary action.
+                            needs no GTK or Qt. On Hyprland the right-click
+                            menu is hyprforge-traymenu, a sibling popup
+                            this daemon spawns directly, and the item
+                            advertises no `Menu` property at all. Where the
+                            popup cannot run — another compositor, or a
+                            bar that never calls ContextMenu — the same
+                            menu is served as com.canonical.dbusmenu for
+                            the bar to draw itself. tray.toml's `menu`
+                            (auto, popup or dbusmenu) chooses; auto does
+                            the above. Popup-only was tried first, and on
+                            any other compositor it left icons with no
+                            menu at all.
                             hyprforge-traymenu, a second binary in the same
                             crate, is the tray's own right-click menu,
                             themed like every other Hyprforge popup and
