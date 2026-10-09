@@ -152,6 +152,12 @@ pub fn strong() -> Font {
 }
 
 /// The popup's outer frame: its background, its outline and its corners.
+///
+/// `clip(true)` clips to a rectangle, not to the rounded shape, so a child
+/// that runs along the popup's edge — a footer bar — must round its own
+/// corners to match (`look.radius`, via `border::bottom`); nothing here can
+/// do it for it. Square ones showed as a faint square behind each of the
+/// popup's bottom corners.
 pub fn frame<'a, Message: 'a, Renderer>(
     content: impl Into<Element<'a, Message, iced_widget::Theme, Renderer>>,
     look: &Look,
@@ -438,6 +444,67 @@ impl Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A frame with a bar along its bottom edge, rounded the way the
+    /// clipboard and emoji footers round theirs, drawn offscreen at 1x.
+    /// Pixels are `[b, g, r, a]` — iced_tiny_skia writes BGRA.
+    fn frame_with_footer(rounded_bar: bool) -> (Vec<u8>, u32, u32) {
+        use iced_runtime::core::{Pixels, Rectangle, Size};
+        use iced_runtime::user_interface::{Cache, UserInterface};
+        let theme = Theme { rounding: 12, ..Default::default() };
+        let look = Look::new(&theme);
+        let (w, h) = (200u32, 120u32);
+        let bar = container(Space::new().width(Length::Fill).height(Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fixed(30.0))
+            .style(move |_: &iced_widget::Theme| container::Style {
+                background: Some(look.footer.into()),
+                border: Border {
+                    radius: if rounded_bar { iced_runtime::core::border::bottom(look.radius) } else { 0.0.into() },
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        let content = iced_widget::column![Space::new().width(Length::Fill).height(Length::Fill), bar];
+        let mut renderer = iced_tiny_skia::Renderer::new(Font::DEFAULT, Pixels(14.0));
+        let size = Size::new(w as f32, h as f32);
+        let mut ui = UserInterface::<(), iced_widget::Theme, iced_tiny_skia::Renderer>::build(
+            frame::<(), _>(content, &look),
+            size,
+            Cache::default(),
+            &mut renderer,
+        );
+        ui.draw(
+            &mut renderer,
+            &iced_widget::Theme::Dark,
+            &iced_runtime::core::renderer::Style { text_color: Color::WHITE },
+            iced_runtime::core::mouse::Cursor::Unavailable,
+        );
+        let mut pixmap = tiny_skia::Pixmap::new(w, h).unwrap();
+        let mut mask = tiny_skia::Mask::new(w, h).unwrap();
+        renderer.draw(
+            &mut pixmap.as_mut(),
+            &mut mask,
+            &iced_tiny_skia::graphics::Viewport::with_physical_size(Size::new(w, h), 1.0),
+            &[Rectangle::with_size(size)],
+            Color::TRANSPARENT,
+        );
+        drop(ui);
+        (pixmap.data().to_vec(), w, h)
+    }
+
+    /// The popup is a layer surface with nothing drawn outside its
+    /// rounded corners: a footer bar that painted square corners showed
+    /// as a faint square behind each of them, on the emoji picker and
+    /// the clipboard history alike.
+    #[test]
+    fn nothing_is_drawn_outside_a_rounded_bottom_corner() {
+        let (pixels, w, h) = frame_with_footer(true);
+        let alpha = |x: u32, y: u32| pixels[((y * w + x) * 4 + 3) as usize];
+        assert_eq!(alpha(0, h - 1), 0, "the bottom-left corner pixel is painted");
+        assert_eq!(alpha(w - 1, h - 1), 0, "the bottom-right corner pixel is painted");
+        assert_eq!(alpha(1, h - 2), 0, "just inside the bottom-left corner is painted");
+    }
 
     #[test]
     fn every_tab_is_hit_in_the_middle_of_where_it_is_drawn() {
