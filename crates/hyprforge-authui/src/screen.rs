@@ -36,6 +36,7 @@ use iced_runtime::core::{
     alignment, gradient, mouse, Alignment, Background, Border, Color, Element, Font, Length,
     Padding, Point, Radians, Rectangle, Shadow, Vector,
 };
+use crate::shadow::shadowed;
 use iced_widget::{button, canvas, column, container, row, stack, text, Space};
 
 /// Everything a renderer has to be able to do to draw this screen: text,
@@ -216,8 +217,11 @@ fn size(value: f32) -> f32 {
 }
 
 /// The frosted panel every raised thing on this screen sits on: the
-/// theme's background at half strength, a hairline of foreground, and a
-/// soft shadow underneath.
+/// theme's background at half strength and a hairline of foreground. Its
+/// soft shadow is [`glass_shadow`], drawn by [`crate::shadow::shadowed`]
+/// rather than set here — an iced `Shadow` is painted unclipped by
+/// `iced_tiny_skia` 0.14.1 and smears under the greeter's partial
+/// redraws; `crate::shadow` has the whole account.
 ///
 /// Not blurred. The mockup's `backdrop-filter` has no equivalent in a
 /// software renderer that draws each widget once, and blurring the whole
@@ -232,13 +236,13 @@ fn glass(theme: &Theme, radius: f32) -> container::Style {
             width: 1.0,
             radius: radius.into(),
         },
-        shadow: Shadow {
-            color: fade(theme.background, 0.45),
-            offset: Vector::new(0.0, 20.0),
-            blur_radius: 50.0,
-        },
         ..Default::default()
     }
+}
+
+/// The shadow under every [`glass`] panel.
+fn glass_shadow(theme: &Theme) -> Shadow {
+    Shadow { color: fade(theme.background, 0.45), offset: Vector::new(0.0, 20.0), blur_radius: 50.0 }
 }
 
 /// Text that stays legible over any wallpaper: the text, with a copy of
@@ -466,12 +470,15 @@ fn card<'a, R: ScreenRenderer + 'a>(scene: &Scene<'a>) -> El<'a, R> {
         body = body.push(under_field(scene));
     }
 
-    container(body)
-        .width(Length::Fixed(380.0 * u))
-        .padding(Padding { top: 26.0 * u, right: 28.0 * u, bottom: 22.0 * u, left: 28.0 * u })
-        .center_x(Length::Fixed(380.0 * u))
-        .style(move |_| glass(theme, 18.0 * u))
-        .into()
+    shadowed(
+        container(body)
+            .width(Length::Fixed(380.0 * u))
+            .padding(Padding { top: 26.0 * u, right: 28.0 * u, bottom: 22.0 * u, left: 28.0 * u })
+            .center_x(Length::Fixed(380.0 * u))
+            .style(move |_| glass(theme, 18.0 * u)),
+        18.0 * u,
+        glass_shadow(theme),
+    )
 }
 
 /// The avatar and the name above the prompt.
@@ -494,7 +501,7 @@ fn identity<'a, R: ScreenRenderer + 'a>(scene: &Scene<'a>) -> El<'a, R> {
         None => {
             let accent = theme.accent;
             let background = theme.background;
-            container(
+            let disc = container(
                 text(scene::initial(scene.username))
                     .size(size(30.0 * u))
                     .font(Font { weight: iced_runtime::core::font::Weight::Semibold, ..font(theme) })
@@ -516,14 +523,13 @@ fn identity<'a, R: ScreenRenderer + 'a>(scene: &Scene<'a>) -> El<'a, R> {
                         .into(),
                 )),
                 border: Border { radius: (side / 2.0).into(), ..Default::default() },
-                shadow: Shadow {
-                    color: fade(background, 0.45),
-                    offset: Vector::new(0.0, 6.0),
-                    blur_radius: 20.0,
-                },
                 ..Default::default()
-            })
-            .into()
+            });
+            shadowed(
+                disc,
+                side / 2.0,
+                Shadow { color: fade(background, 0.45), offset: Vector::new(0.0, 6.0), blur_radius: 20.0 },
+            )
         }
     };
 
@@ -910,11 +916,14 @@ fn media_card<'a, R: ScreenRenderer + 'a>(media: &Media, theme: &'a Theme) -> El
     .spacing(4.0 * u)
     .align_y(Alignment::Center);
 
-    container(row![art, words, controls].spacing(12.0 * u).align_y(Alignment::Center))
-        .width(Length::Fixed(380.0 * u))
-        .padding(12.0 * u)
-        .style(move |_| glass(theme, 14.0 * u))
-        .into()
+    shadowed(
+        container(row![art, words, controls].spacing(12.0 * u).align_y(Alignment::Center))
+            .width(Length::Fixed(380.0 * u))
+            .padding(12.0 * u)
+            .style(move |_| glass(theme, 14.0 * u)),
+        14.0 * u,
+        glass_shadow(theme),
+    )
 }
 
 /// "Signal 3 · Mail 12" — application and count, never the text.
@@ -936,7 +945,7 @@ fn notification_pills<'a, R: ScreenRenderer + 'a>(counts: &[NotificationCount], 
             border: Border { radius: 999.0.into(), ..Default::default() },
             ..Default::default()
         });
-        pills = pills.push(
+        pills = pills.push(shadowed(
             container(
                 row![
                     text(app.clone())
@@ -950,7 +959,9 @@ fn notification_pills<'a, R: ScreenRenderer + 'a>(counts: &[NotificationCount], 
             )
             .padding(Padding { top: 7.0 * u, bottom: 7.0 * u, left: 12.0 * u, right: 12.0 * u })
             .style(move |_| glass(theme, 999.0)),
-        );
+            999.0,
+            glass_shadow(theme),
+        ));
     }
     pills.into()
 }
@@ -965,7 +976,7 @@ fn power_button<'a, R: ScreenRenderer + 'a>(theme: &'a Theme) -> El<'a, R> {
         .center_x(Length::Fixed(side))
         .center_y(Length::Fixed(side))
         .style(move |_| glass(theme, side / 2.0));
-    bare(mark.into(), Some(Action::TogglePowerMenu))
+    bare(shadowed(mark, side / 2.0, glass_shadow(theme)), Some(Action::TogglePowerMenu))
 }
 
 /// The power menu, opened from ⏻.
@@ -1007,11 +1018,14 @@ fn power_menu<'a, R: ScreenRenderer + 'a>(menu: &PowerMenu, theme: &'a Theme) ->
         });
         rows = rows.push(bare(line.into(), Some(Action::Power(action))));
     }
-    container(rows)
-        .width(Length::Fixed(230.0 * u))
-        .padding(6.0 * u)
-        .style(move |_| glass(theme, 14.0 * u))
-        .into()
+    shadowed(
+        container(rows)
+            .width(Length::Fixed(230.0 * u))
+            .padding(6.0 * u)
+            .style(move |_| glass(theme, 14.0 * u)),
+        14.0 * u,
+        glass_shadow(theme),
+    )
 }
 
 /// A click target with no look of its own — the content is the look.
@@ -1826,5 +1840,94 @@ mod tests {
         assert_eq!(unit(&Theme { font_size: 10.0, ..Theme::default() }), 1.0);
         assert_eq!(unit(&Theme { font_size: 96.0, ..Theme::default() }), 1.6);
         assert_eq!(unit(&Theme { font_size: f32::NAN, ..Theme::default() }), 1.0);
+    }
+
+    /// The greeter draws through iced's window compositor, which repaints
+    /// only what changed since the buffer it is handed was last drawn
+    /// (`iced_tiny_skia::window::compositor::present`, buffer age > 0).
+    /// So a keystroke repaints the password field and nothing else — and
+    /// whatever draws *outside* the rectangle being repainted is laid
+    /// over pixels nobody cleared.
+    ///
+    /// This replays exactly that: each frame is diffed against the one
+    /// before with iced's own `Layer::damage`, grouped the way `present`
+    /// groups it, and drawn over the previous frame's pixels. A full redraw
+    /// of the last frame is the reference. Five keystrokes at the 1.6 scale
+    /// the bug was photographed at: the smear is there after the first, and
+    /// every one past five only costs the pre-commit hook time.
+    #[test]
+    fn typing_into_a_partly_redrawn_window_leaves_no_trace_of_earlier_frames() {
+        use iced_tiny_skia::graphics::damage;
+        use iced_tiny_skia::Layer;
+
+        let theme = renderable(Theme::default());
+        let everything = Everything::new();
+        let size = iced_runtime::core::Size::new(640.0, 520.0);
+        let scale = 1.6_f32;
+        let (w, h) = ((size.width * scale) as u32, (size.height * scale) as u32);
+        let viewport = iced_tiny_skia::graphics::Viewport::with_physical_size(
+            iced_runtime::core::Size::new(w, h),
+            scale,
+        );
+        let background = iced_runtime::core::Color::BLACK;
+        let mut renderer = iced_tiny_skia::Renderer::new(font(&theme), Pixels(theme.font_size));
+
+        // Lays one frame out into the renderer's layer stack, the way
+        // iced's runtime does before it presents.
+        let lay_out = |renderer: &mut iced_tiny_skia::Renderer, typed: usize| {
+            let state = State::Asking {
+                prompt: Prompt::secret("Password:"),
+                entered: "z".repeat(typed).into(),
+            };
+            let mut scene = Scene::new(&state, "apost", &theme, chrono::Local::now());
+            scene.output = (size.width, size.height);
+            scene.status = &everything.status;
+            scene.fingerprint = &everything.fingerprint;
+            let mut ui = UserInterface::<Action, iced_widget::Theme, iced_tiny_skia::Renderer>::build(
+                view(scene),
+                size,
+                Cache::default(),
+                renderer,
+            );
+            ui.draw(
+                renderer,
+                &iced_widget::Theme::Dark,
+                &iced_runtime::core::renderer::Style { text_color: iced_runtime::core::Color::WHITE },
+                mouse::Cursor::Unavailable,
+            );
+        };
+        let whole = vec![Rectangle::with_size(size)];
+
+        let mut screen = tiny_skia::Pixmap::new(w, h).unwrap();
+        let mut mask = tiny_skia::Mask::new(w, h).unwrap();
+        lay_out(&mut renderer, 0);
+        renderer.draw(&mut screen.as_mut(), &mut mask, &viewport, &whole, background);
+        let mut previous: Vec<Layer> = renderer.layers().to_vec();
+
+        for typed in 1..=5 {
+            lay_out(&mut renderer, typed);
+            let changed = damage::diff(&previous, renderer.layers(), |layer| vec![layer.bounds], Layer::damage);
+            let changed = damage::group(changed, Rectangle::with_size(size));
+            assert!(!changed.is_empty(), "keystroke {typed} changed nothing on screen");
+            renderer.draw(&mut screen.as_mut(), &mut mask, &viewport, &changed, background);
+            previous = renderer.layers().to_vec();
+        }
+
+        let mut reference = tiny_skia::Pixmap::new(w, h).unwrap();
+        renderer.draw(&mut reference.as_mut(), &mut mask, &viewport, &whole, background);
+
+        let (mut differing, mut worst) = (0usize, 0u8);
+        for (a, b) in screen.data().iter().zip(reference.data()) {
+            let d = a.abs_diff(*b);
+            if d > 2 {
+                differing += 1;
+            }
+            worst = worst.max(d);
+        }
+        assert_eq!(
+            differing, 0,
+            "five partial redraws left {differing} channel value(s) unlike a full redraw \
+             (worst by {worst}/255) — something drew outside the rectangle being repainted"
+        );
     }
 }

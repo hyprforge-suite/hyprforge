@@ -22,6 +22,7 @@
 pub mod conversation;
 pub mod scene;
 pub mod screen;
+mod shadow;
 
 pub use conversation::{Backend, Conversation, Prompt, Response, State};
 // Re-exported rather than owned: the theme is shared with every other
