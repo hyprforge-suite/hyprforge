@@ -21,6 +21,17 @@ that shares its look:
 
 ![The greeter: the same card and clock, asking a user to log in](docs/images/greeter.png)
 
+The popups — clipboard history, the emoji picker, the tray's own menus and
+notifications — share one look with it:
+
+![The clipboard history popup: pinned and recent entries tagged text, link, image and file, with the selected image previewed beside them](docs/images/clipboard.png)
+
+![The emoji picker: search, Emoji, Kaomoji and Symbols tabs, frequently used emoji and a skin-tone button](docs/images/emoji.png)
+
+![Three tray menus side by side: Wi-Fi networks, Bluetooth devices, and battery with power profiles](docs/images/tray.png)
+
+![Notification toasts, one of them a critical battery warning, beside the notification center with live and earlier notifications](docs/images/notifications.png)
+
 ## Requirements
 
 - **Hyprland 0.55 or later, with a Lua config (`hyprland.lua`).** Hyprforge
