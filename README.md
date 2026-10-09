@@ -14,6 +14,14 @@ for the website.
 
 ## Screenshots
 
+The three apps — Settings, Files and Media:
+
+![The Settings app on its Appearance page: the sidebar of pages in five groups, and the desktop theme's options](docs/images/settings.png)
+
+![Files in the grid view: photo thumbnails, and the preview pane showing the selected picture](docs/images/files.png)
+
+![Media's grid: a folder of photos grouped under the day each was taken](docs/images/media.png)
+
 The lock screen, idle and then with a password being typed, and the greeter
 that shares its look:
 
@@ -33,6 +41,8 @@ notifications — share one look with it:
 ![Three tray menus side by side: Wi-Fi networks, Bluetooth devices, and battery with power profiles](docs/images/tray.png)
 
 ![Notification toasts, one of them a critical battery warning, beside the notification center with live and earlier notifications](docs/images/notifications.png)
+
+The photographs in these screenshots are NASA's, which are in the public domain.
 
 ## Requirements
 
