@@ -12,7 +12,31 @@ for the whole-suite plan, including what is not built yet.
 
 ## Screenshots
 
-<!-- Screenshots go here. -->
+The lock screen, idle and then with a password being typed, and the greeter
+that shares its look:
+
+![The lock screen at rest: a large clock, the date, a media card and notification counts over the wallpaper](docs/images/lock-idle.png)
+
+![The lock screen asking for a password: a frosted card with the user's initial, name and a password field](docs/images/lock.png)
+
+![The greeter: the same card and clock, asking a user to log in](docs/images/greeter.png)
+
+## Requirements
+
+- **Hyprland 0.55 or later, with a Lua config (`hyprland.lua`).** Hyprforge
+  loads what it generates through `require()`, which only Lua configs have.
+  It was built and measured against 0.56. With only a `hyprland.conf`, it
+  says so and points at migrating; it never edits a `.conf`. See
+  [`docs/config-integration.md`](docs/config-integration.md).
+- **To build:** Rust, at the version `rust-toolchain.toml` pins (rustup
+  installs it), plus the development files for `wayland`, `libxkbcommon`
+  and `pam`. The packaging is Arch's; elsewhere, `./hyprforge --install`
+  builds and installs from a checkout.
+- **Optional, per feature:** NetworkManager, BlueZ, UPower,
+  power-profiles-daemon, fprintd, UDisks2, gvfs, mpv, ffmpeg, greetd and
+  fcitx5 each light up one part of the suite. A missing one is a message
+  in that part, never a crash, and the PKGBUILD lists each as an optional
+  dependency of the package that uses it.
 
 ## Eleven repositories, one workspace
 
