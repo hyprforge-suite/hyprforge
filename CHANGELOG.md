@@ -11,6 +11,8 @@ drafts the next section from git; `tools/release.sh` files it.
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-10-08
+
 ### Added
 
 - Files: phones and cameras in the Devices section, through gvfs's MTP and
@@ -27,6 +29,24 @@ drafts the next section from git; `tools/release.sh` files it.
   bar, and an undo history.
 - Files: one window — folders opened from other applications arrive as
   tabs, on Hyprland.
+- Tray: `menu = "auto" | "popup" | "dbusmenu"` in `tray.toml`. The
+  daemon serves `com.canonical.dbusmenu` wherever its own popup can't run,
+  so a bar on another compositor gets a right-click menu; Settings' Tray
+  page has the choice.
+- Lock screen: restarts itself when it crashes. A supervisor relaunches
+  the lock, switches to a safe mode (default theme, no wallpaper, no
+  extras, no power menu) from the second crash, and gives up — the
+  session staying locked — after four crashes in a minute.
+- Set up: "Restart the lock screen if it crashes" turns on Hyprland's
+  `misc:allow_session_lock_restore`, with an undo.
+- Greeter: input methods. It asks for one while a question is open and
+  starts fcitx5 in its own compositor, with every addon that can launch
+  a program disabled; IBus is not started, because its Wayland input
+  method only runs inside a panel that launches programs.
+- `tools/release.sh`, `tools/versions.py`, `tools/changelog.py` and
+  `tools/aur.py`: one suite version, these changelogs, and an AUR
+  package rendered from `packaging/arch`, with `check.sh` steps that hold
+  all three.
 
 ### Changed
 
@@ -43,6 +63,10 @@ drafts the next section from git; `tools/release.sh` files it.
 
 ### Fixed
 
+- Greeter: typing left a stack of card outlines behind, one per
+  keystroke. Shadows are now drawn as images, which `iced_tiny_skia`
+  0.14.1 clips to the repainted area where it does not clip a quad's own
+  shadow (fixed upstream after the 0.14 branch).
 - notif: the notification center drew the theme's colours swapped.
 - Docs: stale counts (the Appearance catalogue's 155 options, the
   packages the PKGBUILD builds, the Settings app's eighteen Hyprforge
