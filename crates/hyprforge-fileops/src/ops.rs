@@ -163,6 +163,29 @@ pub enum OpsError {
     },
 }
 
+impl OpsError {
+    /// Whether this failed for want of permission — and so is the one
+    /// kind of failure that trying again as someone with more of it
+    /// could fix.
+    ///
+    /// The three variants that say so in words, and any other whose
+    /// underlying error is `PermissionDenied`: removing a source after a
+    /// move, listing a folder and asking which filesystem a path is on
+    /// can each be refused for permission without being classified into
+    /// a sentence of their own.
+    pub fn is_permission(&self) -> bool {
+        match self {
+            OpsError::PermissionDenied { .. } | OpsError::ReadDenied { .. } | OpsError::MoveDenied { .. } => true,
+            OpsError::Filesystem { source, .. }
+            | OpsError::Read { source, .. }
+            | OpsError::Write { source, .. }
+            | OpsError::Remove { source, .. }
+            | OpsError::ListDir { source, .. } => source.kind() == io::ErrorKind::PermissionDenied,
+            OpsError::SourceNotFound { .. } | OpsError::SourceVanished { .. } | OpsError::DiskFull { .. } => false,
+        }
+    }
+}
+
 /// Classifies an I/O failure encountered reading from the *source* side.
 /// `NotFound` here specifically means "it was there a moment ago" — the
 /// walk already established it existed — never "nothing was ever there".
@@ -269,6 +292,12 @@ pub struct Report {
     /// text here because a `Report` needs to be cheap to hold onto after
     /// the `Operation` that produced it is gone.
     pub failed: Vec<(PathBuf, String)>,
+    /// Which of [`Self::failed`]'s paths failed for want of permission
+    /// ([`OpsError::is_permission`]) — carried as data beside the
+    /// sentences, so a caller deciding whether to offer "try again as
+    /// administrator" never has to recognise one by its wording, which a
+    /// message is free to change.
+    pub denied: Vec<PathBuf>,
     pub cancelled: bool,
     /// `None` for a [`OpKind::Copy`]; `Some` for a [`OpKind::Move`] that
     /// got at least as far as deciding how to move the root.
@@ -372,6 +401,7 @@ pub struct Operation<F: Filesystem> {
     succeeded: Vec<PathBuf>,
     skipped: Vec<PathBuf>,
     failed: Vec<(PathBuf, String)>,
+    denied: Vec<PathBuf>,
     cancelled: bool,
     move_strategy: Option<MoveStrategy>,
     source_removal_failed: Option<String>,
@@ -398,6 +428,7 @@ impl<F: Filesystem> Operation<F> {
             succeeded: Vec::new(),
             skipped: Vec::new(),
             failed: Vec::new(),
+            denied: Vec::new(),
             cancelled: false,
             move_strategy: None,
             source_removal_failed: None,
@@ -472,6 +503,7 @@ impl<F: Filesystem> Operation<F> {
             succeeded: std::mem::take(&mut self.succeeded),
             skipped: std::mem::take(&mut self.skipped),
             failed: std::mem::take(&mut self.failed),
+            denied: std::mem::take(&mut self.denied),
             cancelled: self.cancelled,
             move_strategy: self.move_strategy,
             source_removal_failed: self.source_removal_failed.take(),
@@ -480,6 +512,9 @@ impl<F: Filesystem> Operation<F> {
     }
 
     fn fail(&mut self, path: PathBuf, err: OpsError) {
+        if err.is_permission() {
+            self.denied.push(path.clone());
+        }
         self.failed.push((path, err.to_string()));
     }
 
@@ -1260,6 +1295,7 @@ mod tests {
         assert_eq!(report.failed.len(), 1, "report: {report:?}");
         let said = &report.failed[0].1;
         assert_eq!(*said, format!("you don't have permission to read {}", source.display()));
+        assert_eq!(report.denied, vec![source.clone()], "carried as data, not only as a sentence");
     }
 
     #[test]
@@ -1280,6 +1316,7 @@ mod tests {
             report.failed.iter().any(|(_, said)| *said == format!("you don't have permission to read {}", source.display())),
             "report: {report:?}"
         );
+        assert!(report.denied.contains(&source), "report: {report:?}");
     }
 
     #[test]
@@ -1300,6 +1337,7 @@ mod tests {
 
         assert_eq!(report.failed.len(), 1, "report: {report:?}");
         assert_eq!(report.failed[0].1, format!("you don't have permission to write to {}", dest.display()));
+        assert_eq!(report.denied.len(), 1, "report: {report:?}");
     }
 
     #[test]
@@ -1324,6 +1362,34 @@ mod tests {
         assert_eq!(report.failed.len(), 1, "report: {report:?}");
         assert!(report.failed[0].1.starts_with(&format!("you don't have permission to move {}", source.display())), "{report:?}");
         assert!(source.exists(), "a refused move leaves the source where it was");
+        assert_eq!(report.denied, vec![source.clone()]);
+    }
+
+    /// Only permission is "denied": the one failure a retry with more of
+    /// it could fix. A file that is not there is not offered again as
+    /// administrator.
+    #[test]
+    fn a_failure_that_is_not_about_permission_is_not_called_denied() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("never-was.txt");
+        let report = drive(&mut Operation::real(OpKind::Copy, &source, dir.path().join("copy.txt")), no_collisions);
+        assert!(!report.failed.is_empty(), "report: {report:?}");
+        assert!(report.denied.is_empty(), "report: {report:?}");
+    }
+
+    #[test]
+    fn permission_is_recognised_in_every_variant_that_can_carry_it() {
+        let p = PathBuf::from("/x");
+        let denied = || io::Error::from(io::ErrorKind::PermissionDenied);
+        let other = || io::Error::from(io::ErrorKind::Other);
+        assert!(OpsError::PermissionDenied { path: p.clone() }.is_permission());
+        assert!(OpsError::ReadDenied { path: p.clone() }.is_permission());
+        assert!(OpsError::MoveDenied { from: p.clone(), to: p.clone() }.is_permission());
+        assert!(OpsError::Remove { path: p.clone(), source: denied() }.is_permission());
+        assert!(OpsError::ListDir { path: p.clone(), source: denied() }.is_permission());
+        assert!(!OpsError::Remove { path: p.clone(), source: other() }.is_permission());
+        assert!(!OpsError::DiskFull { path: p.clone() }.is_permission());
+        assert!(!OpsError::SourceVanished { path: p }.is_permission());
     }
 
     #[test]
