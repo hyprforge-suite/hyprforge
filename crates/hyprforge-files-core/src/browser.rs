@@ -5000,8 +5000,52 @@ fn path_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         return path_field(edit, scale);
     }
     let current_dir = vm.current_dir;
+    let (instance, drop_hover, drop_opening) = (vm.instance, vm.drop_hover, vm.drop_opening);
+    // As much of the path as the field has room for, asked of the field
+    // itself — see `elide_to` for the rule and `crumbs_width` for the
+    // sum it is held to.
+    let crumbs = iced::widget::responsive(move |size| {
+        let room = size.width - 2.0 * spacing::SM - CRUMB_SLACK;
+        let font_size = scale.apply(density::META_TEXT_BASE);
+        let segments = elide_to(breadcrumb(current_dir), |shown| {
+            crumbs_width(shown, |label| mono_width(label, font_size)) <= room
+        });
+        crumb_row(segments, instance, (drop_hover, drop_opening), scale)
+    });
+    // One field, not a bare row of buttons.
+    //
+    // The design draws the whole path inside a single bordered box the
+    // width of the toolbar's middle — it reads as the address field it
+    // is, and it is the thing the eye should land on first. Loose
+    // buttons on the toolbar's own background read as three more
+    // controls beside the navigation ones.
+    // The only thing on the bar that flexes. Everything else is fixed,
+    // so dragging the window edge stretches this and nothing else moves.
+    //
+    // A click on the field's empty space opens it for typing. The crumbs
+    // are buttons and capture their own presses, so clicking one still
+    // goes there — `mouse_area` only hears a press nothing inside took.
+    iced::widget::mouse_area(
+        container(crumbs)
+            .width(Length::Fill)
+            .height(Length::Fixed(density::field_height(scale)))
+            .center_y(Length::Fixed(density::field_height(scale)))
+            .padding([0, spacing::SM as u16])
+            .style(inset_field_style),
+    )
+    .on_press(Message::EditPath)
+    .interaction(iced::mouse::Interaction::Text)
+    .into()
+}
+
+/// The crumbs of `segments`, separators and all, as one row.
+fn crumb_row<'a>(
+    segments: Vec<(String, PathBuf)>,
+    instance: u64,
+    drop: (Option<&'a Path>, f32),
+    scale: FontScale,
+) -> Element<'a, Message> {
     let mut crumbs = row![].spacing(spacing::XS).align_y(iced::Alignment::Center);
-    let segments = elide(breadcrumb(current_dir));
     let last = segments.len().saturating_sub(1);
     let mut previous: Option<String> = None;
     for (i, (label, path)) in segments.into_iter().enumerate() {
@@ -5057,35 +5101,57 @@ fn path_bar<'a>(vm: &ViewModel<'a>, scale: FontScale) -> Element<'a, Message> {
         } else {
             // An ancestor is somewhere a drop can land — "up a level"
             // by dragging, as Finder and Dolphin allow.
-            let zone = drop_zone(crumb_button(label, path.clone(), scale, false), vm.instance, &path, (vm.drop_hover, vm.drop_opening));
+            let zone = drop_zone(crumb_button(label, path.clone(), scale, false), instance, &path, drop);
             crumbs = crumbs.push(zone);
         }
     }
+    crumbs.into()
+}
 
-    // One field, not a bare row of buttons.
-    //
-    // The design draws the whole path inside a single bordered box the
-    // width of the toolbar's middle — it reads as the address field it
-    // is, and it is the thing the eye should land on first. Loose
-    // buttons on the toolbar's own background read as three more
-    // controls beside the navigation ones.
-    // The only thing on the bar that flexes. Everything else is fixed,
-    // so dragging the window edge stretches this and nothing else moves.
-    //
-    // A click on the field's empty space opens it for typing. The crumbs
-    // are buttons and capture their own presses, so clicking one still
-    // goes there — `mouse_area` only hears a press nothing inside took.
-    iced::widget::mouse_area(
-        container(crumbs)
-            .width(Length::Fill)
-            .height(Length::Fixed(density::field_height(scale)))
-            .center_y(Length::Fixed(density::field_height(scale)))
-            .padding([0, spacing::SM as u16])
-            .style(inset_field_style),
-    )
-    .on_press(Message::EditPath)
-    .interaction(iced::mouse::Interaction::Text)
-    .into()
+/// How far short of the field's edge the crumbs stop, in logical
+/// pixels — what a measured sum may still be off by once it is laid
+/// out (sub-pixel advances rounded per widget). Running over is the
+/// expensive direction: the last crumb is the one that gets cut.
+const CRUMB_SLACK: f32 = 4.0;
+
+/// The shaped width of `label` in the path bar's monospace at `size` —
+/// the same font, size and shaping `crumb_button` and the current
+/// folder's chip draw it with.
+fn mono_width(label: &str, size: f32) -> f32 {
+    use iced::advanced::text::{Paragraph as _, Text};
+    let paragraph = iced::advanced::graphics::text::Paragraph::with_text(Text {
+        content: label,
+        bounds: iced::Size::INFINITE,
+        size: iced::Pixels(size),
+        line_height: iced::widget::text::LineHeight::default(),
+        font: hyprforge_ui::theme::mono_font(),
+        align_x: iced::advanced::text::Alignment::Left,
+        align_y: iced::alignment::Vertical::Top,
+        shaping: iced::widget::text::Shaping::default(),
+        wrapping: iced::widget::text::Wrapping::None,
+    });
+    paragraph.min_bounds().width
+}
+
+/// How wide `crumb_row` lays `segments` out, given each label's width:
+/// every crumb's text and its padding (`crumb_button`'s 4 a side, the
+/// current folder's chip 5 a side), a "/" wherever `separates_from`
+/// puts one, and the row's spacing between every pair of items.
+fn crumbs_width(segments: &[(String, PathBuf)], width_of: impl Fn(&str) -> f32) -> f32 {
+    let last = segments.len().saturating_sub(1);
+    let mut total = 0.0;
+    let mut items = 0usize;
+    let mut previous: Option<&str> = None;
+    for (i, (label, _)) in segments.iter().enumerate() {
+        if previous.is_some_and(separates_from) {
+            total += width_of("/");
+            items += 1;
+        }
+        previous = Some(label);
+        total += width_of(label) + if i == last { 10.0 } else { 8.0 };
+        items += 1;
+    }
+    total + items.saturating_sub(1) as f32 * spacing::XS
 }
 
 /// How many answers hang under the path bar at once.
@@ -5189,45 +5255,41 @@ fn separates_from(previous: &str) -> bool {
 /// deliberately *not* clickable, because there is no single directory it
 /// could navigate to.
 ///
-/// Elision by count rather than by measured width: iced cannot tell a
-/// layout function how much room it got, so a width-aware version would
-/// have to guess at glyph widths and would be wrong for any font but the
-/// one it guessed for. A fixed depth is cruder and honest.
-fn elide(segments: Vec<(String, PathBuf)>) -> Vec<(String, PathBuf)> {
-    if segments.len() <= MAX_CRUMBS {
+/// By measured width, not by depth. This was a fixed three crumbs once,
+/// on the grounds that iced could not tell a layout how much room it had
+/// and a width-aware version would be guessing at glyph widths — so a
+/// four-deep path showed "~ / … / docs" in a field with room for all of
+/// it. Both grounds went: `responsive` hands the closure its size, and
+/// the shaper that draws the crumbs measures them. `fits` is asked of
+/// whole candidate rows, longest first: the full path, then the head,
+/// an ellipsis and as much of the tail as fits, down to the head, an
+/// ellipsis and the current folder — which is kept even when it does
+/// not fit, because its own chip cuts its name to the room left.
+fn elide_to(
+    segments: Vec<(String, PathBuf)>,
+    fits: impl Fn(&[(String, PathBuf)]) -> bool,
+) -> Vec<(String, PathBuf)> {
+    if segments.len() <= 2 || fits(&segments) {
         return segments;
     }
-    let mut out = Vec::with_capacity(MAX_CRUMBS + 1);
-    out.push(segments[0].clone());
     // The ellipsis carries the *first hidden* path, so it is at least a
     // meaningful thing to hold rather than an empty one, even though
     // nothing clicks it today.
-    out.push(("\u{2026}".to_string(), segments[1].1.clone()));
-    // `MAX_CRUMBS - 2`, not `- 1`: the head and the ellipsis already
-    // account for two of the budget. Getting this wrong returns one
-    // crumb too many, which still *looks* right and quietly makes the
-    // field overflow again — the exact bug elision was added to fix.
-    out.extend(segments[segments.len() - (MAX_CRUMBS - 2)..].iter().cloned());
-    out
+    let candidate = |tail: usize| -> Vec<(String, PathBuf)> {
+        let mut out = Vec::with_capacity(tail + 2);
+        out.push(segments[0].clone());
+        out.push(("\u{2026}".to_string(), segments[1].1.clone()));
+        out.extend(segments[segments.len() - tail..].iter().cloned());
+        out
+    };
+    // `len - 2` is the most a candidate can keep: the head is already
+    // in, and an ellipsis standing for nothing would be a lie.
+    (1..segments.len() - 1)
+        .rev()
+        .map(candidate)
+        .find(|shown| fits(shown))
+        .unwrap_or_else(|| candidate(1))
 }
-
-/// How many crumbs are kept: the head, an ellipsis, and where you are.
-///
-/// Three, not four, and the difference was measured rather than
-/// guessed. On this machine's window — 771px wide, 216 of it sidebar —
-/// the toolbar leaves the path field about 200px after the navigation
-/// buttons, the search field and the view toggles have taken theirs.
-/// Four crumbs overflowed that, and iced clips a row from the right,
-/// so the segment that got dropped was the *last* one: the folder you
-/// are actually in, which is the single thing the bar exists to tell
-/// you.
-///
-/// Losing the parent hurts less than losing where you are. A width-aware
-/// version could keep more on a wide window, but iced gives a layout
-/// function no way to ask how much room it got, so that version would be
-/// guessing at glyph widths — and being wrong about it puts us straight
-/// back to clipping the end.
-const MAX_CRUMBS: usize = 3;
 
 /// One ancestor in the path, clickable but drawn as text.
 ///
@@ -8132,34 +8194,71 @@ mod tests {
         assert_eq!(labels, vec!["/", "home", "apost", "Documents"]);
     }
 
+    fn crumbs(labels: &[&str]) -> Vec<(String, PathBuf)> {
+        labels.iter().map(|s| (s.to_string(), PathBuf::from(s))).collect()
+    }
+
+    fn labels(segments: Vec<(String, PathBuf)>) -> Vec<String> {
+        segments.into_iter().map(|(l, _)| l).collect()
+    }
+
+    /// One pixel a character: what a test can reason about by eye.
+    fn chars(label: &str) -> f32 {
+        label.chars().count() as f32
+    }
+
+    /// The case that was wrong: a four-deep path in a field with room
+    /// for all of it was cut to "~ / … / docs". Room is what decides now.
+    #[test]
+    fn a_path_with_room_to_show_is_shown_whole() {
+        let path = crumbs(&["~", "Downloads", "hyprforge-0.1.9.tar.xz", "hyprforge-0.1.9", "docs"]);
+        let room = crumbs_width(&path, chars);
+        assert_eq!(labels(elide_to(path.clone(), |c| crumbs_width(c, chars) <= room)), labels(path));
+    }
+
     /// A path deeper than the bar can show keeps its ends. Without this
     /// the tail was what got clipped — so four levels in, the bar showed
     /// the tree you were in and not the folder you were actually looking
     /// at, which is the one thing it exists to say.
     #[test]
     fn a_path_too_deep_to_fit_keeps_its_head_and_its_tail() {
-        let deep: Vec<(String, PathBuf)> = ["~", "Documents", "Projects", "hyprforge", "crates"]
-            .iter()
-            .map(|s| (s.to_string(), PathBuf::from(s)))
-            .collect();
-        let shown: Vec<String> = elide(deep).into_iter().map(|(l, _)| l).collect();
-        assert_eq!(
-            shown,
-            vec!["~", "\u{2026}", "crates"],
-            "the folder you are in must survive; the middle is what goes"
-        );
+        let path = crumbs(&["~", "Documents", "Projects", "hyprforge", "crates"]);
+        let shown = labels(elide_to(path, |_| false));
+        assert_eq!(shown, vec!["~", "\u{2026}", "crates"], "the folder you are in must survive; the middle is what goes");
+    }
+
+    /// Between the two: the middle goes from the outside in, and as much
+    /// of the tail stays as the room allows — never less.
+    #[test]
+    fn as_much_of_the_tail_stays_as_fits() {
+        let path = crumbs(&["~", "Documents", "Projects", "hyprforge", "crates"]);
+        let two_deep = crumbs(&["~", "\u{2026}", "hyprforge", "crates"]);
+        let room = crumbs_width(&two_deep, chars);
+        let shown = labels(elide_to(path, |c| crumbs_width(c, chars) <= room));
+        assert_eq!(shown, vec!["~", "\u{2026}", "hyprforge", "crates"]);
     }
 
     /// A path that already fits is left exactly as it is — no ellipsis
-    /// appears for a path with nothing hidden behind it.
+    /// appears for a path with nothing hidden behind it, however short
+    /// the field.
     #[test]
     fn a_path_that_fits_is_not_elided_at_all() {
-        let shallow: Vec<(String, PathBuf)> = ["~", "Documents"]
-            .iter()
-            .map(|s| (s.to_string(), PathBuf::from(s)))
-            .collect();
-        let shown: Vec<String> = elide(shallow).into_iter().map(|(l, _)| l).collect();
-        assert_eq!(shown, vec!["~", "Documents"]);
+        assert_eq!(labels(elide_to(crumbs(&["~", "Documents"]), |_| false)), vec!["~", "Documents"]);
+        assert_eq!(labels(elide_to(crumbs(&["~", "Documents", "x"]), |_| true)), vec!["~", "Documents", "x"]);
+    }
+
+    /// The sum the field is held to: text, each crumb's padding, a "/"
+    /// between crumbs but never after the root's own "/", and the row's
+    /// spacing between every pair of items.
+    #[test]
+    fn the_crumbs_width_counts_what_the_row_draws() {
+        // "/" home x: crumbs "/", "home", "x"; one separator, between
+        // "home" and "x" (the root "/" is its own separator).
+        let width = crumbs_width(&crumbs(&["/", "home", "x"]), chars);
+        let text = 1.0 + 4.0 + 1.0 + 1.0; // "/", "home", "x", the separator
+        let padding = 8.0 + 8.0 + 10.0;
+        let gaps = 3.0 * spacing::XS; // four items, three gaps
+        assert_eq!(width, text + padding + gaps);
     }
 
     #[test]
