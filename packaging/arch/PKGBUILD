@@ -259,6 +259,16 @@ package_hyprforge-lock() {
 package_hyprforge-greet() {
   pkgdesc="greetd greeter sharing the lock screen's look"
   depends=(wayland libxkbcommon pam greetd)
+  # Started on the login screen when installed, with every addon off but
+  # an allow-list that starts no other program (hyprforge-greet's
+  # src/input_method.rs). The engines are the ones that list allows;
+  # IBus is never started there, so it is not offered.
+  optdepends=(
+    'fcitx5: input methods on the login screen'
+    'fcitx5-chinese-addons: pinyin and table input on the login screen'
+    'fcitx5-rime: rime input on the login screen'
+    'fcitx5-hangul: hangul input on the login screen'
+  )
   cd "$startdir/../.."
   _bin hyprforge-greet
   _license
@@ -280,8 +290,8 @@ package_hyprforge-tray() {
   pkgdesc="Tray icons for Wi-Fi, Bluetooth, keep awake and night light"
   install=hyprforge-tray.install
   # wayland/libxkbcommon: hyprforge-traymenu draws its own right-click
-  # menu (com.canonical.dbusmenu is no longer served — see
-  # hyprforge-tray's own module doc), a layer-shell popup on the same
+  # menu on Hyprland (elsewhere the daemon serves com.canonical.dbusmenu
+  # instead — see hyprforge-tray's own module doc), a layer-shell popup on the same
   # stack as hyprforge-clipmenu, confirmed with ldd against this same
   # build rather than assumed from that package's own depends. Nothing
   # else is required for hyprforge-trayd itself: each icon needs its own

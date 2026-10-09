@@ -60,6 +60,10 @@ pkgname = hyprforge-greet
 	depends = libxkbcommon
 	depends = pam
 	depends = greetd
+	optdepends = fcitx5: input methods on the login screen
+	optdepends = fcitx5-chinese-addons: pinyin and table input on the login screen
+	optdepends = fcitx5-rime: rime input on the login screen
+	optdepends = fcitx5-hangul: hangul input on the login screen
 
 pkgname = hyprforge-displayd
 	pkgdesc = Display daemon that remembers monitor layouts

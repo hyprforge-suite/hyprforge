@@ -215,7 +215,7 @@ can take it down.
 |---|---|
 | unlocked (exit 0) | exits 0 |
 | crashed (a panic, or killed by a signal) | starts it again, and Hyprland hands the dead lock to the new copy |
-| crashed a second time | starts it in safe mode: the default theme, no wallpaper, no avatar, no status line or power menu, no fingerprint reader |
+| crashed a second time | starts it in safe mode: the default theme, no wallpaper, no avatar, no status line, no fingerprint reader, and no power menu or ⏻ button (nothing would be asking logind, so it could do none of what it offered) |
 | crashed a fourth time within a minute | stops (exit 4); the session stays locked behind Hyprland's screen |
 | was refused the lock after a relaunch | stops (exit 3), naming `misc:allow_session_lock_restore` |
 
@@ -280,11 +280,12 @@ established lock screen has:
 
 - **No input-method support in the lock screen.** A password typed through
   an IME cannot be entered there. swaylock is the same; it still means some
-  users cannot log in. The greeter has the client half: it asks for an input
-  method while a question is open (secure purpose for a password) and takes
-  what one commits. Nothing starts an input method in the greeter's own
-  compositor yet, so in practice it does nothing until one is running there;
-  see `crates/hyprforge-greet/README.md`.
+  users cannot log in. The greeter asks for an input method while a
+  question is open and, when fcitx5 is installed, starts one in its own
+  compositor — with every addon off but an allow-list that starts no other
+  program. A password still goes past it as plain keys, deliberately, so
+  it is never composed in a candidate window in clear; see
+  `crates/hyprforge-greet/README.md`.
 - **The password is erased on this side, and PAM keeps its own copy.**
   `Secret<T>` zeroes its value when it goes out of scope, which matters
   more than it looks: a typed password is not appended to in place — the
