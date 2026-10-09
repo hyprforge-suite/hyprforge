@@ -1,0 +1,119 @@
+<!-- title: Settings | description: hyprforge-settings — a Settings app for Hyprland: nineteen pages, a search for every option, and changes written as plain Lua your config loads. | nav: settings -->
+
+<div class="wrap">
+  <header class="hero">
+    <p class="kicker after-lines"><a href="components.html">What's in it</a><span class="sep">/</span>hyprforge-settings</p>
+    <h1 class="display" style="max-width:13ch"><span class="line">Settings for</span> <span class="line">Hyprland, <em>in</em></span> <span class="line"><em>plain Lua</em>.</span></h1>
+    <div class="after-lines">
+      <p class="standfirst">Displays, keyboard and mouse, keybinds, window rules, animations, Wi-Fi, Bluetooth, the way it all looks. Change something here and it's written to a Lua file your config loads, so you can always open it and see exactly what happened.</p>
+      <div class="actions">
+        <a class="button" href="install.html">Install it <span class="arr">→</span></a>
+        <a class="textlink" href="https://github.com/hyprforge-suite/hyprforge-settings">Source on GitHub</a>
+      </div>
+    </div>
+  </header>
+
+  <div class="after-lines"><shot name="settings" alt="The Settings app" need="Settings at full size on the Appearance page, sidebar showing" caption="Settings, on the Appearance page." eager="1"></div>
+
+  <section class="sect" style="margin-top:96px">
+    <div class="label"><b>§1</b>Every page</div>
+    <div class="body">
+      <div class="prose" style="margin-bottom:32px">
+        <p>There are nineteen pages in five groups. Click through them below. In the app, <kbd>Ctrl</kbd>+<kbd>K</kbd> searches all of them at once, down to Hyprland's own option names, so typing <code>gaps_in</code> or just "gaps" lands you in the same place.</p>
+      </div>
+      <div class="panel rise">
+        <div class="panel-bar"><span>hyprforge-settings</span><span>a sketch, not a screenshot</span></div>
+        <div class="settings-demo">
+          <nav>
+            <h5>Get started</h5>
+            <button class="on" data-page="setup">Set up</button>
+            <h5>System</h5>
+            <button data-page="displays">Displays</button>
+            <button data-page="power">Power &amp; battery</button>
+            <button data-page="input">Keyboard &amp; mouse</button>
+            <button data-page="apps">Default apps</button>
+            <h5>Connectivity</h5>
+            <button data-page="network">Network</button>
+            <button data-page="bt">Bluetooth</button>
+            <h5>Hyprland</h5>
+            <button data-page="windows">Windows &amp; workspaces</button>
+            <button data-page="binds">Keybinds</button>
+            <button data-page="anim">Animations</button>
+            <button data-page="rules">Window rules</button>
+            <button data-page="idle">Idle &amp; lock</button>
+            <button data-page="session">Session</button>
+            <button data-page="adv">Advanced</button>
+            <h5>Personal</h5>
+            <button data-page="look">Appearance</button>
+            <button data-page="wall">Wallpaper</button>
+            <button data-page="night">Night light</button>
+            <button data-page="share">Screen sharing</button>
+            <button data-page="tray">Tray</button>
+          </nav>
+          <div class="pane">
+            <div data-page="setup"><h4>Set up</h4><p class="sub">Finishes an install one checked item at a time, and remembers what it did so each item can be undone. It opens here the first time you launch Settings.</p><ul><li>Turn on the suite's background services</li><li>Bind the clipboard, emoji picker and other popups to keys</li><li>Point hypridle at the Hyprforge lock screen</li><li>Make Files and Media your default apps</li><li>Set up the open and save dialog</li></ul></div>
+            <div data-page="displays" hidden><h4>Displays</h4><p class="sub">Drag your monitors into place and pick a mode and scale. The layout is remembered for that set of monitors.</p><ul><li>Only scales your panel can actually take</li><li>Keep the change, or it reverts by itself</li></ul></div>
+            <div data-page="power" hidden><h4>Power &amp; battery</h4><p class="sub">Battery from UPower and power profiles from power-profiles-daemon.</p><ul><li>Charge level and time remaining</li><li>Power saver, balanced or performance</li></ul></div>
+            <div data-page="input" hidden><h4>Keyboard &amp; mouse</h4><p class="sub">Keyboard layouts and repeat, pointer speed and scrolling.</p></div>
+            <div data-page="apps" hidden><h4>Default apps</h4><p class="sub">Which app opens which kind of file, in the shared freedesktop database, so every other app on your system agrees.</p></div>
+            <div data-page="network" hidden><h4>Network</h4><p class="sub">Wi-Fi and wired connections, through NetworkManager. If it isn't running, the page says so instead of showing an empty list.</p></div>
+            <div data-page="bt" hidden><h4>Bluetooth</h4><p class="sub">Pair, connect and forget devices, through BlueZ.</p></div>
+            <div data-page="windows" hidden><h4>Windows &amp; workspaces</h4><p class="sub">Gaps, borders, layouts and how workspaces behave.</p></div>
+            <div data-page="binds" hidden><h4>Keybinds</h4><p class="sub">Every bind in one list, including the ones you wrote by hand. Record a new one by pressing the keys.</p><ul><li>Every dispatcher Hyprland has, checked against Hyprland itself</li></ul></div>
+            <div data-page="anim" hidden><h4>Animations</h4><p class="sub">Hyprland's animations and the curves they follow.</p></div>
+            <div data-page="rules" hidden><h4>Window rules</h4><p class="sub">Where and how windows open: floating, size, workspace, opacity. Your hand-written rules are imported and still win.</p></div>
+            <div data-page="idle" hidden><h4>Idle &amp; lock</h4><p class="sub">When the screen dims, locks and sleeps, through hypridle.</p></div>
+            <div data-page="session" hidden><h4>Session</h4><p class="sub">What starts with your session, the environment it runs in, touchpad gestures and what apps may do.</p><ul><li>Dangerous environment variables are flagged</li><li>A gesture that would clash is caught before it's written</li></ul></div>
+            <div data-page="adv" hidden><h4>Advanced</h4><p class="sub">Any Hyprland option by name, for the things the friendlier pages don't cover.</p></div>
+            <div data-page="look" hidden><h4>Appearance</h4><p class="sub">The look every Hyprforge app shares. The accent is your Hyprland border colour and the fonts are your system's. Changes reach the lock screen and the login screen too.</p></div>
+            <div data-page="wall" hidden><h4>Wallpaper</h4><p class="sub">Your wallpaper, through hyprpaper, applied as you choose it. Media's "Set as Wallpaper" lands here too.</p></div>
+            <div data-page="night" hidden><h4>Night light</h4><p class="sub">Warmer colours in the evening, through hyprsunset. It's also a click away in the tray.</p></div>
+            <div data-page="share" hidden><h4>Screen sharing</h4><p class="sub">The portal that lets apps share your screen. It's only restarted when you ask, because a restart would end a share in progress.</p></div>
+            <div data-page="tray" hidden><h4>Tray</h4><p class="sub">Which of Hyprforge's tray icons appear in your bar.</p></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§2</b>Your config</div>
+    <div class="body two">
+      <div class="prose">
+        <h2 class="title" style="margin-bottom:22px">It never rewrites what you wrote.</h2>
+        <p>Settings writes its own files and adds a short, marked block of <code>require()</code> lines to your <code>hyprland.lua</code>. Your own config loads after it, so anything you wrote by hand still wins. It never touches a <code>.conf</code>.</p>
+        <p>When you first open it, it reads the keybinds and rules you already have, using a sandboxed Lua evaluator rather than guessing with a regex. If a file won't parse, you're told, and nothing gets written over it.</p>
+      </div>
+      <pre class="term"><span class="c">-- Hyprforge-managed requires (evaluated first) — do not edit by hand.</span>
+require(<span class="ok">"hyprforge/window-rules"</span>)
+require(<span class="ok">"hyprforge/monitors"</span>)
+<span class="c">-- end Hyprforge-managed requires</span>
+
+<span class="c">-- and then yours, untouched</span>
+require(<span class="ok">"my-binds"</span>)</pre>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§3</b>More of it</div>
+    <div class="body">
+      <div class="plates">
+        <div class="w6 rise"><shot name="settings-search" alt="The Settings search palette" need="Settings with the Ctrl+K palette open and a query typed" caption="Searching every page and option at once."></div>
+        <div class="w6 rise"><shot name="settings-keybinds" alt="The Keybinds page" need="Settings, Keybinds page, the list of binds" caption="Keybinds, including the ones you wrote by hand."></div>
+        <div class="w12 rise"><shot name="displays" alt="The Displays page in Settings" need="Settings, Displays page with two monitors arranged on the canvas" ratio="21/9" caption="Arranging two monitors. Keep the change or it reverts by itself."></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§4</b>Worth knowing</div>
+    <div class="body prose">
+      <p>Settings is the one piece that isn't small. It brings most of the suite's libraries with it, because it's the place all of them are configured. Every other piece installs and runs without it.</p>
+    </div>
+  </section>
+
+  <nav class="next" style="margin-bottom:40px">
+    <a href="files.html"><span>Next</span><b>Files →</b></a>
+    <a href="displays.html"><span>Or</span><b>How displays are remembered →</b></a>
+  </nav>
+</div>

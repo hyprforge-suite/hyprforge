@@ -1,0 +1,144 @@
+<!-- title: Hyprforge | description: The rest of your Hyprland desktop — lock screen, login, Settings, Files, Media, notifications, clipboard, emoji, tray and displays, made as one piece. Every part installable on its own. | nav: | figs: 1 -->
+
+<div class="wrap">
+  <header class="hero">
+    <p class="kicker after-lines">Free software for Hyprland<span class="sep">/</span>MIT</p>
+    <h1 class="display"><span class="line">The rest of</span> <span class="line">your <em>Hyprland</em></span> <span class="line">desktop.</span></h1>
+    <div class="after-lines">
+      <p class="standfirst">Hyprland gives you a superb compositor and leaves the rest to you: the lock screen, the login, notifications, somewhere to change a setting. Hyprforge is that rest, made as one piece so it looks and behaves like one.</p>
+      <div class="actions">
+        <a class="button" href="install.html">Install it <span class="arr">→</span></a>
+        <a class="textlink" href="https://github.com/hyprforge-suite/hyprforge">Read the source</a>
+      </div>
+      <p class="meta">Arch packages, or build from source<span class="sep"> · </span>needs Hyprland 0.55 or later with a Lua config</p>
+    </div>
+  </header>
+
+  <figure class="lockdemo after-lines">
+    <div class="screen" aria-label="A working recreation of the Hyprforge lock screen. Type to try it.">
+      <div class="wallpaper" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+      <input class="lock-input" type="password" autocomplete="off" aria-label="Try the lock screen. Nothing you type is sent anywhere." style="position:absolute;opacity:0;pointer-events:none;width:1px;height:1px">
+      <div class="lockface">
+        <div class="status" aria-hidden="true"><span>us</span><span>home-5G</span><span class="batt"><span></span>82%</span></div>
+        <div class="clock"><div class="time">09:41</div><div class="date">Thursday, 8 October</div></div>
+        <div class="idle-cards" aria-hidden="true">
+          <div class="media-card">
+            <div class="art"></div>
+            <div class="m"><b>Nightcall</b><span>Kavinsky · Spotify</span><div class="bar"><i></i></div></div>
+            <div class="ctl"><span>‹</span><span class="pp">❚❚</span><span>›</span></div>
+          </div>
+          <div class="chips"><span>Signal <b>3</b></span><span>Mail <b>12</b></span></div>
+        </div>
+        <div class="auth-card" aria-hidden="true">
+          <div class="avatar">V</div>
+          <div class="who">Voldemort</div>
+          <div class="field"><span class="caret"></span></div>
+          <div class="under"><span>us layout</span><span class="caps">Caps Lock off</span></div>
+        </div>
+        <div class="hint">Type to unlock</div>
+        <div class="power" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 3v8M6.3 6.8a8 8 0 1 0 11.4 0"/></svg></div>
+      </div>
+      <div class="desktop">
+        <div class="topbar"><div class="ws"><i class="on"></i><i></i><i></i><i></i></div><span class="tr">82%</span></div>
+        <div class="welcome">
+          <div class="welcome-card">
+            <div class="avatar">V</div>
+            <h3>Welcome back.</h3>
+            <p>That was a copy of <code>hyprforge-lock</code> running in your browser. The real one is a session-lock client that checks your password with PAM, and nothing you type there reaches a log either.</p>
+            <div class="wb"><a href="lock.html">About the lock screen</a><button class="relock" type="button">Lock it again</button></div>
+          </div>
+        </div>
+        <div class="toast"><div class="toast-ic">⚡</div><div><b>Battery</b><span>Charging, 82%</span></div></div>
+      </div>
+    </div>
+    <figcaption><span class="fig">Fig. 1</span><span>The lock screen, rebuilt in your browser. Start typing and the card comes up. <kbd>Enter</kbd> unlocks and <kbd>Esc</kbd> puts it away. Nothing you type leaves the page: it only keeps a count, which is all the dots need.</span></figcaption>
+  </figure>
+
+  <section class="sect" style="margin-top:96px">
+    <div class="label"><b>§1</b>What's in it</div>
+    <div class="body">
+      <h2 class="title">Ten pieces, and you can take <em>any one</em> of them.</h2>
+      <div class="prose" style="margin-bottom:48px">
+        <p>Each piece has its own repository and its own package. Take the clipboard history and leave the other nine, and it'll still work and still look right. Take all ten and they share a look, a keyboard grammar and a set of libraries, so they feel like they came from the same place, because they did.</p>
+      </div>
+      <p class="catalogue-head">Apps</p>
+      <ol class="catalogue" data-stagger>
+        <li><a href="settings.html"><span class="n">01</span><span class="name">Settings</span><span class="desc">Nineteen pages over your Hyprland config. It writes plain Lua that you can open and read.</span><span class="pkg">hyprforge-settings</span><span class="go">→</span></a></li>
+        <li><a href="files.html"><span class="n">02</span><span class="name">Files</span><span class="desc">Tabs, split view, Quick Look, archives you can walk into like folders, phones and network shares.</span><span class="pkg">hyprforge-files</span><span class="go">→</span></a></li>
+        <li><a href="media.html"><span class="n">03</span><span class="name">Media</span><span class="desc">Photos, video and 3D models in one viewer, in the same order Files shows them.</span><span class="pkg">hyprforge-media</span><span class="go">→</span></a></li>
+        <li><a href="lock.html"><span class="n">04</span><span class="name">Lock screen</span><span class="desc">Password or fingerprint, what's playing, and a supervisor that keeps you locked if it ever falls over.</span><span class="pkg">hyprforge-lock</span><span class="go">→</span></a></li>
+        <li><a href="greeter.html"><span class="n">05</span><span class="name">Greeter</span><span class="desc">The login screen for greetd. It uses the lock screen's own drawing code, so the two match exactly.</span><span class="pkg">hyprforge-greet</span><span class="go">→</span></a></li>
+      </ol>
+      <p class="catalogue-head">Running in the background</p>
+      <ol class="catalogue" data-stagger>
+        <li><a href="notifications.html"><span class="n">06</span><span class="name">Notifications</span><span class="desc">Toasts, a notification center to come back to, and do-not-disturb. It takes over from dunst or mako.</span><span class="pkg">hyprforge-notif</span><span class="go">→</span></a></li>
+        <li><a href="clipboard.html"><span class="n">07</span><span class="name">Clipboard</span><span class="desc">Your copy history at the pointer. A password manager's secrets are never even read.</span><span class="pkg">hyprforge-clipboard</span><span class="go">→</span></a></li>
+        <li><a href="emoji.html"><span class="n">08</span><span class="name">Emoji picker</span><span class="desc">Every emoji, plus kaomoji and symbols, one key away, and it pastes for you.</span><span class="pkg">hyprforge-emojimenu</span><span class="go">→</span></a></li>
+        <li><a href="tray.html"><span class="n">09</span><span class="name">Tray</span><span class="desc">Wi-Fi, Bluetooth, battery, night light and more, in whichever bar you already use.</span><span class="pkg">hyprforge-tray</span><span class="go">→</span></a></li>
+        <li><a href="displays.html"><span class="n">10</span><span class="name">Displays</span><span class="desc">Plug the dock back in and your monitors come back the way you arranged them.</span><span class="pkg">hyprforge-displayd</span><span class="go">→</span></a></li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§2</b>What it looks like</div>
+    <div class="body">
+      <div class="prose" style="margin-bottom:44px">
+        <p>These aren't mockups. Each one was drawn by the code that draws it on your screen, with the same theme, read from the same files. Settings, Files and Media are still waiting for their portraits.</p>
+      </div>
+      <div class="plates">
+        <div class="w7 rise"><shot name="clipboard" alt="The clipboard history popup: pinned and recent entries tagged text, link, image and file, with the selected image previewed beside them" caption="Clipboard history at the pointer, with the selected screenshot previewed on the right."></div>
+        <div class="w5 rise"><shot name="emoji" alt="The emoji picker: search, Emoji, Kaomoji and Symbols tabs, frequently used emoji and a skin-tone button" caption="The emoji picker. The ones you use most come first."></div>
+        <div class="w12 rise"><shot name="notifications" alt="Notification toasts, one of them a critical battery warning, beside the notification center with live and earlier notifications" caption="Notifications as they arrive, left, and the center you can come back to, right. Critical ones get through do-not-disturb."></div>
+        <div class="w12 rise"><shot name="tray" alt="Three tray menus side by side: Wi-Fi networks, Bluetooth devices, and battery with power profiles" caption="Three of the tray's menus: Wi-Fi, Bluetooth, and battery with power profiles."></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§3</b>How it's made</div>
+    <div class="body">
+      <h2 class="title">Every mistake gets <em>written down</em>.</h2>
+      <div class="prose" style="margin-bottom:48px">
+        <p>The repository keeps a running list called "the rules that came from being wrong." Each entry is a real bug: what happened, why it wasn't obvious, and what now stops it happening again. Three of them:</p>
+      </div>
+      <div class="notes" data-stagger>
+        <div class="note">
+          <div class="tag">the lock screen</div>
+          <h3>A keysym name is the password.</h3>
+          <p>Logging "just the keysym" while debugging sounds harmless, until you notice that <code>XK_a</code> is the letter a and <code>XK_comma</code> is a comma.</p>
+          <p class="after">Nothing derived from a keystroke reaches a log or a crash report. What you typed shows as a count.</p>
+        </div>
+        <div class="note">
+          <div class="tag">your config</div>
+          <h3>Unreadable isn't empty.</h3>
+          <p>An import once treated a config file it couldn't parse as one with nothing in it, and that cost a user 37 keybinds they'd written by hand.</p>
+          <p class="after">A missing file means first run. A broken one gets reported to you, and nothing is written over it.</p>
+        </div>
+        <div class="note">
+          <div class="tag">the lock screen, again</div>
+          <h3>A round number is someone else's timeout.</h3>
+          <p>The lock screen took five seconds to appear, and our side finished in a millisecond. The compositor was waiting for windows we were holding back.</p>
+          <p class="after">Measure before optimising anything that talks to another process.</p>
+        </div>
+      </div>
+      <p style="margin-top:44px"><a class="textlink" href="engineering.html">More from the list, and how it's tested →</a></p>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§4</b>Getting it</div>
+    <div class="body two">
+      <div class="prose">
+        <h2 class="title" style="margin-bottom:22px">One command, and you approve every step.</h2>
+        <p>The installer builds what you ask for, copies only what changed, and checks the copy actually landed. Then it offers to wire each piece into your desktop: services, keybinds, the lock in hypridle, default apps. It asks first every time and keeps a record, so all of it can be undone.</p>
+        <p><a class="textlink" href="install.html">The full install guide →</a></p>
+      </div>
+      <div class="codeblock"><pre class="term"><span class="p">$ </span>git clone --recurse-submodules \
+    https://github.com/hyprforge-suite/hyprforge
+<span class="p">$ </span>cd hyprforge
+<span class="p">$ </span>./hyprforge --install --all --dry-run   <span class="c"># look first</span>
+<span class="p">$ </span>./hyprforge --install --all</pre></div>
+    </div>
+  </section>
+</div>

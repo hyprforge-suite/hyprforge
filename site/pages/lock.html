@@ -1,0 +1,69 @@
+<!-- title: Lock screen | description: hyprforge-lock — a lock screen for Hyprland with password and fingerprint unlock, media controls, notification counts and a supervisor that keeps you locked if it crashes. | nav: lock -->
+
+<div class="wrap">
+  <header class="hero">
+    <p class="kicker after-lines"><a href="components.html">What's in it</a><span class="sep">/</span>hyprforge-lock</p>
+    <h1 class="display" style="max-width:13ch"><span class="line">A lock screen</span> <span class="line">that <em>stays</em></span> <span class="line">locked.</span></h1>
+    <div class="after-lines">
+      <p class="standfirst">Your wallpaper, a clock, and what's playing. Start typing and a card comes up asking for your password, or just touch the fingerprint reader. If anything goes wrong, the session stays locked.</p>
+      <div class="actions">
+        <a class="button" href="install.html">Install it <span class="arr">→</span></a>
+        <a class="textlink" href="https://github.com/hyprforge-suite/hyprforge-lock">Source on GitHub</a>
+        <a class="textlink" href="./">Try it on the home page</a>
+      </div>
+    </div>
+  </header>
+
+  <div class="after-lines"><shot name="lock-idle" alt="The lock screen at rest: a large clock, the date, a media card and notification counts over the wallpaper" caption="At rest: the time, what's playing, and how many messages came in while you were away." eager="1"></div>
+
+  <section class="sect" style="margin-top:96px">
+    <div class="label"><b>§1</b>What it does</div>
+    <div class="body">
+      <dl class="features" data-stagger>
+        <div><dt>Password and fingerprint at once</dt><dd>It listens to fprintd beside the password field, not after it. Three unrecognised fingers stop the reader until the next lock.</dd></div>
+        <div><dt>The whole PAM check</dt><dd>A correct password is checked against your account too, so an expired or locked account stays locked.</dd></div>
+        <div><dt>Media and messages</dt><dd>Play, pause and skip from the lock screen. Notifications that arrive while you're away are counted per app, whichever notification daemon you use.</dd></div>
+        <div><dt>A power menu</dt><dd>Suspend, restart or shut down from the ⏻ button or <kbd>Tab</kbd>.</dd></div>
+        <div><dt>Every monitor, sharp</dt><dd>The card follows your keyboard and the other screens show the clock. Each one is drawn at its real fractional scale.</dd></div>
+        <div><dt>Instant</dt><dd>Its windows exist before the compositor confirms the lock, so it's on screen at once, not five seconds later.</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§2</b>While you type</div>
+    <div class="body two">
+      <div class="prose">
+        <h2 class="title" style="margin-bottom:22px">It tells you why before it says no.</h2>
+        <p>The card shows your keyboard layout and whether Caps Lock is on, because "wrong password" is most often the wrong layout. It reads what each key <em>typed</em>, not which key it was, so capitals and symbols in your password survive.</p>
+        <p>A wrong password gives the field a shake. Nothing you type, not even a key's name, is written to a log.</p>
+      </div>
+      <shot name="lock" alt="The lock screen asking for a password: a frosted card with the user's initial, name and a password field" caption="Mid-password, with the layout and Caps Lock under the field."></div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§3</b>If it crashes</div>
+    <div class="body two">
+      <div class="prose">
+        <h2 class="title" style="margin-bottom:22px">You stay locked. That's the whole point.</h2>
+        <p>A lock screen that crashes must never hand over your session. Hyprforge's runs under a supervisor. If it dies, Hyprland keeps the screen covered and the lock comes back in a simpler safe mode, with the power menu hidden. Set up turns on the Hyprland setting this relies on.</p>
+        <p>Every extra on the screen comes from somebody else's service: UPower for the battery, NetworkManager for Wi-Fi, fprintd for fingerprints, any MPRIS player for media. If one is missing, that part of the screen just isn't there.</p>
+      </div>
+      <shot name="lock-safe-mode" alt="The lock screen in safe mode" need="The lock screen after a restart, in safe mode with the power menu hidden" caption="Safe mode, after a restart."></div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§4</b>On its own</div>
+    <div class="body two">
+      <div class="prose">
+        <p>The lock screen needs six small Hyprforge libraries, which come from crates.io, and nothing else from the suite. Set up can point hypridle's <code>lock_cmd</code> at it for you. It installs its own PAM file with both the auth and account stacks, because borrowing hyprlock's would reject correct passwords.</p>
+      </div>
+      <div class="codeblock"><pre class="term"><span class="p">$ </span>./hyprforge --install --lock</pre></div>
+    </div>
+  </section>
+
+  <nav class="next" style="margin-bottom:40px">
+    <a href="greeter.html"><span>Next</span><b>The greeter, the same screen at login →</b></a>
+    <a href="components.html"><span>Or</span><b>Everything else in the suite →</b></a>
+  </nav>
+</div>

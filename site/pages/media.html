@@ -1,0 +1,47 @@
+<!-- title: Media | description: hyprforge-media — a photo, video and 3D model viewer for Hyprland, in the same order as Files, with EXIF done right, video through mpv and STL/3MF/OBJ models. | nav: components -->
+
+<div class="wrap">
+  <header class="hero">
+    <p class="kicker after-lines"><a href="components.html">What's in it</a><span class="sep">/</span>hyprforge-media</p>
+    <h1 class="display" style="max-width:13ch"><span class="line">Photos, video</span> <span class="line">and <em>3D models</em>,</span> <span class="line">one window.</span></h1>
+    <div class="after-lines">
+      <p class="standfirst">Open a photo and it floats on your screen at its own size. Open a folder and you can walk through it in exactly the order Files shows it. Behind that is a grid grouped by date, a library, a filmstrip, the EXIF details and a slideshow.</p>
+      <div class="actions">
+        <a class="button" href="install.html">Install it <span class="arr">→</span></a>
+        <a class="textlink" href="https://github.com/hyprforge-suite/hyprforge-media">Source on GitHub</a>
+      </div>
+    </div>
+  </header>
+
+  <div class="after-lines"><shot name="media" alt="The Media viewer" need="Media, the date-grouped grid of a photo folder" caption="A folder of photos, grouped by the day they were taken." eager="1"></div>
+
+  <section class="sect" style="margin-top:96px">
+    <div class="label"><b>§1</b>What it does</div>
+    <div class="body">
+      <dl class="features" data-stagger>
+        <div><dt>The same "next" as Files</dt><dd>Both ask one shared library which picture comes next, so two windows on one folder never disagree.</dd></div>
+        <div><dt>The right way up</dt><dd>EXIF orientation is always applied, and the inspector shows the rest of the camera's notes.</dd></div>
+        <div><dt>Big photos, safely</dt><dd>A 36-megapixel file is measured before it's decoded, so one huge picture can't take the viewer down.</dd></div>
+        <div><dt>Video through mpv</dt><dd>mpv is loaded when it's needed, not linked in. Without it, everything else still works and a video tells you what's missing.</dd></div>
+        <div><dt>3D models</dt><dd>STL, 3MF and OBJ, drawn on the GPU in the same window. Drag to turn them.</dd></div>
+        <div><dt>Part of the desktop</dt><dd>Copy, Open With, Trash, Show in Files and Set as Wallpaper each go through the same code the rest of the suite uses.</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§2</b>Plates</div>
+    <div class="body">
+      <div class="plates">
+        <div class="w12 rise"><shot name="media-single" alt="A single photo open in Media" need="One photo open, floating over the desktop at its own size" caption="One photo, at its own size, on the monitor your pointer is on."></div>
+        <div class="w6 rise"><shot name="media-video" alt="A video playing in Media" need="A video playing, the controls bar showing" caption="Playing a video. Scrubbing keeps up."></div>
+        <div class="w6 rise"><shot name="media-model" alt="A 3D model in Media" need="An STL model, lit, mid-rotation" caption="A 3D print, ready to turn over."></div>
+      </div>
+    </div>
+  </section>
+
+  <nav class="next" style="margin-bottom:40px">
+    <a href="files.html"><span>Back to</span><b>Files →</b></a>
+    <a href="notifications.html"><span>Next</span><b>Notifications →</b></a>
+  </nav>
+</div>

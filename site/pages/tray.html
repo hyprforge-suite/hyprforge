@@ -1,0 +1,47 @@
+<!-- title: Tray | description: hyprforge-tray — Wi-Fi, Bluetooth, battery and power profiles, keep-awake, night light and display layouts in any bar, with no GTK or Qt. | nav: components -->
+
+<div class="wrap">
+  <header class="hero">
+    <p class="kicker after-lines"><a href="components.html">What's in it</a><span class="sep">/</span>hyprforge-tray</p>
+    <h1 class="display" style="max-width:12ch"><span class="line">The tray,</span> <span class="line">without <em>GTK</em></span> <span class="line"><em>or Qt</em>.</span></h1>
+    <div class="after-lines">
+      <p class="standfirst">One small daemon puts Wi-Fi, Bluetooth, battery and power profiles, keep-awake, night light and your display layouts into whichever bar you already run. On Hyprland it draws its own menus. Everywhere else, your bar does.</p>
+      <div class="actions">
+        <a class="button" href="install.html">Install it <span class="arr">→</span></a>
+        <a class="textlink" href="https://github.com/hyprforge-suite/hyprforge-tray">Source on GitHub</a>
+      </div>
+    </div>
+  </header>
+
+  <div class="after-lines"><shot name="tray" alt="Three tray menus side by side: Wi-Fi networks, Bluetooth devices, and battery with power profiles" caption="Three menus: Wi-Fi, Bluetooth, and battery with power profiles." eager="1"></div>
+
+  <section class="sect" style="margin-top:96px">
+    <div class="label"><b>§1</b>What's in it</div>
+    <div class="body">
+      <dl class="features" data-stagger>
+        <div><dt>Network</dt><dd>Wi-Fi and Ethernet, through NetworkManager. Join a network from the menu.</dd></div>
+        <div><dt>Bluetooth</dt><dd>Connect your devices through BlueZ, or turn the radio back on.</dd></div>
+        <div><dt>Battery and power</dt><dd>Charge from UPower, and saver, balanced or performance from power-profiles-daemon.</dd></div>
+        <div><dt>Keep awake</dt><dd>Stop the machine sleeping while something important runs.</dd></div>
+        <div><dt>Night light</dt><dd>Warmer colours through hyprsunset, a click away.</dd></div>
+        <div><dt>Display layouts</dt><dd>Switch between the monitor layouts you've saved.</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§2</b>Why no toolkit</div>
+    <div class="body two">
+      <div class="prose">
+        <h2 class="title" style="margin-bottom:22px">A tray icon is a message, not a widget.</h2>
+        <p>Your bar draws the icon from a name and a few properties it reads over D-Bus. That's how this tray avoids GTK and Qt, which almost every other way of putting an icon there drags in.</p>
+        <p>Its icons never hide. With Wi-Fi off, the icon stays, because that's exactly when you need its menu to turn Wi-Fi back on. And if NetworkManager isn't running, the menu tells you so while the other icons carry on.</p>
+      </div>
+      <shot name="tray-bar" alt="The tray's icons in a bar" need="Waybar's tray with the Hyprforge icons, one menu open below it" ratio="16/9" caption="In Waybar."></div>
+  </section>
+
+  <nav class="next" style="margin-bottom:40px">
+    <a href="displays.html"><span>Next</span><b>Displays →</b></a>
+    <a href="components.html"><span>Or</span><b>Everything else in the suite →</b></a>
+  </nav>
+</div>

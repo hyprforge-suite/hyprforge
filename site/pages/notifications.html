@@ -1,0 +1,59 @@
+<!-- title: Notifications | description: hyprforge-notif — a notification daemon and notification center for Hyprland that takes over from dunst or mako, with do-not-disturb, history and notifctl. | nav: components -->
+
+<div class="wrap">
+  <header class="hero">
+    <p class="kicker after-lines"><a href="components.html">What's in it</a><span class="sep">/</span>hyprforge-notif</p>
+    <h1 class="display" style="max-width:13ch"><span class="line">Notifications,</span> <span class="line">and <em>somewhere</em></span> <span class="line">to find them later.</span></h1>
+    <div class="after-lines">
+      <p class="standfirst">Toasts that arrive in the corner and get out of the way, and a notification center that keeps what you missed. It takes over from dunst or mako, and it's small: one process, one thread, no UI toolkit.</p>
+      <div class="actions">
+        <a class="button" href="install.html">Install it <span class="arr">→</span></a>
+        <a class="textlink" href="https://github.com/hyprforge-suite/hyprforge-notif">Source on GitHub</a>
+      </div>
+    </div>
+  </header>
+
+  <div class="after-lines"><shot name="notifications" alt="Notification toasts, one of them a critical battery warning, beside the notification center with live and earlier notifications" caption="Toasts on the left. On the right, the center: what's live, then what you missed." eager="1"></div>
+
+  <section class="sect" style="margin-top:96px">
+    <div class="label"><b>§1</b>What it does</div>
+    <div class="body">
+      <dl class="features" data-stagger>
+        <div><dt>The whole spec</dt><dd>Urgency, actions, markup, images, replacing a notification in place, and transient and resident ones.</dd></div>
+        <div><dt>A center with history</dt><dd>Live notifications first, then everything earlier. Dismiss them one at a time or clear the lot.</dd></div>
+        <div><dt>Do not disturb</dt><dd>Ordinary notifications go quietly into history. Critical ones always get through.</dd></div>
+        <div><dt>Sharp at any scale</dt><dd>Text is crisp at 1.25×, 1.5× and 1.6×, not blurred by a stretched buffer.</dd></div>
+        <div><dt>Edit, save, done</dt><dd>Change <code>config.toml</code> and the running daemon picks it up straight away.</dd></div>
+        <div><dt>Every script, every alphabet</dt><dd>Emoji, CJK and right-to-left text all lay out properly.</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§2</b>From a key or a script</div>
+    <div class="body two">
+      <div class="prose">
+        <p><code>notifctl</code> drives the daemon over a local socket. Set up binds the center and do-not-disturb to keys for you, and can undo that too.</p>
+        <p>If dunst, mako or swaync is already installed, Hyprforge won't switch them off behind your back. Only one notification daemon can run at a time, so Set up asks you first.</p>
+      </div>
+      <div class="codeblock"><pre class="term"><span class="p">$ </span>notifctl center       <span class="c"># open or close the center</span>
+<span class="p">$ </span>notifctl dnd          <span class="c"># do-not-disturb on or off</span>
+<span class="p">$ </span>notifctl dismiss-all
+<span class="p">$ </span>notifctl history --json</pre></div>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§3</b>With the rest</div>
+    <div class="body two">
+      <div class="prose">
+        <p>When Files moves or deletes something, its undo notice arrives here, with Undo and History buttons on it. While your screen is locked, the lock screen counts what came in so you know what's waiting.</p>
+      </div>
+      <shot name="notifications-dnd" alt="The notification center with do-not-disturb on" need="The notification center open, do-not-disturb switched on" caption="Do not disturb, on."></div>
+  </section>
+
+  <nav class="next" style="margin-bottom:40px">
+    <a href="clipboard.html"><span>Next</span><b>Clipboard history →</b></a>
+    <a href="components.html"><span>Or</span><b>Everything else in the suite →</b></a>
+  </nav>
+</div>

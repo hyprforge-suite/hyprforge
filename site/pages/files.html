@@ -1,0 +1,83 @@
+<!-- title: Files | description: hyprforge-files — a file manager for Hyprland: tabs, split view, Quick Look, archives as folders, a search that understands filters, drives, phones, network shares and an undo history. | nav: files -->
+
+<div class="wrap">
+  <header class="hero">
+    <p class="kicker after-lines"><a href="components.html">What's in it</a><span class="sep">/</span>hyprforge-files</p>
+    <h1 class="display" style="max-width:14ch"><span class="line">The file manager</span> <span class="line">you'd <em>otherwise</em></span> <span class="line">borrow from GNOME.</span></h1>
+    <div class="after-lines">
+      <p class="standfirst">Tabs, split view and Quick Look. Archives you can walk into like folders. Phones, USB sticks and network shares in the sidebar, and an undo that shows you everything it's holding. It's native to Hyprland and it looks like the rest of your desktop.</p>
+      <div class="actions">
+        <a class="button" href="install.html">Install it <span class="arr">→</span></a>
+        <a class="textlink" href="https://github.com/hyprforge-suite/hyprforge-files">Source on GitHub</a>
+      </div>
+    </div>
+  </header>
+
+  <div class="after-lines"><shot name="files" alt="The Files window" need="Files, grid view with thumbnails and the preview pane open" caption="Files, in the grid view with the preview pane open." eager="1"></div>
+
+  <section class="sect" style="margin-top:96px">
+    <div class="label"><b>§1</b>Search</div>
+    <div class="body two">
+      <div class="prose">
+        <h2 class="title" style="margin-bottom:22px">Type a filter and it becomes a chip.</h2>
+        <p>Search understands <code>ext:</code>, <code>size:</code>, <code>modified:</code>, <code>content:</code> and <code>tag:</code>. It can look inside files without an index, and it tells you how many it didn't get to read. <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> widens the search from this folder to your whole home.</p>
+        <p>Try it: type <code>ext:jpg</code> and a space.</p>
+      </div>
+      <div class="panel rise">
+        <div class="panel-bar"><span>~/ — search</span><span>a few made-up files</span></div>
+        <div class="panel-body">
+          <div class="search" id="files-search"><input type="text" placeholder="Search, or type a filter" aria-label="Try the Files search" autocomplete="off" spellcheck="false"></div>
+          <div class="suggest">try <button type="button" data-q="ext:rs">ext:rs</button><button type="button" data-q="size:>100M">size:&gt;100M</button><button type="button" data-q="modified:<7d">modified:&lt;7d</button></div>
+          <div class="results" id="files-results"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§2</b>What it does</div>
+    <div class="body">
+      <dl class="features" data-stagger>
+        <div><dt>Archives are folders</dt><dd><code>~/Downloads/x.tar.xz/bin</code> is a place you can go. It handles zip, tar over gzip, bzip2, xz or zstd, and 7z, with nothing extra installed.</dd></div>
+        <div><dt>…and you can edit them</dt><dd>Add, rename and delete inside an archive. Each change is written beside the original and swapped in, so an interrupted edit never leaves half an archive.</dd></div>
+        <div><dt>Quick Look</dt><dd><kbd>Space</kbd> shows the file large. Videos play, 3D models turn, and the arrow keys walk the folder while it's open.</dd></div>
+        <div><dt>Split view</dt><dd><kbd>F3</kbd> puts a second folder beside the first, each with its own history and selection.</dd></div>
+        <div><dt>Drag anything</dt><dd>Drag between folders, tabs, the sidebar and the path bar, or out into other apps. Files inside an archive are unpacked while you're still dragging.</dd></div>
+        <div><dt>Undo, with a history</dt><dd><kbd>Ctrl</kbd>+<kbd>Z</kbd> takes things back, and Undo History lists everything it still can. Each undo first checks the folder is as it left it.</dd></div>
+        <div><dt>Drives, phones, servers</dt><dd>Mount and eject through UDisks2, with nothing running as root. Phones and cameras open over MTP, and Connect to Server does smb, sftp and ftp.</dd></div>
+        <div><dt>Thumbnails for nearly everything</dt><dd>Photos, SVG, PDF, video, 3D models, AVIF, HEIF and JPEG XL. They share the thumbnail cache your other apps already use.</dd></div>
+        <div><dt>A trash that works on btrfs</dt><dd>A file on another filesystem gets its own trash folder. On btrfs every subvolume counts as another filesystem.</dd></div>
+        <div><dt>Tags</dt><dd>Kept on the file itself, the way Dolphin does it, so they survive renames and copies. <code>tag:work</code> finds them.</dd></div>
+        <div><dt>Previous versions</dt><dd>If snapper keeps snapshots of your home, a file's older copies are a menu item away, one per change.</dd></div>
+        <div><dt>Open as administrator</dt><dd>One password and a tab can change system folders, under a banner that says so. The window itself never runs as root.</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§3</b>Plates</div>
+    <div class="body">
+      <div class="plates">
+        <div class="w6 rise"><shot name="files-archive" alt="Browsing inside an archive in Files" need="Files inside a .tar.xz, the path bar showing the archive as a folder" caption="Inside a tarball, without unpacking it."></div>
+        <div class="w6 rise"><shot name="files-quicklook" alt="Quick Look over the Files window" need="Files with Quick Look open on a photo or a 3D model" caption="Quick Look, one press of the space bar."></div>
+        <div class="w6 rise"><shot name="files-split" alt="Files in split view" need="Files with F3 split view: two folders side by side" caption="Split view."></div>
+        <div class="w6 rise"><shot name="files-devices" alt="The Files sidebar with drives and a phone" need="The sidebar showing a USB stick, a phone and a network share" caption="A stick, a phone and a server in the sidebar."></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§4</b>Everywhere else</div>
+    <div class="body two">
+      <div class="prose">
+        <h2 class="title" style="margin-bottom:22px">It's also your open and save dialog.</h2>
+        <p>Set up can make Files the dialog that every app's "Open…" and "Save as…" use, so choosing a file in your browser works the way Files does, Quick Look included.</p>
+      </div>
+      <shot name="files-dialog" alt="The open/save dialog" need="A browser's Save dialog, drawn by Hyprforge Files" caption="Saving from a browser."></div>
+  </section>
+
+  <nav class="next" style="margin-bottom:40px">
+    <a href="media.html"><span>Next</span><b>Media, which shares Files' idea of "next" →</b></a>
+    <a href="components.html"><span>Or</span><b>Everything else in the suite →</b></a>
+  </nav>
+</div>

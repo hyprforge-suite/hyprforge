@@ -1,0 +1,39 @@
+# The website at https://hyprforge-suite.github.io/hyprforge/.
+#
+# tools/build-site.py wraps site/pages/ in site/_layout.html and copies in
+# docs/images rather than keeping a second copy, so the site, this README
+# and the component READMEs always show the same renders. A screenshot the
+# site wants but docs/images lacks is drawn as a placeholder naming the file.
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths: ["site/**", "docs/images/**", "tools/build-site.py", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the site
+        run: python3 tools/build-site.py _site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

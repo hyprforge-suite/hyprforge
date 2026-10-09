@@ -1,0 +1,44 @@
+<!-- title: Emoji picker | description: hyprforge-emojimenu — an emoji picker for Hyprland: every emoji, kaomoji and symbols at the pointer, with search and skin tones, and it pastes for you. | nav: components -->
+
+<div class="wrap">
+  <header class="hero">
+    <p class="kicker after-lines"><a href="components.html">What's in it</a><span class="sep">/</span>hyprforge-emojimenu</p>
+    <h1 class="display" style="max-width:13ch"><span class="line">The emoji picker</span> <span class="line">GNOME and KDE</span> <span class="line"><em>already have</em>.</span></h1>
+    <div class="after-lines">
+      <p class="standfirst">Press a key and it opens at your pointer, with the emoji you use most at the top. Type to search, pick one, and it's pasted into whatever you were writing.</p>
+      <div class="actions">
+        <a class="button" href="install.html">Install it <span class="arr">→</span></a>
+        <a class="textlink" href="https://github.com/hyprforge-suite/hyprforge-emojimenu">Source on GitHub</a>
+      </div>
+    </div>
+  </header>
+
+  <div class="after-lines" style="max-width:640px"><shot name="emoji" alt="The emoji picker: search, Emoji, Kaomoji and Symbols tabs, frequently used emoji and a skin-tone button" caption="Frequently used first, then every emoji in its usual order." eager="1"></div>
+
+  <section class="sect" style="margin-top:96px">
+    <div class="label"><b>§1</b>What it does</div>
+    <div class="body">
+      <dl class="features" data-stagger>
+        <div><dt>All of them</dt><dd>Every emoji in Unicode, in the order your phone uses, with search.</dd></div>
+        <div><dt>Skin tones</dt><dd>Hold an emoji, or press <kbd>Shift</kbd>+<kbd>Enter</kbd>, for its tones. The ✋ button sets the tone every emoji is shown in.</dd></div>
+        <div><dt>Kaomoji and symbols</dt><dd>Two more tabs: kaomoji, and the arrows, maths, currency, dashes and quotes you can never find. <kbd>Tab</kbd> moves between them.</dd></div>
+        <div><dt>Nothing running in between</dt><dd>It starts when you press the key and exits when you pick or press <kbd>Esc</kbd>. There's no daemon.</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§2</b>The hard part</div>
+    <div class="body two">
+      <div class="prose">
+        <h2 class="title" style="margin-bottom:22px">Pasting, for real.</h2>
+        <p>A picker that types your emoji and then exits can close before the compositor has read the keys. When we measured it, that delivered nothing at all. The fix is to ask the compositor a question and wait for the answer. It can't reply until it has processed everything sent before, so the reply proves the keys arrived.</p>
+      </div>
+      <shot name="emoji-tones" alt="The skin-tone picker" need="The picker with a skin-tone row open over an emoji" ratio="1/1" caption="Picking a skin tone."></div>
+  </section>
+
+  <nav class="next" style="margin-bottom:40px">
+    <a href="tray.html"><span>Next</span><b>The tray →</b></a>
+    <a href="components.html"><span>Or</span><b>Everything else in the suite →</b></a>
+  </nav>
+</div>

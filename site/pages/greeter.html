@@ -1,0 +1,52 @@
+<!-- title: Greeter | description: hyprforge-greet — a greetd login screen for Hyprland that uses the lock screen's own drawing code, with no compositor keybinds and an input method for passwords. | nav: lock -->
+
+<div class="wrap">
+  <header class="hero">
+    <p class="kicker after-lines"><a href="components.html">What's in it</a><span class="sep">/</span>hyprforge-greet</p>
+    <h1 class="display" style="max-width:13ch"><span class="line">The same screen,</span> <span class="line"><em>before</em> you</span> <span class="line">log in.</span></h1>
+    <div class="after-lines">
+      <p class="standfirst">A login screen for greetd that has no drawing code of its own. It borrows the lock screen's, so logging in and unlocking look identical. They weren't styled to match: there's only one screen.</p>
+      <div class="actions">
+        <a class="button" href="install.html">Install it <span class="arr">→</span></a>
+        <a class="textlink" href="https://github.com/hyprforge-suite/hyprforge-greet">Source on GitHub</a>
+      </div>
+    </div>
+  </header>
+
+  <div class="after-lines"><shot name="greeter" alt="The greeter: the lock screen's card and clock, asking a user to log in" caption="The login screen. Same clock, same card, same glass as the lock screen." eager="1"></div>
+
+  <section class="sect" style="margin-top:96px">
+    <div class="label"><b>§1</b>The rule it keeps</div>
+    <div class="body prose">
+      <h2 class="title" style="margin-bottom:22px">Its compositor has no keybinds. Not one.</h2>
+      <p>Whoever is standing at a login screen hasn't logged in yet, and every keybind on that screen's compositor belongs to them. One "harmless" <kbd>Super</kbd>+<kbd>Q</kbd> for a terminal is a shell without a password. So the greeter's Hyprland config has none, and its README asks you never to add one. No care in the greeter's own code could make up for it.</p>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§2</b>Details</div>
+    <div class="body">
+      <dl class="features" data-stagger>
+        <div><dt>No graphics driver needed</dt><dd>It draws in software with the lock screen's renderer, which is also why the frosted card is exactly as frosted on both.</dd></div>
+        <div><dt>Your look, before you're you</dt><dd>A greeter can't read your home folder. Settings exports your theme, wallpaper and monitor layout to a place it can.</dd></div>
+        <div><dt>An input method for passwords</dt><dd>It starts fcitx5 with most of it switched off. An in-progress composition is never drawn or kept, and nothing gets entered twice.</dd></div>
+        <div><dt>The same conversation</dt><dd>PAM's questions go through the same code as the lock screen's, so a failure that wasn't your password never says it was.</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§3</b>Installing it</div>
+    <div class="body two">
+      <div class="prose">
+        <p>This is the one part the installer won't finish for you. It never writes <code>/etc/greetd/config.toml</code> or turns greetd on, because that file decides how your machine logs in. The guide walks you through it from a spare terminal, and every step up to the last can be undone.</p>
+        <p><a class="textlink" href="https://github.com/hyprforge-suite/hyprforge-greet/blob/main/INSTALL.md">Read INSTALL.md →</a></p>
+      </div>
+      <shot name="greeter-password" alt="The greeter asking for a password" need="The greeter mid-login: password dots in the field, layout and Caps Lock shown" caption="Logging in."></div>
+  </section>
+
+  <nav class="next" style="margin-bottom:40px">
+    <a href="lock.html"><span>Back to</span><b>The lock screen →</b></a>
+    <a href="settings.html"><span>Next</span><b>Settings, which sends the greeter your look →</b></a>
+  </nav>
+</div>

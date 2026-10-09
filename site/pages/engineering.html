@@ -1,0 +1,58 @@
+<!-- title: How it's made | description: The rules that came from being wrong: the bugs behind Hyprforge's habits, the checks it runs against the real system, and why every piece has to work alone. | nav: engineering -->
+
+<div class="wrap">
+  <header class="hero">
+    <p class="kicker after-lines">How it's made</p>
+    <h1 class="display" style="max-width:13ch"><span class="line">The rules that</span> <span class="line">came from</span> <span class="line"><em>being wrong</em>.</span></h1>
+    <div class="after-lines">
+      <p class="standfirst">The repository keeps a list of every mistake that was hard to see coming: what happened, why it wasn't obvious, and what now stops it happening again. It's the most useful thing in there. Here's some of it.</p>
+      <div class="actions"><a class="textlink" href="https://github.com/hyprforge-suite/hyprforge/blob/main/CLAUDE.md">Read the whole list</a></div>
+    </div>
+  </header>
+
+  <section class="sect flush">
+    <div class="label"><b>§1</b>From the list</div>
+    <div class="body">
+      <div class="notes" data-stagger>
+        <div class="note"><div class="tag">the lock screen</div><h3>A keysym name is the password.</h3><p><code>XK_a</code> is the letter a. Logging "just the keysym" writes your password down in barely-disguised form.</p><p class="after">Nothing derived from a keystroke reaches a log. What you typed shows as a count.</p></div>
+        <div class="note"><div class="tag">your config</div><h3>Unreadable isn't empty.</h3><p>Treating a file that wouldn't parse as a file with nothing in it cost a user 37 keybinds written by hand.</p><p class="after">Missing means first run. Broken means you're told, and nothing is written over it.</p></div>
+        <div class="note"><div class="tag">the lock screen</div><h3>A round number is someone else's timeout.</h3><p>Five seconds to lock, and our side was done in a millisecond. The compositor was waiting on us.</p><p class="after">Measure before optimising anything that talks to another process.</p></div>
+        <div class="note"><div class="tag">tests</div><h3>A test that couldn't run didn't pass.</h3><p>Test runners have no "skipped". One that returned early printed <code>ok</code> having checked nothing.</p><p class="after">A skipped check says so, and the check script shows it in yellow.</p></div>
+        <div class="note"><div class="tag">the login screen</div><h3>The same colour, different pixels.</h3><p>Login and lock read the same theme, and login was visibly washed out. The two renderers blend in different colour spaces.</p><p class="after">Both draw with one renderer now, and "should these match" is settled by comparing pixels.</p></div>
+        <div class="note"><div class="tag">the login screen</div><h3>The way in is the compositor.</h3><p>Every keybind on a login screen belongs to whoever's at the keyboard. A terminal bind there is a shell without a password.</p><p class="after">The greeter's compositor has no keybinds at all.</p></div>
+        <div class="note"><div class="tag">the clipboard</div><h3>Sent isn't delivered.</h3><p>A paste reported success and delivered nothing. The popup closed before the compositor read its keys.</p><p class="after">It waits for proof the keys arrived, not for a delay that happens to be long enough.</p></div>
+        <div class="note"><div class="tag">the tray</div><h3>An icon that hides is a switch you can't reach.</h3><p>The Wi-Fi icon disappeared when Wi-Fi was off, exactly when you'd need its menu to turn it on.</p><p class="after">Every icon you turned on stays visible, and a test holds it to that.</p></div>
+        <div class="note"><div class="tag">everything</div><h3>Never wait without a limit.</h3><p><code>hyprctl</code>, <code>gsettings</code> and <code>fc-list</code> can all stop answering. A plain wait waits forever.</p><p class="after">Every other program is given a time limit. Not answering is treated like not starting.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§2</b>Testing</div>
+    <div class="body two">
+      <div class="prose">
+        <h2 class="title" style="margin-bottom:22px">It asks the real thing.</h2>
+        <p>The first tier runs anywhere: the linter, every test, and checks that the documentation and manifests still tell the truth. Every tier after it asks a real system a question it can only answer by being there. Does Hyprland parse what we generate? Does NetworkManager agree about signal strength? Does every icon name resolve in the theme you actually have?</p>
+        <p>Each tier only runs when the thing it asks is present. The live tiers only ever read, because they run on a computer someone is using, and a test that could drop your Wi-Fi isn't worth having.</p>
+      </div>
+      <pre class="term"><span class="p">$ </span>./check.sh
+<span class="ok">✓</span> lint and every test
+<span class="ok">✓</span> docs name things that exist
+<span class="ok">✓</span> Hyprland parses what we write
+<span class="ok">✓</span> unzip, tar and 7z agree with us
+<span class="ok">✓</span> NetworkManager, BlueZ, UPower
+<span class="ok">✓</span> the icon theme resolves every name
+<span class="ok">✓</span> each piece builds alone from crates.io
+<span class="y">–</span> fprintd: skipped, no reader here
+<span class="c">  … 23 tiers in all</span></pre>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§3</b>Standing alone</div>
+    <div class="body prose">
+      <h2 class="title" style="margin-bottom:22px">Install one piece on a clean machine. Does it work?</h2>
+      <p>That's the test for every piece. Being shared when they're built is what makes them a suite. Being separate when they're installed is what keeps it honest. A missing theme file means first run, so the clipboard is themed correctly on a machine that's never seen Settings. A stopped service is something to tell you about, not a crash. A missing sibling is a line in a log, and the rest carries on.</p>
+    </div>
+  </section>
+</div>

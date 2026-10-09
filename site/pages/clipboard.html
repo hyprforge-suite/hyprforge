@@ -1,0 +1,59 @@
+<!-- title: Clipboard | description: hyprforge-clipboard — clipboard history for Hyprland that never reads a password manager's secrets, with a popup at the pointer that pastes what you pick. | nav: components -->
+
+<div class="wrap">
+  <header class="hero">
+    <p class="kicker after-lines"><a href="components.html">What's in it</a><span class="sep">/</span>hyprforge-clipboard</p>
+    <h1 class="display" style="max-width:13ch"><span class="line">Everything you</span> <span class="line">copied, <em>except</em></span> <span class="line">your passwords.</span></h1>
+    <div class="after-lines">
+      <p class="standfirst">A small daemon remembers what you copy. Press a key and the history opens at your pointer. Pick something and it's pasted into whatever you were using: text, links, images or files.</p>
+      <div class="actions">
+        <a class="button" href="install.html">Install it <span class="arr">→</span></a>
+        <a class="textlink" href="https://github.com/hyprforge-suite/hyprforge-clipboard">Source on GitHub</a>
+      </div>
+    </div>
+  </header>
+
+  <div class="after-lines" style="max-width:860px"><shot name="clipboard" alt="The clipboard history popup: pinned and recent entries tagged text, link, image and file, with the selected image previewed beside them" caption="Pinned entries at the top, then recent ones, with a preview of the selected image." eager="1"></div>
+
+  <section class="sect" style="margin-top:96px">
+    <div class="label"><b>§1</b>The rule</div>
+    <div class="body two">
+      <div class="prose">
+        <h2 class="title" style="margin-bottom:22px">A secret is never read, so it can't be kept.</h2>
+        <p>A clipboard manager writes your history to disk. A password manager puts your password on the clipboard. Use both carelessly and your passwords end up in a file in your home folder, and neither program ever mentions it.</p>
+        <p>So Hyprforge checks whether a copy is marked secret <em>before</em> it asks for the contents. A secret is never read, stored or logged. It doesn't enter the program at all.</p>
+      </div>
+      <pre class="term"><span class="ok">kept</span>     text           <span class="c">git log --oneline</span>
+<span class="ok">kept</span>     image/png      <span class="c">a screenshot</span>
+<span class="ok">kept</span>     file           <span class="c">~/Documents/notes.md</span>
+<span class="y">skipped</span>  marked secret by your password manager
+         <span class="c">contents never requested</span></pre>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§2</b>Details</div>
+    <div class="body">
+      <dl class="features" data-stagger>
+        <div><dt>Search and tabs</dt><dd>Type to search, or show only text, images, links or files.</dd></div>
+        <div><dt>Pins</dt><dd>Pin what you paste every day and it stays at the top.</dd></div>
+        <div><dt>It actually pastes</dt><dd>The popup waits for the compositor to confirm it received the keys before it closes, rather than guessing how long that takes.</dd></div>
+        <div><dt>Your pick outlives the popup</dt><dd>On Wayland a copy disappears with whoever made it. The daemon holds your pick, so it's still there after the popup closes.</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§3</b>On its own</div>
+    <div class="body two">
+      <div class="prose"><p>Installing the clipboard gets you the daemon and its popup, and nothing else: no Settings app and no tray. Set up can turn on the service and bind the popup to a key, and undo both.</p></div>
+      <div class="codeblock"><pre class="term"><span class="p">$ </span>systemctl --user enable --now hyprforge-clipd
+<span class="c"># then bind hyprforge-clipmenu to a key</span></pre></div>
+    </div>
+  </section>
+
+  <nav class="next" style="margin-bottom:40px">
+    <a href="emoji.html"><span>Next</span><b>The emoji picker →</b></a>
+    <a href="components.html"><span>Or</span><b>Everything else in the suite →</b></a>
+  </nav>
+</div>

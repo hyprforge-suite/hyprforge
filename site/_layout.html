@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{title}}</title>
+<meta name="description" content="{{description}}">
+<meta name="theme-color" content="#f3efe6" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#161411" media="(prefers-color-scheme: dark)">
+<meta property="og:type" content="website">
+<meta property="og:title" content="{{title}}">
+<meta property="og:description" content="{{description}}">
+<meta property="og:image" content="https://hyprforge-suite.github.io/hyprforge/images/lock-idle.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231c1a17'/%3E%3Cpath d='M9 22h14M11 22l1.5-8h7L21 22M14 14l2-5 2 5' stroke='%23e2693b' stroke-width='2.2' fill='none' stroke-linejoin='round' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght,SOFT@0,9..144,300..600,0..100;1,9..144,300..600,0..100&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/site.js" defer></script>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="wrap">
+    <a class="wordmark" href="./">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 24h18M10 24l2-10h8l2 10M13 14l3-7 3 7" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linejoin="round" stroke-linecap="round"/></svg>
+      Hyprforge
+    </a>
+    <nav class="nav" aria-label="Main">
+      <a href="components.html" data-nav="components">What's in it</a>
+      <a href="lock.html" data-nav="lock">Lock &amp; login</a>
+      <a href="settings.html" data-nav="settings">Settings</a>
+      <a href="files.html" data-nav="files">Files</a>
+      <a href="engineering.html" data-nav="engineering">How it's made</a>
+      <a href="install.html" data-nav="install">Install</a>
+      <a href="https://github.com/hyprforge-suite/hyprforge">GitHub</a>
+    </nav>
+    <button class="menu-btn" type="button" aria-label="Menu" aria-expanded="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 8h16M4 16h16"/></svg>
+    </button>
+  </div>
+</header>
+
+<main>
+{{content}}
+</main>
+
+<footer class="colophon">
+  <div class="wrap">
+    <div class="cols">
+      <div>
+        <a class="wordmark" href="./">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 24h18M10 24l2-10h8l2 10M13 14l3-7 3 7" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linejoin="round" stroke-linecap="round"/></svg>
+          Hyprforge
+        </a>
+        <p style="margin-top:14px;max-width:34ch">The rest of the desktop for Hyprland. Free software, MIT licensed, made in the open.</p>
+      </div>
+      <div>
+        <h5>Apps</h5>
+        <ul>
+          <li><a href="settings.html">Settings</a></li>
+          <li><a href="files.html">Files</a></li>
+          <li><a href="media.html">Media</a></li>
+          <li><a href="lock.html">Lock screen</a></li>
+          <li><a href="greeter.html">Greeter</a></li>
+        </ul>
+      </div>
+      <div>
+        <h5>In the background</h5>
+        <ul>
+          <li><a href="notifications.html">Notifications</a></li>
+          <li><a href="clipboard.html">Clipboard</a></li>
+          <li><a href="emoji.html">Emoji picker</a></li>
+          <li><a href="tray.html">Tray</a></li>
+          <li><a href="displays.html">Displays</a></li>
+        </ul>
+      </div>
+      <div>
+        <h5>Elsewhere</h5>
+        <ul>
+          <li><a href="install.html">Install</a></li>
+          <li><a href="https://github.com/hyprforge-suite/hyprforge/tree/main/docs">Documentation</a></li>
+          <li><a href="https://github.com/hyprforge-suite/hyprforge/blob/main/CHANGELOG.md">Changelog</a></li>
+          <li><a href="https://crates.io/search?q=hyprforge">crates.io</a></li>
+          <li><a href="https://github.com/hyprforge-suite">GitHub</a></li>
+        </ul>
+      </div>
+    </div>
+    <p class="fine">Hyprforge is an independent project, not affiliated with or endorsed by hyprwm or the Hyprland project. Set in Fraunces and IBM Plex. This site is a handful of HTML files and a short Python script, and its screenshots are the same files the README shows.</p>
+  </div>
+</footer>
+</body>
+</html>

@@ -5,7 +5,9 @@ libraries, a Settings GUI, a clipboard history, an emoji picker, a
 StatusNotifierItem tray, Network/Bluetooth/power clients, a file manager,
 a photo, video and 3D model viewer, and a shared lock screen and greeter
 — all for Hyprland. See [`docs/design/vision.md`](docs/design/vision.md)
-for the whole-suite plan, including what is not built yet.
+for the whole-suite plan, including what is not built yet, and
+[hyprforge-suite.github.io/hyprforge](https://hyprforge-suite.github.io/hyprforge/)
+for the website.
 
 > Hyprforge is an independent project. It is not affiliated with or
 > endorsed by hyprwm or the Hyprland project.
@@ -181,6 +183,7 @@ is reported in yellow rather than counted as a pass.
 - [`docs/lock-and-greeter.md`](docs/lock-and-greeter.md) — the lock screen and the greeter
 - [`docs/testing.md`](docs/testing.md) — `check.sh` and its tiers
 - [`docs/design/`](docs/design/) — the suite's [vision](docs/design/vision.md), the [repository plan](docs/design/repo-plan.md) and the [media viewer plan](docs/design/media-plan.md)
+- [`site/`](site/) — the website, built by `tools/build-site.py`; a screenshot a page asks for is drawn from the PNG of that name in docs/images once it exists, and as a placeholder naming the file until then
 - [`CLAUDE.md`](CLAUDE.md) — the working conventions, and the rules that came from being wrong
 
 ## Licence

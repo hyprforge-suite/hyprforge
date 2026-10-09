@@ -1,0 +1,112 @@
+<!-- title: Install | description: Installing Hyprforge: what you need, building from a checkout, the Arch packages, and the Set up step that wires it into your desktop and can undo it. | nav: install -->
+
+<div class="wrap">
+  <header class="hero">
+    <p class="kicker after-lines">Install</p>
+    <h1 class="display" style="max-width:12ch"><span class="line">Installing</span> <span class="line"><em>Hyprforge</em>.</span></h1>
+    <div class="after-lines">
+      <p class="standfirst">It takes four steps. One command does the building and copying, then offers to wire each piece into your desktop. It asks before each step, keeps a record, and can undo all of it.</p>
+    </div>
+  </header>
+
+  <section class="sect flush">
+    <div class="label"><b>Step 1</b>What you need</div>
+    <div class="body prose">
+      <p><strong>Hyprland 0.55 or later, with a Lua config</strong> (<code>hyprland.lua</code>). Hyprforge loads what it writes with <code>require()</code>, which only a Lua config has. If you only have a <code>hyprland.conf</code>, it'll tell you and point you at migrating. It never edits a <code>.conf</code>.</p>
+      <p>To build it you need Rust (rustup installs the right version for you) and the development files for <code>wayland</code>, <code>libxkbcommon</code> and <code>pam</code>.</p>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>Step 2</b>Get the source</div>
+    <div class="body two">
+      <div class="prose"><p>Each piece is a submodule, so clone with them included.</p></div>
+      <div class="codeblock"><pre class="term"><span class="p">$ </span>git clone --recurse-submodules \
+    https://github.com/hyprforge-suite/hyprforge
+<span class="p">$ </span>cd hyprforge</pre></div>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>Step 3</b>Install</div>
+    <div class="body two">
+      <div class="prose">
+        <p>Choose pieces with flags, or take everything with <code>--all</code>. A dry run shows you what would happen first.</p>
+        <p>Installing and updating are the same command. It copies only what changed, checks the copy landed, and restarts a running service whose program it just replaced.</p>
+      </div>
+      <div class="codeblock"><pre class="term"><span class="c"># look first</span>
+<span class="p">$ </span>./hyprforge --install --all --dry-run
+<span class="c"># everything</span>
+<span class="p">$ </span>./hyprforge --install --all
+<span class="c"># or just some of it</span>
+<span class="p">$ </span>./hyprforge --install --lock --clipboard --notif</pre></div>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>Step 4</b>Set up</div>
+    <div class="body two">
+      <div class="prose">
+        <p>The install ends by running Set up in your terminal. It turns on the background services, binds the popups to keys, points hypridle at the lock screen, makes Files and Media your defaults, and sets up the open and save dialog. It asks about each one.</p>
+        <p>Everything it does is recorded, so it can be put back.</p>
+      </div>
+      <div class="codeblock"><pre class="term"><span class="p">$ </span>hyprforge-settings --setup --list   <span class="c"># where things stand</span>
+<span class="p">$ </span>hyprforge-settings --setup --undo   <span class="c"># put it back</span>
+<span class="p">$ </span>./hyprforge --status                <span class="c"># what's installed</span></pre></div>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>Arch Linux</b>Packages</div>
+    <div class="body two">
+      <div class="prose">
+        <p>On Arch you can build separate packages from the same checkout and install only the ones you want. The background services are switched on for every user through systemd presets, and nothing in your own config is written as root.</p>
+        <div class="codeblock" style="margin-top:20px"><pre class="term"><span class="p">$ </span>cd packaging/arch
+<span class="p">$ </span>makepkg -si</pre></div>
+      </div>
+      <ul class="pkglist">
+        <li><b>hyprforge</b> all of it</li>
+        <li><b>hyprforge-settings</b></li>
+        <li><b>hyprforge-files</b></li>
+        <li><b>hyprforge-media</b></li>
+        <li><b>hyprforge-lock</b></li>
+        <li><b>hyprforge-greet</b></li>
+        <li><b>hyprforge-notif</b></li>
+        <li><b>hyprforge-clipboard</b></li>
+        <li><b>hyprforge-emojimenu</b></li>
+        <li><b>hyprforge-tray</b></li>
+        <li><b>hyprforge-displayd</b></li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>Optional</b>Extras</div>
+    <div class="body">
+      <div class="prose" style="margin-bottom:24px"><p>Each of these switches on one part of the suite. If one is missing, that part tells you so. Nothing crashes.</p></div>
+      <div class="table-scroll">
+        <table class="table">
+          <thead><tr><th>Install</th><th>And you get</th></tr></thead>
+          <tbody>
+            <tr><td>NetworkManager</td><td>Wi-Fi in Settings and the tray, and on the lock screen</td></tr>
+            <tr><td>BlueZ</td><td>Bluetooth in Settings and the tray</td></tr>
+            <tr><td>UPower, power-profiles-daemon</td><td>Battery and power profiles</td></tr>
+            <tr><td>fprintd</td><td>Fingerprint unlock</td></tr>
+            <tr><td>UDisks2, gvfs</td><td>Drives, phones, cameras and network shares in Files</td></tr>
+            <tr><td>mpv, ffmpeg</td><td>Video playback and video thumbnails</td></tr>
+            <tr><td>greetd</td><td>The login screen</td></tr>
+            <tr><td>fcitx5</td><td>An input method at login</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>One more thing</b>The login screen</div>
+    <div class="body">
+      <p class="aside"><strong>The login screen is the one step you finish by hand.</strong> The installer never writes <code>/etc/greetd/config.toml</code> or turns greetd on, because that file decides how your machine logs in. <a href="https://github.com/hyprforge-suite/hyprforge-greet/blob/main/INSTALL.md">INSTALL.md</a> walks you through it from a spare terminal, and every step up to the last can be undone.</p>
+      <p style="margin-top:32px" class="prose">Stuck, or found something broken? <a href="https://github.com/hyprforge-suite/hyprforge/issues">Open an issue</a>. If you know which piece it is, its own repository is the best place.</p>
+    </div>
+  </section>
+</div>

@@ -1,0 +1,46 @@
+<!-- title: Displays | description: hyprforge-displayd — remembers how you arranged your monitors and puts it back when you plug them in again, with keep-or-revert and a command-line tool. | nav: components -->
+
+<div class="wrap">
+  <header class="hero">
+    <p class="kicker after-lines"><a href="components.html">What's in it</a><span class="sep">/</span>hyprforge-displayd</p>
+    <h1 class="display" style="max-width:12ch"><span class="line">Plug the dock in.</span> <span class="line"><em>That's it.</em></span></h1>
+    <div class="after-lines">
+      <p class="standfirst">A small daemon recognises the monitors you've plugged in and puts back the arrangement you saved for them. Same dock tomorrow, same layout, and no script to keep up to date.</p>
+      <div class="actions">
+        <a class="button" href="install.html">Install it <span class="arr">→</span></a>
+        <a class="textlink" href="https://github.com/hyprforge-suite/hyprforge-displayd">Source on GitHub</a>
+      </div>
+    </div>
+  </header>
+
+  <div class="after-lines"><shot name="displays" alt="The Displays page in Settings" need="Settings, Displays page with two monitors arranged on the canvas" ratio="21/9" caption="Arranging monitors in Settings. The daemon remembers it." eager="1"></div>
+
+  <section class="sect" style="margin-top:96px">
+    <div class="label"><b>§1</b>How it remembers</div>
+    <div class="body">
+      <dl class="features" data-stagger>
+        <div><dt>By monitor, not by port</dt><dd><code>DP-1</code> is whatever's plugged in there today. Layouts are keyed on the monitors themselves, so they follow the monitor.</dd></div>
+        <div><dt>Identical twins</dt><dd>Two of the same monitor look identical to a computer. It goes by which port they're in, and keeps any swap you saved.</dd></div>
+        <div><dt>Only scales that work</dt><dd>Hyprland quietly refuses a scale that doesn't fit the resolution. Every scale is snapped to one your screen can really take first.</dd></div>
+        <div><dt>Keep or revert</dt><dd>A new layout asks to be kept. If you can't see the screen to answer, it puts the old one back by itself.</dd></div>
+        <div><dt>Even when it isn't running</dt><dd>The layout is also written as a plain <code>monitors.lua</code>, so it applies without the daemon.</dd></div>
+        <div><dt>Your rules win</dt><dd>That file loads before your own config, so a monitor line you wrote by hand still has the last word.</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§2</b>From a script</div>
+    <div class="body two">
+      <div class="prose"><p><code>hyprforge-displayctl</code> speaks to the daemon over the same D-Bus interface Settings and the tray use.</p></div>
+      <div class="codeblock"><pre class="term"><span class="p">$ </span>hyprforge-displayctl list-profiles
+<span class="p">$ </span>hyprforge-displayctl apply-reversible &lt;profile&gt;
+<span class="p">$ </span>hyprforge-displayctl confirm</pre></div>
+    </div>
+  </section>
+
+  <nav class="next" style="margin-bottom:40px">
+    <a href="settings.html"><span>Back to</span><b>Settings →</b></a>
+    <a href="components.html"><span>Or</span><b>Everything else in the suite →</b></a>
+  </nav>
+</div>
