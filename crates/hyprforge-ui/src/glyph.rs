@@ -33,11 +33,16 @@ use iced::widget::canvas;
 use iced::{Element, Length, Point, Rectangle, Renderer, Theme};
 
 /// Which way a chevron points, or that it is the "up a level" arrow.
+///
+/// `Forward` and `Down` are also a disclosure's two states — closed and
+/// open — as in the process manager's app rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Nav {
     Back,
     Forward,
     Up,
+    /// A chevron pointing down: something opened below.
+    Down,
 }
 
 /// Stroke weight as a fraction of the button's side.
@@ -102,6 +107,11 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for NavGlyph {
                 b.move_to(Point::new(mid.x - extent * 0.5, mid.y - extent));
                 b.line_to(Point::new(mid.x + extent * 0.5, mid.y));
                 b.line_to(Point::new(mid.x - extent * 0.5, mid.y + extent));
+            }
+            Nav::Down => {
+                b.move_to(Point::new(mid.x - extent, mid.y - extent * 0.5));
+                b.line_to(Point::new(mid.x, mid.y + extent * 0.5));
+                b.line_to(Point::new(mid.x + extent, mid.y - extent * 0.5));
             }
             // An arrow: a shaft with a head, drawn as two subpaths. The
             // head is deliberately wider than a chevron's — at this size

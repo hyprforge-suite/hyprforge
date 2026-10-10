@@ -85,7 +85,7 @@ into an app.
 Drawn, not typed, because a font's symbols are a different shape on every
 machine:
 
-- `nav` (back/forward/up), `sidebar`, `side_panel`
+- `nav` (back/forward/up, and down: with forward, a disclosure's open and closed — the process manager's app rows), `sidebar`, `side_panel`
 - `view` (list/grid/columns)
 - `page` (each Settings page)
 - `signal` (with `signal_bars`, the strength-to-bars rule), `battery`
