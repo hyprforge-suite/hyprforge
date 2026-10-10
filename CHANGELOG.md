@@ -11,6 +11,8 @@ drafts the next section from git; `tools/release.sh` files it.
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-10-10
+
 ### Added
 
 - `hyprforge-popup`: `PopupApp::namespace`, so a popup can name its own

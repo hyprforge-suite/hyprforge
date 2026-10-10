@@ -1,6 +1,6 @@
 pkgbase = hyprforge
 	pkgdesc = Native Hyprland desktop applications
-	pkgver = 0.1.11
+	pkgver = 0.1.12
 	pkgrel = 1
 	url = https://github.com/hyprforge-suite/hyprforge
 	arch = x86_64
@@ -8,7 +8,7 @@ pkgbase = hyprforge
 	makedepends = cargo
 	makedepends = git
 	options = !lto
-	source = hyprforge::git+https://github.com/hyprforge-suite/hyprforge.git#tag=v0.1.11
+	source = hyprforge::git+https://github.com/hyprforge-suite/hyprforge.git#tag=v0.1.12
 	source = hyprforge-clipboard::git+https://github.com/hyprforge-suite/hyprforge-clipboard.git
 	source = hyprforge-displayd::git+https://github.com/hyprforge-suite/hyprforge-displayd.git
 	source = hyprforge-emojimenu::git+https://github.com/hyprforge-suite/hyprforge-emojimenu.git
