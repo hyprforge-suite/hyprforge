@@ -87,6 +87,7 @@ impl MockSystem {
             "hyprforge-files",
             "hyprforge-files-portal",
             "hyprforge-lock",
+            "hyprforge-polkit",
             "hyprforge-media",
             "hyprforge-displayd",
             "hyprforge-trayd",
@@ -238,6 +239,14 @@ impl System for MockSystem {
 
     fn unmask(&self, unit: &str) -> Result<(), String> {
         self.with_unit("unmask", unit, |u| u.masked = false)
+    }
+
+    fn start(&self, unit: &str) -> Result<(), String> {
+        self.with_unit("start", unit, |u| u.active = !u.masked)
+    }
+
+    fn stop(&self, unit: &str) -> Result<(), String> {
+        self.with_unit("stop", unit, |u| u.active = false)
     }
 
     fn try_restart(&self, unit: &str) -> Result<(), String> {

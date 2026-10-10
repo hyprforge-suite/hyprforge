@@ -11,6 +11,16 @@ drafts the next section from git; `tools/release.sh` files it.
 
 ## [Unreleased]
 
+### Added
+
+- `hyprforge-popup`: `PopupApp::namespace`, so a popup can name its own
+  layer surface and a compositor rule can tell it apart from the rest.
+- Set up: "Administrator prompts", which makes `hyprforge-polkit` this
+  session's polkit agent — masking hyprpolkitagent for your user, which
+  holds even when your config starts it, and unmasking it on undo.
+- Set up: "Blur behind administrator prompts", a layer rule for the
+  polkit prompt's namespace.
+
 ## [0.1.11] - 2026-10-10
 
 ### Added

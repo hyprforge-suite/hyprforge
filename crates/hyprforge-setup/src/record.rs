@@ -135,6 +135,14 @@ pub enum Change {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         previous: Option<String>,
     },
+    /// hyprforge-polkit enabled, and the agents masked to make room.
+    PolkitAgent {
+        /// False when it was already enabled and only a competitor had
+        /// to go.
+        enabled_ours: bool,
+        #[serde(default)]
+        replaced: Vec<ReplacedAgent>,
+    },
 }
 
 /// A competing notification daemon that was turned off.
@@ -145,6 +153,16 @@ pub struct Replaced {
     /// every user and `disable` would have left it starting at login.
     #[serde(default)]
     pub masked: bool,
+}
+
+/// A competing polkit agent that was masked — see `items/polkit.rs` for
+/// why a mask and not a disable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplacedAgent {
+    pub unit: String,
+    /// Running when it was masked, so undo starts it again.
+    #[serde(default)]
+    pub was_active: bool,
 }
 
 /// One type's default before setup changed it. `app` absent means the
@@ -220,6 +238,10 @@ mod tests {
             Change::Snapper { allow_users: String::new(), sync_acl: "no".into() },
             Change::FingerprintPam { previous: None },
             Change::FingerprintPam { previous: Some("#%PAM-1.0\nauth include system-auth\n".into()) },
+            Change::PolkitAgent {
+                enabled_ours: true,
+                replaced: vec![ReplacedAgent { unit: "hyprpolkitagent.service".into(), was_active: true }],
+            },
         ];
         for (i, change) in changes.into_iter().enumerate() {
             record.items.insert(format!("item-{i}"), Entry { applied: format!("did {i}"), change });

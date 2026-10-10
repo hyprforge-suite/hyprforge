@@ -372,6 +372,70 @@ fn a_competing_notification_daemon_is_named_replaced_and_restored() {
     assert!(!r.sys.unit("notifd.service").unwrap().enabled_for_user);
 }
 
+/// hyprpolkitagent as this machine runs it: not enabled, started by a
+/// `systemctl --user start` line in hyprland.lua. Disabling would change
+/// nothing, so it is masked — which that line then fails against — and
+/// undo unmasks it and starts it again, leaving its enable state alone.
+#[test]
+fn an_agent_started_by_config_is_masked_and_brought_back_running() {
+    let r = rig();
+    r.sys.set_unit("hyprpolkitagent.service", MockUnit { active: true, ..Default::default() });
+    r.sys.set_process("hyprpolkitagent", true);
+    let state = r.state("service-polkit");
+    let State::Todo { what } = &state else { panic!("{state:?}") };
+    assert!(what.contains("Replace hyprpolkitagent"), "{what}");
+
+    r.apply("service-polkit").unwrap();
+    r.sys.set_process("hyprpolkitagent", false);
+    let theirs = r.sys.unit("hyprpolkitagent.service").unwrap();
+    assert!(theirs.masked && !theirs.active);
+    assert!(!theirs.enabled_for_user, "a mask, not an enable state change");
+    assert!(r.sys.unit("hyprforge-polkit.service").unwrap().active);
+    assert_eq!(r.state("service-polkit"), State::Done);
+
+    r.undo("service-polkit").unwrap();
+    let theirs = r.sys.unit("hyprpolkitagent.service").unwrap();
+    assert!(!theirs.masked && theirs.active && !theirs.enabled_for_user);
+    let ours = r.sys.unit("hyprforge-polkit.service").unwrap();
+    assert!(!ours.enabled_for_user && !ours.active);
+}
+
+/// polkit refuses a second agent, so the other one has to be gone before
+/// ours starts — the order is the point, not a detail.
+#[test]
+fn the_other_agent_stops_before_ours_starts() {
+    let r = rig();
+    r.sys.set_unit("hyprpolkitagent.service", MockUnit { enabled_for_user: true, active: true, ..Default::default() });
+    r.apply("service-polkit").unwrap();
+    let calls = r.sys.calls();
+    let mask = calls.iter().position(|c| c == "mask-now hyprpolkitagent.service").unwrap();
+    let ours = calls.iter().position(|c| c == "enable-now hyprforge-polkit.service").unwrap();
+    assert!(mask < ours, "{calls:?}");
+}
+
+/// An agent that was masked already, or never ran, is not undone into
+/// running.
+#[test]
+fn undo_starts_only_an_agent_that_was_running() {
+    let r = rig();
+    r.sys.set_unit("hyprpolkitagent.service", MockUnit { enabled_for_user: true, ..Default::default() });
+    r.apply("service-polkit").unwrap();
+    r.undo("service-polkit").unwrap();
+    let theirs = r.sys.unit("hyprpolkitagent.service").unwrap();
+    assert!(!theirs.masked && !theirs.active && theirs.enabled_for_user);
+}
+
+/// polkit-gnome by a bare `exec` cannot be switched off for good; the
+/// item names it, by its full name, rather than half-replacing it.
+#[test]
+fn an_agent_outside_systemd_is_named_and_left_alone() {
+    let r = rig();
+    r.sys.set_process("polkit-gnome-au", true);
+    let state = r.state("service-polkit");
+    let State::Unavailable { why } = &state else { panic!("{state:?}") };
+    assert!(why.contains("polkit-gnome") && why.contains("autostart"), "{why}");
+}
+
 /// A competitor a package enabled for everyone survives `disable`, so it
 /// is masked — and unmasked again on undo.
 #[test]
@@ -638,6 +702,7 @@ fn an_item_whose_program_isnt_installed_is_unavailable_not_todo() {
         ("hypridle", "idle-lock"),
         ("hyprforge-lock", "lock-restore"),
         ("notifd", "notif-blur"),
+        ("hyprforge-polkit", "polkit-blur"),
         ("hyprforge-files-portal", "portal-dialog"),
         ("hyprforge-files", "show-in-folder"),
     ] {

@@ -101,6 +101,11 @@ pub trait System {
     fn mask_now(&self, unit: &str) -> Result<(), String>;
     /// `systemctl --user unmask <unit>`.
     fn unmask(&self, unit: &str) -> Result<(), String>;
+    /// `systemctl --user start <unit>` — only ever to bring back
+    /// something setup stopped.
+    fn start(&self, unit: &str) -> Result<(), String>;
+    /// `systemctl --user stop <unit>`.
+    fn stop(&self, unit: &str) -> Result<(), String>;
     /// `systemctl --user try-restart <unit>`: restarts it only if it was
     /// running, so a change never starts something nobody started.
     fn try_restart(&self, unit: &str) -> Result<(), String>;
@@ -235,6 +240,14 @@ impl System for RealSystem {
 
     fn unmask(&self, unit: &str) -> Result<(), String> {
         systemctl(&["unmask", unit])
+    }
+
+    fn start(&self, unit: &str) -> Result<(), String> {
+        systemctl(&["start", unit])
+    }
+
+    fn stop(&self, unit: &str) -> Result<(), String> {
+        systemctl(&["stop", unit])
     }
 
     fn try_restart(&self, unit: &str) -> Result<(), String> {

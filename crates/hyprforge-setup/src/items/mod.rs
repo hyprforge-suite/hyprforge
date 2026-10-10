@@ -12,6 +12,7 @@ use crate::Env;
 
 mod binds;
 mod blur;
+mod polkit;
 mod defaults;
 mod filemanager;
 mod fingerprint;
@@ -26,11 +27,12 @@ mod wiring;
 pub use portal::{with_file_chooser, without_file_chooser, PortalEdit};
 
 /// The suite's own user units, the ones the packages preset.
-pub const SUITE_UNITS: [&str; 4] = [
+pub const SUITE_UNITS: [&str; 5] = [
     "hyprforge-displayd.service",
     "hyprforge-trayd.service",
     "hyprforge-clipd.service",
     services::NOTIFD_UNIT,
+    polkit::UNIT,
 ];
 
 /// What an item's operations are given: the paths, and the system.
@@ -81,10 +83,11 @@ enum Kind {
     Wiring,
     Service(&'static services::ServiceSpec),
     Notifd,
+    PolkitAgent,
     Bind(&'static binds::BindSpec),
     IdleLock,
     LockRestore,
-    NotifBlur,
+    Blur(&'static blur::BlurSpec),
     Defaults(&'static defaults::DefaultsSpec),
     PortalDialog,
     ShowInFolder,
@@ -111,10 +114,11 @@ impl Item {
             Kind::Wiring => &[],
             Kind::Service(spec) => spec.requires,
             Kind::Notifd => &["notifd"],
+            Kind::PolkitAgent => &["hyprforge-polkit"],
             Kind::Bind(spec) => spec.requires,
             Kind::IdleLock => &["hypridle", "hyprforge-lock"],
             Kind::LockRestore => &["hyprforge-lock"],
-            Kind::NotifBlur => &["notifd"],
+            Kind::Blur(spec) => spec.requires,
             Kind::Defaults(spec) => spec.requires,
             Kind::PortalDialog | Kind::GtkPortal => &["hyprforge-files-portal"],
             Kind::ShowInFolder => &["hyprforge-files"],
@@ -128,6 +132,7 @@ impl Item {
         match self.kind {
             Kind::Service(spec) => Some(spec.unit),
             Kind::Notifd => Some(services::NOTIFD_UNIT),
+            Kind::PolkitAgent => Some(polkit::UNIT),
             _ => None,
         }
     }
@@ -140,10 +145,11 @@ impl Item {
             Kind::Wiring => wiring::check(cx),
             Kind::Service(spec) => services::check(cx, spec),
             Kind::Notifd => services::check_notifd(cx),
+            Kind::PolkitAgent => polkit::check(cx),
             Kind::Bind(spec) => binds::check(cx, spec),
             Kind::IdleLock => idle::check(cx),
             Kind::LockRestore => lock_restore::check(cx),
-            Kind::NotifBlur => blur::check(cx),
+            Kind::Blur(spec) => blur::check(cx, spec),
             Kind::Defaults(spec) => defaults::check(cx, spec),
             Kind::PortalDialog => portal::check(cx),
             Kind::ShowInFolder => filemanager::check(cx),
@@ -159,10 +165,11 @@ impl Item {
             Kind::Wiring => wiring::apply(cx),
             Kind::Service(spec) => services::apply(cx, spec),
             Kind::Notifd => services::apply_notifd(cx),
+            Kind::PolkitAgent => polkit::apply(cx),
             Kind::Bind(spec) => binds::apply(cx, spec),
             Kind::IdleLock => idle::apply(cx),
             Kind::LockRestore => lock_restore::apply(cx),
-            Kind::NotifBlur => blur::apply(cx),
+            Kind::Blur(spec) => blur::apply(cx, spec),
             Kind::Defaults(spec) => defaults::apply(cx, spec),
             Kind::PortalDialog => portal::apply(cx),
             Kind::ShowInFolder => filemanager::apply(cx),
@@ -181,12 +188,15 @@ impl Item {
             (Kind::Notifd, Change::Notifd { enabled_notifd, replaced }) => {
                 services::undo_notifd(cx, *enabled_notifd, replaced)
             }
+            (Kind::PolkitAgent, Change::PolkitAgent { enabled_ours, replaced }) => {
+                polkit::undo(cx, *enabled_ours, replaced)
+            }
             (Kind::Bind(spec), Change::Bind { name }) => binds::undo(cx, spec, name),
             (Kind::IdleLock, Change::IdleLock { previous }) => idle::undo(cx, previous),
             (Kind::LockRestore, Change::LockRestore { previous }) => {
                 lock_restore::undo(cx, previous.as_ref())
             }
-            (Kind::NotifBlur, Change::LayerRules { names, previous }) => {
+            (Kind::Blur(_), Change::LayerRules { names, previous }) => {
                 blur::undo(cx, names, previous)
             }
             (Kind::Defaults(_), Change::Defaults { app, previous }) => {
@@ -211,7 +221,7 @@ impl Item {
 }
 
 /// Every item, in order. See the module doc for why the order matters.
-pub static ITEMS: [Item; 21] = [
+pub static ITEMS: [Item; 23] = [
     Item::new(
         "wiring",
         "Connect Hyprforge to your Hyprland config",
@@ -246,6 +256,13 @@ pub static ITEMS: [Item; 21] = [
         "Hyprforge's notification daemon, with a history centre and Do Not Disturb.",
         true,
         Kind::Notifd,
+    ),
+    Item::new(
+        "service-polkit",
+        "Administrator prompts",
+        "hyprforge-polkit asks for your password when an app needs administrator access, in place of hyprpolkitagent.",
+        true,
+        Kind::PolkitAgent,
     ),
     Item::new(
         "bind-clipboard",
@@ -308,7 +325,14 @@ pub static ITEMS: [Item; 21] = [
         "Blur behind notifications",
         "Hyprland blurs what is behind notification popups and the centre panel.",
         true,
-        Kind::NotifBlur,
+        Kind::Blur(&blur::NOTIF),
+    ),
+    Item::new(
+        "polkit-blur",
+        "Blur behind administrator prompts",
+        "Hyprland blurs what is behind the prompt for your password, as the lock screen does behind its card.",
+        true,
+        Kind::Blur(&blur::POLKIT),
     ),
     Item::new(
         "default-folders",
@@ -383,6 +407,7 @@ mod tests {
                 "service-trayd",
                 "service-clipd",
                 "service-notifd",
+                "service-polkit",
                 "bind-clipboard",
                 "bind-emoji",
                 "bind-notifications",
@@ -392,6 +417,7 @@ mod tests {
                 "idle-lock",
                 "lock-restore",
                 "notif-blur",
+                "polkit-blur",
                 "default-folders",
                 "default-images",
                 "portal-dialog",
