@@ -61,14 +61,14 @@ The photographs in these screenshots are NASA's, which are in the public domain.
   in that part, never a crash, and the PKGBUILD lists each as an optional
   dependency of the package that uses it.
 
-## Eleven repositories, one workspace
+## Twelve repositories, one workspace
 
 The suite lives in the [hyprforge-suite](https://github.com/hyprforge-suite)
 GitHub organisation (`hyprforge` itself was already taken by an unrelated
-project), and every repository in it is public. Ten components have
+project), and every repository in it is public. Eleven components have
 repositories of their own, each with green CI, and each appears here as a
 git submodule at `crates/<component>`; this repository is where the
-libraries they share live, and the only place that says how the eleven fit
+libraries they share live, and the only place that says how the twelve fit
 together.
 
 | Repository | What it is |
@@ -83,8 +83,9 @@ together.
 | [hyprforge-files](https://github.com/hyprforge-suite/hyprforge-files) | A file manager: tabs, a sidebar, list, grid and column views with thumbnails, a preview pane, the freedesktop trash, copy, paste and drag with other applications, and zip/tar/7z archives browsed and edited in place. |
 | [hyprforge-media](https://github.com/hyprforge-suite/hyprforge-media) | A photo, video and 3D model viewer: a folder browsed in the file manager's order, a date-grouped grid and library, EXIF and orientation done right, videos through libmpv, STL/3MF/OBJ models on the GPU, and a slideshow. |
 | [hyprforge-notif](https://github.com/hyprforge-suite/hyprforge-notif) | A notification daemon, `notifd`, replacing dunst or mako: the full `org.freedesktop.Notifications` server, layer-shell toasts, a notification center with history, do-not-disturb, and `notifctl` to drive them. A cargo workspace of its own, on smol rather than tokio. |
+| [hyprforge-polkit](https://github.com/hyprforge-suite/hyprforge-polkit) | A polkit authentication agent: the administrator prompt, drawn as the lock screen's card over a dimmed and blurred desktop, relaying polkit's own PAM conversation — a password, or a fingerprint where the `polkit-1` stack offers one. |
 
-Nine of the ten are meant to be installed on their own: clone
+Ten of the eleven are meant to be installed on their own: clone
 `hyprforge-clipboard` and you get a clipboard daemon and nothing else — no
 Settings app, no tray, no Hyprland config machinery. `hyprforge-settings` is
 the exception and its own README says so: it depends on eighteen other

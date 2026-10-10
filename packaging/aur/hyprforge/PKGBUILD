@@ -30,6 +30,7 @@ pkgname=(
   hyprforge-tray
   hyprforge-clipboard
   hyprforge-emojimenu
+  hyprforge-polkit
   hyprforge-files
   hyprforge-media
   hyprforge-notif
@@ -53,10 +54,11 @@ source=(
   "hyprforge-lock::git+https://github.com/hyprforge-suite/hyprforge-lock.git"
   "hyprforge-media::git+https://github.com/hyprforge-suite/hyprforge-media.git"
   "hyprforge-notif::git+https://github.com/hyprforge-suite/hyprforge-notif.git"
+  "hyprforge-polkit::git+https://github.com/hyprforge-suite/hyprforge-polkit.git"
   "hyprforge-settings::git+https://github.com/hyprforge-suite/hyprforge-settings.git"
   "hyprforge-tray::git+https://github.com/hyprforge-suite/hyprforge-tray.git"
 )
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 
 prepare() {
   cd "$srcdir/hyprforge"
@@ -73,6 +75,7 @@ prepare() {
   git config submodule.crates/hyprforge-lock.url "$srcdir/hyprforge-lock"
   git config submodule.crates/hyprforge-media.url "$srcdir/hyprforge-media"
   git config submodule.crates/hyprforge-notif.url "$srcdir/hyprforge-notif"
+  git config submodule.crates/hyprforge-polkit.url "$srcdir/hyprforge-polkit"
   git config submodule.crates/hyprforge-settings.url "$srcdir/hyprforge-settings"
   git config submodule.crates/hyprforge-tray.url "$srcdir/hyprforge-tray"
   git -c protocol.file.allow=always submodule update
@@ -186,6 +189,7 @@ package_hyprforge-settings() {
     'hyprforge-clipboard: clipboard history, which Set up binds to Super+V'
     'hyprforge-emojimenu: the emoji picker, which Set up binds to Super+.'
     'hyprforge-notif: notifications, whose center Set up binds to Super+N'
+    'hyprforge-polkit: the administrator prompt Set up puts in place of hyprpolkitagent'
     'hyprforge-files: the file manager Set up makes the default for folders'
     'hyprforge-media: the viewer Set up makes the default for pictures'
   )
@@ -375,6 +379,23 @@ package_hyprforge-emojimenu() {
   _license
 }
 
+package_hyprforge-polkit() {
+  pkgdesc="Polkit authentication agent: the administrator prompt, drawn as the lock screen's card"
+  # polkit's helper does the authenticating; the agent only relays its
+  # PAM conversation, so polkit is a hard dependency. wayland and
+  # libxkbcommon for the prompt's layer-shell surface, as the popups.
+  depends=(polkit wayland libxkbcommon)
+  optdepends=('fprintd: a fingerprint answers the prompt, once Set up adds it to polkit-1')
+  # Deliberately no preset and no .install. Enabling an agent for every
+  # user starts it beside the one they already have, and polkit accepts
+  # one per session — whichever registers first wins, at random. Taking
+  # over is Set up's "Administrator prompts" item, per user, with undo.
+  cd "$srcdir/hyprforge"
+  _bin hyprforge-polkit
+  _unit crates/hyprforge-polkit/packaging/hyprforge-polkit.service hyprforge-polkit
+  _license
+}
+
 package_hyprforge-notif() {
   pkgdesc="Notification daemon and notification center, with notifctl to drive them"
   install=hyprforge-notif.install
@@ -408,6 +429,7 @@ package_hyprforge() {
     hyprforge-tray
     hyprforge-clipboard
     hyprforge-emojimenu
+    hyprforge-polkit
     hyprforge-files
     hyprforge-media
     hyprforge-notif

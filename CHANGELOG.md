@@ -2,7 +2,7 @@
 
 Every notable change to the Hyprforge suite, newest first. The format is
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the suite is
-versioned as one: the libraries, the ten components and the Arch packages
+versioned as one: the libraries, the eleven components and the Arch packages
 share each version number (see `docs/design/repo-plan.md`).
 
 Each component's repository keeps a `CHANGELOG.md` of its own from the

@@ -231,6 +231,12 @@ Hyprland-facing
                             hyprforge-emoji, with long-press support for
                             picking a skin tone, frequently used emoji
                             first, and tabs for kaomoji and symbols.
+  hyprforge-polkit/        the polkit authentication agent: registers for
+                            the session, relays polkit's helper's PAM
+                            conversation, and draws it as the lock
+                            screen's card (hyprforge-authui) on a
+                            full-monitor PopupApp surface of its own
+                            namespace, so a layer rule can blur behind it.
   hyprforge-notif/         the notification daemon, notifd, and notifctl
                             to drive it: toasts on layer-shell surfaces, a
                             notification center, history and
@@ -279,9 +285,9 @@ Apps
                             conversation model
 ```
 
-Ten of these directories — clipboard, lock, greet, tray, settings,
-displayd, emojimenu, files, media and notif — are also their own repositories, published
-separately from this one. See "Eleven repositories, one workspace" in the [README](../README.md) for
+Eleven of these directories — clipboard, lock, greet, tray, settings,
+displayd, emojimenu, files, media, notif and polkit — are also their own repositories, published
+separately from this one. See "Twelve repositories, one workspace" in the [README](../README.md) for
 the list, and "Repositories, crates.io and where a change goes" below for
 where a change to one of them should actually be made.
 

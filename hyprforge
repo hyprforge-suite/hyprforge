@@ -77,7 +77,7 @@ NO_RESTART=false
 # The one step this script still prints rather than does: the greeter's.
 # It is captured here and printed once, at the very end, after setup has
 # run — not in the middle of the action log, where it used to sit among
-# nine other components' blocks and got skimmed past. Every other block
+# the other components' blocks and got skimmed past. Every other block
 # (enable this service, bind that key, point hypridle here, make Files
 # the default for folders) is now an item `hyprforge-settings --setup`
 # does and can undo; see run_setup.
@@ -278,6 +278,9 @@ ${B}Components${N}
                    of file is this, and what opens it. See
                    --provide-mimetype for the part that changes what the
                    rest of the desktop does.
+  --polkit         The administrator prompt: hyprforge-polkit, a polkit
+                   agent drawn as the lock screen's card, and its user
+                   unit. Setup offers to replace hyprpolkitagent.
   --emoji          The emoji picker popup, bound from Settings ->
                    Shortcuts (it has no daemon and no service).
   --all            Every component above.
@@ -331,12 +334,13 @@ while [[ $# -gt 0 ]]; do
         --clipboard)     COMPONENTS+=(clipboard) ;;
         --notif)         COMPONENTS+=(notif) ;;
         --emoji)         COMPONENTS+=(emoji) ;;
+        --polkit)        COMPONENTS+=(polkit) ;;
         --files)         COMPONENTS+=(files) ;;
         --media)        COMPONENTS+=(media) ;;
         --mime)          COMPONENTS+=(mime) ;;
         --provide-mimetype) PROVIDE_MIMETYPE=true ;;
         --settings)      COMPONENTS+=(settings) ;;
-        --all)           COMPONENTS+=(greeter lock displayd tray clipboard notif emoji files media mime settings) ;;
+        --all)           COMPONENTS+=(greeter lock displayd tray clipboard notif emoji polkit files media mime settings) ;;
         --force-cleanup) FORCE_CLEANUP=true ;;
         --dry-run)       DRY_RUN=true ;;
         --no-restart)    NO_RESTART=true ;;
@@ -349,7 +353,7 @@ done
 
 [[ -n $ACTION ]] || die "pick one of --install, --uninstall or --status"
 if [[ $ACTION != status && ${#COMPONENTS[@]} -eq 0 ]]; then
-    die "--$ACTION needs at least one component (--greeter, --lock, --displayd, --tray, --clipboard, --notif, --settings, --all)"
+    die "--$ACTION needs at least one component (--greeter, --lock, --displayd, --tray, --clipboard, --notif, --polkit, --settings, --all)"
 fi
 
 has_component() {
@@ -1066,6 +1070,54 @@ uninstall_clipboard() {
     fi
 }
 
+install_polkit() {
+    COMPONENT_CHANGED=false
+    build hyprforge-polkit
+    step "Administrator prompt"
+    install_file target/release/hyprforge-polkit "$PREFIX/hyprforge-polkit" 755
+
+    # The same ExecStart rewrite as the tray's unit, for the same reason.
+    local unit_dir="$HOME/.config/systemd/user"
+    local unit=crates/hyprforge-polkit/packaging/hyprforge-polkit.service
+    local generated
+    generated=$(mktemp)
+    trap 'rm -f "$generated"' RETURN
+    sed "s|^ExecStart=.*|ExecStart=$PREFIX/hyprforge-polkit|" "$unit" > "$generated"
+
+    if $DRY_RUN; then
+        skip "would install $unit_dir/hyprforge-polkit.service (ExecStart=$PREFIX/hyprforge-polkit)"
+    elif [[ -e $unit_dir/hyprforge-polkit.service ]] && cmp -s "$generated" "$unit_dir/hyprforge-polkit.service"; then
+        mark_current
+    else
+        install -Dm644 "$generated" "$unit_dir/hyprforge-polkit.service"
+        systemctl --user daemon-reload
+        ok "installed $unit_dir/hyprforge-polkit.service"
+    fi
+    flush_current
+
+    # Taking over from hyprpolkitagent is setup's `service-polkit` item,
+    # which this run's setup step offers: it masks the other agent (the
+    # switch that holds when hyprland.lua starts it by hand) and records
+    # that, so --uninstall can put it back. Only one agent can answer
+    # polkit, so enabling ours here, beside it, would do nothing.
+    restart_if_running hyprforge-polkit "administrator prompts"
+}
+
+uninstall_polkit() {
+    step "Administrator prompt: removing"
+    # Setup's undo (offered before this) has already brought back the
+    # agent it replaced; this only removes what --install put here.
+    if ! $DRY_RUN && timeout 5 systemctl --user is-enabled hyprforge-polkit >/dev/null 2>&1; then
+        timeout 20 systemctl --user disable --now hyprforge-polkit || true
+        ok "disabled the user service"
+    fi
+    if [[ -e "$HOME/.config/systemd/user/hyprforge-polkit.service" ]]; then
+        remove_user_path "$HOME/.config/systemd/user/hyprforge-polkit.service"
+        $DRY_RUN || timeout 20 systemctl --user daemon-reload || true
+    fi
+    remove_file "$PREFIX/hyprforge-polkit"
+}
+
 uninstall_tray() {
     step "Tray icons: removing"
     if ! $DRY_RUN && timeout 5 systemctl --user is-enabled hyprforge-trayd >/dev/null 2>&1; then
@@ -1395,6 +1447,7 @@ setup_ids_for() {
         clipboard) echo service-clipd bind-clipboard ;;
         notif)     echo service-notifd bind-notifications bind-dnd notif-blur ;;
         emoji)     echo bind-emoji ;;
+        polkit)    echo service-polkit polkit-blur ;;
         files)     echo bind-files default-folders portal-dialog show-in-folder ;;
         media)     echo default-images ;;
         lock)      echo bind-lock idle-lock lock-restore ;;
@@ -1611,7 +1664,7 @@ status_summary() {
     # line under-reported what was installed and never called them stale.
     for name in hyprforge-greet hyprforge-lock hyprforge-displayd \
                 hyprforge-trayd hyprforge-traymenu hyprforge-clipd hyprforge-clipmenu \
-                notifd notifctl hyprforge-emojimenu hyprforge-files hyprforge-media \
+                notifd notifctl hyprforge-emojimenu hyprforge-polkit hyprforge-files hyprforge-media \
                 hyprforge-mimetype hyprforge-mimeopen hyprforge-settings; do
         if [[ ! -e $PREFIX/$name ]]; then
             missing+=("$name")
@@ -1649,6 +1702,7 @@ show_status() {
     status_binary notifd
     status_binary notifctl
     status_binary hyprforge-emojimenu
+    status_binary hyprforge-polkit
     status_binary hyprforge-files
     status_binary hyprforge-files-portal
     status_binary hyprforge-files-admin
@@ -1673,6 +1727,7 @@ show_status() {
     status_service --user hyprforge-trayd "the tray icons are running"
     status_service --user hyprforge-clipd "clipboard history is being recorded"
     status_service --user notifd "notifications are being shown"
+    status_service --user hyprforge-polkit "administrator prompts are answered"
 
     status_setup
 
@@ -1711,6 +1766,7 @@ case $ACTION in
         has_component clipboard && install_clipboard
         has_component notif && install_notif
         has_component emoji && install_emoji
+        has_component polkit && install_polkit
         has_component files && install_files
         has_component media && install_media
         has_component mime && install_mime
@@ -1737,6 +1793,7 @@ case $ACTION in
         has_component clipboard && uninstall_clipboard
         has_component notif && uninstall_notif
         has_component emoji && uninstall_emoji
+        has_component polkit && uninstall_polkit
         has_component files && uninstall_files
         has_component media && uninstall_media
         has_component mime && uninstall_mime

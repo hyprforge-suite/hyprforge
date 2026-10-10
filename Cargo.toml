@@ -25,6 +25,7 @@ members = [
     "crates/hyprforge-popup",
     "crates/hyprforge-emoji",
     "crates/hyprforge-emojimenu",
+    "crates/hyprforge-polkit",
     "crates/hyprforge-tray",
     "crates/hyprforge-network",
     "crates/hyprforge-power",

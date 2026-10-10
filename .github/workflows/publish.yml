@@ -98,4 +98,4 @@ jobs:
             --exclude hyprforge-lock --exclude hyprforge-greet \
             --exclude hyprforge-settings --exclude hyprforge-displayd \
             --exclude hyprforge-emojimenu --exclude hyprforge-files \
-            --exclude hyprforge-media $SKIP
+            --exclude hyprforge-media --exclude hyprforge-polkit $SKIP

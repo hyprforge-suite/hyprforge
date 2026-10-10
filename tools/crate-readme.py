@@ -14,7 +14,7 @@ and a second copy is a thing that drifts — the class of failure
 README *is* the crate doc, plus the one thing the doc cannot say about
 itself: where it lives and how to install it.
 
-Only library crates. The nine components carry hand-written READMEs,
+Only library crates. The components carry hand-written READMEs,
 because those are the front page of a repository someone clones, and say
 things (installing, what is next door) a crate doc has no reason to.
 
@@ -35,7 +35,7 @@ ROOT = Path(__file__).resolve().parent.parent
 COMPONENTS = {
     "hyprforge-clipboard", "hyprforge-lock", "hyprforge-greet", "hyprforge-tray",
     "hyprforge-settings", "hyprforge-displayd", "hyprforge-emojimenu",
-    "hyprforge-files", "hyprforge-media",
+    "hyprforge-files", "hyprforge-media", "hyprforge-polkit",
 }
 SUITE = "https://github.com/hyprforge-suite/hyprforge"
 
