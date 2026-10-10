@@ -36,6 +36,49 @@ pub fn progress_line<'a, Message: 'a>(fraction: f32, scale: FontScale) -> Elemen
         .into()
 }
 
+/// One bar split into parts: where something went — CPU time by kind,
+/// memory by use, a disk by what fills it. Each part is a fraction of
+/// the whole and a colour from the theme's roles (never the accent,
+/// which means selected); what the parts leave is the empty track.
+///
+/// Drawn as proportioned blocks, not a canvas, so it lays out like any
+/// other row and a zero part takes no room at all.
+pub fn stacked_bar<'a, Message: 'a>(parts: &[(f32, iced::Color)], scale: FontScale) -> Element<'a, Message> {
+    const STEPS: f32 = 1000.0;
+    let height = scale.apply(PROGRESS_GIRTH_BASE * 2.0);
+    let mut used = 0u16;
+    let mut bar = iced::widget::Row::new();
+    for &(fraction, color) in parts {
+        let portion = (fraction.clamp(0.0, 1.0) * STEPS).round() as u16;
+        if portion == 0 {
+            continue;
+        }
+        used = used.saturating_add(portion);
+        bar = bar.push(
+            iced::widget::container(iced::widget::Space::new())
+                .width(Length::FillPortion(portion))
+                .height(Length::Fixed(height))
+                .style(move |_t: &iced::Theme| iced::widget::container::Style {
+                    background: Some(Background::Color(color)),
+                    ..iced::widget::container::Style::default()
+                }),
+        );
+    }
+    let rest = (STEPS as u16).saturating_sub(used);
+    if rest > 0 {
+        bar = bar.push(iced::widget::Space::new().width(Length::FillPortion(rest)).height(Length::Fixed(height)));
+    }
+    iced::widget::container(bar)
+        .width(Length::Fill)
+        .clip(true)
+        .style(move |_t: &iced::Theme| iced::widget::container::Style {
+            background: Some(Background::Color(surface::row())),
+            border: Border { radius: (height / 2.0).into(), ..Border::default() },
+            ..iced::widget::container::Style::default()
+        })
+        .into()
+}
+
 /// [`progress_line`]'s look, on its own so a test can hold it to the
 /// rule above.
 pub fn progress_line_style() -> progress_bar::Style {

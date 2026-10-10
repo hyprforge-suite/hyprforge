@@ -38,7 +38,7 @@ pub use layout::{
     setting_row_style, status_dot, SETTING_ROW_GAP,
 };
 pub use marquee::{band_rect, edge_scroll, marquee, Marquee};
-pub use progress::{popover_card, progress_line, progress_line_style};
+pub use progress::{popover_card, progress_line, progress_line_style, stacked_bar};
 pub use panel::{fact, fact_row, panel_tabs};
 pub use ring::{countdown_ring, remaining_fraction};
 pub use scrim::{scrim, scrim_color, SCRIM_ALPHA};
