@@ -11,6 +11,28 @@ drafts the next section from git; `tools/release.sh` files it.
 
 ## [Unreleased]
 
+### Added
+
+- A website, at https://hyprforge-suite.github.io/hyprforge/, with a page
+  for each component and screenshots of each; the READMEs show the same
+  screenshots.
+- `hyprforge-fileops`: `Report::denied` and `OpsError::is_permission` say
+  which failures were for want of permission, as data rather than as a
+  sentence to recognise.
+
+### Changed
+
+- Tray: a menu is as wide as its widest label, measured, from 220 up to
+  360px, and only a label wider than that is cut — the battery line no
+  longer ends "charging, fu…".
+- Files: the path bar shows as much of the path as the field has room
+  for, rather than at most three crumbs at any width.
+
+### Fixed
+
+- Popups: no square corner showed behind the rounded corners of the
+  clipboard history, the emoji picker and the notification center.
+
 ## [0.1.9] - 2026-10-08
 
 ### Added
