@@ -35,7 +35,7 @@ ROOT = Path(__file__).resolve().parent.parent
 COMPONENTS = {
     "hyprforge-clipboard", "hyprforge-lock", "hyprforge-greet", "hyprforge-tray",
     "hyprforge-settings", "hyprforge-displayd", "hyprforge-emojimenu",
-    "hyprforge-files", "hyprforge-media", "hyprforge-polkit",
+    "hyprforge-files", "hyprforge-media", "hyprforge-polkit", "hyprforge-procman",
 }
 SUITE = "https://github.com/hyprforge-suite/hyprforge"
 

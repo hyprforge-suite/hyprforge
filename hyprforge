@@ -281,6 +281,11 @@ ${B}Components${N}
   --polkit         The administrator prompt: hyprforge-polkit, a polkit
                    agent drawn as the lock screen's card, and its user
                    unit. Setup offers to replace hyprpolkitagent.
+  --procman        The process manager: the window, hyprforge-top, the
+                   root helper it asks through polkit (D-Bus activation,
+                   bus policy, polkit actions) and the history recorder's
+                   system unit — installed, never enabled: that is
+                   Setup's "Record system history", off unless chosen.
   --emoji          The emoji picker popup, bound from Settings ->
                    Shortcuts (it has no daemon and no service).
   --all            Every component above.
@@ -335,12 +340,13 @@ while [[ $# -gt 0 ]]; do
         --notif)         COMPONENTS+=(notif) ;;
         --emoji)         COMPONENTS+=(emoji) ;;
         --polkit)        COMPONENTS+=(polkit) ;;
+        --procman)       COMPONENTS+=(procman) ;;
         --files)         COMPONENTS+=(files) ;;
         --media)        COMPONENTS+=(media) ;;
         --mime)          COMPONENTS+=(mime) ;;
         --provide-mimetype) PROVIDE_MIMETYPE=true ;;
         --settings)      COMPONENTS+=(settings) ;;
-        --all)           COMPONENTS+=(greeter lock displayd tray clipboard notif emoji polkit files media mime settings) ;;
+        --all)           COMPONENTS+=(greeter lock displayd tray clipboard notif emoji polkit procman files media mime settings) ;;
         --force-cleanup) FORCE_CLEANUP=true ;;
         --dry-run)       DRY_RUN=true ;;
         --no-restart)    NO_RESTART=true ;;
@@ -353,7 +359,7 @@ done
 
 [[ -n $ACTION ]] || die "pick one of --install, --uninstall or --status"
 if [[ $ACTION != status && ${#COMPONENTS[@]} -eq 0 ]]; then
-    die "--$ACTION needs at least one component (--greeter, --lock, --displayd, --tray, --clipboard, --notif, --polkit, --settings, --all)"
+    die "--$ACTION needs at least one component (--greeter, --lock, --displayd, --tray, --clipboard, --notif, --polkit, --procman, --settings, --all)"
 fi
 
 has_component() {
@@ -406,7 +412,9 @@ build() {
     if $DRY_RUN; then
         return 0
     fi
-    cargo build --release -p "$package" 2>&1 | grep -vE "^\s*(Compiling|Finished)" || true
+    # BUILD_FEATURES, set on the call, for a package whose binaries
+    # need features its plain build leaves off (procman's).
+    cargo build --release -p "$package" ${BUILD_FEATURES:+--features "$BUILD_FEATURES"} 2>&1 | grep -vE "^\s*(Compiling|Finished)" || true
     for binary in "${binaries[@]}"; do
         [[ -x target/release/${binary} ]] || die "cargo did not produce target/release/$binary"
         ok "built target/release/$binary"
@@ -1118,6 +1126,103 @@ uninstall_polkit() {
     remove_file "$PREFIX/hyprforge-polkit"
 }
 
+# procman's root half. The helper is started by the system bus, never by
+# a person, so it sits beside its activation file's path rather than on
+# PATH; the bus policy, the polkit actions and the recorder's unit are
+# the system's, so they go where the system reads them.
+readonly PROCMAN_LIBEXEC=/usr/local/lib/hyprforge
+readonly DBUS_SYSTEM_SERVICES_DIR=/usr/share/dbus-1/system-services
+readonly DBUS_SYSTEM_POLICY_DIR=/usr/share/dbus-1/system.d
+readonly SYSTEM_UNIT_DIR=/etc/systemd/system
+readonly PROCMAN_RECORDER_CONFIG=/etc/hyprforge/procman-recorder.toml
+
+install_procman() {
+    COMPONENT_CHANGED=false
+    # Four programs, one crate; the terminal view and the eBPF network
+    # counter are features a plain build leaves off.
+    BUILD_FEATURES=tui,netbpf build hyprforge-procman hyprforge-procman hyprforge-top \
+        hyprforge-procman-helper hyprforge-procman-recorder
+    step "Process manager"
+    local p=crates/hyprforge-procman/packaging generated
+    install_file target/release/hyprforge-procman "$PREFIX/hyprforge-procman" 755
+    install_file target/release/hyprforge-top "$PREFIX/hyprforge-top" 755
+
+    # The helper, and the activation file that names it — rewritten from
+    # the package's /usr/lib to this install's place.
+    install_file target/release/hyprforge-procman-helper "$PROCMAN_LIBEXEC/hyprforge-procman-helper" 755
+    generated=$(mktemp)
+    trap 'rm -f "$generated"' RETURN
+    sed "s|^Exec=.*|Exec=$PROCMAN_LIBEXEC/hyprforge-procman-helper|" "$p/dev.hyprforge.ProcMan1.service" > "$generated"
+    COMPONENT_CHANGED=false
+    install_file "$generated" "$DBUS_SYSTEM_SERVICES_DIR/dev.hyprforge.ProcMan1.service" 644
+    install_file "$p/dev.hyprforge.ProcMan1.conf" "$DBUS_SYSTEM_POLICY_DIR/dev.hyprforge.ProcMan1.conf" 644
+    install_file "$p/org.hyprforge.procman.policy" "$POLKIT_ACTIONS_DIR/org.hyprforge.procman.policy" 644
+    # The bus reads its policy when told to; a helper the old policy
+    # doesn't know may not own its name until then. A helper already
+    # running exits when idle and is started anew, so it needs no restart.
+    if $COMPONENT_CHANGED; then
+        run_root busctl call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig ||
+            warn "couldn't ask the system bus to reload its policy — the helper may not start until it does"
+    fi
+
+    # The recorder: its binary, its unit pointed at it, and its config —
+    # which is the administrator's once it exists, so never replaced.
+    COMPONENT_CHANGED=false
+    install_file target/release/hyprforge-procman-recorder "$PREFIX/hyprforge-procman-recorder" 755
+    sed "s|^ExecStart=.*|ExecStart=$PREFIX/hyprforge-procman-recorder|" "$p/hyprforge-procman-recorder.service" > "$generated"
+    install_file "$generated" "$SYSTEM_UNIT_DIR/hyprforge-procman-recorder.service" 644
+    if [[ -e $PROCMAN_RECORDER_CONFIG ]]; then
+        mark_current
+    else
+        install_file "$p/procman-recorder.toml" "$PROCMAN_RECORDER_CONFIG" 644
+    fi
+    if $COMPONENT_CHANGED; then
+        run_root systemctl daemon-reload
+        # Enabling is Setup's "Record system history", never this script's;
+        # a recorder already running is restarted onto what was installed.
+        if ! $NO_RESTART && timeout 5 systemctl is-active --quiet hyprforge-procman-recorder; then
+            run_root systemctl restart hyprforge-procman-recorder &&
+                { $DRY_RUN || ok "restarted the history recorder onto the new build"; }
+        fi
+    fi
+
+    local entry=$p/hyprforge-procman.desktop dst="$DESKTOP_DIR/hyprforge-procman.desktop"
+    if $DRY_RUN; then
+        skip "would install $dst"
+    elif [[ -e $dst ]] && cmp -s "$entry" "$dst"; then
+        mark_current
+    else
+        install -Dm644 "$entry" "$dst"
+        ok "installed $dst"
+    fi
+    flush_current
+}
+
+uninstall_procman() {
+    step "Process manager: removing"
+    # Setup's undo (offered before this) has already switched recording
+    # off if Setup switched it on; one enabled by hand is stopped here,
+    # since its binary is about to go. The history stays: it is the
+    # administrator's, in /var/log, and --force-cleanup does not reach it.
+    if ! $DRY_RUN && timeout 5 systemctl is-enabled hyprforge-procman-recorder >/dev/null 2>&1; then
+        run_root systemctl disable --now hyprforge-procman-recorder || true
+        ok "stopped the history recorder"
+    fi
+    remove_file "$SYSTEM_UNIT_DIR/hyprforge-procman-recorder.service"
+    [[ -e $SYSTEM_UNIT_DIR/hyprforge-procman-recorder.service ]] || $DRY_RUN || run_root systemctl daemon-reload || true
+    remove_file "$PREFIX/hyprforge-procman-recorder"
+    remove_file "$DBUS_SYSTEM_SERVICES_DIR/dev.hyprforge.ProcMan1.service"
+    remove_file "$DBUS_SYSTEM_POLICY_DIR/dev.hyprforge.ProcMan1.conf"
+    remove_file "$POLKIT_ACTIONS_DIR/org.hyprforge.procman.policy"
+    remove_file "$PROCMAN_LIBEXEC/hyprforge-procman-helper"
+    remove_file "$PREFIX/hyprforge-top"
+    remove_file "$PREFIX/hyprforge-procman"
+    remove_user_path "$DESKTOP_DIR/hyprforge-procman.desktop"
+    if [[ -e $PROCMAN_RECORDER_CONFIG ]]; then
+        skip "kept $PROCMAN_RECORDER_CONFIG and any history in /var/log/hyprforge/procman (yours to remove)"
+    fi
+}
+
 uninstall_tray() {
     step "Tray icons: removing"
     if ! $DRY_RUN && timeout 5 systemctl --user is-enabled hyprforge-trayd >/dev/null 2>&1; then
@@ -1448,6 +1553,7 @@ setup_ids_for() {
         notif)     echo service-notifd bind-notifications bind-dnd notif-blur ;;
         emoji)     echo bind-emoji ;;
         polkit)    echo service-polkit polkit-blur ;;
+        procman)   echo bind-procman record-history ;;
         files)     echo bind-files default-folders portal-dialog show-in-folder ;;
         media)     echo default-images ;;
         lock)      echo bind-lock idle-lock lock-restore ;;
@@ -1664,7 +1770,8 @@ status_summary() {
     # line under-reported what was installed and never called them stale.
     for name in hyprforge-greet hyprforge-lock hyprforge-displayd \
                 hyprforge-trayd hyprforge-traymenu hyprforge-clipd hyprforge-clipmenu \
-                notifd notifctl hyprforge-emojimenu hyprforge-polkit hyprforge-files hyprforge-media \
+                notifd notifctl hyprforge-emojimenu hyprforge-polkit hyprforge-procman hyprforge-top \
+                hyprforge-procman-recorder hyprforge-files hyprforge-media \
                 hyprforge-mimetype hyprforge-mimeopen hyprforge-settings; do
         if [[ ! -e $PREFIX/$name ]]; then
             missing+=("$name")
@@ -1703,6 +1810,9 @@ show_status() {
     status_binary notifctl
     status_binary hyprforge-emojimenu
     status_binary hyprforge-polkit
+    status_binary hyprforge-procman
+    status_binary hyprforge-top
+    status_binary hyprforge-procman-recorder
     status_binary hyprforge-files
     status_binary hyprforge-files-portal
     status_binary hyprforge-files-admin
@@ -1728,6 +1838,7 @@ show_status() {
     status_service --user hyprforge-clipd "clipboard history is being recorded"
     status_service --user notifd "notifications are being shown"
     status_service --user hyprforge-polkit "administrator prompts are answered"
+    status_service --system hyprforge-procman-recorder "the machine's history is being recorded"
 
     status_setup
 
@@ -1767,6 +1878,7 @@ case $ACTION in
         has_component notif && install_notif
         has_component emoji && install_emoji
         has_component polkit && install_polkit
+        has_component procman && install_procman
         has_component files && install_files
         has_component media && install_media
         has_component mime && install_mime
@@ -1794,6 +1906,7 @@ case $ACTION in
         has_component notif && uninstall_notif
         has_component emoji && uninstall_emoji
         has_component polkit && uninstall_polkit
+        has_component procman && uninstall_procman
         has_component files && uninstall_files
         has_component media && uninstall_media
         has_component mime && uninstall_mime

@@ -12,8 +12,8 @@ Two things have to be true at once, and they are not the same thing:
   `web-colors` bug was a single `default-features = false` rather than
   the same edit in five apps.
 - **Install one part** — already solved, and not by repository layout.
-  `packaging/arch/PKGBUILD` builds one source tree into twelve packages
-  (eleven components and the `hyprforge` metapackage);
+  `packaging/arch/PKGBUILD` builds one source tree into thirteen packages
+  (twelve components and the `hyprforge` metapackage);
   `pacman -S hyprforge-clipboard` installs two binaries and no other
   Hyprforge package. Packaging granularity and repository granularity are
   different questions.
@@ -406,9 +406,9 @@ async-io and panic — and three things follow from that shape:
 ## Releases: one version, cut by `tools/release.sh`
 
 The whole suite shares one version — the libraries (which inherit
-`[workspace.package].version`), the eleven components, notif's crates and
+`[workspace.package].version`), the twelve components, notif's crates and
 the PKGBUILD's `pkgver`. The PKGBUILD already builds one tree into
-twelve packages at one version, so "Hyprforge 0.2.0" should name one
+thirteen packages at one version, so "Hyprforge 0.2.0" should name one
 tree too. Before this was decided (2026-10-08) only the libraries moved:
 by v0.1.8 the clipboard and tray (published, so they had to) were at
 0.1.8 and the other seven components and notif still said 0.1.0.
@@ -441,7 +441,7 @@ component's path is only pin bumps.
 
 **The AUR.** `packaging/arch/PKGBUILD` builds the checkout it sits in.
 `tools/aur.py` renders `packaging/aur/hyprforge` from it with real
-sources: the suite at `#tag=v$pkgver` and the eleven component repositories,
+sources: the suite at `#tag=v$pkgver` and the twelve component repositories,
 each submodule pointed at makepkg's copy in `prepare`. A render only
 builds when the tag carries the same packaging, which is why it is made
 at release time: today's render at 0.1.8 fetches and prepares against

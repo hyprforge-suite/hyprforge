@@ -25,6 +25,9 @@
 [submodule "crates/hyprforge-polkit"]
 	path = crates/hyprforge-polkit
 	url = https://github.com/hyprforge-suite/hyprforge-polkit.git
+[submodule "crates/hyprforge-procman"]
+	path = crates/hyprforge-procman
+	url = https://github.com/hyprforge-suite/hyprforge-procman.git
 [submodule "crates/hyprforge-settings"]
 	path = crates/hyprforge-settings
 	url = https://github.com/hyprforge-suite/hyprforge-settings.git

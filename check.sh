@@ -1699,7 +1699,7 @@ else
     # `-m` so every file is dated now: cargo leaves a package's directory
     # out of its fingerprint, and an extraction dated older than the last
     # one in the shared target would be judged fresh and never compiled.
-    # One shared target, so ten components cost one build of iced.
+    # One shared target, so every component costs one build of iced.
     step "Components build against published crates"
     standalone_target="$PWD/target/standalone"
     broken=()

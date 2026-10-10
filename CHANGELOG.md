@@ -2,7 +2,7 @@
 
 Every notable change to the Hyprforge suite, newest first. The format is
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the suite is
-versioned as one: the libraries, the eleven components and the Arch packages
+versioned as one: the libraries, the twelve components and the Arch packages
 share each version number (see `docs/design/repo-plan.md`).
 
 Each component's repository keeps a `CHANGELOG.md` of its own from the
@@ -10,6 +10,15 @@ first release after this file was started. `tools/changelog.py draft`
 drafts the next section from git; `tools/release.sh` files it.
 
 ## [Unreleased]
+
+### Added
+
+- `hyprforge-procman`, the twelfth component: a process manager with Task
+  Manager as the floor, a polkit-checked root helper, `hyprforge-top`
+  (atop's screen and atopsar's reports in a terminal), and a recorder that
+  keeps a root-only history of the whole machine, with network per process
+  counted by eBPF. Packaged as `hyprforge-procman`, and `--procman` in the
+  installer.
 
 ## [0.1.13] - 2026-10-10
 

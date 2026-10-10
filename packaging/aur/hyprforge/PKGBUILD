@@ -31,6 +31,7 @@ pkgname=(
   hyprforge-clipboard
   hyprforge-emojimenu
   hyprforge-polkit
+  hyprforge-procman
   hyprforge-files
   hyprforge-media
   hyprforge-notif
@@ -42,7 +43,10 @@ pkgdesc="Native Hyprland desktop applications"
 arch=(x86_64)
 url="https://github.com/hyprforge-suite/hyprforge"
 license=(MIT)
-makedepends=(cargo git)
+# clang and libbpf's headers compile procman's eBPF network counter
+# (crates/hyprforge-procman/bpf/net.bpf.c) into its binaries; nothing of
+# either is needed at run time.
+makedepends=(cargo git clang libbpf)
 options=(!lto)
 source=(
   "hyprforge::git+https://github.com/hyprforge-suite/hyprforge.git#tag=v$pkgver"
@@ -55,10 +59,13 @@ source=(
   "hyprforge-media::git+https://github.com/hyprforge-suite/hyprforge-media.git"
   "hyprforge-notif::git+https://github.com/hyprforge-suite/hyprforge-notif.git"
   "hyprforge-polkit::git+https://github.com/hyprforge-suite/hyprforge-polkit.git"
+  "hyprforge-procman::git+https://github.com/hyprforge-suite/hyprforge-procman.git"
   "hyprforge-settings::git+https://github.com/hyprforge-suite/hyprforge-settings.git"
   "hyprforge-tray::git+https://github.com/hyprforge-suite/hyprforge-tray.git"
 )
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+_procman_features=hyprforge-procman/tui,hyprforge-procman/netbpf
 
 prepare() {
   cd "$srcdir/hyprforge"
@@ -76,6 +83,7 @@ prepare() {
   git config submodule.crates/hyprforge-media.url "$srcdir/hyprforge-media"
   git config submodule.crates/hyprforge-notif.url "$srcdir/hyprforge-notif"
   git config submodule.crates/hyprforge-polkit.url "$srcdir/hyprforge-polkit"
+  git config submodule.crates/hyprforge-procman.url "$srcdir/hyprforge-procman"
   git config submodule.crates/hyprforge-settings.url "$srcdir/hyprforge-settings"
   git config submodule.crates/hyprforge-tray.url "$srcdir/hyprforge-tray"
   git -c protocol.file.allow=always submodule update
@@ -93,7 +101,9 @@ build() {
   export CARGO_TARGET_DIR="$srcdir/target"
   # One build for every package below. Splitting the repository would
   # mean building the shared crates once per component instead.
-  cargo build --release --frozen --workspace
+  # procman's terminal view and its network counter are features, off
+  # for a plain `cargo build` so the recorder can be built with neither.
+  cargo build --release --frozen --workspace --features "$_procman_features"
   (cd crates/hyprforge-notif && cargo build --release --frozen --workspace)
 }
 
@@ -104,7 +114,7 @@ check() {
   # Tier 1 only. The other tiers need a running compositor, NetworkManager,
   # BlueZ, logind and a bar, none of which exist in a build chroot — see
   # check.sh's header.
-  cargo test --release --frozen --workspace
+  cargo test --release --frozen --workspace --features "$_procman_features"
   (cd crates/hyprforge-notif && cargo test --release --frozen --workspace)
 }
 
@@ -190,6 +200,7 @@ package_hyprforge-settings() {
     'hyprforge-emojimenu: the emoji picker, which Set up binds to Super+.'
     'hyprforge-notif: notifications, whose center Set up binds to Super+N'
     'hyprforge-polkit: the administrator prompt Set up puts in place of hyprpolkitagent'
+    'hyprforge-procman: the process manager Set up binds to Ctrl+Shift+Escape, and the history recorder it switches on'
     'hyprforge-files: the file manager Set up makes the default for folders'
     'hyprforge-media: the viewer Set up makes the default for pictures'
   )
@@ -396,6 +407,40 @@ package_hyprforge-polkit() {
   _license
 }
 
+package_hyprforge-procman() {
+  pkgdesc="Process manager for Hyprland, with atop's terminal view and a system history recorder"
+  backup=(etc/hyprforge/procman-recorder.toml)
+  depends=(wayland libxkbcommon)
+  optdepends=(
+    # The helper asks polkit before every call; without polkitd, Show
+    # everything and acting on another user's process say they weren't
+    # allowed, and the rest of the window is unaffected.
+    "polkit: Show everything, ending another user's process, and reading the recorded history"
+  )
+  # Deliberately no preset and no .install: the recorder samples every
+  # process as root, all day, and that is the user's decision. Settings
+  # -> Set up's "Record system history" enables it, with undo.
+  local p=crates/hyprforge-procman/packaging
+  cd "$srcdir/hyprforge"
+  _bin hyprforge-procman
+  _bin hyprforge-top
+  _bin hyprforge-procman-recorder
+  # The helper is started by the system bus, never by a person, so it
+  # lives where its activation file says: /usr/lib/hyprforge.
+  install -Dm755 "$srcdir/target/release/hyprforge-procman-helper" "$pkgdir/usr/lib/hyprforge/hyprforge-procman-helper"
+  grep -qx 'Exec=/usr/lib/hyprforge/hyprforge-procman-helper' $p/dev.hyprforge.ProcMan1.service ||
+    { echo "the helper's activation file doesn't name /usr/lib/hyprforge" >&2; return 1; }
+  install -Dm644 $p/dev.hyprforge.ProcMan1.service "$pkgdir/usr/share/dbus-1/system-services/dev.hyprforge.ProcMan1.service"
+  install -Dm644 $p/dev.hyprforge.ProcMan1.conf "$pkgdir/usr/share/dbus-1/system.d/dev.hyprforge.ProcMan1.conf"
+  install -Dm644 $p/org.hyprforge.procman.policy "$pkgdir/usr/share/polkit-1/actions/org.hyprforge.procman.policy"
+  # A system unit, already pointing at /usr/bin: it is root's, not a
+  # user's, so _unit's rewrite for user units doesn't apply.
+  install -Dm644 $p/hyprforge-procman-recorder.service "$pkgdir/usr/lib/systemd/system/hyprforge-procman-recorder.service"
+  install -Dm644 $p/procman-recorder.toml "$pkgdir/etc/hyprforge/procman-recorder.toml"
+  install -Dm644 $p/hyprforge-procman.desktop "$pkgdir/usr/share/applications/hyprforge-procman.desktop"
+  _license crates/hyprforge-procman/LICENSE
+}
+
 package_hyprforge-notif() {
   pkgdesc="Notification daemon and notification center, with notifctl to drive them"
   install=hyprforge-notif.install
@@ -430,6 +475,7 @@ package_hyprforge() {
     hyprforge-clipboard
     hyprforge-emojimenu
     hyprforge-polkit
+    hyprforge-procman
     hyprforge-files
     hyprforge-media
     hyprforge-notif

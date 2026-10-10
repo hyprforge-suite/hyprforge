@@ -768,7 +768,7 @@ a spare VT.
 
 ### Working with the components
 
-The eleven components are **git submodules** at `crates/<component>`, each
+The twelve components are **git submodules** at `crates/<component>`, each
 the real home of its code (issue #2; `docs/design/repo-plan.md` has the mechanism and
 the history). Clone with `--recurse-submodules`, or run `git submodule
 update --init` — `check.sh` says so first when one is empty, and so does

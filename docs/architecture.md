@@ -285,9 +285,9 @@ Apps
                             conversation model
 ```
 
-Eleven of these directories — clipboard, lock, greet, tray, settings,
-displayd, emojimenu, files, media, notif and polkit — are also their own repositories, published
-separately from this one. See "Twelve repositories, one workspace" in the [README](../README.md) for
+Twelve of these directories — clipboard, lock, greet, tray, settings,
+displayd, emojimenu, files, media, notif, polkit and procman — are also their own repositories, published
+separately from this one. See "Thirteen repositories, one workspace" in the [README](../README.md) for
 the list, and "Repositories, crates.io and where a change goes" below for
 where a change to one of them should actually be made.
 

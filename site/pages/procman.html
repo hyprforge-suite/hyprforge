@@ -1,0 +1,58 @@
+<!-- title: Process manager | description: hyprforge-procman — a process manager for Hyprland: Task Manager as the floor, atop's screen in a terminal, and a recorder that keeps the whole machine's history for when something went wrong while you weren't looking. | nav: components -->
+
+<div class="wrap">
+  <header class="hero">
+    <p class="kicker after-lines"><a href="components.html">What's in it</a><span class="sep">/</span>hyprforge-procman</p>
+    <h1 class="display" style="max-width:13ch"><span class="line">What's running,</span> <span class="line">what it costs,</span> <span class="line">and <em>what it was</em>.</span></h1>
+    <div class="after-lines">
+      <p class="standfirst">Task Manager is where it starts: your apps grouped by their windows, every core and disk and GPU, services, startup. Then it does what a desktop task manager can't: atop's screen in a terminal, and a history of the whole machine you can go back through.</p>
+      <div class="actions">
+        <a class="button" href="install.html">Install it <span class="arr">→</span></a>
+        <a class="textlink" href="https://github.com/hyprforge-suite/hyprforge-procman">Source on GitHub</a>
+      </div>
+    </div>
+  </header>
+
+  <div class="after-lines" style="max-width:820px"><shot name="procman" alt="The process manager's Processes tab: apps grouped by their windows, with CPU, memory, disk, network and GPU columns" need="Processes, with a few apps open and their windows' titles under them, in the voldemort persona" eager="1"></div>
+
+  <section class="sect" style="margin-top:96px">
+    <div class="label"><b>§1</b>What it does</div>
+    <div class="body">
+      <dl class="features" data-stagger>
+        <div><dt>Apps by their windows</dt><dd>Hyprland says which process owns each window, so an app is everything it started, with the window's title under it. Then background processes, then the kernel's.</dd></div>
+        <div><dt>Every GPU, asleep or awake</dt><dd>Which card each app is using and how hard. A laptop's NVIDIA card is read only while it's already awake, so looking never wakes it.</dd></div>
+        <div><dt>Services, beside their processes</dt><dd>System and user units with the CPU and memory of their own cgroups, failed ones first, and the journal next to them.</dd></div>
+        <div><dt>Never the wrong process</dt><dd>Ending a process goes through a handle to that exact process, so a number the system has since given to something else is never hit.</dd></div>
+        <div><dt>Everyone's, when you ask</dt><dd>Show everything asks for your password once and fills in other users' disk, network and open files, through a small helper that checks with polkit every time.</dd></div>
+        <div><dt>Network per process</dt><dd>Counted in the kernel at the point each program hands data to a socket, so video calls and QUIC count, not just TCP.</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§2</b>In a terminal</div>
+    <div class="body two">
+      <div class="prose">
+        <h2 class="title" style="margin-bottom:22px">atop's screen, and atop's keys.</h2>
+        <p><code>hyprforge-top</code> is for when there's no desktop to open a window on: over SSH, on a spare console, in a recovery shell. The header lines and views are atop's, and so are the keys, so you don't have to learn anything new.</p>
+        <p><code>hyprforge-top report</code> adds up a day, ten minutes at a time: CPU, memory, disks, network, pressure, and the programs that used the most. As text, or as JSON for something else to read.</p>
+      </div>
+      <shot name="procman-top" alt="hyprforge-top in a terminal: atop's header lines over a list of processes" ratio="16/10" need="hyprforge-top in a terminal, the generic view, voldemort persona"></div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§3</b>The hard part</div>
+    <div class="body two">
+      <div class="prose">
+        <h2 class="title" style="margin-bottom:22px">What was it doing at 3 a.m.?</h2>
+        <p>A task manager only shows now. The recorder keeps a record of every process every ten seconds, about 30 MB a day and under half a percent of one core. The Recorded tab draws a day and marks where the machine was struggling. Pick a moment and see what was busiest, and what the hour around it added up to.</p>
+        <p>That record has every program's command line in it, and command lines can hold passwords. So it's readable by root alone, where atop's own logs are readable by anyone. You get it through the same password prompt as Show everything. It's off until you switch it on in Set up.</p>
+      </div>
+      <shot name="procman-recorded" alt="The Recorded tab: a day of CPU, memory and I/O pressure, with a moment picked and the processes busiest in it" ratio="16/10" need="Recorded tab over a real day with a strained stretch, voldemort persona"></div>
+  </section>
+
+  <nav class="next" style="margin-bottom:40px">
+    <a href="settings.html"><span>Back to</span><b>Settings, whose Set up turns the recorder on →</b></a>
+    <a href="components.html"><span>Or</span><b>Everything else in the suite →</b></a>
+  </nav>
+</div>

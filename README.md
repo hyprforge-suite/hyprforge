@@ -66,14 +66,14 @@ The photographs in these screenshots are NASA's, which are in the public domain.
   in that part, never a crash, and the PKGBUILD lists each as an optional
   dependency of the package that uses it.
 
-## Twelve repositories, one workspace
+## Thirteen repositories, one workspace
 
 The suite lives in the [hyprforge-suite](https://github.com/hyprforge-suite)
 GitHub organisation (`hyprforge` itself was already taken by an unrelated
-project), and every repository in it is public. Eleven components have
+project), and every repository in it is public. Twelve components have
 repositories of their own, each with green CI, and each appears here as a
 git submodule at `crates/<component>`; this repository is where the
-libraries they share live, and the only place that says how the twelve fit
+libraries they share live, and the only place that says how the thirteen fit
 together.
 
 | Repository | What it is |
@@ -88,9 +88,10 @@ together.
 | [hyprforge-files](https://github.com/hyprforge-suite/hyprforge-files) | A file manager: tabs, a sidebar, list, grid and column views with thumbnails, a preview pane, the freedesktop trash, copy, paste and drag with other applications, and zip/tar/7z archives browsed and edited in place. |
 | [hyprforge-media](https://github.com/hyprforge-suite/hyprforge-media) | A photo, video and 3D model viewer: a folder browsed in the file manager's order, a date-grouped grid and library, EXIF and orientation done right, videos through libmpv, STL/3MF/OBJ models on the GPU, and a slideshow. |
 | [hyprforge-notif](https://github.com/hyprforge-suite/hyprforge-notif) | A notification daemon, `notifd`, replacing dunst or mako: the full `org.freedesktop.Notifications` server, layer-shell toasts, a notification center with history, do-not-disturb, and `notifctl` to drive them. A cargo workspace of its own, on smol rather than tokio. |
+| [hyprforge-procman](https://github.com/hyprforge-suite/hyprforge-procman) | A process manager with Task Manager as the floor: processes grouped by window, Performance, Startup, Users, Details and Services, through a polkit-checked root helper. `hyprforge-top` is atop's screen in a terminal, and a recorder keeps a root-only history of the whole machine, with network per process counted by eBPF. |
 | [hyprforge-polkit](https://github.com/hyprforge-suite/hyprforge-polkit) | A polkit authentication agent: the administrator prompt, drawn as the lock screen's card over a dimmed and blurred desktop, relaying polkit's own PAM conversation — a password, or a fingerprint where the `polkit-1` stack offers one. |
 
-Ten of the eleven are meant to be installed on their own: clone
+Eleven of the twelve are meant to be installed on their own: clone
 `hyprforge-clipboard` and you get a clipboard daemon and nothing else — no
 Settings app, no tray, no Hyprland config machinery. `hyprforge-settings` is
 the exception and its own README says so: it depends on eighteen other
