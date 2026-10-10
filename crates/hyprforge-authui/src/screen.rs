@@ -56,7 +56,7 @@ impl<T> ScreenRenderer for T where
 {
 }
 
-type El<'a, R> = Element<'a, Action, iced_widget::Theme, R>;
+pub type El<'a, R> = Element<'a, Action, iced_widget::Theme, R>;
 
 /// Beyond this many characters the dots stop being countable anyway, and
 /// a row that grows without limit would push the field apart.
@@ -450,9 +450,22 @@ fn tracked(text: &str) -> String {
     out
 }
 
-/// The card: an optional battery warning, the avatar and the name, the
-/// prompt, and the line under it.
+/// The card: [`card_body`] on [`glass_panel`].
 fn card<'a, R: ScreenRenderer + 'a>(scene: &Scene<'a>) -> El<'a, R> {
+    let u = unit(scene.theme);
+    glass_panel(card_body(scene), scene.theme, 380.0 * u, Padding { top: 26.0 * u, right: 28.0 * u, bottom: 22.0 * u, left: 28.0 * u })
+}
+
+/// What the card holds: an optional battery warning, the avatar and the
+/// name, and the field and the line under it — or the fingerprint
+/// prompt in their place.
+///
+/// Public, with [`glass_panel`], so another prompt for a password —
+/// `hyprforge-polkit`'s — is drawn by this code rather than a copy of it,
+/// and cannot drift from the lock screen. Nothing in it sends an
+/// [`Action`]: the media card and the power menu, which do, are not part
+/// of the card.
+pub fn card_body<'a, R: ScreenRenderer + 'a>(scene: &Scene<'a>) -> El<'a, R> {
     let theme = scene.theme;
     let u = unit(theme);
     let typed = typed_count(scene.state);
@@ -469,12 +482,25 @@ fn card<'a, R: ScreenRenderer + 'a>(scene: &Scene<'a>) -> El<'a, R> {
         body = body.push(field(scene));
         body = body.push(under_field(scene));
     }
+    body.into()
+}
 
+/// The frosted panel the card sits on — `glass` and its shadow —
+/// `width` wide around `content`. The shadow is drawn outside the panel,
+/// so whatever hosts it needs room around it: 20px down and a 50px blur
+/// at its widest.
+pub fn glass_panel<'a, M: 'a, R: ScreenRenderer + 'a>(
+    content: impl Into<Element<'a, M, iced_widget::Theme, R>>,
+    theme: &'a Theme,
+    width: f32,
+    padding: Padding,
+) -> Element<'a, M, iced_widget::Theme, R> {
+    let u = unit(theme);
     shadowed(
-        container(body)
-            .width(Length::Fixed(380.0 * u))
-            .padding(Padding { top: 26.0 * u, right: 28.0 * u, bottom: 22.0 * u, left: 28.0 * u })
-            .center_x(Length::Fixed(380.0 * u))
+        container(content)
+            .width(Length::Fixed(width))
+            .padding(padding)
+            .center_x(Length::Fixed(width))
             .style(move |_| glass(theme, 18.0 * u)),
         18.0 * u,
         glass_shadow(theme),
