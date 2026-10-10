@@ -124,7 +124,16 @@ for path in $submodules; do
     # Every manifest whose version moved (notif has nine, in bin/ and
     # crates/), its lockfile, and a changelog — which only a component
     # whose pin moved has, so it is staged only if step 2 wrote one.
-    run git -C "$path" add -u -- ':(glob)**/Cargo.toml' ':(glob)**/Cargo.lock'
+    #
+    # The lockfile only where one is tracked — notif's, of the ten. Git
+    # refuses a pathspec that matches nothing, so naming Cargo.lock for
+    # every component stopped 0.1.10 at the first one, before anything
+    # was committed.
+    pathspecs=(':(glob)**/Cargo.toml')
+    if [[ -n "$(git -C "$path" ls-files -- ':(glob)**/Cargo.lock')" ]]; then
+        pathspecs+=(':(glob)**/Cargo.lock')
+    fi
+    run git -C "$path" add -u -- "${pathspecs[@]}"
     if ! $EXECUTE || [[ -e "$path/CHANGELOG.md" ]]; then
         run git -C "$path" add -- CHANGELOG.md
     fi

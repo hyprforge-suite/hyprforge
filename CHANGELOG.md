@@ -11,6 +11,8 @@ drafts the next section from git; `tools/release.sh` files it.
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-10-09
+
 ### Added
 
 - A website, at https://hyprforge-suite.github.io/hyprforge/, with a page
