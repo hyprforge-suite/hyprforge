@@ -15,7 +15,7 @@ use crate::system::{Generated, Loaded, System, UnitState};
 use hyprforge_shortcuts::binds::LiveBind;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// One systemd user unit, as the mock models it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -39,6 +39,10 @@ struct Inner {
     calls: Vec<String>,
     /// snapper configs by name, as files a set-config rewrites.
     snapper_files: BTreeMap<String, PathBuf>,
+    /// What `fprintd-list` would say: enrolled or not, or no answer.
+    fingerprint: Option<bool>,
+    /// Make the next root write fail, as a dismissed prompt does.
+    root_refuses: bool,
 }
 
 /// See the module doc.
@@ -59,6 +63,8 @@ impl Default for MockSystem {
                 systemctl_unanswered: false,
                 calls: Vec::new(),
                 snapper_files: BTreeMap::new(),
+                fingerprint: None,
+                root_refuses: false,
             }),
         }
     }
@@ -147,6 +153,16 @@ impl MockSystem {
     /// Points snapper's `config` at `path`, for set-config to rewrite.
     pub fn with_snapper_config(&self, config: &str, path: PathBuf) {
         self.inner.borrow_mut().snapper_files.insert(config.to_string(), path);
+    }
+
+    /// What `fprintd-list` answers.
+    pub fn with_fingerprint(&self, enrolled: Option<bool>) {
+        self.inner.borrow_mut().fingerprint = enrolled;
+    }
+
+    /// Root writes fail from now on, as when the prompt is dismissed.
+    pub fn refusing_root(&self) {
+        self.inner.borrow_mut().root_refuses = true;
     }
 
     fn record(&self, call: String) {
@@ -259,6 +275,33 @@ impl System for MockSystem {
     fn reload_session_bus(&self) -> Result<(), String> {
         self.record("reload-session-bus".to_string());
         Ok(())
+    }
+
+    fn fingerprint_enrolled(&self, _user: &str) -> Option<bool> {
+        self.inner.borrow().fingerprint
+    }
+
+    /// Recorded, and done for real — to the test's own rooted paths.
+    fn write_as_root(&self, path: &Path, content: Option<&str>) -> Result<(), String> {
+        if self.inner.borrow().root_refuses {
+            return Err("the password prompt was dismissed".to_string());
+        }
+        match content {
+            Some(text) => {
+                self.record(format!("write-as-root {}", path.display()));
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                std::fs::write(path, text).map_err(|e| e.to_string())
+            }
+            None => {
+                self.record(format!("remove-as-root {}", path.display()));
+                match std::fs::remove_file(path) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+                    _ => Ok(()),
+                }
+            }
+        }
     }
 
     /// Recorded, and written into the config file the mock was pointed

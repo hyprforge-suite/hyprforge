@@ -128,6 +128,13 @@ pub enum Change {
     GtkPortal {},
     /// snapper's `home` config, and what its two settings said before.
     Snapper { allow_users: String, sync_acl: String },
+    /// `/etc/pam.d/polkit-1` with the fingerprint reader added, and what
+    /// it said before — `None` when there was no local copy, so undo
+    /// removes it and the vendor's stack applies again.
+    FingerprintPam {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous: Option<String>,
+    },
 }
 
 /// A competing notification daemon that was turned off.
@@ -211,6 +218,8 @@ mod tests {
             Change::FileManager1 { previous: Some("[D-BUS Service]\n".into()) },
             Change::GtkPortal {},
             Change::Snapper { allow_users: String::new(), sync_acl: "no".into() },
+            Change::FingerprintPam { previous: None },
+            Change::FingerprintPam { previous: Some("#%PAM-1.0\nauth include system-auth\n".into()) },
         ];
         for (i, change) in changes.into_iter().enumerate() {
             record.items.insert(format!("item-{i}"), Entry { applied: format!("did {i}"), change });

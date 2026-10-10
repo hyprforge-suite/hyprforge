@@ -25,6 +25,12 @@ pub struct Env {
     pub snapper_configs: PathBuf,
     /// This user's login name, as snapper's `ALLOW_USERS` names users.
     pub user: String,
+    /// `/etc/pam.d` — where a local PAM stack overrides the vendor's.
+    pub pam_dir: PathBuf,
+    /// `/usr/lib/pam.d` — the stacks the packages ship.
+    pub vendor_pam_dir: PathBuf,
+    /// `/usr/lib/security` — where PAM's modules are.
+    pub pam_modules: PathBuf,
 }
 
 impl Env {
@@ -37,6 +43,9 @@ impl Env {
             mimeapps_paths: hyprforge_mime::mimeapps_paths(),
             snapper_configs: PathBuf::from("/etc/snapper/configs"),
             user: std::env::var("USER").unwrap_or_default(),
+            pam_dir: PathBuf::from("/etc/pam.d"),
+            vendor_pam_dir: PathBuf::from("/usr/lib/pam.d"),
+            pam_modules: PathBuf::from("/usr/lib/security"),
         }
     }
 
@@ -51,6 +60,9 @@ impl Env {
             data_dirs: vec![data_home.clone()],
             snapper_configs: root.join("snapper"),
             user: "alex".to_string(),
+            pam_dir: root.join("pam.d"),
+            vendor_pam_dir: root.join("vendor-pam.d"),
+            pam_modules: root.join("security"),
             config_home,
             data_home,
         }

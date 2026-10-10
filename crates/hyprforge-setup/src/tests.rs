@@ -62,8 +62,20 @@ fn rig() -> Rig {
     let snapper_home = env.snapper_configs.join("home");
     std::fs::write(&snapper_home, "SUBVOLUME=\"/home\"\nALLOW_USERS=\"sam\"\nSYNC_ACL=\"no\"\n").unwrap();
     sys.with_snapper_config("home", snapper_home);
+    // A fingerprint reader with a finger enrolled, pam_fprintd installed,
+    // and polkit's stack as Arch ships it, with no local copy — for the
+    // fingerprint item.
+    sys.install_binary("fprintd-list");
+    sys.with_fingerprint(Some(true));
+    std::fs::create_dir_all(&env.pam_modules).unwrap();
+    std::fs::write(env.pam_modules.join("pam_fprintd.so"), "").unwrap();
+    std::fs::create_dir_all(&env.vendor_pam_dir).unwrap();
+    std::fs::write(env.vendor_pam_dir.join("polkit-1"), POLKIT_STACK).unwrap();
     Rig { dir, env, sys }
 }
+
+/// Arch's `/usr/lib/pam.d/polkit-1`.
+const POLKIT_STACK: &str = "#%PAM-1.0\n\nauth       include      system-auth\naccount    include      system-auth\npassword   include      system-auth\nsession    include      system-auth\n";
 
 impl Rig {
     fn state(&self, id: &str) -> State {
@@ -662,6 +674,62 @@ fn previous_versions_undo_removes_the_user_before_the_acl_syncing() {
     assert_eq!(calls[n - 2], "snapper -c home set-config ALLOW_USERS=sam");
     assert_eq!(calls[n - 1], "snapper -c home set-config SYNC_ACL=no");
     assert!(matches!(r.state("previous-versions"), State::Todo { .. }));
+}
+
+/// With no local copy, the vendor's stack is copied to /etc/pam.d with
+/// the reader first; undo removes the copy, so the vendor's applies
+/// again — never an edit of the vendor file.
+#[test]
+fn fingerprint_writes_a_local_stack_and_undo_removes_it() {
+    let r = rig();
+    let local = r.env.pam_dir.join("polkit-1");
+    assert!(is_todo(&r.state("fingerprint-polkit")));
+    r.apply("fingerprint-polkit").unwrap();
+    let written = r.read(&local);
+    assert!(written.contains("auth       sufficient   pam_fprintd.so timeout=10"), "{written}");
+    assert!(written.contains("auth       include      system-auth"));
+    assert_eq!(r.read(&r.env.vendor_pam_dir.join("polkit-1")), POLKIT_STACK, "the vendor's file is never touched");
+    r.undo("fingerprint-polkit").unwrap();
+    assert!(!local.exists(), "no local copy before, none after");
+    assert!(is_todo(&r.state("fingerprint-polkit")));
+}
+
+/// A local stack someone wrote themselves is the one changed — and the
+/// one put back, word for word.
+#[test]
+fn fingerprint_keeps_a_local_stack_and_undo_restores_it_exactly() {
+    let r = rig();
+    let local = r.env.pam_dir.join("polkit-1");
+    let mine = "#%PAM-1.0\n# mine\nauth       required     pam_env.so\nauth       include      system-auth\naccount    include      system-auth\n";
+    std::fs::create_dir_all(&r.env.pam_dir).unwrap();
+    std::fs::write(&local, mine).unwrap();
+    r.apply("fingerprint-polkit").unwrap();
+    assert!(r.read(&local).contains("# mine"));
+    r.undo("fingerprint-polkit").unwrap();
+    assert_eq!(r.read(&local), mine);
+}
+
+#[test]
+fn fingerprint_is_offered_only_when_a_finger_could_answer() {
+    let r = rig();
+    r.sys.with_fingerprint(Some(false));
+    assert!(matches!(r.state("fingerprint-polkit"), State::Unavailable { .. }), "nothing enrolled");
+    r.sys.with_fingerprint(None);
+    assert!(matches!(r.state("fingerprint-polkit"), State::Unknown { .. }), "fprintd not answering is not \"no\"");
+    let r = rig();
+    std::fs::remove_file(r.env.pam_modules.join("pam_fprintd.so")).unwrap();
+    assert!(matches!(r.state("fingerprint-polkit"), State::Unavailable { .. }), "no PAM module");
+}
+
+/// A dismissed password prompt changes nothing and records nothing.
+#[test]
+fn fingerprint_refused_leaves_nothing_behind() {
+    let r = rig();
+    r.sys.refusing_root();
+    let before = r.snapshot();
+    assert!(r.apply("fingerprint-polkit").is_err());
+    assert_eq!(r.snapshot(), before);
+    assert!(is_todo(&r.state("fingerprint-polkit")));
 }
 
 #[test]

@@ -14,6 +14,7 @@ mod binds;
 mod blur;
 mod defaults;
 mod filemanager;
+mod fingerprint;
 mod gtk;
 mod idle;
 mod lock_restore;
@@ -89,6 +90,7 @@ enum Kind {
     ShowInFolder,
     GtkPortal,
     PreviousVersions,
+    FingerprintPolkit,
 }
 
 impl Item {
@@ -117,6 +119,7 @@ impl Item {
             Kind::PortalDialog | Kind::GtkPortal => &["hyprforge-files-portal"],
             Kind::ShowInFolder => &["hyprforge-files"],
             Kind::PreviousVersions => &["hyprforge-files", "snapper", "pkexec"],
+            Kind::FingerprintPolkit => &["pkexec", "fprintd-list"],
         }
     }
 
@@ -146,6 +149,7 @@ impl Item {
             Kind::ShowInFolder => filemanager::check(cx),
             Kind::GtkPortal => gtk::check(cx),
             Kind::PreviousVersions => snapshots::check(cx),
+            Kind::FingerprintPolkit => fingerprint::check(cx),
         }
     }
 
@@ -164,6 +168,7 @@ impl Item {
             Kind::ShowInFolder => filemanager::apply(cx),
             Kind::GtkPortal => gtk::apply(cx),
             Kind::PreviousVersions => snapshots::apply(cx),
+            Kind::FingerprintPolkit => fingerprint::apply(cx),
         }
     }
 
@@ -195,6 +200,9 @@ impl Item {
             (Kind::PreviousVersions, Change::Snapper { allow_users, sync_acl }) => {
                 snapshots::undo(cx, allow_users, sync_acl)
             }
+            (Kind::FingerprintPolkit, Change::FingerprintPam { previous }) => {
+                fingerprint::undo(cx, previous.as_deref())
+            }
             // A record edited by hand into the wrong shape for its item.
             // Refused rather than guessed at.
             _ => Err(format!("setup.toml records a change {} didn't make", self.id)),
@@ -203,7 +211,7 @@ impl Item {
 }
 
 /// Every item, in order. See the module doc for why the order matters.
-pub static ITEMS: [Item; 20] = [
+pub static ITEMS: [Item; 21] = [
     Item::new(
         "wiring",
         "Connect Hyprforge to your Hyprland config",
@@ -344,6 +352,13 @@ pub static ITEMS: [Item; 20] = [
         false,
         Kind::PreviousVersions,
     ),
+    Item::new(
+        "fingerprint-polkit",
+        "Fingerprint for administrator prompts",
+        "Adds your fingerprint reader to polkit's sign-in, so a finger can answer an administrator prompt. If you don't touch it, the password comes up after ten seconds. Asks for your password once.",
+        false,
+        Kind::FingerprintPolkit,
+    ),
 ];
 
 /// The item with this id.
@@ -383,15 +398,17 @@ mod tests {
                 "show-in-folder",
                 "gtk-portal",
                 "previous-versions",
+                "fingerprint-polkit",
             ]
         );
     }
 
-    /// The opt-ins: a variable every GTK app inherits, and a change
-    /// that asks for a password, are not things to do without being asked.
+    /// The opt-ins: a variable every GTK app inherits, and the two
+    /// changes that ask for a password, are not things to do without
+    /// being asked.
     #[test]
-    fn only_the_gtk_portal_variable_and_snapshots_are_off_by_default() {
+    fn only_the_gtk_portal_variable_and_the_root_changes_are_off_by_default() {
         let off: Vec<&str> = ITEMS.iter().filter(|i| !i.default_on).map(|i| i.id).collect();
-        assert_eq!(off, ["gtk-portal", "previous-versions"]);
+        assert_eq!(off, ["gtk-portal", "previous-versions", "fingerprint-polkit"]);
     }
 }

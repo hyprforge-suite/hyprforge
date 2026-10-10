@@ -120,6 +120,12 @@ pub trait System {
     /// `pkexec snapper -c <config> set-config KEY=VALUE…`: the one change
     /// setup makes as root — see `items/snapshots.rs`.
     fn snapper_set_config(&self, config: &str, settings: &[(String, String)]) -> Result<(), String>;
+    /// Whether `user` has a fingerprint enrolled, from `fprintd-list`.
+    /// `None` when that could not be found out — never folded into "no".
+    fn fingerprint_enrolled(&self, user: &str) -> Option<bool>;
+    /// Writes `path` as root through `pkexec` — or, given `None`, removes
+    /// it. Only ever a PAM stack: see `items/fingerprint.rs`.
+    fn write_as_root(&self, path: &Path, content: Option<&str>) -> Result<(), String>;
 }
 
 /// The real system: `systemctl --user`, `pgrep`, `hyprctl`, `busctl`.
@@ -128,6 +134,40 @@ pub struct RealSystem;
 
 /// Runs a program with the shared bound and returns its output, or what
 /// went wrong in words.
+/// What `fprintd-list <user>` says about fingers: a line ` - #0: …` per
+/// enrolled finger, or "… has no fingers enrolled …". Anything else —
+/// no reader, fprintd not answering — is not an answer either way.
+pub(crate) fn fingers_enrolled(listing: &str) -> Option<bool> {
+    if listing.lines().any(|l| l.trim_start().starts_with("- #")) {
+        Some(true)
+    } else if listing.contains("has no fingers enrolled") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// A file holding `text`, readable by root, removed when dropped.
+struct Staged(PathBuf);
+
+impl Staged {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn tempfile_with(text: &str) -> Result<Staged, String> {
+    let path = std::env::temp_dir().join(format!("hyprforge-setup-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)));
+    std::fs::write(&path, text).map_err(|e| format!("couldn't stage {}: {e}", path.display()))?;
+    Ok(Staged(path))
+}
+
 fn run(program: &str, args: &[&str]) -> Result<std::process::Output, String> {
     hyprforge_process::output(Command::new(program).args(args), hyprforge_process::TIMEOUT)
         .map_err(|e| format!("couldn't run {program}: {e}"))
@@ -254,6 +294,35 @@ impl System for RealSystem {
         }
     }
 
+    fn fingerprint_enrolled(&self, user: &str) -> Option<bool> {
+        let out = run("fprintd-list", &[user]).ok()?;
+        fingers_enrolled(&String::from_utf8_lossy(&out.stdout))
+    }
+
+    fn write_as_root(&self, path: &Path, content: Option<&str>) -> Result<(), String> {
+        let mut command = Command::new("pkexec");
+        // Kept until pkexec is done with it: root reads it from here.
+        let staged;
+        match content {
+            Some(text) => {
+                staged = tempfile_with(text)?;
+                command.args(["install", "-m", "0644", "-o", "root", "-g", "root", "-T"]).arg(staged.path()).arg(path);
+            }
+            None => {
+                command.args(["rm", "-f", "--"]).arg(path);
+            }
+        }
+        // Two minutes, as for snapper: someone is typing a password.
+        let out = hyprforge_process::output(&mut command, std::time::Duration::from_secs(120))
+            .map_err(|e| format!("couldn't run pkexec: {e}"))?;
+        match out.status.code() {
+            Some(0) => Ok(()),
+            Some(126) => Err("the password prompt was dismissed".to_string()),
+            Some(127) => Err(format!("this account isn't allowed to change {}", path.display())),
+            _ => Err(format!("couldn't write {}: {}", path.display(), String::from_utf8_lossy(&out.stderr).trim())),
+        }
+    }
+
     fn reload_session_bus(&self) -> Result<(), String> {
         // The same call the installer's `reload_session_bus` makes.
         let out = run(
@@ -288,5 +357,21 @@ mod tests {
         assert_eq!(UnitState::parse("masked"), UnitState::Masked);
         assert_eq!(UnitState::parse("not-found"), UnitState::NotFound);
         assert_eq!(UnitState::parse("static"), UnitState::Other("static".into()));
+    }
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::fingers_enrolled;
+
+    /// `fprintd-list`'s own output, from a Goodix reader, 2026-10-09 —
+    /// not written from memory.
+    #[test]
+    fn fprintd_lists_are_read_as_they_are_written() {
+        let enrolled = "found 1 devices\nDevice at /net/reactivated/Fprint/Device/0\nUsing device /net/reactivated/Fprint/Device/0\nFingerprints for user alex on Goodix MOC Fingerprint Sensor (press):\n - #0: right-thumb\n - #1: right-index-finger\n";
+        let none = "found 1 devices\nDevice at /net/reactivated/Fprint/Device/0\nUsing device /net/reactivated/Fprint/Device/0\nUser nobody has no fingers enrolled for Goodix MOC Fingerprint Sensor.\n";
+        assert_eq!(fingers_enrolled(enrolled), Some(true));
+        assert_eq!(fingers_enrolled(none), Some(false));
+        assert_eq!(fingers_enrolled("No devices available\n"), None, "no reader is not an answer either way");
     }
 }
