@@ -31,6 +31,11 @@ that shares its look:
 
 ![The greeter: the same card and clock, asking a user to log in](docs/images/greeter.png)
 
+And the same card again when an application needs administrator access —
+the polkit agent, over the desktop dimmed and blurred:
+
+![The administrator prompt: the lock screen's card over a blurred desktop, asking for a password to mount a drive](docs/images/polkit.png)
+
 The popups — clipboard history, the emoji picker, the tray's own menus and
 notifications — share one look with it:
 

@@ -1,0 +1,45 @@
+<!-- title: Administrator prompt | description: hyprforge-polkit — a polkit agent for Hyprland: the password prompt for administrator access, drawn as the lock screen's card, with your fingerprint where you've set one up. | nav: components -->
+
+<div class="wrap">
+  <header class="hero">
+    <p class="kicker after-lines"><a href="components.html">What's in it</a><span class="sep">/</span>hyprforge-polkit</p>
+    <h1 class="display" style="max-width:13ch"><span class="line">The password prompt,</span> <span class="line">drawn as your</span> <span class="line"><em>lock screen</em>.</span></h1>
+    <div class="after-lines">
+      <p class="standfirst">When an app needs administrator access to mount a drive, install a package or change a system setting, this is what asks. It's the lock screen's card, over your desktop dimmed and blurred, so it's clear what you're answering.</p>
+      <div class="actions">
+        <a class="button" href="install.html">Install it <span class="arr">→</span></a>
+        <a class="textlink" href="https://github.com/hyprforge-suite/hyprforge-polkit">Source on GitHub</a>
+      </div>
+    </div>
+  </header>
+
+  <div class="after-lines" style="max-width:820px"><shot name="polkit" alt="The administrator prompt: a card over the blurred desktop asking for Voldemort's password to mount a drive called Horcruxes, with Cancel and Authenticate" caption="polkit's own sentence for what's being asked, and the lock screen's card for the answer." eager="1"></div>
+
+  <section class="sect" style="margin-top:96px">
+    <div class="label"><b>§1</b>What it does</div>
+    <div class="body">
+      <dl class="features" data-stagger>
+        <div><dt>The lock screen's card</dt><dd>The avatar, the field and the line under it are drawn by the lock screen's own code, so the two prompts for your password can't drift apart.</dd></div>
+        <div><dt>Your fingerprint</dt><dd>Set up can add your reader to administrator prompts. Touch it, or wait ten seconds and type your password instead.</dd></div>
+        <div><dt>Says what it's for</dt><dd>The sentence comes from whoever wrote the action, word for word. When several accounts can answer, you can pick another.</dd></div>
+        <div><dt>Takes over cleanly</dt><dd>Set up switches hyprpolkitagent off for you, even when your config starts it by hand, without editing that config. Undo brings it back.</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section class="sect">
+    <div class="label"><b>§2</b>The hard part</div>
+    <div class="body two">
+      <div class="prose">
+        <h2 class="title" style="margin-bottom:22px">It never checks your password.</h2>
+        <p>An agent is a messenger. polkit gives it a one-time ticket, and polkit's own helper checks you against the system's sign-in rules, then tells polkit the answer itself. The prompt only passes along what the helper asks and what you type. So it accepts exactly what your system is set up to accept, and what you typed is never written down or logged.</p>
+        <p>That's also why it can't offer your finger and your password at the same moment: the system asks one question at a time, and while it waits for a finger, nothing else can be asked.</p>
+      </div>
+      <shot name="polkit-fingerprint" alt="The same prompt waiting for a fingerprint: Place your finger on the fingerprint reader" ratio="16/10" caption="Waiting for a finger. Ten seconds later it asks for the password."></div>
+  </section>
+
+  <nav class="next" style="margin-bottom:40px">
+    <a href="lock.html"><span>Back to</span><b>The lock screen, whose card it draws →</b></a>
+    <a href="components.html"><span>Or</span><b>Everything else in the suite →</b></a>
+  </nav>
+</div>
