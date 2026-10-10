@@ -243,6 +243,10 @@ pub struct Placement {
     pub height: u32,
 }
 
+/// The layer namespace every popup has unless [`PopupApp::namespace`]
+/// says otherwise.
+pub const NAMESPACE: &str = "hyprforge-popup";
+
 /// What a popup shows and how it responds to input — the seam between
 /// this crate's Wayland/iced plumbing and a consumer's own model. See
 /// this module's own doc for why these three responsibilities are one
@@ -343,6 +347,15 @@ pub trait PopupApp {
     /// which is what a popup you type into needs.
     fn dismissal(&self) -> Dismissal {
         Dismissal::HoldKeyboard
+    }
+
+    /// The layer surface's namespace — the name a compositor's layer
+    /// rules match on. Defaults to [`NAMESPACE`], shared by every popup
+    /// that has no reason to be told apart; one that wants a rule of its
+    /// own (the polkit prompt's blur, which the clipboard menu must not
+    /// get) names itself here. Read once, when the surface is created.
+    fn namespace(&self) -> &'static str {
+        NAMESPACE
     }
 
     /// How long the pointer must stay down before a press becomes a
@@ -689,7 +702,7 @@ impl<A: PopupApp + 'static> Popup<A> {
         self.fractional_scale =
             self.fractional_scale_manager.as_ref().map(|m| m.get_fractional_scale(&surface, qh, ()));
         let layer =
-            self.layer_shell.create_layer_surface(qh, surface, Layer::Overlay, Some("hyprforge-popup"), Some(&output));
+            self.layer_shell.create_layer_surface(qh, surface, Layer::Overlay, Some(self.app.namespace()), Some(&output));
         layer.set_anchor(Anchor::TOP | Anchor::LEFT);
         // `-1`, not the default `0`. A layer surface whose exclusive zone
         // is `0` is positioned inside whatever space is *left over* after
