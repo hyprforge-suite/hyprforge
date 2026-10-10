@@ -196,6 +196,41 @@ pub enum Dismissal {
     CloseOnFocusLoss,
 }
 
+/// A [`PopupApp`] that can be told things while it is open — see
+/// [`Popup::run_receiving`].
+pub trait Receives<M>: PopupApp {
+    /// Takes one message. The popup is redrawn after every message;
+    /// `Some` ends it with that outcome, as a key or a click can.
+    fn receive(&mut self, message: M) -> Option<Self::Outcome>;
+}
+
+/// The receiving end of a popup's inbox, handed to
+/// [`Popup::run_receiving`]; [`inbox`] makes the pair.
+pub struct Inbox<M>(calloop::channel::Channel<M>);
+
+/// Where messages for a running popup are sent from. Cheap to clone, and
+/// usable from any thread; a send to a popup that has closed fails
+/// rather than blocking.
+pub type InboxSender<M> = calloop::channel::Sender<M>;
+
+/// A popup inbox: give the [`Inbox`] to [`Popup::run_receiving`], keep
+/// the sender.
+pub fn inbox<M>() -> (InboxSender<M>, Inbox<M>) {
+    let (sender, channel) = calloop::channel::channel();
+    (sender, Inbox(channel))
+}
+
+/// What one inbox event does: `None` when nothing happened — the
+/// channel closed, which is a sender going away and not a message, so
+/// the popup stays up until its app ends it — and otherwise whatever the
+/// app answered, after which the popup is redrawn.
+fn deliver<M, O>(event: calloop::channel::Event<M>, receive: impl FnOnce(M) -> Option<O>) -> Option<Option<O>> {
+    match event {
+        calloop::channel::Event::Msg(message) => Some(receive(message)),
+        calloop::channel::Event::Closed => None,
+    }
+}
+
 /// Where to place the popup: an anchor of top-left plus the margins that
 /// put its corner at the already-clamped cursor position. Computed by
 /// `crate::placement::place`, so this module never touches `hyprctl`
@@ -467,6 +502,50 @@ impl<A: PopupApp + 'static> Popup<A> {
     /// exclusive keyboard focus, which is exactly the kind of thing
     /// CLAUDE.md says never to point at the session you're using.
     pub fn run(connection: Connection, placement: Placement, app: A, theme: Theme) -> Result<Outcome<A::Outcome>, PopupError> {
+        Self::run_with(connection, placement, app, theme, |_| Ok(()))
+    }
+
+    /// [`Self::run`], with messages from elsewhere in the process
+    /// delivered to the app while it is open — see [`Receives`].
+    ///
+    /// Every popup so far learned everything it would show before it
+    /// opened, so the loop below only ever woke for Wayland. A prompt
+    /// that relays a conversation cannot: "Place your finger", "Wrong
+    /// password" and "Cancelled by the caller" arrive while it is up,
+    /// from a thread this loop knows nothing about. The inbox is a
+    /// calloop channel, so a message wakes the loop the way a key does.
+    pub fn run_receiving<M: 'static>(
+        connection: Connection,
+        placement: Placement,
+        app: A,
+        theme: Theme,
+        inbox: Inbox<M>,
+    ) -> Result<Outcome<A::Outcome>, PopupError>
+    where
+        A: Receives<M>,
+    {
+        Self::run_with(connection, placement, app, theme, move |handle| {
+            handle
+                .insert_source(inbox.0, |event, _, popup: &mut Popup<A>| {
+                    if let Some(ended) = deliver(event, |message| popup.app.receive(message)) {
+                        if let Some(outcome) = ended {
+                            popup.outcome = Some(Outcome::App(outcome));
+                        }
+                        popup.mark_dirty();
+                    }
+                })
+                .map(|_| ())
+                .map_err(|e| PopupError::EventLoop(e.to_string()))
+        })
+    }
+
+    fn run_with(
+        connection: Connection,
+        placement: Placement,
+        app: A,
+        theme: Theme,
+        sources: impl FnOnce(&calloop::LoopHandle<'static, Popup<A>>) -> Result<(), PopupError>,
+    ) -> Result<Outcome<A::Outcome>, PopupError> {
         let (globals, mut queue) = registry_queue_init(&connection)?;
         let qh = queue.handle();
 
@@ -526,8 +605,9 @@ impl<A: PopupApp + 'static> Popup<A> {
             calloop::EventLoop::try_new().map_err(|e| PopupError::EventLoop(e.to_string()))?;
         let handle = event_loop.handle();
         WaylandSource::new(connection.clone(), queue)
-            .insert(handle)
+            .insert(handle.clone())
             .map_err(|e| PopupError::EventLoop(e.to_string()))?;
+        sources(&handle)?;
 
         while popup.outcome.is_none() {
             // No app this crate serves today opts into long-press
@@ -1236,3 +1316,38 @@ delegate_pointer!(@<A: PopupApp + 'static> Popup<A>);
 delegate_shm!(@<A: PopupApp + 'static> Popup<A>);
 delegate_layer!(@<A: PopupApp + 'static> Popup<A>);
 delegate_registry!(@<A: PopupApp + 'static> Popup<A>);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A message reaches the app and may end the popup; a closed
+    /// channel — every sender gone — is not a message and ends nothing.
+    #[test]
+    fn an_inbox_message_reaches_the_app_and_a_closed_inbox_does_nothing() {
+        use calloop::channel::Event;
+        assert_eq!(deliver(Event::Msg(3), |m: i32| (m > 2).then_some("end")), Some(Some("end")));
+        assert_eq!(deliver(Event::Msg(1), |m: i32| (m > 2).then_some("end")), Some(None), "redrawn, still open");
+        assert_eq!(deliver::<i32, &str>(Event::Closed, |_| unreachable!("nothing to receive")), None);
+    }
+
+    /// The point of the inbox: a send from another thread wakes a loop
+    /// that is blocked waiting for something to happen.
+    #[test]
+    fn a_send_from_another_thread_wakes_the_loop() {
+        let (sender, inbox) = inbox::<u32>();
+        let mut event_loop: calloop::EventLoop<Vec<u32>> = calloop::EventLoop::try_new().unwrap();
+        event_loop
+            .handle()
+            .insert_source(inbox.0, |event, _, got: &mut Vec<u32>| {
+                if let calloop::channel::Event::Msg(m) = event {
+                    got.push(m);
+                }
+            })
+            .unwrap();
+        std::thread::spawn(move || sender.send(7).unwrap());
+        let mut got = Vec::new();
+        event_loop.dispatch(Some(std::time::Duration::from_secs(5)), &mut got).unwrap();
+        assert_eq!(got, [7]);
+    }
+}

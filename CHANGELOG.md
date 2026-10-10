@@ -11,6 +11,14 @@ drafts the next section from git; `tools/release.sh` files it.
 
 ## [Unreleased]
 
+### Added
+
+- Files: "Retry as administrator" on a copy or move that was refused for
+  permission, run by the administrator helper.
+- `hyprforge-popup`: an inbox (`inbox`, `Receives`,
+  `Popup::run_receiving`), so something outside a popup can tell it
+  things while it is open.
+
 ## [0.1.10] - 2026-10-09
 
 ### Added

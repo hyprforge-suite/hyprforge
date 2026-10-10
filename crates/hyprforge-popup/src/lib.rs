@@ -64,7 +64,7 @@ pub mod singleton;
 pub mod stack;
 
 pub use placement::{cursor_position, monitors, place, place_below_bar};
-pub use popup::{Dismissal, Outcome, Placement, Popup, PopupApp, PopupError, FOCUS_RELEASE_TIMEOUT};
+pub use popup::{inbox, Dismissal, Inbox, InboxSender, Outcome, Placement, Popup, PopupApp, PopupError, Receives, FOCUS_RELEASE_TIMEOUT};
 pub use scroll::scroll_rows;
 pub use scrollbar::{clamp_offset, scroll_into_view, Scrollbar};
 pub use stack::Stack;
