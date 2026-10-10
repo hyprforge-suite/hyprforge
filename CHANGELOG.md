@@ -11,6 +11,8 @@ drafts the next section from git; `tools/release.sh` files it.
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-10-10
+
 ### Added
 
 - Files: "Retry as administrator" on a copy or move that was refused for
