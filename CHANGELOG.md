@@ -18,6 +18,9 @@ drafts the next section from git; `tools/release.sh` files it.
 - `hyprforge-popup`: an inbox (`inbox`, `Receives`,
   `Popup::run_receiving`), so something outside a popup can tell it
   things while it is open.
+- Set up: "Fingerprint for administrator prompts", off by default — adds
+  your fingerprint reader to polkit's PAM stack, with the password ten
+  seconds later if you don't touch it.
 - `hyprforge-authui`: `card_body` and `glass_panel`, the lock screen's card
   as two public pieces, so another password prompt draws with the same
   code.

@@ -48,11 +48,13 @@ stops both apply and undo — undoing "nothing" would leave every change
 in place, and applying would overwrite the only record of what was
 there before.
 
-**One item is done as root, and none by default.** "Previous versions
-of your files" lets this user read snapper's snapshots of `/home`,
-which takes snapper's own `set-config` through `pkexec` — a password
-prompt — so it is off unless ticked. Everything else setup does is in
-files this user owns.
+**Two items are done as root, and neither by default.** "Previous
+versions of your files" lets this user read snapper's snapshots of
+`/home`, through snapper's own `set-config`; "Fingerprint for
+administrator prompts" adds pam_fprintd to polkit's PAM stack, as a
+local copy in `/etc/pam.d` that undo removes. Both go through `pkexec`
+— a password prompt — so both are off unless ticked. Everything else
+setup does is in files this user owns.
 
 # What is where
 
@@ -60,7 +62,7 @@ files this user owns.
 temp directory; `System` is every other process (`systemctl --user`,
 `hyprctl`, `pgrep`, the session bus), with `RealSystem` bounding each
 call and `mock::MockSystem` (feature `mock`) standing in for all of
-it, `pkexec snapper` included; `record` is `setup.toml`; `state` is the four states and the
+it, `pkexec` included; `record` is `setup.toml`; `state` is the four states and the
 `--porcelain` line the installer parses.
 
 ## Where this lives
