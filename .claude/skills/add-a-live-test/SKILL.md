@@ -64,6 +64,6 @@ When unsure between `live` and `disposable`, it is `disposable`. A
 
 `tools/hf lint` must report every ignored test in one tier and every
 live one behind one gate. Then run its tier: `tools/hf check` for
-`live`/`visible`; ask the user for `! tools/hf test disposable` or
-`! tools/hf test root`. A green run that only skipped is not a pass —
+`live`/`visible`; ask the user to run `tools/hf test disposable` or
+`tools/hf test root` in a terminal of their own (not `!`, which has none). A green run that only skipped is not a pass —
 make it fail once on purpose (wrong expected value) to see it can.

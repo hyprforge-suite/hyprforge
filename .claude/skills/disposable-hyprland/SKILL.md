@@ -17,10 +17,12 @@ session holds), so the instance is a window in the session. It refuses
 to start without a terminal, because the 2026-10-08 hard freeze happened
 while an unattended agent cycled nested compositors. Ask:
 
-> Please run `! tools/hf hyprland up` — it opens a small nested Hyprland
-> window that ends itself within fifteen minutes.
+> Please run `tools/hf hyprland up` in a terminal of your own — it opens
+> a small nested Hyprland window that ends itself within fifteen minutes.
 
-or, for the test tier, `! tools/hf test disposable` (starts, runs, stops).
+or, for the test tier, `tools/hf test disposable` (starts, runs, stops).
+Not with the `!` prefix: it runs without a terminal and is refused like
+any agent.
 Never pass `--unattended-ok`, never from a background agent, and keep
 restarts few.
 
@@ -83,7 +85,8 @@ unauthenticated.
 
 Part of the disposable tier (`binary(nested_clipboard)`); hf exports
 `HYPRFORGE_TEST_NESTED_DISPLAY` for it. To run just those:
-`! tools/hf test disposable -- -E 'binary(nested_clipboard)'`.
+`tools/hf test disposable -- -E 'binary(nested_clipboard)'`, in the
+user's terminal.
 
 ## When something looks wrong
 

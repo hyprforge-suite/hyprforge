@@ -33,8 +33,9 @@ together, ungated.
 **The disposable and root tiers are never yours to start.** The Bash
 tool has no terminal, `hf hyprland up` refuses without one, and the
 2026-10-08 freeze happened while an unattended agent cycled nested
-compositors. Ask the user to run `! tools/hf test disposable` (the `!`
-puts its output in the conversation). Never pass `--unattended-ok`.
+compositors. Ask the user to run `tools/hf test disposable` in a terminal of their
+own — not with the `!` prefix, which has no terminal either and is
+refused the same way. Never pass `--unattended-ok`.
 
 ## Reading the result
 

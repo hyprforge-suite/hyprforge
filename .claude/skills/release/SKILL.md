@@ -21,7 +21,8 @@ decides when to release; confirm before every `--execute`.
    at its pin on `main`, and work that needed this release's library
    changes on each component's `next` branch (`component-change` skill).
 3. The disposable tier has passed on the current commit — the release
-   refuses otherwise. Ask the user: `! tools/hf test disposable`.
+   refuses otherwise. Ask the user to run `tools/hf test disposable` in a terminal of
+   their own — the `!` prefix has no terminal and is refused.
 
 ## Run it
 
