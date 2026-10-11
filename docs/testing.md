@@ -46,7 +46,8 @@ partial rebuild per step, on top of a separate build each for `publish
 --dry-run` and every component built against crates.io. Those two moved
 to `hf land` and `hf release`, the two moments their answers decide
 something. procman's `tui` and `netbpf` features are on in every build
-(netbpf only with clang installed, said in yellow otherwise), because
+(netbpf only with clang and libbpf's headers installed, said in yellow
+otherwise; CI installs both), because
 check.sh never compiled either.
 
 `[profile.dev] debug = "line-tables-only"` with dependencies at no debug

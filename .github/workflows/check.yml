@@ -12,9 +12,11 @@
 # invisible to every test and to reading the diff — both renderers report
 # the same `Color` and only the pixels differ.
 #
-# procman's eBPF feature needs clang and libbpf's headers, which this
-# runner does not install; `tools/hf` leaves the feature out without clang
-# and says so in yellow.
+# procman's eBPF feature needs clang and libbpf's headers; both are
+# installed below so the feature is compiled and tested here too.
+# `tools/hf` leaves it out, in yellow, on a machine missing either — the
+# first run of this workflow had clang (the image ships it) and no
+# headers, and failed the whole build instead.
 name: check
 
 on:
@@ -34,7 +36,7 @@ env:
   # `rust-cache`'s *save* step: "No space left on device".
   #
   # Nothing here needs line numbers in a backtrace. A failing test names
-  # itself, and anyone chasing it further runs `check.sh` locally, where
+  # itself, and anyone chasing it further runs `tools/hf` locally, where
   # the profile is untouched.
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
@@ -69,12 +71,14 @@ jobs:
       #   pam-sys2  -> libpam0g-dev   (hyprforge-lock authenticates)
       #   xkbcommon -> libxkbcommon-dev
       #   wayland-sys -> libwayland-dev
+      #   procman's netbpf -> clang, libbpf-dev
       # mlua is vendored, so it needs a C compiler but no system Lua.
       - name: Install native dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            pkg-config libpam0g-dev libxkbcommon-dev libwayland-dev
+            pkg-config libpam0g-dev libxkbcommon-dev libwayland-dev \
+            clang libbpf-dev
 
       # No toolchain action: rust-toolchain.toml pins the version, and
       # rustup on the runner honours it. One place to raise it.

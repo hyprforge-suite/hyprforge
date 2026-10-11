@@ -28,13 +28,24 @@ def features() -> list[str]:
 
     procman's terminal UI and its eBPF counter are off by default, which
     meant check.sh never compiled — let alone tested — either. Both are
-    what the installer builds. netbpf needs clang to compile its BPF
-    object; without clang it is left out and `hf check` says so.
+    what the installer builds. netbpf needs clang and libbpf's headers
+    to compile its BPF object; without either it is left out and
+    `hf check` says which. CI's first run had clang and no headers, and
+    the whole build failed on `bpf/bpf_helpers.h` rather than skipping.
     """
     wanted = ["hyprforge-procman/tui"]
-    if have("clang"):
+    if netbpf_missing() is None:
         wanted.append("hyprforge-procman/netbpf")
     return wanted
+
+
+def netbpf_missing() -> str | None:
+    """What stops the netbpf feature building here, or None."""
+    if not have("clang"):
+        return "clang is not installed"
+    if not Path("/usr/include/bpf/bpf_helpers.h").is_file():
+        return "libbpf's headers are not installed (bpf/bpf_helpers.h)"
+    return None
 
 
 def feature_args() -> list[str]:

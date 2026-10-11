@@ -14,6 +14,7 @@
 import json
 import os
 import subprocess
+import sys
 import time
 
 from . import hyprland, nextest, tiers, ui
@@ -83,7 +84,11 @@ def _root(extra: list[str]) -> int:
     # Credentials first, while there is a terminal to ask on: nextest runs
     # each binary with no stdin to prompt through.
     if subprocess.run(["sudo", "-v"]).returncode != 0:
-        ui.bad("sudo refused")
+        # A fingerprint can still answer without a terminal (pam_fprintd
+        # prompts on stderr), so this is not refused up front — but a
+        # password cannot, and Claude Code's `!` has no terminal.
+        why = "" if sys.stdin.isatty() else " — no terminal to type a password into; run it in a terminal of your own"
+        ui.bad(f"sudo refused{why}")
         return ui.summary()
     runner = "sudo --non-interactive --preserve-env"
     env = {"CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER": runner}

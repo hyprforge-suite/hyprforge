@@ -109,7 +109,7 @@ def clippy() -> None:
     if r.ok and not warnings:
         ui.ok("clippy: no warnings")
         if "hyprforge-procman/netbpf" not in tiers.features():
-            ui.skip("procman's netbpf feature not built", "clang is not installed")
+            ui.skip("procman's netbpf feature not built", tiers.netbpf_missing() or "")
     else:
         ui.bad(f"clippy: {len(warnings) or 'build failed,'} warning(s) — run: cargo clippy --workspace --all-targets")
         ui.detail(warnings[:10])
