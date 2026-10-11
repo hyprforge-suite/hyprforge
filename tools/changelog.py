@@ -15,8 +15,10 @@ A draft, not a changelog. Commit subjects here are written to be read,
 which is why drafting from them is worth doing at all, but they say what
 a commit did and not whether a user would notice: the person cutting the
 release sorts the draft into Added / Changed / Fixed and drops what only
-matters to contributors. That step is why this never writes a section
-the release script then publishes unread — `release.sh` stops for it.
+matters to contributors. That step is why the suite's section is never
+published unread — `hf release` refuses an unedited draft. A
+component's section is the exception: it is written at release time
+from the component's own commit subjects and published as listed.
 
 Two sources, because the suite has two kinds of history. A library's
 commits are this repository's own, found by path under `crates/<lib>`.
@@ -143,9 +145,12 @@ def draft_component(path, since, until):
     items = component_changes(since, until).get(path)
     if not items:
         return None
+    # Written at release time, into the section being released — so no
+    # "sort before releasing" note: there is no later step for it to ask
+    # for, and every released section until 0.1.14 carried one anyway.
     return (
-        "<!-- Drafted by tools/changelog.py; sort into Added / Changed / "
-        "Fixed before releasing. -->\n\n" + bullets(items) + "\n"
+        "<!-- Listed from this component's commit subjects by "
+        "tools/changelog.py. -->\n\n" + bullets(items) + "\n"
     )
 
 

@@ -538,8 +538,9 @@ files helper and polkit policy the current packaging installs.
       tools/release.sh — nextest tiers, the disposable nested Hyprland,
       the session guard, `hf land`, and the two-phase `hf release`;
       publish.yml waits out crates.io's 429s itself
-- [ ] First two-phase release through `tools/hf release` (0.1.14), and
-      the first push to the AUR
+- [x] First two-phase release through `tools/hf release` (0.1.14,
+      2026-10-11)
+- [ ] The first push to the AUR (`docs/backlog.md`, Needs you)
 
 ## Staying in sync after the push (retired with `sync.sh`)
 

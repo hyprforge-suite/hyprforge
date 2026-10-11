@@ -16,6 +16,12 @@ worth doing next.
 Things only the user can do — an account, a password, a decision, or
 someone watching the screen. Ranked by what each one unblocks.
 
+- **Push five component commits, then their pins.** Made while you
+  were away and committed locally only: `hyprforge-lock` b4dcd4d (the
+  PAM fallback), `hyprforge-greet` 7baf25a, `hyprforge-notif` d6cd7e3,
+  `hyprforge-settings` 1afb19e and `hyprforge-files` 6e3f68b (docs).
+  Each is `tools/hf land <component>` once you say go; the pins can't
+  be committed before that. *Added 2026-10-11.*
 - **A first look at procman, together, and its screenshots.** The
   window has only ever been drawn offscreen (`render_every_tab`); open
   it with the user watching and go through every tab. Its site page
@@ -92,28 +98,6 @@ someone watching the screen. Ranked by what each one unblocks.
 
 Open work Claude can do unattended. Nothing here blocks a release.
 
-- **The lock borrows hyprlock's PAM file, which rejects correct
-  passwords.** `service_name()` falls back to `/etc/pam.d/hyprlock`
-  when the lock's own file is missing, and its comment calls that file
-  "exactly the right shape to borrow"
-  (`crates/hyprforge-lock/src/pam.rs:33`). It isn't: hyprlock's stack
-  has no account section and ends in `pam_deny` (CLAUDE.md, the PAM
-  notes). A source build without the PAM file locks its user out. Drop
-  the fallback or accept only a file with an `account` line. Small.
-  *Added 2026-10-11.*
-- **Docs that say the wrong thing.** One sweep (`keep-docs-current`):
-  `docs/design/repo-plan.md:541` still shows 0.1.14 as unreleased;
-  `docs/displays.md` calls displayd's unit opt-in in one section and
-  installed in another; Files' DESIGN.md (around line 792) describes an
-  unreadable-source message fileops fixed (`ReadDenied`);
-  `docs/design/media-plan.md` lists Quick Look as left to do; greet's
-  README says it has no ignored tests (it has one); notif's
-  `headless_daemon.rs` example and PLAN.md describe a center panel and
-  notif-ipc as unbuilt; Settings' Bluetooth module says the pairing
-  agent isn't connected (it is), with stale `allow(dead_code)` there and
-  in Displays; Settings' and displayd's released changelog sections
-  still carry the "sort before releasing" draft note. Small, several
-  submodule commits. *Added 2026-10-11.*
 - **Animated GIFs show their first frame only.** In Media and Files'
   preview (`docs/design/media-plan.md`, `hyprforge-image` has no frame
   iteration). Needs frame decoding inside the memory budget and the
@@ -228,6 +212,14 @@ Parked on purpose — written down so they are not lost, not scheduled.
 Kept for a few weeks so "what happened to X" has an answer, then
 pruned; git history has the rest.
 
+- **The lock no longer borrows hyprlock's PAM file**, whose missing
+  account stack refused every correct password; it falls back to
+  `login` (`hyprforge-lock` b4dcd4d, unpushed). *Added 2026-10-11.*
+- **The stale-docs sweep**: repo-plan, displays, media-plan, Files'
+  DESIGN, greet's README, notif's PLAN and example, Settings'
+  Bluetooth comments and allows. `tools/changelog.py` no longer writes
+  "sort before releasing" into a section it is releasing; the old notes
+  are HTML comments and were left. *Added 2026-10-11.*
 - **The whole-suite survey** of 2026-10-11: five agents read every
   crate, doc and submodule for unfinished work; their findings are the
   items above dated that day. GitHub had no open issues or pull

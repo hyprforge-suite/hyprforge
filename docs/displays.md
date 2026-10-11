@@ -223,8 +223,8 @@ Hyprland's own startup/reload with no Hyprforge process involved.
 `hyprforge-displayd` didn't: it applies layouts entirely at runtime over
 `wlr-output-management-v1`, so if the daemon isn't running (crashed before
 systemd's `Restart=on-failure` catches it, not started yet at session
-boot, or its unit was simply never installed — that's a manual, opt-in
-step above), Hyprland falls back to its own default hotplug behavior and
+boot, or its unit was never installed — only possible for a build
+installed by hand, as above), Hyprland falls back to its own default hotplug behavior and
 your chosen scale/resolution/arrangement is lost until the daemon comes
 back.
 

@@ -10,8 +10,8 @@ the viewer grammar and the actions that touch files. The three open
 questions at the end were answered by the owner — PNG, JPEG, WebP and GIF;
 Set as Wallpaper in scope; the keyboard grammar merged as
 `hyprforge-keys`. Phase 4 is built too: the file manager's preview pane
-and its grid thumbnails both decode through `hyprforge-image`. What is
-left of it is the spacebar Quick Look overlay. Two gaps are named rather than hidden: an
+and its grid thumbnails both decode through `hyprforge-image`. The
+spacebar Quick Look overlay followed in Files (2026-10-03). Two gaps are named rather than hidden: an
 animated GIF plays its first frame only, and zooming past the size that
 was decoded upsamples rather than re-decoding a sharper crop.
 
@@ -281,9 +281,9 @@ tolerant of an absent sibling. Rotation that writes back to the file is a
 separate, later decision: it is a destructive edit of someone's original
 and needs to say so.
 
-**Phase 4 — pay the shared-component debt.** *Built, except the
-spacebar Quick Look overlay: the preview pane and the grid thumbnails
-decode through `hyprforge-image`.* Wire
+**Phase 4 — pay the shared-component debt.** *Built: the preview pane,
+the grid thumbnails and, since 2026-10-03, the spacebar Quick Look
+overlay all decode through `hyprforge-image`.* Wire
 `hyprforge-files-core`'s `preview_pane` and a spacebar Quick Look onto
 `hyprforge-image`, which closes vision pillar 8 and retires a `bool` that
 currently promises something the file manager does not do.
