@@ -29,39 +29,11 @@ pub const SEARCH_FIELD_WIDTH: f32 = 190.0;
 /// the label grows into the padding, not past it.
 pub const SIDEBAR_WIDTH: f32 = 216.0;
 
-/// A context menu's size, `(width, height)`, before it is drawn.
-///
-/// Computed rather than measured, because the menu has to be placed —
-/// flipped away from an edge — before iced lays it out. Every number
-/// here is also what `browser::context_menu` uses to draw it, so the two
-/// cannot disagree about how tall a menu is.
+/// A context menu's size, `(width, height)`, before it is drawn — by
+/// the suite's shared menu, which draws it from the same numbers.
 pub fn menu_size(items: &[crate::menu::MenuItem], scale: FontScale) -> (f32, f32) {
-    let rows: f32 = items
-        .iter()
-        .map(|item| match item {
-            crate::menu::MenuItem::Separator => menu_separator_height(scale),
-            crate::menu::MenuItem::Action { .. } | crate::menu::MenuItem::Custom { .. } => row_height(scale),
-        })
-        .sum();
-    // `menu_padding` all round, plus the one-pixel border either side.
-    let chrome = 2.0 * menu_padding(scale) + 2.0;
-    (scale.apply(MENU_WIDTH), rows + chrome)
+    hyprforge_ui::widgets::menu_size(items.iter().map(|i| matches!(i, crate::menu::MenuItem::Separator)), scale)
 }
-
-/// The space inside a menu's border.
-pub fn menu_padding(scale: FontScale) -> f32 {
-    scale.apply(hyprforge_ui::theme::spacing::XS)
-}
-
-/// A separator line's whole slot, the line centred in it.
-pub fn menu_separator_height(scale: FontScale) -> f32 {
-    scale.apply(MENU_SEPARATOR)
-}
-
-/// Wide enough for the longest built-in label beside its shortcut —
-/// "Open in New Tab" and "Ctrl+Enter".
-const MENU_WIDTH: f32 = 260.0;
-const MENU_SEPARATOR: f32 = 9.0;
 
 /// The collapsed sidebar's width: one mark, centred, with air round it.
 ///

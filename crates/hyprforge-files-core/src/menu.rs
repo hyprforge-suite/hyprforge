@@ -477,26 +477,9 @@ pub fn step(items: &[MenuItem], from: Option<usize>, direction: i32) -> Option<u
         .find(|&i| items[i].is_selectable())
 }
 
-/// Where the menu's top-left corner goes, given where it was asked for,
-/// its own size and the window's.
-///
-/// It opens down and to the right of the pointer, the way menus do,
-/// unless that would run off the window — then it flips to open up, or
-/// left, from the same point. A menu too large to fit either way is
-/// pinned to the edge it overflows least, so its top-left is always on
-/// screen and the first items are always reachable.
-pub fn place(at: (f32, f32), menu: (f32, f32), window: (f32, f32)) -> (f32, f32) {
-    fn axis(at: f32, size: f32, limit: f32) -> f32 {
-        if at + size <= limit {
-            at
-        } else if at - size >= 0.0 {
-            at - size
-        } else {
-            (limit - size).max(0.0)
-        }
-    }
-    (axis(at.0, menu.0, window.0), axis(at.1, menu.1, window.1))
-}
+/// Where the menu's top-left corner goes — the suite's shared rule,
+/// moved to `hyprforge_ui` when the process manager wanted a menu too.
+pub use hyprforge_ui::widgets::place_menu as place;
 
 #[cfg(test)]
 mod tests {

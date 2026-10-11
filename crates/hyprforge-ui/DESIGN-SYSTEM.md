@@ -113,7 +113,7 @@ Each is `hyprforge_ui::widgets::<name>`.
 | Progress | `progress_line` (with `progress_line_style`): a thin bar in the foreground colour on the `row` step, never the accent; drawn only when there is an honest fraction. `stacked_bar`: one bar split into parts by fraction, each in a theme role's colour (never the accent), the rest the empty track — where something went (the process manager's CPU time by kind and memory by use) |
 | Input | `wheel_zoom` (with `WheelZoom`, `steps_from_pixels`, `PIXELS_PER_STEP`): Ctrl+wheel over what it wraps is a zoom step, taken before the scrollable inside can scroll with it; a plain wheel passes through. A touchpad's pixels are added up into whole steps — Files' listing. `marquee` (with `Marquee`, `band_rect`, `edge_scroll`): a rubber band across empty space around what it wraps — it starts only on a press its content did not take, asks the layout which tagged containers it meets (through the scroll), anchors to the scrolled content, scrolls near an edge, and draws in the accent; a click that never became a band is `on_clear` — Files' listing |
 | Dragging | `drag_card` (with `DragCard`): the card under the pointer — the first name, a stacked pile and an accent count for more than one, a `+` in the success colour while Ctrl copies — drawn `lift` of the way picked up, so easing `lift` is the pick-up and the put-down (Files' in-window drag). `drop_target_style` (with `DropLook`): a target under a drag, outlined in the foreground colour where a hover has none, and filling from the left as the wait before it opens runs out (Files' spring-loaded folders) |
-| Floating | `popover_card`: the surface a popover opens on, the context menu's own (see Patterns). `scrim`: a card centred over the window dimmed with `scrim_color` (the root step at `SCRIM_ALPHA`), a press on the dim layer dismissing it, and nothing beneath reachable — Files' Quick Look |
+| Floating | `context_menu`, `menu_overlay`, `MenuRow`: what a right click opens, at the pointer (`pointer`, whose `track` and `last` remember where it is, since `on_right_press` says only that a press happened), placed by `place_menu` from `menu_size` — down and right, flipped off any edge — over a layer that closes it on any other click; `menu_item_style` lights the row under the pointer with the accent, `menu_padding`, `menu_separator_height`, `MENU_WIDTH` and `MENU_SEPARATOR` are its sizes. Files' menus and the process manager's draw with it. `popover_card`: the surface a popover opens on, the context menu's own (see Patterns). `scrim`: a card centred over the window dimmed with `scrim_color` (the root step at `SCRIM_ALPHA`), a press on the dim layer dismissing it, and nothing beneath reachable — Files' Quick Look |
 
 ## Patterns
 
@@ -125,8 +125,8 @@ Not widgets, but decided once:
 - **Purple means selected.** Nothing else takes the accent. A mode, a
   hover or a focused field uses an elevation step or the dim text colour.
 - **A floating list is the context menu's surface.** `sidebar`, a 1px
-  `card_border` outline, `inner_radius`. `suggestions` and Files' context
-  menu agree.
+  `card_border` outline, `inner_radius`. `suggestions` and the shared
+  `context_menu` agree.
 - **Progress is not selection.** A bar fills with the foreground colour,
   because iced's default bar takes the palette's primary, which is the
   accent. Unknown progress is said in words ("counting…"), never drawn

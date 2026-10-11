@@ -15,6 +15,7 @@ mod controls;
 mod field;
 mod layout;
 mod marquee;
+mod menu;
 mod progress;
 mod panel;
 mod ring;
@@ -38,6 +39,7 @@ pub use layout::{
     setting_row_style, status_dot, SETTING_ROW_GAP,
 };
 pub use marquee::{band_rect, edge_scroll, marquee, Marquee};
+pub use menu::{context_menu, menu_item_style, menu_overlay, menu_padding, menu_separator_height, menu_size, place_menu, pointer, MenuRow, MENU_SEPARATOR, MENU_WIDTH};
 pub use progress::{popover_card, progress_line, progress_line_style, stacked_bar};
 pub use panel::{fact, fact_row, panel_tabs};
 pub use ring::{countdown_ring, remaining_fraction};

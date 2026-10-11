@@ -19,6 +19,10 @@ drafts the next section from git; `tools/release.sh` files it.
   keeps a root-only history of the whole machine, with network per process
   counted by eBPF. Packaged as `hyprforge-procman`, and `--procman` in the
   installer.
+- `hyprforge-ui`: `context_menu`, `menu_overlay` and `MenuRow` — Files'
+  right-click menu, moved into the shared layer with its placement rule
+  and the pointer tracking it opens at, so the process manager's menus
+  are the same menu.
 
 ## [0.1.13] - 2026-10-10
 

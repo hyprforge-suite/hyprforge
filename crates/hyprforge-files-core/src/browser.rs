@@ -3100,7 +3100,7 @@ impl Browser {
     /// it. On top, the menu itself, `opaque` so a click on it never
     /// falls through to the closing layer, and `pin`ned where it was
     /// asked for, flipped away from any edge it would run off
-    /// ([`menus::place`]).
+    /// (`hyprforge_ui::widgets::place_menu`).
     pub fn menu_overlay(&self, scale: FontScale, window: (f32, f32)) -> Option<Element<'_, Message>> {
         if let Some(card) = self.quick_look_overlay(scale, window) {
             return Some(card);
@@ -3110,7 +3110,7 @@ impl Browser {
         }
         let menu = self.menu.as_ref()?;
         let size = density::menu_size(&menu.items, scale);
-        let (x, y) = menus::place(menu.at, size, window);
+        let (x, y) = hyprforge_ui::widgets::place_menu(menu.at, size, window);
         let away = iced::widget::mouse_area(
             iced::widget::Space::new().width(Length::Fill).height(Length::Fill),
         )
@@ -5890,99 +5890,26 @@ fn with_row_menu<'a>(inner: Element<'a, Message>, index: usize) -> Element<'a, M
         .into()
 }
 
-/// A context menu's own box: items and separators on the chrome plane,
-/// with a hairline border so it reads as lifted off the listing.
-///
-/// Every dimension here comes from `density`, the same numbers
-/// `density::menu_size` adds up to place the menu — so the box drawn is
-/// the box that was placed.
+/// A context menu's own box, drawn by the suite's shared menu
+/// (`hyprforge_ui::widgets::context_menu`), which is also what
+/// `density::menu_size` measures — so the box drawn is the box placed.
 fn context_menu<'a>(menu: &'a OpenMenu, scale: FontScale, width: f32) -> Element<'a, Message> {
-    let row_h = density::row_height(scale);
-    let mut list = column![].width(Length::Fill);
-    for (index, item) in menu.items.iter().enumerate() {
-        match item {
-            MenuItem::Separator => {
-                list = list.push(
-                    container(divider())
-                        .height(Length::Fixed(density::menu_separator_height(scale)))
-                        .center_y(Length::Fixed(density::menu_separator_height(scale)))
-                        .padding([0, spacing::SM as u16]),
-                );
+    use hyprforge_ui::widgets::MenuRow;
+    let rows = menu
+        .items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| match item {
+            MenuItem::Separator => MenuRow::Separator,
+            MenuItem::Action { label, hint, enabled, .. } => {
+                MenuRow::Item { label: (*label).to_string(), hint: hint.clone(), on: enabled.then_some(Message::MenuChose(index)) }
             }
-            MenuItem::Action { .. } | MenuItem::Custom { .. } => {
-                let (label, hint, enabled) = match item {
-                    MenuItem::Action { label, hint, enabled, .. } => (*label, hint.as_ref(), *enabled),
-                    MenuItem::Custom { label, enabled, .. } => (label.as_str(), None, *enabled),
-                    MenuItem::Separator => unreachable!("matched above"),
-                };
-                let highlighted = menu.highlighted == Some(index);
-                let colour = if enabled {
-                    hyprforge_ui::theme::text()
-                } else {
-                    hyprforge_ui::theme::text_dim()
-                };
-                // One line, whatever the label: `menu_size` placed the
-                // menu counting one row per item, and a person's own
-                // label can be longer than any this crate ships.
-                let mut content = row![scaled_text(label, density::ROW_TEXT_BASE, scale)
-                    .color(colour)
-                    .wrapping(iced::widget::text::Wrapping::None)
-                    .width(Length::Fill)]
-                .align_y(iced::Alignment::Center)
-                .spacing(spacing::MD);
-                if let Some(hint) = hint {
-                    content = content.push(meta_text(hint.as_str(), density::META_TEXT_BASE, scale));
-                }
-                list = list.push(
-                    iced::widget::button(content)
-                        .on_press_maybe(enabled.then_some(Message::MenuChose(index)))
-                        .width(Length::Fill)
-                        .height(Length::Fixed(row_h))
-                        .padding([0, spacing::SM as u16])
-                        .style(move |t: &iced::Theme, status| {
-                            menu_item_style(t, status, highlighted, enabled)
-                        }),
-                );
+            MenuItem::Custom { label, enabled, .. } => {
+                MenuRow::Item { label: label.clone(), hint: None, on: enabled.then_some(Message::MenuChose(index)) }
             }
-        }
-    }
-    container(list)
-        .padding(density::menu_padding(scale))
-        .width(Length::Fixed(width))
-        .style(|_t: &iced::Theme| container::Style {
-            background: Some(iced::Background::Color(hyprforge_ui::theme::surface::sidebar())),
-            border: iced::Border {
-                color: hyprforge_ui::theme::surface::card_border(),
-                width: 1.0,
-                radius: density::inner_radius().into(),
-            },
-            ..container::Style::default()
         })
-        .into()
-}
-
-/// A menu item's look.
-///
-/// Unlike a listing row, hover takes the accent here. In a menu the
-/// pointer *is* the choice being made — the item under it is what a
-/// click will run — so hover and the keyboard highlight are the same
-/// state and look the same. A disabled item never lights up.
-fn menu_item_style(
-    theme: &iced::Theme,
-    status: iced::widget::button::Status,
-    highlighted: bool,
-    enabled: bool,
-) -> iced::widget::button::Style {
-    use iced::widget::button;
-    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-    let lit = enabled && (highlighted || hovered);
-    button::Style {
-        background: lit
-            .then(|| iced::Background::Color(theme.extended_palette().primary.weak.color)),
-        text_color: hyprforge_ui::theme::text(),
-        border: iced::Border { radius: density::nested_radius().into(), ..iced::Border::default() },
-        ..button::Style::default()
-    }
+        .collect();
+    hyprforge_ui::widgets::context_menu(rows, menu.highlighted, scale, width)
 }
 
 /// Moved to `hyprforge_ui::widgets` when Settings adopted the same
