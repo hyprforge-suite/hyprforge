@@ -140,7 +140,7 @@ mod tests {
     /// refused a bare Space would drop Quick Look's own key on the way.
     #[test]
     fn a_line_naming_space_is_loaded_not_refused() {
-        let line = [("quick-look".to_string(), vec!["Space".to_string(), "Ctrl+Y".to_string()])];
+        let line = [("quick-look".to_string(), vec!["Space".to_string(), "Ctrl+Alt+Y".to_string()])];
         let (keys, problems) = crate::config::keymap_with(&line.into_iter().collect());
         assert!(problems.is_empty(), "{problems:?}");
         let space = KeyPress { key: Key::Space, mods: Modifiers::default(), text: Some(' ') };

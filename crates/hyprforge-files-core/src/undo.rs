@@ -23,6 +23,16 @@
 //! A permanent delete is not here, because there is nothing to take back
 //! from — which is what its confirmation dialog says.
 //!
+//! **Redo** does the undone thing again, with the same rule: check the
+//! folder first and refuse with a sentence when it has moved on. Undoing a
+//! copy, an extraction or a new archive sent something to the Trash, so
+//! redoing one brings it back out — which is why [`Undone`] keeps where
+//! the undo put it. Only an undo that went through completely can be
+//! redone; one that stopped partway left a folder no record describes.
+//! And anything new that is done forgets every redo, as everywhere else:
+//! replaying an old step over a folder a newer one has changed is the
+//! guess this module exists to refuse.
+//!
 //! Neither is *editing* an archive, and that one is a decision rather
 //! than an omission. Every format here rewrites the whole file to change
 //! one member, so the only honest undo is a copy of the archive as it
@@ -130,10 +140,24 @@ fn name(path: &std::path::Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-/// The most recent things done, newest last.
+/// Something undone, kept so it can be done again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Undone {
+    /// What was done, and what redoing it does again.
+    pub done: Undoable,
+    /// What the undo moved to the Trash, as [`Undoable::Trashed`] records
+    /// it: `(stored, original, .trashinfo)`. Filled for a copy, an
+    /// extraction and a new archive, whose undo trashes them; a redo
+    /// restores exactly these and nothing it would have to look for.
+    pub trashed: Vec<(PathBuf, PathBuf, PathBuf)>,
+}
+
+/// The most recent things done, newest last, and the things undone that
+/// can be done again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UndoHistory {
     entries: VecDeque<Undoable>,
+    redo: Vec<Undone>,
     depth: usize,
 }
 
@@ -143,20 +167,59 @@ impl UndoHistory {
     /// an hour ago is more likely to meet a folder that has moved on than
     /// to do what anyone wants.
     pub fn new(depth: usize) -> Self {
-        UndoHistory { entries: VecDeque::with_capacity(depth), depth }
+        UndoHistory { entries: VecDeque::with_capacity(depth), redo: Vec::new(), depth }
     }
 
     /// Remembers `done`, forgetting the oldest past the depth. An empty
     /// record is not remembered — undoing it would do nothing, and would
     /// use up the Ctrl+Z meant for the thing before it.
+    ///
+    /// Forgets every redo: something new was done, and a redo checked
+    /// against the folder as it was before would be checked against the
+    /// wrong folder.
     pub fn push(&mut self, done: Undoable) {
         if done.is_empty() || self.depth == 0 {
             return;
         }
+        self.redo.clear();
+        self.remember(done);
+    }
+
+    /// Remembers what a redo did, keeping the redos behind it: Ctrl+Shift+Z
+    /// three times after Ctrl+Z three times walks all the way back.
+    pub fn redone(&mut self, done: Undoable) {
+        if done.is_empty() || self.depth == 0 {
+            return;
+        }
+        self.remember(done);
+    }
+
+    fn remember(&mut self, done: Undoable) {
         if self.entries.len() == self.depth {
             self.entries.pop_front();
         }
         self.entries.push_back(done);
+    }
+
+    /// Keeps something just undone for Ctrl+Shift+Z. The window calls
+    /// this only when the undo went through completely.
+    pub fn undone(&mut self, undone: Undone) {
+        if self.depth == 0 {
+            return;
+        }
+        if self.redo.len() == self.depth {
+            self.redo.remove(0);
+        }
+        self.redo.push(undone);
+    }
+
+    /// The most recently undone thing, taken off the redo list.
+    pub fn pop_redo(&mut self) -> Option<Undone> {
+        self.redo.pop()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
     }
 
     /// The most recent thing, taken off the history.
@@ -185,6 +248,57 @@ impl UndoHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn undone(done: Undoable) -> Undone {
+        Undone { done, trashed: Vec::new() }
+    }
+
+    /// Undo three, redo three: each redo comes back in the order it was
+    /// undone, newest undo first, and a redo does not forget the ones
+    /// behind it.
+    #[test]
+    fn redo_walks_back_through_everything_undone() {
+        let mut history = UndoHistory::new(10);
+        history.undone(undone(copied(1)));
+        history.undone(undone(copied(2)));
+        let first = history.pop_redo().unwrap();
+        assert_eq!(first.done, copied(2));
+        history.redone(first.done);
+        assert!(history.can_redo(), "the older undo is still there to redo");
+        assert_eq!(history.pop_redo().unwrap().done, copied(1));
+        assert!(!history.can_redo());
+    }
+
+    /// Doing something new forgets every redo: it would be replayed over
+    /// a folder the new thing has changed.
+    #[test]
+    fn doing_something_new_forgets_the_redos() {
+        let mut history = UndoHistory::new(10);
+        history.undone(undone(copied(1)));
+        history.push(copied(3));
+        assert!(!history.can_redo());
+    }
+
+    /// An empty job did nothing, so it changed nothing a redo depends on.
+    #[test]
+    fn an_empty_record_keeps_the_redos() {
+        let mut history = UndoHistory::new(10);
+        history.undone(undone(copied(1)));
+        history.push(copied(0));
+        assert!(history.can_redo());
+    }
+
+    /// The redo list is as short as the history, for the same reason.
+    #[test]
+    fn the_redo_list_is_bounded_by_the_same_depth() {
+        let mut history = UndoHistory::new(2);
+        for n in 1..=3 {
+            history.undone(undone(copied(n)));
+        }
+        assert_eq!(history.pop_redo().unwrap().done, copied(3));
+        assert_eq!(history.pop_redo().unwrap().done, copied(2));
+        assert!(history.pop_redo().is_none(), "the oldest was forgotten");
+    }
 
     fn copied(n: usize) -> Undoable {
         Undoable::Copied((0..n).map(|i| PathBuf::from(format!("/c{i}"))).collect())

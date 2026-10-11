@@ -2872,6 +2872,7 @@ impl Browser {
             // Handled above; listed so a new window action is a compile
             // error here rather than a silent fall-through.
             Action::Undo
+            | Action::Redo
             | Action::UndoHistory
             | Action::NewTab
             | Action::CloseTab

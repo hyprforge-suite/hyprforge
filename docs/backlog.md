@@ -106,10 +106,6 @@ Open work Claude can do unattended. Nothing here blocks a release.
   on zoom (`crates/hyprforge-media/src/main.rs:1611`), so 1:1 on a large
   photo is soft. The plan's crop-at-native-resolution decode was never
   built. Medium to large. *Added 2026-10-11.*
-- **Files has no redo.** Ctrl+Shift+Z is held for it
-  (`crates/hyprforge-files-core/src/action.rs:646`); redo needs undo's
-  "the folder still matches" check in reverse. Medium.
-  *Added 2026-10-11.*
 - **Encrypted drives can't be unlocked.** A LUKS stick shows as Locked
   and stops there (`crates/hyprforge-volumes/src/backend.rs:169`).
   Needs a passphrase prompt, UDisks2 `Encrypted.Unlock`, and locking
@@ -206,6 +202,10 @@ Parked on purpose — written down so they are not lost, not scheduled.
 Kept for a few weeks so "what happened to X" has an answer, then
 pruned; git history has the rest.
 
+- **Files has redo**: Ctrl+Shift+Z and Ctrl+Y, for everything undo
+  covers; a copy, extraction or archive comes back out of the Trash
+  from where its undo put it. On Files' `next` until the next release
+  publishes `hyprforge-files-core`'s `Undone`. *Added 2026-10-11.*
 - **The lock no longer borrows hyprlock's PAM file**, whose missing
   account stack refused every correct password; it falls back to
   `login` (`hyprforge-lock` b4dcd4d). *Added 2026-10-11.*

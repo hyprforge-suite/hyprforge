@@ -324,7 +324,7 @@ pub fn group(action: Action) -> &'static str {
         FocusUp | FocusDown | FocusLeft | FocusRight | ExtendUp | ExtendDown | SelectAll | ClearSearch
         | NextSearchScope | ContextMenu => "Selecting",
         Trash | DeletePermanently | Restore | EmptyTrash | Copy | Cut | Paste | CopyPath | Rename | NewFolder
-        | OpenWith | Extract | ExtractTo | Compress | Undo | UndoHistory | CopyToOtherPane | MoveToOtherPane => "Files",
+        | OpenWith | Extract | ExtractTo | Compress | Undo | Redo | UndoHistory | CopyToOtherPane | MoveToOtherPane => "Files",
         ToggleHidden | TogglePreview | ZoomIn | ZoomOut | ZoomReset | QuickLook | Properties | Preferences | Transfers
         | TransferQueue | OpenTerminal => "The window",
         Pin | Unpin | PinUp | PinDown | ToggleStar | EditTags | PreviousVersions | Mount | Unmount | Eject | Disconnect | ConnectToServer => "Sidebar",

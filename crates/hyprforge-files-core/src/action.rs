@@ -184,6 +184,8 @@ pub enum Action {
     // Window scope: the tab strip, and undo — whose history spans tabs.
     /// Take back the most recent trash, rename, move, copy or new folder.
     Undo,
+    /// Do again what the last undo took back.
+    Redo,
     /// Show what is remembered for undo, newest first — the thing Ctrl+Z
     /// would take back next, and what waits behind it.
     UndoHistory,
@@ -302,6 +304,7 @@ impl Action {
             Action::NewFolder,
             Action::ContextMenu,
             Action::Undo,
+            Action::Redo,
             Action::UndoHistory,
             Action::NewTab,
             Action::CloseTab,
@@ -381,6 +384,7 @@ impl Action {
             Action::NewFolder => "new-folder",
             Action::ContextMenu => "context-menu",
             Action::Undo => "undo",
+            Action::Redo => "redo",
             Action::UndoHistory => "undo-history",
             Action::NewTab => "new-tab",
             Action::CloseTab => "close-tab",
@@ -477,6 +481,7 @@ impl Action {
             Action::NewFolder => "New Folder",
             Action::ContextMenu => "Show Menu",
             Action::Undo => "Undo",
+            Action::Redo => "Redo",
             Action::UndoHistory => "Undo History",
             Action::NewTab => "New Tab",
             Action::CloseTab => "Close Tab",
@@ -506,6 +511,7 @@ impl Action {
     pub fn scope(self) -> Scope {
         match self {
             Action::Undo
+            | Action::Redo
             | Action::UndoHistory
             | Action::NewTab
             | Action::CloseTab
@@ -644,9 +650,11 @@ impl Action {
             // would open".
             Action::ContextMenu => &["Menu", "Shift+F10"],
             Action::Undo => &["Ctrl+Z"],
+            // Both, because both are what other programs use: Ctrl+Shift+Z
+            // on GTK and in most editors, Ctrl+Y on Windows and in Office.
+            Action::Redo => &["Ctrl+Shift+Z", "Ctrl+Y"],
             // Unbound: the notice's History button and the palette reach
-            // it, and Ctrl+Shift+Z — the obvious key — is redo everywhere
-            // else, which this crate may yet want.
+            // it.
             Action::UndoHistory => &[],
             Action::NewTab => &["Ctrl+T"],
             Action::CloseTab => &["Ctrl+W"],
@@ -895,6 +903,7 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         // the folder in view, which is what every file manager's
         // Properties does from the background.
         Action::Undo
+        | Action::Redo
         | Action::UndoHistory
         | Action::NewTab
         | Action::CloseTab
@@ -1001,7 +1010,8 @@ mod tests {
             let is_window = matches!(
                 action,
                 Action::Undo
-                    | Action::UndoHistory
+                | Action::Redo
+                | Action::UndoHistory
                     | Action::NewTab
                     | Action::CloseTab
                     | Action::NextTab
