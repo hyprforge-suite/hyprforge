@@ -16,12 +16,6 @@ worth doing next.
 Things only the user can do — an account, a password, a decision, or
 someone watching the screen. Ranked by what each one unblocks.
 
-- **Push five component commits, then their pins.** Made while you
-  were away and committed locally only: `hyprforge-lock` b4dcd4d (the
-  PAM fallback), `hyprforge-greet` 7baf25a, `hyprforge-notif` d6cd7e3,
-  `hyprforge-settings` 1afb19e and `hyprforge-files` 6e3f68b (docs).
-  Each is `tools/hf land <component>` once you say go; the pins can't
-  be committed before that. *Added 2026-10-11.*
 - **A first look at procman, together, and its screenshots.** The
   window has only ever been drawn offscreen (`render_every_tab`); open
   it with the user watching and go through every tab. Its site page
@@ -214,7 +208,7 @@ pruned; git history has the rest.
 
 - **The lock no longer borrows hyprlock's PAM file**, whose missing
   account stack refused every correct password; it falls back to
-  `login` (`hyprforge-lock` b4dcd4d, unpushed). *Added 2026-10-11.*
+  `login` (`hyprforge-lock` b4dcd4d). *Added 2026-10-11.*
 - **The stale-docs sweep**: repo-plan, displays, media-plan, Files'
   DESIGN, greet's README, notif's PLAN and example, Settings'
   Bluetooth comments and allows. `tools/changelog.py` no longer writes
