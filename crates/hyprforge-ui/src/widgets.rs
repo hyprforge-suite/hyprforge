@@ -4,7 +4,7 @@
 //! arrived with the Settings redesign and Files' path bar and are
 //! re-exported, so every widget is `hyprforge_ui::widgets::<name>`
 //! wherever it happens to live. `DESIGN-SYSTEM.md` beside this crate's
-//! manifest catalogues all of them, and `check.sh` fails if it misses one.
+//! manifest catalogues all of them, and `tools/hf` fails if it misses one.
 
 mod anchor;
 mod badges;

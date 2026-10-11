@@ -36,7 +36,7 @@ is not caret-compatible with the old (0.1.x to 0.2.0): cargo silently
 ignores a `[patch]` whose version does not satisfy the requirement, so
 leaving `hyprforge-look = "0.1"` behind would build the published 0.1
 instead of this checkout — the failure CLAUDE.md describes, which
-check.sh's "Siblings build from this checkout" then catches.
+`tools/hf check`'s "Siblings build from this checkout" then catches.
 """
 
 import argparse

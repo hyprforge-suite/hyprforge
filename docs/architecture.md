@@ -334,20 +334,22 @@ git clone --recurse-submodules https://github.com/hyprforge-suite/hyprforge
 git submodule update --init
 ```
 
-`./check.sh` says so before anything else when one is missing, rather than
+`tools/hf check` says so before anything else when one is missing, rather than
 letting cargo fail to load the workspace.
 
 A pull request against a component repository — `hyprforge-lock`, say — is a
 pull request against the code; there is no second copy for it to be carried
 back into. A change here to a component is two commits: one inside
 `crates/<component>`, pushed to that component's repository, and one here
-moving the pin. `./check.sh` refuses a pin that names a commit its repository
-does not have on `main` (nobody else could clone it), and builds every
-component on its own against the libraries on crates.io, the way the
-component's CI is about to — so a component that needs a library change not
-yet released is caught here rather than on GitHub. A change to a library and
-a component together is the library here, a release, then the component and
-the pin; `docs/design/repo-plan.md` has the order.
+moving the pin. `tools/hf land <component>` makes both in that order: it
+builds the component on its own against the libraries on crates.io, the way
+the component's CI is about to, pushes it to its repository's `main`, and
+only then stages the pin — and the pre-commit hook refuses a pin that names
+a commit its repository does not have on `main` (nobody else could clone it).
+A component change that needs a library change not yet released goes to the
+component's `next` branch instead (`hf land <component> --next`), and the
+next release merges it once the library is published; `docs/design/repo-plan.md`
+has the order.
 
 Until October 2026 the components were copies instead, written here and
 pushed out with `git subtree split` by `split.sh` and kept in step by

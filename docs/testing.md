@@ -1,125 +1,177 @@
 # Testing
 
-`./check.sh` is the one command; this is what each of its steps asks,
-and why each tier gates on the thing it actually asks.
-
-## Checking everything works
+`tools/hf` is the one tool. This is what it asks, which tier each test
+is in, and why each live check waits on the thing it asks and nothing
+else.
 
 ```
-./check.sh          # everything available on this machine
-./check.sh --quick  # no compositor or daemons needed
+tools/hf check --fast      # clippy, docs, static checks, unit tier — the pre-commit hook and CI
+tools/hf check             # + the live and visible tiers, and the session guard
+tools/hf test disposable   # the tests that change a compositor, on a nested one
+tools/hf test root         # the tests that need root, and the recorder inside its sandbox
+tools/hf lint              # the static checks alone
+tools/hf sandbox           # every shipped unit verified; self-tests inside their sandbox
+tools/hf doctor            # which tools are missing, and whether the hook is on
+tools/hf clean             # what build output weighs; removes what is always safe to
 ```
 
-Tier 1 runs everywhere, no system needed. Besides clippy and the unit and
-integration tests, it has two steps worth knowing about by name:
-**Renderer colour space** greps `cargo tree` for iced's `web-colors`
-feature and fails if it's on, because that fact is invisible to every
-Rust test — both renderers report the same `Color` and only the pixels
-differ (see the shared-look rule in `CLAUDE.md`). **Standalone crate
-dependency pins** exists because the components in the README's table are
-their own repositories, which means each hand-copies every third-party
-dependency's version and feature set instead of inheriting from
-`[workspace.dependencies]` — a crate that is its own repository root has
-nothing to inherit from. It checks nine of the ten: `hyprforge-notif`'s
-versions are its own on purpose, not copies of this table (see below). If
-the root bumps a version or a feature and the copy isn't updated, cargo
-resolves both happily: clippy stays silent and every test passes while
-the suite quietly builds two versions of the same dependency. A dropped
-`features = ["derive"]` was proved invisible to the rest of tier 1
-before this step existed. It discovers which crates to check by their
-shape — nothing in the manifest inherits from the workspace — rather
-than from a hardcoded list, so a newly prepared crate is covered
-automatically. It's also why `crates/hyprforge-notif/` gets its own step: that's a
-second, separate cargo workspace (`exclude`d from this one — see
-Cargo.toml), so `cargo test --workspace` never reaches it, and a
-component whose tests silently never run is exactly the failure this
-project keeps naming.
+Nothing `hf check` runs changes the machine's state. That was not true
+of the `check.sh` it replaced: on 2026-10-10 its live step pushed every
+Hyprland option, at extreme values, into the session in use, and six
+runs in one evening left the desktop frozen until a re-login. The rule
+in CLAUDE.md ("A live test that changes the compositor changes the one
+you are working in") has the whole story.
 
-Three tier-1 steps hold what `tools/release.sh` needs to be true before
-a release can be cut. **Versions agree** runs `tools/versions.py
---check`: the suite has one version, which the libraries inherit and
-the components, notif's crates and the PKGBUILD's `pkgver` spell by
-hand. It fails on `pkgver`, on a library spelling a version of its own,
-and on the clipboard and tray, whose versions crates.io already shows.
-The other seven components and notif were never bumped before lockstep
-was decided and still say 0.1.0, so they are reported in yellow rather
-than failed — a step that is red until the next release is a step nobody
-reads — and each one is held to the version from the first release that
-tags its repository. **Changelog has a section for the version** asks
-that `CHANGELOG.md` has a section for the workspace version and an
-Unreleased one above it. **AUR PKGBUILD matches packaging/arch** asks
-that `packaging/aur/hyprforge` is exactly what `tools/aur.py` renders
-from `packaging/arch/PKGBUILD`, `.SRCINFO` included when makepkg is
-installed: two PKGBUILDs kept in step by hand would drift the way the
-standalone crates' dependency pins did.
+## The tiers
 
-Past tier 1, every further step answers a different question and gates
-on the thing it actually asks, rather than sharing one `--ignored` run:
+Every test is in exactly one tier. A tier is a nextest profile in
+`.config/nextest.toml` whose `default-filter` says which tests it holds,
+and `tools/hf` fails when an `#[ignore]`d test is in no tier or in two —
+so a new one has to be classified before it can be committed.
 
-| Step | Asks | Needs |
+| Tier | What is in it | Run by | Changes anything? |
+|---|---|---|---|
+| `unit` | every test not `#[ignore]`d | `hf check --fast`, the hook, CI | no |
+| `live` | asks a real service, installed tool or the running Hyprland, read-only | `hf check` | no |
+| `visible` | registers with a tray host or BlueZ for a moment, then unregisters | `hf check` | briefly, then undone |
+| `disposable` | flips Hyprland options, loads binds and rules, sets the wallpaper and temperature, writes the clipboard | `hf test disposable` | yes — a nested instance only |
+| `root` | procman's taskstats and eBPF tests | `hf test root` | loads an eBPF program |
+| `manual` | screenshot generators and benchmarks | `hf test manual -- -E '…'` | writes PNGs to `$SHOTS` |
+
+**One build serves every tier.** Every cargo and nextest call is
+`--workspace` with the same features, so cargo resolves one feature set
+and builds one set of test binaries. check.sh ran `cargo test -p <crate>`
+per live step, and each `-p` resolved features for that crate alone — a
+partial rebuild per step, on top of a separate build each for `publish
+--dry-run` and every component built against crates.io. Those two moved
+to `hf land` and `hf release`, the two moments their answers decide
+something. procman's `tui` and `netbpf` features are on in every build
+(netbpf only with clang installed, said in yellow otherwise), because
+check.sh never compiled either.
+
+`[profile.dev] debug = "line-tables-only"` with dependencies at no debug
+info at all is the other half: debug info was most of the 439GB and then
+666GB `target/` that stalled this machine twice.
+
+## Tier 1: `hf check --fast`
+
+Runs everywhere, no system needed. Beside clippy, rustdoc and the unit
+tier:
+
+- **Renderer colour space** greps `cargo tree` for iced's `web-colors`
+  feature and fails if it is on: both renderers report the same `Color`
+  and only the pixels differ (the shared-look rule in CLAUDE.md).
+- **Standalone crate dependency pins** — the components are their own
+  repositories and hand-copy every third-party dependency's version and
+  features; a copy that drifts from `[workspace.dependencies]` builds two
+  versions of one crate with no symptom. `hyprforge-notif`'s versions are
+  its own on purpose, and it is its own cargo workspace, so it gets its
+  own clippy, fmt and test step.
+- **Siblings build from this checkout**, **Every package is a
+  repository**, **Docs name things that exist**, **Library READMEs match
+  their crate docs** — each a script in `tools/hflib/lints/` or `tools/`,
+  with its reason at the top.
+- **Versions agree**, **Changelog has a section for the version**, **AUR
+  PKGBUILD matches packaging/arch** hold the one suite version, its
+  changelog and the rendered AUR package to what `hf release` needs.
+- **The installer can plan every component** and **The installer's dry run
+  touches nothing** — the second compares a scratch home byte for byte
+  before and after every component's dry-run uninstall.
+- **Every ignored test has one tier**, and every `live` or `visible` test
+  sits behind exactly one gate.
+
+## The live gates
+
+Each gate in `tools/hflib/tiers.py` names the tests that ask one thing
+and checks that thing is there first — never a neighbour. The parse
+tests once rode the Hyprland run and needed a compositor to ask hyprpaper
+a question; on a machine with the daemons and no compositor they never
+ran at all.
+
+| Gate | Asks | Open when |
 |---|---|---|
-| Live tests against Hyprland | does **Hyprland** agree? | Hyprland running |
-| Parse tests against the ecosystem daemons | do **hyprpaper/hypridle** agree? | hyprpaper/hypridle installed, not running |
-| Live tests against the system's archive tools | do **tar, unzip and 7z** read what this writes, and this what they write? | at least one of them installed |
-| Live tests against NetworkManager | does **NetworkManager** agree? | NetworkManager running |
-| Live tests against BlueZ | does **BlueZ** agree? | bluetooth.service running |
-| Live tests against hyprsunset | does **hyprsunset** agree? | hyprsunset running |
-| Live tests against systemd-logind | does **logind** agree? | something answering on `org.freedesktop.login1` |
-| Live tests against UPower | does **UPower** agree? | upower.service running |
-| Live tests against power-profiles-daemon | does **power-profiles-daemon** agree? | power-profiles-daemon.service running |
-| Live tests against fprintd | does **fprintd** answer the lock screen's questions? | fprintd installed (bus-activatable) |
-| Live tests against the Wayland clipboard | does the **compositor's clipboard** agree? | a Wayland session (`WAYLAND_DISPLAY` set) |
-| Trash entries written by another implementation | can this crate read the **`.trashinfo` files already on disk**? | a home trash directory with something in it |
-| Icon names against the installed theme | do the tray's icon names resolve in the **installed icon theme**? | an icon theme to ask (via `gsettings`) |
-| The installed shared MIME database | does this machine's **shared MIME database** say what the parsers expect? | shared-mime-info installed |
-| Live tests against a tray host | does a real **tray host** accept these icons? | a `StatusNotifierWatcher` running (a bar with a tray) |
-| The AUR package builds in a clean chroot | does the **AUR package** build with nothing but its declared dependencies? It builds this checkout's committed HEAD (`tools/aur.py --local-into`), not the published tag | devtools installed (`extra-x86_64-build`) |
+| Hyprland, read-only | does Hyprland have every catalogued option, with the declared type? | Hyprland answers `hyprctl version` |
+| hyprsunset | does the binary and the instance's socket agree? | Hyprland running |
+| the ecosystem daemons' parsers | do hyprpaper and hypridle parse what this writes? | either installed |
+| the system's archive tools | do tar, unzip and 7z read what this writes, and this what they write? | any installed |
+| NetworkManager, BlueZ, UPower, power-profiles-daemon | do they have the interface the crate claims? | the service is active |
+| systemd-logind, systemd, polkitd, fprintd, UDisks2 | likewise | the name is on the system bus |
+| gio's phones and cameras | does `gio` list what the volumes crate reads? | `gio` installed |
+| the Wayland compositor's protocols | data-control, output management, text-input-v3 offered? | `WAYLAND_DISPLAY` set |
+| another implementation's trash | can this read the `.trashinfo` already on disk? | a home trash exists |
+| the installed icon theme | do the tray's icon names resolve in one theme? | `gsettings` to name it |
+| the shared MIME database | does this machine's database say what the parsers expect? | `globs2` readable |
+| the portal's FileChooser interface | does the dialog serve what xdg-desktop-portal calls? | the XML and `dbus-daemon` |
+| ffmpeg and libmpv | does a thumbnail come from the right frame? | `ffmpeg` installed |
+| BlueZ, registering an agent *(visible)* | does BlueZ accept the pairing agent? | bluetooth active |
+| a tray host *(visible)* | does a real host list the item, with no `Menu`? | a `StatusNotifierWatcher` on the bus |
 
-Tier 1 catches a mistake in the code. Every step below it catches the far
-nastier kind: code that is internally consistent and wrong about the system
-it talks to. Every claim the option catalogues make — that an option exists,
-what type it is, what range it accepts — is checked against the running
-compositor, the generated hyprlang files are handed to the daemons
-themselves, and the NetworkManager, BlueZ, hyprsunset, logind, UPower,
-power-profiles-daemon, clipboard and tray steps are each read-only checks
-that the real service's interface is the shape the corresponding crate
-claims. UPower and power-profiles-daemon are two separate services with
-independent lifetimes, so they get two separate steps rather than one
-combined "power" step — a machine with UPower masked but
-power-profiles-daemon running should still get the second step's coverage,
-and vice versa; power-profiles-daemon's own step never calls
-`SetActiveProfile`, since changing the active profile changes how loud a
-stranger's fans are out from under them. Registering with a tray host is
-the one exception to read-only: it really does put an icon in the
-user's bar for a fraction of a second, which is the smallest observable
-form of "a host accepted it".
+notif's two font tests run behind their own check — a font with 标 in it
+and one with an emoji — because check.sh never ran them and the first run
+failed on a machine with no CJK font rather than on anything notif does.
 
-That matters most where a mistake is *silent*. A misspelled key in a
-generated config isn't an error to hyprpaper or hypridle:
+**A skipped check announces itself.** libtest has no skipped state — a
+test that returns early because a device is absent prints `ok` exactly
+like one that verified something. Every such test `eprintln!`s
+`HYPRFORGE-SKIP: <reason>` first; nextest's JUnit report keeps passing
+tests' output (`store-success-output`), and `tools/hf` reports each
+marker in yellow even on a green run.
 
-```
-[ERR] Config has errors:
-Config error … config option <listener:this_is_not_a_key> does not exist.
-Proceeding ignoring faulty entries
-```
+**A silent mistake needs a negative control.** A misspelled key in a
+generated config is not an error to hyprpaper or hypridle — they print
+`Config error … does not exist. Proceeding ignoring faulty entries` and
+exit 0. So the parse tests match on the message, and a control feeds each
+daemon a key that does not exist and insists it complains.
 
-It exits 0, drops the line, and the setting simply never happens. So the
-parse tests match on the message, not the status — and a negative control
-feeds each daemon a key that definitely doesn't exist and insists it
-complains, because a validation test that cannot fail is worthless.
+The parse tests run each daemon with a runtime directory of its own, a
+signature nobody else has and no `WAYLAND_DISPLAY`. A second hyprpaper
+under the session's signature takes over the session's IPC socket and
+leaves the original unreachable; check.sh avoided that by skipping
+whenever hyprpaper was running, which on any machine using hyprpaper
+meant the check never ran.
 
-**The hyprpaper parse check skips while hyprpaper is running.** A second
-instance takes over its IPC socket, and when it exits the socket is gone,
-leaving the original alive but unreachable until it's restarted.
+## The session guard
 
-**A skipped check announces itself instead of counting as a pass.** libtest
-has no skipped state — a test that returns early because a daemon isn't
-installed, or NetworkManager has no Wi-Fi device to ask, prints `ok`
-exactly like one that verified something. Every gated step except live
-tests against Hyprland — parse, archive tools, NetworkManager, BlueZ,
-hyprsunset, logind, trash, UPower, power-profiles-daemon, fprintd,
-clipboard, icon names, MIME database and tray —
-`eprintln!`s an `HYPRFORGE-SKIP: <reason>` line before returning early from a check it
-couldn't actually run, `check.sh` runs them with `--nocapture` and greps
-for the marker, and each one found is reported separately in yellow even
-on an otherwise green run.
+Before the live tiers and after them, `hf check` snapshots the running
+Hyprland — every option's current value (`hyprctl descriptions -j`),
+binds, workspace rules, animations, monitor modes, hyprpaper's wallpapers
+and hyprsunset's temperature — and fails naming anything that moved. A
+person changing a setting during the run trips it too, and the message
+says so.
+
+## The disposable tier
+
+`tools/hf test disposable` starts a nested Hyprland (`hf hyprland up`),
+runs the tier against it and takes it down. There is no headless-only
+Hyprland: without a parent compositor it reaches for the DRM device the
+session holds. So the instance is a window in the session, kept as safe
+as that can be — see `tools/hflib/hyprland.py` and the
+`disposable-hyprland` skill: one at a time, a fifteen-minute hard
+lifetime, its own hyprpaper and hyprsunset under its own signature, logs
+in `target/hf/logs`, and it will not start without a terminal.
+
+Every test in it opens with `hyprforge_testkit::Hyprland::disposable()`,
+which panics unless the instance it is given is nested — a compositor
+with no `WAYLAND_DISPLAY` in its environment is driving hardware, which
+makes it a session. Its handle reloads the instance when dropped, during
+a panic too. A pass is stamped in `target/hf/stamps/disposable.json` with
+the tree of every crate it covers, and `hf release` refuses a release
+those crates changed since.
+
+## Root, and the sandbox
+
+`hf test root` builds as you and runs only the test binaries as root,
+through cargo's target runner, so `target/` gains no root-owned file. It
+then runs the procman recorder's `--self-test` inside its unit's sandbox
+(`hf sandbox`): `systemd-run` with every property the unit file sets,
+read from the file. The recorder once shipped with `PrivateNetwork=yes`,
+which hides every exit from it, and every test passed — outside the
+sandbox.
+
+## Not covered
+
+The lock screen's live behaviour and Files' copy and paste between
+applications need the nested compositor by hand; the `disposable-hyprland`
+skill has both. The AUR package's clean-chroot build and every component
+built against crates.io run in `hf release`; a component is built that
+way by `hf land` too.

@@ -35,7 +35,7 @@
         <p>The first tier runs anywhere: the linter, every test, and checks that the documentation and manifests still tell the truth. Every tier after it asks a real system a question it can only answer by being there. Does Hyprland parse what we generate? Does NetworkManager agree about signal strength? Does every icon name resolve in the theme you actually have?</p>
         <p>Each tier only runs when the thing it asks is present. The live tiers only ever read, because they run on a computer someone is using, and a test that could drop your Wi-Fi isn't worth having.</p>
       </div>
-      <pre class="term"><span class="p">$ </span>./check.sh
+      <pre class="term"><span class="p">$ </span>tools/hf check
 <span class="ok">✓</span> lint and every test
 <span class="ok">✓</span> docs name things that exist
 <span class="ok">✓</span> Hyprland parses what we write

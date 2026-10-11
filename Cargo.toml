@@ -60,7 +60,7 @@ members = [
 # to see it coming. Excluded, each workspace resolves its own graph.
 #
 # The seam costs one thing: `cargo test --workspace` here does not run
-# notif's tests. check.sh's "notif workspace" step is what covers that. And
+# notif's tests. `tools/hf check`'s "notif workspace" step is what covers that. And
 # this file's [patch.crates-io] does not reach it — cargo reads patches
 # only from the root of the workspace being built, and notif is its own
 # root — which is what `crates/.cargo/config.toml` is for.
@@ -292,7 +292,7 @@ inotify = { version = "0.11", default-features = false }
 # This table is what stops that: inside this workspace, every published
 # name resolves to its directory. Cargo only honours a patch whose
 # version satisfies the requirement, so bumping a library to 0.2 means
-# bumping the components' "0.1" in the same commit — `check.sh`'s
+# bumping the components' "0.1" in the same commit — `tools/hf check`'s
 # "Siblings build from this checkout" step fails if one is missed, which
 # is otherwise silent: cargo ignores the patch and fetches 0.1.
 #
@@ -338,3 +338,16 @@ hyprforge-video = { path = "crates/hyprforge-video" }
 hyprforge-viewer = { path = "crates/hyprforge-viewer" }
 hyprforge-volumes = { path = "crates/hyprforge-volumes" }
 hyprforge-windowrules = { path = "crates/hyprforge-windowrules" }
+
+# Debug info is most of what `target/` weighs — it reached 439GB once and
+# 666GB once, and stalled the whole machine both times
+# (docs/testing.md). Line tables are enough for a panic's backtrace to
+# name the line in this workspace's own code; full variable-level info
+# for every dependency is what nobody here has ever opened a debugger
+# for. Anyone who needs it for one session can set
+# CARGO_PROFILE_DEV_DEBUG=2.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

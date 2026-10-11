@@ -454,7 +454,7 @@ install_file() {
 # own home that need no sudo. Every removal under $HOME goes through
 # one of these, never a bare `rm`, because a bare `rm` is invisible to
 # --dry-run — `uninstall_settings` deleted a real launcher entry during
-# a dry run that way, and check.sh's "The installer's dry run touches
+# a dry run that way, and `tools/hf check`'s "The installer's dry run touches
 # nothing" step now runs every uninstall against a scratch home to keep
 # it from happening again.
 run_user() {

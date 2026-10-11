@@ -64,7 +64,7 @@ PAM would bar on a correct password is barred on a correct finger. Only
 about the device that was claimed, are believed. Three unrecognised
 fingers — `pam_fprintd`'s own default — stop the reader, because fprintd
 keeps no count of its own and `pam_faillock` never sees these; a bad
-*read* (too short, off-centre) is not counted. `check.sh`'s fprintd tier
+*read* (too short, off-centre) is not counted. `tools/hf check`'s fprintd tier
 asks the running daemon the lock's own questions, read-only; the first
 version of this code named the wrong manager path and passed every unit
 test.

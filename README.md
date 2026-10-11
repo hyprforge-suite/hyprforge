@@ -181,16 +181,17 @@ Binaries land in `target/release/`: `hyprforge-displayd`,
 ## Checking everything works
 
 ```
-./check.sh          # everything available on this machine
-./check.sh --quick  # no compositor or daemons needed
+tools/hf check --fast      # clippy, docs, static checks, unit tests — runs anywhere
+tools/hf check             # + every live check this machine can answer
+tools/hf test disposable   # the tests that change a compositor, on a nested one
 ```
 
-Tier 1 — clippy, the unit and integration tests, and checks on the
-manifests and the docs — runs anywhere. Every tier past it asks a real
-system something (Hyprland, NetworkManager, BlueZ, UDisks2, crates.io and
-more) and runs only when that system is there; a check that could not run
-is reported in yellow rather than counted as a pass.
-[`docs/testing.md`](docs/testing.md) has every step and why it exists.
+The fast check needs nothing but a compiler. The full check asks real
+systems (Hyprland, NetworkManager, BlueZ, UDisks2 and more) read-only,
+each only when it is there; a check that could not run is reported in
+yellow rather than counted as a pass, and nothing it runs changes the
+session. Tests that do change a compositor run against a nested one.
+[`docs/testing.md`](docs/testing.md) has every tier and why it exists.
 
 ## Documentation
 
@@ -198,7 +199,7 @@ is reported in yellow rather than counted as a pass.
 - [`docs/config-integration.md`](docs/config-integration.md) — where config lives, how `hyprland.lua` loads it, window rules, shortcuts, input, appearance, and importing hand-written config
 - [`docs/displays.md`](docs/displays.md) — `hyprforge-displayd`: profiles, confirm/revert, scales as 120ths, the `monitors.lua` fallback, competing `hl.monitor()` rules, and the D-Bus API
 - [`docs/lock-and-greeter.md`](docs/lock-and-greeter.md) — the lock screen and the greeter
-- [`docs/testing.md`](docs/testing.md) — `check.sh` and its tiers
+- [`docs/testing.md`](docs/testing.md) — `tools/hf` and its tiers
 - [`docs/design/`](docs/design/) — the suite's [vision](docs/design/vision.md), the [repository plan](docs/design/repo-plan.md) and the [media viewer plan](docs/design/media-plan.md)
 - [`site/`](site/) — the website, built by `tools/build-site.py`; a screenshot a page asks for is drawn from the PNG of that name in docs/images once it exists, and as a placeholder naming the file until then
 - [`CLAUDE.md`](CLAUDE.md) — the working conventions, and the rules that came from being wrong

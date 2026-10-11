@@ -7,7 +7,7 @@
 //! nobody here wrote — and read back archives those tools produced.
 //!
 //! Gated, and gated on the tool each one actually asks. `#[ignore]` so
-//! they only run when `check.sh` asks for them, and a tool that is not
+//! they only run when `tools/hf` asks for them, and a tool that is not
 //! installed prints a `HYPRFORGE-SKIP:` marker rather than returning
 //! quietly — the rule CLAUDE.md states about a test that cannot run
 //! never reporting as one that passed.

@@ -10,7 +10,7 @@ already has a crate-level doc that says what it is and what it is not, in
 the voice this project writes in, and it is what docs.rs shows. A README
 written by hand beside it would be a second copy of the same paragraphs,
 and a second copy is a thing that drifts — the class of failure
-`check.sh`'s "Docs name things that exist" step exists to catch. So the
+`tools/hf check`'s "Docs name things that exist" step exists to catch. So the
 README *is* the crate doc, plus the one thing the doc cannot say about
 itself: where it lives and how to install it.
 

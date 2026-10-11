@@ -1,0 +1,10 @@
+# Components that are also published to crates.io, because other
+# components use them as libraries: emojimenu, files and media use the
+# clipboard's history and paste, Settings uses the tray's preferences.
+# Every other component is installed from packages, not published.
+#
+# `tools/hflib/publishing.py` derives the publish exclusions from this
+# plus `publish = false`, and so does .github/workflows/publish.yml —
+# check.sh and publish.yml each kept a hand list, and publish.yml's
+# comment said "seven" while it excluded nine.
+components = ["hyprforge-clipboard", "hyprforge-tray"]

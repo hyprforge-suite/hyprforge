@@ -1,35 +1,36 @@
-# Publishes every library crate to crates.io when a version tag is pushed.
+# Publishes every library crate to crates.io when `tools/hf release`
+# pushes a `libs-vX.Y.Z` tag — phase A of the two-phase release (see
+# tools/hflib/release.py). The suite's own `vX.Y.Z` tag comes later, on
+# the commit that pins every component, and publishes nothing.
 #
-# Seven components are excluded: they are installed from packages (and
-# `cargo install`-able from their own repositories), not published. The
-# clipboard and the tray are published, because other components use them
-# as libraries — and `cargo install hyprforge-clipboard` giving you both
-# its binaries is a feature. Cargo
-# 1.90+'s `publish --workspace` orders the rest by dependency and waits for
-# each wave to appear on the index before publishing the next, so the five
-# waves docs/design/repo-plan.md lists are cargo's problem rather than this file's.
+# What is not published is derived, not listed: every component except
+# those in tools/hflib/published.toml (the clipboard and the tray, which
+# other components use as libraries), plus anything `publish = false`.
+# This file used to keep a hand list whose comment said "seven" while it
+# excluded nine.
 #
-# The very first publish of each crate is not done here: crates.io
-# rate-limits new crate names from one account (a small burst, then a slow
-# trickle), and a workflow that hits that limit fails halfway through a
-# wave with the index in a state nobody chose. The first round is run by
-# hand, wave by wave, after asking help@crates.io for a raise. This
-# workflow is for every release after that, when every name already
-# exists and only versions move.
+# Cargo 1.90+'s `publish --workspace` orders the crates by dependency and
+# waits for each wave to appear on the index before the next.
 #
-# Versions are lockstep: `version.workspace = true` in every library, so
-# one tag is one version for the whole set. See docs/design/repo-plan.md.
+# The very first publish of a new crate name is still done by hand:
+# crates.io rate-limits new names from one account, and a workflow that
+# hits that limit fails halfway through a wave. This workflow is for
+# releases where every name already exists and only versions move.
 
 name: Publish to crates.io
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["libs-v*"]
 
 jobs:
   publish:
     name: "cargo publish --workspace (libraries only)"
     runs-on: ubuntu-latest
+    # crates.io allows a burst of 30 updates, then one a minute, and this
+    # publishes more than 30; waiting that out is the job now, not a
+    # person's re-run.
+    timeout-minutes: 150
     permissions:
       contents: read
     steps:
@@ -57,46 +58,66 @@ jobs:
         # 0.1.0 again (an error from the index) or, worse, a version the tag
         # does not name. Refuse rather than guess.
         run: |
-          want="${GITHUB_REF_NAME#v}"
+          want="${GITHUB_REF_NAME#libs-v}"
           have=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')
           [ "$want" = "$have" ] || { echo "tag says $want, Cargo.toml says $have"; exit 1; }
 
-      - name: Skip what this version already published
-        # crates.io allows a burst of 30 updates and then one a minute
-        # (PublishUpdate in its rate_limiter.rs), and this publishes 33.
-        # cargo waits for the index between dependency waves, which
-        # usually refills enough, but a 429 stops the run with some crates
-        # at the new version and some not. Re-running would then fail at
-        # once on the first crate that already exists. So every crate the
-        # index already lists at this version is excluded, and a re-run
-        # after a 429 finishes the job instead of repeating it.
-        #
-        # The sparse index, not the API: it is what cargo itself reads,
-        # and it needs no token and no user agent.
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          skip=""
-          for name in $(cargo metadata --no-deps --format-version 1 \
-              | python3 -c 'import json,sys; print(*(p["name"] for p in json.load(sys.stdin)["packages"]))'); do
-            path="${name:0:2}/${name:2:2}/$name"
-            if curl -sf "https://index.crates.io/$path" \
-                | python3 -c "import json,sys; sys.exit(0 if any(json.loads(l)['vers'] == '$version' for l in sys.stdin if l.strip()) else 1)"; then
-              echo "$name $version is already on crates.io; skipping it"
-              skip="$skip --exclude $name"
-            fi
-          done
-          echo "SKIP=$skip" >> "$GITHUB_ENV"
-
-      - name: cargo publish --workspace
+      - name: cargo publish --workspace, waiting out the rate limit
+        # A 429 stops `cargo publish` with some crates at the new version
+        # and some not. Each round therefore first excludes every crate
+        # the sparse index already lists at this version (what cargo
+        # itself reads; no token, no user agent), publishes the rest, and
+        # on a 429 sleeps until the time crates.io names plus a minute,
+        # then goes again. Until 0.1.13 this was a person running
+        # `gh run rerun --failed` after reading the time off the log.
         env:
           # An organisation secret: a crates.io API token scoped to
           # publish-update (and publish-new, for a library added later),
           # with the hyprforge-* crates as its scope.
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          cargo publish --workspace \
-            --exclude hyprforge-lock --exclude hyprforge-greet \
-            --exclude hyprforge-settings --exclude hyprforge-displayd \
-            --exclude hyprforge-emojimenu --exclude hyprforge-files \
-            --exclude hyprforge-media --exclude hyprforge-polkit \
-            --exclude hyprforge-procman $SKIP
+          version="${GITHUB_REF_NAME#libs-v}"
+          unpublished=$(python3 - <<'PY'
+          import json, subprocess, tomllib
+          meta = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"]))
+          published = set(tomllib.load(open("tools/hflib/published.toml", "rb"))["components"])
+          components = {l.split()[1].split("/")[-1] for l in subprocess.check_output(
+              ["git", "config", "-f", ".gitmodules", "--get-regexp", r"^submodule\..*\.path$"], text=True).splitlines()}
+          for p in meta["packages"]:
+              if p.get("publish") == [] or (p["name"] in components and p["name"] not in published):
+                  print(p["name"])
+          PY
+          )
+          echo "not published: $unpublished"
+          for round in $(seq 1 12); do
+            exclude=""
+            for name in $unpublished; do exclude="$exclude --exclude $name"; done
+            for name in $(cargo metadata --no-deps --format-version 1 \
+                | python3 -c 'import json,sys; print(*(p["name"] for p in json.load(sys.stdin)["packages"]))'); do
+              case " $unpublished " in *" $name "*) continue ;; esac
+              path="${name:0:2}/${name:2:2}/$name"
+              if curl -sf "https://index.crates.io/$path" \
+                  | python3 -c "import json,sys; sys.exit(0 if any(json.loads(l)['vers'] == '$version' for l in sys.stdin if l.strip()) else 1)"; then
+                exclude="$exclude --exclude $name"
+              fi
+            done
+            if cargo publish --workspace $exclude 2>&1 | tee publish.log; then
+              echo "everything is published"
+              exit 0
+            fi
+            if grep -q "already exists on crates.io index" publish.log && ! grep -q "429" publish.log; then
+              continue
+            fi
+            if ! grep -q "429" publish.log; then
+              echo "publish failed for a reason other than the rate limit"
+              exit 1
+            fi
+            # "Please try again after Sat, 11 Oct 2026 21:40:12 GMT"
+            after=$(grep -o 'try again after [^"]*GMT' publish.log | head -1 | sed 's/try again after //')
+            wait=$(( $(date -d "$after" +%s 2>/dev/null || date +%s) - $(date +%s) + 60 ))
+            [ "$wait" -lt 60 ] && wait=60
+            echo "rate limited until $after; sleeping ${wait}s (round $round)"
+            sleep "$wait"
+          done
+          echo "still not done after 12 rounds"
+          exit 1

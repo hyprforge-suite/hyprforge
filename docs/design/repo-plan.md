@@ -43,22 +43,24 @@ Working in it:
 git clone --recurse-submodules https://github.com/hyprforge-suite/hyprforge
 git submodule update --init            # a clone made without them
 
-# a change to a component: commit inside it, push it, then move the pin
+# a change to a component: commit inside it, then land it
 git -C crates/hyprforge-files commit ...
-git -C crates/hyprforge-files push origin HEAD:main
-git add crates/hyprforge-files && git commit -m "..."   # the pin bump
+tools/hf land files            # builds it against crates.io, pushes its main, stages the pin
+git commit -m "..."            # the pin bump
+
+# a change that needs a library change not yet on crates.io
+tools/hf land files --next     # pushes to the component's `next`; no pin
 ```
 
-The order matters and `check.sh` holds it. A pin naming a commit its
+The order matters and `tools/hf` holds it. A pin naming a commit its
 repository does not have on `main` is a monorepo nobody else can clone, so
-"Submodule pins are on their repositories" refuses one. And a component
-whose commit calls a library change not yet on crates.io builds here (the
-`[patch]` table) and fails its own CI, so "Components build against
-published crates" builds each one outside the workspace the way its CI
-will — the guard `sync.sh --push` used to apply before pushing, moved to
-where the pin is decided. A change to a library and a component together
-is therefore: the library here, a release (`vX.Y.Z`, see Status), then the
-component's commit, then the pin.
+the pre-commit hook refuses one. And a component whose commit calls a
+library change not yet on crates.io builds here (the `[patch]` table) and
+fails its own CI, so `hf land` builds each one outside the workspace the
+way its CI will before pushing it — the guard `sync.sh --push` applied
+before pushing, then check.sh on every full run, now at the push again.
+Such a commit goes to the component's `next` branch, and the release
+merges it once the library it needs is published.
 
 The migration was mechanical because the copies were exact: after
 `sync.sh` reported all ten in step, each `crates/<component>` was replaced
@@ -125,7 +127,7 @@ is now about *convenience* rather than *possibility*.
 The one-manifest problem is solved and worth knowing: a component's
 `Cargo.toml` names its siblings by crates.io version, and the root
 `Cargo.toml` has a `[patch.crates-io]` section redirecting those names back
-to `crates/` (every one of them, which `check.sh`'s "Siblings build from
+to `crates/` (every one of them, which `tools/hf check`'s "Siblings build from
 this checkout" step enforces, along with the version still satisfying the
 requirement). One file, both contexts, no divergence for `git subtree
 push` to conflict on forever, and no network access when building here.
@@ -298,7 +300,7 @@ standalone crate cannot inherit from `[workspace.dependencies]`, so its
 versions are hand-copied, and if the root bumps one nothing fails: cargo
 resolves both, clippy stays silent, the tests stay green, and the suite
 quietly builds two versions of the same dependency. That is "one place to
-fix a shared thing" failing without a symptom, so `check.sh` now compares
+fix a shared thing" failing without a symptom, so `tools/hf check` now compares
 every standalone-ready manifest against the workspace table in tier 1.
 
 *Reversibility, which the plan asserts and nobody had checked* — at the
@@ -367,7 +369,7 @@ Degrading well hid it.
 
 So: before splitting anything, the question is not "is this crate
 ready", it is **"does this crate directory contain every binary its
-package installs"**. `check.sh`'s "Every package is a repository" step
+package installs"**. `tools/hf check`'s "Every package is a repository" step
 asks it now, discovered from the PKGBUILD rather than from a list
 someone has to remember to update.
 
@@ -390,7 +392,7 @@ async-io and panic — and three things follow from that shape:
   so the root `[patch.crates-io]` never reaches it. `crates/.cargo/config.toml`
   does it instead, from outside the split directory, where the
   standalone repository will never see paths that point at nothing.
-  `check.sh`'s "Siblings build from this checkout" asks the same two
+  `tools/hf check`'s "Siblings build from this checkout" asks the same two
   questions of that table as of the root one.
 - **Its versions are its own.** The dependency-pin step skips it: its
   `[workspace.dependencies]` pins zbus to async-io where the root table
@@ -403,7 +405,7 @@ async-io and panic — and three things follow from that shape:
   is recorded here with `git subtree merge`, so later splits descend from
   it and the published history fast-forwards from what was archived.
 
-## Releases: one version, cut by `tools/release.sh`
+## Releases: one version, in two phases (`tools/hf release`)
 
 The whole suite shares one version — the libraries (which inherit
 `[workspace.package].version`), the twelve components, notif's crates and
@@ -413,25 +415,39 @@ tree too. Before this was decided (2026-10-08) only the libraries moved:
 by v0.1.8 the clipboard and tray (published, so they had to) were at
 0.1.8 and the other seven components and notif still said 0.1.0.
 
-`tools/release.sh X.Y.Z` prints every step and does nothing; with
-`--execute` it does them, stopping at the first failure:
+`tools/hf release X.Y.Z` prints every step and does nothing; with
+`--execute` it does them, stopping at the first failure and recording
+each finished step in `target/hf/release-X.Y.Z.json`, so re-running the
+same command continues where it stopped. It refuses to start off `main`,
+with anything uncommitted, with a submodule checked out away from its
+pin, or when the crates the disposable tier covers changed since it
+last passed.
 
-1. `./check.sh`, in full.
-2. Every version moved (`tools/versions.py --set`), the changelogs filed
-   (`tools/changelog.py release`, which refuses an Unreleased section
-   that is still an unedited draft), the AUR package re-rendered
-   (`tools/aur.py --write`), and `./check.sh --quick` over the result.
-   A bump that is not caret-compatible (0.1.x to 0.2.0) also moves every
-   Hyprforge sibling requirement, because cargo silently ignores a
-   `[patch]` whose version does not satisfy one.
-3. Each component committed and pushed to its `main`.
-4. The suite — pins, versions, changelog, packaging — in one
-   "Release vX.Y.Z" commit, pushed.
-5. The tag, pushed; `publish.yml` publishes the libraries.
-6. Every component tagged at its pin; a GitHub Release for the suite and
-   for each component whose pin moved since the previous tag (worked out
-   before step 3, which moves them all).
-7. The AUR push, printed for a person to run.
+Two phases, because a component calling a library change has to be built
+against the *published* library, and so cannot go out until that library
+has. The one-phase `tools/release.sh` that came before could not ship such
+a commit at all: 0.1.13 needed one split by hand and work parked on
+`after-0.1.14` branches.
+
+- **Phase A, the libraries.** Every component's `next` merged locally;
+  `tools/hf check`, cargo's packager and the clean-chroot AUR build over
+  the result. Every version moved (`tools/versions.py --set` — a bump that
+  is not caret-compatible also moves every Hyprforge sibling requirement,
+  because cargo silently ignores a `[patch]` whose version does not satisfy
+  one), the changelogs filed (`tools/changelog.py release`, which refuses an
+  unedited Unreleased draft), the AUR package re-rendered. The clipboard
+  and the tray pushed — they are published with the libraries — then
+  "Release vX.Y.Z (libraries)", tagged `libs-vX.Y.Z`. `publish.yml`
+  publishes, waiting out crates.io's rate limit by itself, and `hf release`
+  waits until the sparse index lists every library at the new version.
+- **Phase B, the components.** Each one built alone against the crates
+  just published, exactly as its CI is about to, pushed to its `main`, its
+  `next` deleted. Then "Release vX.Y.Z" with every pin, tagged `vX.Y.Z` —
+  the AUR package sources the submodules at this tag's pins, so it has to
+  be the commit with the final ones. Then every component tagged, a GitHub
+  Release for the suite and each component whose pin moved since the
+  previous tag (worked out before anything moves them), and the AUR push
+  printed for a person to run.
 
 **Changelogs.** `CHANGELOG.md` here and one per component, Keep a
 Changelog style. `tools/changelog.py draft` drafts from git: a library's
@@ -508,7 +524,7 @@ files helper and polkit policy the current packaging installs.
 - [x] Components are submodules (2026-10-03, issue #2): after v0.1.5 was
       published and `sync.sh` reported all ten in step, each
       `crates/<component>` became a submodule of its repository at the
-      same tree. `split.sh` and `sync.sh` retired; `check.sh` asks that
+      same tree. `split.sh` and `sync.sh` retired; check.sh asked that
       every standalone crate is an initialised submodule, that every pin
       is on its repository's `main`, and that every component builds
       against the published libraries; CI and the PKGBUILD check out
@@ -518,14 +534,19 @@ files helper and polkit policy the current packaging installs.
       suite's `CHANGELOG.md`, and check.sh's "Versions agree", "Changelog
       has a section for the version", "AUR PKGBUILD matches
       packaging/arch" and the gated clean-chroot tier
-- [ ] First lockstep release through `tools/release.sh`, and the first
-      push to the AUR
+- [x] Tooling rebuilt (2026-10-11): `tools/hf` replaced check.sh and
+      tools/release.sh — nextest tiers, the disposable nested Hyprland,
+      the session guard, `hf land`, and the two-phase `hf release`;
+      publish.yml waits out crates.io's 429s itself
+- [ ] First two-phase release through `tools/hf release` (0.1.14), and
+      the first push to the AUR
 
 ## Staying in sync after the push (retired with `sync.sh`)
 
 History: this is the problem submodules removed. There is no second copy
 to fall behind now, and the one guard here worth keeping — building each
-component against crates.io before it goes out — moved into `check.sh`.
+component against crates.io before it goes out — moved into check.sh,
+and since 2026-10-11 into `tools/hf land` and `hf release`.
 
 Publishing with `split.sh` and a hand-typed `git push` was step 3's
 answer to *getting a component out the door once*. It has no opinion on

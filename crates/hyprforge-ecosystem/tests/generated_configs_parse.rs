@@ -45,7 +45,7 @@ use std::process::Command;
 /// listener nobody asked for.
 const ERROR_MARKERS: &[&str] = &["does not exist", "config error in file"];
 
-/// Printed whenever a check could not be made, so `check.sh` can tell a
+/// Printed whenever a check could not be made, so `tools/hf` can tell a
 /// check that *passed* from one that never *ran*.
 ///
 /// libtest has no notion of a skipped test. Returning early from one is

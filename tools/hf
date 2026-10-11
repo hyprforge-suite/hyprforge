@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""Hyprforge's one tool for checking, testing, landing and releasing.
+
+  tools/hf check [--fast]          everything this machine can check without changing it
+  tools/hf precommit               what the pre-commit hook runs: staged pins, then check --fast
+  tools/hf lint                    the static checks only (no build of tests)
+  tools/hf test <tier> [-- ARGS]   one tier: unit, live, visible, disposable, root, manual
+  tools/hf hyprland up|down|status the disposable nested Hyprland
+  tools/hf sandbox                 shipped units, verified, and self-tests under their sandbox
+  tools/hf land <component> [--next]   push a component, then stage its pin
+  tools/hf release X.Y.Z [--execute]   the two-phase release (dry run by default)
+  tools/hf clean [--dry-run] [--incremental]
+  tools/hf doctor
+
+`--fast` is what the pre-commit hook and CI run: clippy, docs, the
+static checks and the unit tier. Without it, the live and visible tiers
+run too, each behind the gate it actually asks, and the session guard
+proves the running Hyprland was left as it was.
+
+Nothing `hf check` runs changes the session. The tests that change a
+compositor run only under `hf test disposable`, against a nested
+instance, from a terminal. docs/testing.md has the tier table.
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from hflib import checks, clean, hyprland, testing, ui  # noqa: E402
+
+
+def main(argv: list[str]) -> int:
+    # Everything after a bare `--` belongs to nextest, not to us.
+    passthrough: list[str] = []
+    if "--" in argv:
+        i = argv.index("--")
+        argv, passthrough = argv[:i], argv[i + 1 :]
+
+    p = argparse.ArgumentParser(prog="tools/hf", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="command", required=True)
+
+    c = sub.add_parser("check", help="everything this machine can check without changing it")
+    c.add_argument("--fast", action="store_true", help="no live tiers (the pre-commit hook and CI)")
+
+    sub.add_parser("lint", help="the static checks only")
+    sub.add_parser("precommit", help="staged pins on their repositories, then check --fast")
+
+    t = sub.add_parser("test", help="run one tier")
+    t.add_argument("tier")
+    t.add_argument("--keep", action="store_true", help="disposable: leave the nested Hyprland running afterwards")
+    t.add_argument("--unattended-ok", action="store_true", help="disposable: start without a terminal (never from a background agent)")
+
+    h = sub.add_parser("hyprland", help="the disposable nested Hyprland")
+    h.add_argument("action", choices=["up", "down", "status"])
+    h.add_argument("--unattended-ok", action="store_true")
+
+    sub.add_parser("sandbox", help="shipped units, and self-tests under their own sandbox")
+
+    l = sub.add_parser("land", help="push a component's work, then stage its pin")
+    l.add_argument("component")
+    l.add_argument("--next", action="store_true", help="push to the component's `next` branch; stage nothing")
+
+    r = sub.add_parser("release", help="the two-phase release")
+    r.add_argument("version")
+    r.add_argument("--execute", action="store_true")
+
+    k = sub.add_parser("clean", help="report build output and remove what is safe to")
+    k.add_argument("--dry-run", action="store_true")
+    k.add_argument("--incremental", action="store_true")
+
+    sub.add_parser("doctor", help="tools and repository state")
+
+    a = p.parse_args(argv)
+    if a.command == "check":
+        return checks.check(fast=a.fast)
+    if a.command == "lint":
+        return checks.lint()
+    if a.command == "precommit":
+        from hflib import land
+
+        return land.precommit() or checks.check(fast=True)
+    if a.command == "test":
+        return testing.test(a.tier, keep=a.keep, unattended_ok=a.unattended_ok, extra=passthrough)
+    if a.command == "hyprland":
+        {"up": lambda: hyprland.up(unattended_ok=a.unattended_ok), "down": hyprland.down, "status": hyprland.status}[a.action]()
+        return 0
+    if a.command == "sandbox":
+        from hflib import sandbox
+
+        return sandbox.sandbox()
+    if a.command == "land":
+        from hflib import land
+
+        return land.land(a.component, to_next=a.next)
+    if a.command == "release":
+        from hflib import release
+
+        return release.release(a.version, execute=a.execute)
+    if a.command == "clean":
+        return clean.clean(a.dry_run, a.incremental)
+    if a.command == "doctor":
+        return clean.doctor()
+    return 2
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        print()
+        sys.exit(130)

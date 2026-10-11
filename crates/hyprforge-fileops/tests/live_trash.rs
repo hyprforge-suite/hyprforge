@@ -19,7 +19,7 @@ use std::path::Path;
 /// A trash with nothing in it proves nothing, and must say so rather
 /// than passing silently — libtest has no skipped state, so a test that
 /// returns early prints `ok` exactly like one that checked something.
-/// `check.sh` greps for this marker.
+/// `tools/hf` greps for this marker.
 fn skip(reason: &str) {
     eprintln!("HYPRFORGE-SKIP: {reason}");
 }

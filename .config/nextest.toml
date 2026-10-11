@@ -1,0 +1,152 @@
+# Every test in the workspace belongs to exactly one tier, and a tier is
+# a nextest profile whose default-filter says which tests it holds.
+#
+# Why tiers exist: `#[ignore]` used to mean four different things — needs
+# root, needs a service, is a screenshot tool, changes the session — and
+# one `cargo test -- --ignored` sweep ran all of them, against the live
+# session. On 2026-10-10 that pushed every Hyprland option, at extreme
+# values, into the desktop in use and left it frozen until a re-login.
+#
+# `tools/hf` runs the tiers; nobody needs to type these profiles by hand.
+#
+#   unit        everything not #[ignore]d — no system needed     hf check --fast, CI
+#   live        asks a real service and changes nothing          hf check
+#   visible     briefly visible, then undone (an icon in the bar) hf check
+#   disposable  changes Hyprland or the clipboard                hf test disposable
+#   root        needs root                                        hf test root
+#   manual      screenshot tools and benchmarks                   never automatic
+#
+# `tools/hf lint` fails when an ignored test is in no tier or in two, so a
+# new #[ignore] has to be classified before it can be committed. The
+# `add-a-live-test` skill says how to choose.
+
+[store]
+dir = "target/nextest"
+
+# Live tests talk to one compositor, one bus, one clipboard; each used to
+# run with --test-threads=1, and the nested clipboard tests set
+# WAYLAND_DISPLAY process-wide. One at a time is the honest default.
+[test-groups]
+serial = { max-threads = 1 }
+
+[profile.default]
+# A bare `cargo nextest run` is the unit tier.
+default-filter = "all()"
+fail-fast = false
+# Every live test is bounded by its own timeouts; this is the backstop for
+# one that is not, so a wedged service fails a test instead of the run.
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[profile.default.junit]
+path = "junit.xml"
+# Passing tests' output is kept: a skipped check prints HYPRFORGE-SKIP and
+# returns early, which libtest reports as a pass, so the marker in a
+# passing test's stderr is the only place a skip is visible.
+store-success-output = true
+
+[[profile.default.overrides]]
+filter = "kind(test) and binary(/^live_/) | binary(nested_clipboard) | binary(generated_configs_parse)"
+test-group = "serial"
+
+# ---------------------------------------------------------------------------
+# The tiers. Run with `--run-ignored only` for every tier except `unit`.
+# ---------------------------------------------------------------------------
+
+[profile.unit]
+default-filter = "all()"
+fail-fast = false
+[profile.unit.junit]
+path = "junit.xml"
+store-success-output = true
+
+[profile.live]
+fail-fast = false
+slow-timeout = { period = "30s", terminate-after = 4 }
+default-filter = """
+    (
+        binary_id(hyprforge-appearance::live_appearance)
+      | binary_id(hyprforge-input::live_input)
+      | binary_id(hyprforge-system::live_system)
+    ) and test(/^(hyprland_has_every_catalogued_option_with_the_declared_type|declared_unsupported_categories_are_still_absent_or_still_untyped|options_declared_unsupported_are_still_absent)$/)
+  | binary_id(hyprforge-ecosystem::live_ecosystem) and test(/^(hyprpaper_still_answers_listactive|hypridle_still_has_no_ipc|the_generated_wallpaper_file_is_well_formed)$/)
+  | binary_id(hyprforge-ecosystem::live_hyprsunset)
+  | binary_id(hyprforge-ecosystem::generated_configs_parse)
+  | binary_id(hyprforge-archive::live_system_tools)
+  | binary_id(hyprforge-bluetooth::live_bluez) and not test(=bluez_accepts_the_pairing_agent_this_crate_registers)
+  | binary_id(hyprforge-clipboard) | binary_id(hyprforge-clipboard::live_clipboard)
+  | binary_id(hyprforge-displayd::live_smoke)
+  | binary_id(hyprforge-fileops::live_trash)
+  | binary_id(hyprforge-files::live_portal_interface)
+  | binary_id(hyprforge-greet::live_text_input)
+  | binary_id(hyprforge-lock::bin/hyprforge-lock) and test(/live_fprintd/)
+  | binary_id(hyprforge-mime::live_mime_database)
+  | binary_id(hyprforge-network::live_networkmanager)
+  | binary_id(hyprforge-polkit::live_polkit)
+  | binary_id(hyprforge-polkit::bin/hyprforge-polkit) and test(=agent::tests::a_process_outside_any_session_answers_for_the_users_display)
+  | binary_id(hyprforge-power::live_logind) | binary_id(hyprforge-power::live_upower) | binary_id(hyprforge-power::live_power_profiles)
+  | binary_id(hyprforge-procman) and test(/^(services|sessions)::/)
+  | binary_id(hyprforge-tray::live_icons)
+  | binary_id(hyprforge-video)
+  | binary_id(hyprforge-volumes::live_udisks) | binary_id(hyprforge-volumes::live_gadgets)
+"""
+[profile.live.junit]
+path = "junit.xml"
+store-success-output = true
+[[profile.live.overrides]]
+filter = "all()"
+test-group = "serial"
+
+[profile.visible]
+fail-fast = false
+slow-timeout = { period = "30s", terminate-after = 4 }
+default-filter = """
+    binary_id(hyprforge-tray::live_tray)
+  | binary_id(hyprforge-bluetooth::live_bluez) and test(=bluez_accepts_the_pairing_agent_this_crate_registers)
+"""
+[profile.visible.junit]
+path = "junit.xml"
+store-success-output = true
+[[profile.visible.overrides]]
+filter = "all()"
+test-group = "serial"
+
+[profile.disposable]
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 5 }
+default-filter = """
+    (
+        binary_id(hyprforge-appearance::live_appearance)
+      | binary_id(hyprforge-input::live_input)
+      | binary_id(hyprforge-system::live_system)
+    ) and not test(/^(hyprland_has_every_catalogued_option_with_the_declared_type|declared_unsupported_categories_are_still_absent_or_still_untyped|options_declared_unsupported_are_still_absent)$/)
+  | binary_id(hyprforge-session::live_session)
+  | binary_id(hyprforge-shortcuts::live_lua)
+  | binary_id(hyprforge-windowrules::live_lua)
+  | binary_id(hyprforge-ecosystem::live_ecosystem) and test(/^(hyprpaper_accepts_every_fit_mode_this_crate_writes|hyprsunset_takes_and_reports_a_temperature|hyprsunset_accepts_the_extremes_of_the_declared_range)$/)
+  | binary_id(hyprforge-files::nested_clipboard)
+"""
+[profile.disposable.junit]
+path = "junit.xml"
+store-success-output = true
+[[profile.disposable.overrides]]
+filter = "all()"
+test-group = "serial"
+
+[profile.root]
+fail-fast = false
+default-filter = """
+    binary_id(hyprforge-procman) and test(/^(exits|netbpf)::/)
+"""
+[profile.root.junit]
+path = "junit.xml"
+store-success-output = true
+[[profile.root.overrides]]
+filter = "all()"
+test-group = "serial"
+
+[profile.manual]
+default-filter = """
+    binary_id(hyprforge-polkit::bin/hyprforge-polkit) and test(=prompt::tests::render_the_card)
+  | binary_id(hyprforge-procman::bin/hyprforge-procman) and test(/^render::/)
+  | binary_id(hyprforge-procman) and test(/^(journal|recorder|tui)::/)
+"""

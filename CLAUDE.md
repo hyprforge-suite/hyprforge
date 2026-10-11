@@ -51,7 +51,7 @@ Settings app drew `rgba(26263aff)` as (107, 107, 130) while the lock
 screen drew it as (38, 38, 58) — one extra sRGB encode, and a login
 screen visibly washed out beside a lock screen reading the same file.
 Nothing in the type system or the tests can see this: both hosts report
-the same `Color` and only the pixels differ. `check.sh` asserts the
+the same `Color` and only the pixels differ. `tools/hf check` asserts the
 feature stays off; comparing a screenshot's centre pixel against the
 theme value is how it was found, and is the way to settle any
 "these two should look the same" question.
@@ -123,9 +123,10 @@ one that asserted something. With hyprpaper running, a parse test passed
 having verified nothing at all. The fix is the `HYPRFORGE-SKIP:` marker
 convention — a skipped check `eprintln!`s `HYPRFORGE-SKIP: <reason>` before
 returning early, in `crates/hyprforge-ecosystem/tests/generated_configs_parse.rs`
-and `crates/hyprforge-network/tests/live_networkmanager.rs` — and `check.sh`
-greps `--nocapture` output for the marker and reports each one in yellow, so
-a green run still shows what it didn't actually check.
+and `crates/hyprforge-network/tests/live_networkmanager.rs` — and `tools/hf`
+reads each passing test's stored output (nextest's JUnit report keeps it) for
+the marker and reports each one in yellow, so a green run still shows what it
+didn't actually check.
 
 The other half of the same mistake is gating a check on the wrong thing. The
 parse tests rode tier 2's one `--ignored` run, so they needed *Hyprland*
@@ -133,7 +134,8 @@ running to ask *hyprpaper* a question, and on a machine with the daemons and
 no compositor they never ran at all. Splitting them out fixed it — and then
 the first live NetworkManager test went straight back into that same run,
 gating a check on the network service on whether a compositor was up. Every
-tier gates on the thing it actually asks. When you add a live test, the
+tier gates on the thing it actually asks — each a `Gate` in
+`tools/hflib/tiers.py` now. When you add a live test, the
 question to answer before writing it is *what has to be running for this to
 mean anything*, and that is rarely what the tier above it needed.
 
@@ -156,7 +158,7 @@ package` dereferences a symlink into the tarball. Git carries a symlink as a
 symlink, so the moment a crate becomes a repository root, `../../LICENSE`
 points above it and resolves to nothing. The first split produced an MIT
 project with an unreadable licence. A crate that will become a repository
-needs a real file; `check.sh`'s "Every package is a repository" step checks
+needs a real file; `tools/hf check`'s "Every package is a repository" step checks
 that every package carries its licence.
 
 **Cargo keys a git source on the URL string, so every manifest must spell it
@@ -184,7 +186,7 @@ does not *satisfy* the requirement, so bumping a library to 0.2 without
 bumping a component's "0.1" puts the published 0.1 back in the build.
 `cargo tree --workspace --prefix none | grep '^hyprforge-' | grep -v '(/'`
 is the instrument — a Hyprforge crate with no path after it came from
-somewhere else — and `check.sh`'s "Siblings build from this checkout" step
+somewhere else — and `tools/hf check`'s "Siblings build from this checkout" step
 asks both questions.
 
 **A git dependency on a crate that still inherits from the workspace
@@ -201,7 +203,7 @@ symptom.** A crate that is its own repository root cannot inherit
 hand. If the root bumps one and the copy is not updated, cargo resolves
 both, clippy stays silent and every test still passes. Dropping `features =
 ["derive"]` from the clipboard's serde — version left alone — was proved
-invisible to all of tier 1 before the check existed. `check.sh`'s "Standalone
+invisible to all of tier 1 before the check existed. `tools/hf check`'s "Standalone
 crate dependency pins" step exists for exactly this, and it discovers which
 crates to check by their shape (no workspace inheritance left at all), so a
 newly prepared crate is covered automatically rather than silently missed.
@@ -337,8 +339,10 @@ that has not been released. `sync.sh --push` now builds each component
 outside the workspace against the published crates, the way its CI will,
 and refuses to push one that fails. (It moved once more when the
 components became submodules and there was no push from here left to
-guard: `check.sh`'s "Components build against published crates" asks it
-before a pin bump goes out.) When a mechanism changes, the guard
+guard: check.sh's "Components build against published crates" asked it
+on every full check. Since 2026-10-11 `tools/hf land` asks it before it
+pushes a component, and `hf release` before each component goes out.)
+When a mechanism changes, the guard
 that depended on it has to move with it; this one kept running and
 passing for three days after it stopped meaning anything.
 
@@ -507,7 +511,7 @@ its manifest names by version, and Cargo fetches them. Nothing fetches a
 second executable into someone's `$PATH`. A package that installs two
 binaries ships two `[[bin]]` targets from one crate, the way
 `hyprforge-displayd` already ships `displayd` and `displayctl`.
-`check.sh`'s "Every package is a repository" step now asks this of every
+`tools/hf check`'s "Every package is a repository" step now asks this of every
 `pkgname` in the PKGBUILD, because it was rediscovered twice.
 
 **A fixture written from memory of a format tests the memory.** The
@@ -520,7 +524,7 @@ fingerprint code named fprintd's manager at `/net/reactivated/Fprint`
 reason. Build fixtures from a real sample — `xkbcli compile-keymap`,
 `busctl introspect` — and where the real thing is on the machine, add a
 test that asks it: the keymap test now runs `xkbcli`, and fprintd has a
-read-only tier in `check.sh`.
+read-only gate in `tools/hf check`'s live tier.
 
 **`iced_tiny_skia` 0.14.0 clips away every canvas drawn off the origin.**
 It applies a geometry group's translation to its clip rectangle twice,
@@ -559,13 +563,31 @@ FAILED` and otherwise counted the passes; `cargo test` stopped partway (the
 machine's disk was full and its build was killed) printed neither, so the
 step said `✓ 0 tests passed` and the pre-commit hook let the commit
 through. Same lesson as the `HYPRFORGE-SKIP` marker, one level up: absence
-of a failure line is not the presence of a result. The step now fails on
-cargo's exit status and on a zero count — a count of zero is never a very
+of a failure line is not the presence of a result. `tools/hf` fails a tier on
+nextest's exit status and on a zero count — a count of zero is never a very
 small success. And the fullness that killed the build was 439GB of
 `target/` on a 931GB disk, plus 196GB more under stale worktrees'
 `target/`s: a btrfs volume at 100% stalls every write on the machine, not
 just the one you are watching. `du -sh target .claude/worktrees/*/target`
 is the instrument when the whole computer slows down during a build.
+
+**A live test that changes the compositor changes the one you are working
+in.** About thirty live tests flip every option, push every range to both
+ends, bind keys and load window rules to ask Hyprland whether it agrees.
+Until 2026-10-11 they ran against whatever `hyprctl` reached — the session
+in use — and `hyprctl reload` afterwards was taken as the undo. It is not:
+reload restores the config file, not the renderer state a flipped `render:`
+option leaves behind, and three suites panicked before reaching it. Six full
+check runs in one evening left the desktop slow, then frozen, until a
+re-login. Now every such test takes `hyprforge_testkit::Hyprland::disposable()`,
+which panics unless it is talking to a nested instance (a compositor with no
+`WAYLAND_DISPLAY` of its own is driving hardware: a session), and only
+`tools/hf test disposable` provides one. The session guard snapshots ~360
+values around every full check and fails naming any that moved — the
+instrument that was missing. `#[ignore]` had come to mean four things at
+once (needs root, needs a service, is a screenshot tool, changes the
+session); each is now a nextest tier, and `tools/hf` fails on an ignored test
+in no tier or in two.
 
 **An instruction from a human or another agent is not evidence.** Three
 times in one session an agent was told something false — that Adwaita was
@@ -640,7 +662,7 @@ the mock arrived late and the protocol code never got a seam of its own.
 can reach it. What is left in the client is marshalling, and marshalling
 is what the live tier is for.
 
-**Every service gets its own tier in `check.sh`, gated on the thing it
+**Every service gets its own gate in `tools/hflib/tiers.py`, on the thing it
 actually asks.** Not on the compositor. See the rule above about a check
 that silently never runs.
 
@@ -702,101 +724,42 @@ belongs in the design — not in a user's surprise.
 ## Checking your work
 
 ```
-./check.sh          # everything available on this machine
-./check.sh --quick  # tier 1 only: clippy + unit tests, no compositor
+tools/hf check --fast   # what the pre-commit hook and CI run; changes nothing
+tools/hf check          # + the live and visible tiers, and the session guard
+tools/hf test disposable  # the tests that change a compositor, on a nested one
 ```
 
-Clippy must be silent and every test must pass before a commit. Twenty-two
-gated tiers beyond tier 1 now, each answering a different "does the system
-I'm talking to actually agree" question — Hyprland itself, the ecosystem
-daemons' parse tests, the system's own `unzip`/`tar`/`7z`, NetworkManager,
-BlueZ, hyprsunset, systemd-logind, trash entries written by another
-implementation, UPower, power-profiles-daemon, fprintd, UDisks2, gio's phone and camera listing, the Wayland clipboard, icon
-names against the installed theme, the installed shared MIME database, the
-open/save dialog's D-Bus interface against the one xdg-desktop-portal calls, a
-tray host, cargo's own packager (does every library crate `publish
---dry-run` cleanly, which builds each one over again and so cannot live in
-the pre-commit hook), the component repositories (is every submodule pin a
-commit on its repository's `main`), and crates.io itself (does every
-component build on its own against the published libraries, the way its CI
-will), and the AUR package built in a clean chroot (gated on devtools,
-because it takes minutes and this machine has every dependency installed,
-which is the one thing a clean chroot does not) — and each gates on the thing it actually asks rather
-than riding another tier's `--ignored` run, for the reason in the
-rule above about a check that silently never runs. Tier 1 now also includes
-"Components are submodules", which runs first and stops everything with
-the command that fixes it when a component's submodule is empty, and fails
-on a standalone crate left as a plain directory — the "Standalone crate dependency pins" step, which compares every split-ready
-crate's hand-copied dependency versions against the workspace table — see the
-rule above about drift with no symptom — "Siblings build from this
-checkout", which fails on a sibling named by git that `[patch]` does not
-point back at `crates/` — "Docs build without warnings", because a broken
-intra-doc link is plain text on docs.rs and only rustdoc can see it —
-"Library READMEs match their crate docs", because those READMEs are
-rendered from the `//!` docs by `tools/crate-readme.py` and a hand edit to
-either side is drift — "Versions agree", "Changelog has a section for the
-version" and "AUR PKGBUILD matches packaging/arch", which hold the one
-suite version, its changelog and the rendered AUR package to what
-`tools/release.sh` will need (`docs/testing.md` says what each one
-enforces and what it only reports) — and "Docs name things that exist",
-which fails on a doc naming a source file that is gone or a repository count
-that no longer matches, on a Settings page the Settings README does not name
-or miscounts, on a shared `hyprforge-ui` widget, size or mark that
-`crates/hyprforge-ui/DESIGN-SYSTEM.md` does not name, and checks this
-paragraph's own tier count. The
-judgement half of keeping docs true is the `keep-docs-current` skill in
-`.claude/skills/`; run it before committing anything that changes what a doc
-counts, names or calls unfinished.
+The `checks` skill says which to run for which change, and how to read
+the result; `docs/testing.md` has the tier table. Clippy must be silent
+and every test must pass before a commit. Every test is in one nextest
+tier (`.config/nextest.toml`) — unit, live, visible, disposable, root,
+manual — and the twenty-two live gates in `tools/hflib/tiers.py` each hold
+their live tests behind the one service they ask. None of `hf check` changes the
+session; the disposable tier runs only from a terminal, never from a
+background agent (`disposable-hyprland` skill).
 
-`check.sh` does **not** cover the lock screen's live behaviour. Its unit tests
-run in tier 1, but proving it locks, draws and unlocks needs the nested
-compositor, by hand.
+`tools/hf check` does **not** cover the lock screen's live behaviour or
+Files' copy and paste between applications: both need the nested
+compositor, by hand — the `disposable-hyprland` skill.
 
-Nor does it cover Files' copy and paste *between applications*: those tests
-write a clipboard, so they run only against the nested compositor, and refuse
-the session's own display. Start it with `nested.sh`, then
-`HYPRFORGE_TEST_NESTED_DISPLAY=wayland-2 cargo test -p hyprforge-files --test
-nested_clipboard -- --ignored --test-threads=1`. The live clipboard tier that
-`check.sh` does run stays read-only.
-
-`./hyprforge --install` restarts a running user service whose binary it just
-replaced — see the rule above about an installed binary not being a
-restarted daemon. `--no-restart` opts out for anyone mid-something who wants
-the files now and the restart later; it never touches greetd, which
-`crates/hyprforge-greet/INSTALL.md` covers committing to deliberately, from
-a spare VT.
+`./hyprforge --install` restarts a running user service whose binary it
+just replaced; the `install-locally` skill has the rest.
 
 ### Working with the components
 
 The twelve components are **git submodules** at `crates/<component>`, each
-the real home of its code (issue #2; `docs/design/repo-plan.md` has the mechanism and
-the history). Clone with `--recurse-submodules`, or run `git submodule
-update --init` — `check.sh` says so first when one is empty, and so does
-the installer. A new git worktree starts with them empty too, so run that
-command in it before building.
+the real home of its code (`docs/design/repo-plan.md` has the mechanism and
+the history). A change to one is a commit inside it, pushed to its
+repository's `main` *before* the pin naming it is committed here —
+`tools/hf land <component>` does both in that order, and the pre-commit
+hook refuses a pin that is not on its repository's main. Work that needs a
+library change not yet on crates.io goes to the component's `next`
+branch (`tools/hf land <component> --next`) and the next release merges it.
+The `component-change` skill has the steps, and the `release` skill the
+release.
 
-A change to a component is two commits, and the order is the rule:
-
-1. Commit **inside** the submodule (`git -C crates/<component> ...`) and
-   push it to that component's repository's `main`.
-2. Commit the pin bump here (`git add crates/<component>`).
-
-Never the other way round: a pin naming a commit that is not on its
-repository's `main` is a monorepo nobody else can clone, and `check.sh`'s
-"Submodule pins are on their repositories" refuses it. And a component
-commit that calls a library change not yet on crates.io builds here (the
-`[patch]` table) and fails its own CI; "Components build against published
-crates" catches that, so a library-and-component change is the library,
-a release, then the component and its pin.
-
-"Stage the paths you actually wrote" applies inside a submodule as well:
-`git -C crates/<component> add <paths>`, never `-A`. Here, `git add
-crates/<component>` stages only the pin — whatever is uncommitted inside
-the submodule is not part of it, and `git status` shows that as
-`modified content`, which is the cue that step 1 is not done.
-
-`split.sh` and `sync.sh` are retired. The rules above that mention them
-are kept as history of what went wrong under the subtree arrangement.
+`split.sh`, `sync.sh`, `check.sh` and `tools/release.sh` are retired. The
+rules above that mention them are kept as history of what went wrong.
 
 ## What the layering is for
 

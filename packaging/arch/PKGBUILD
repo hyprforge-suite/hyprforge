@@ -81,7 +81,7 @@ check() {
   export CARGO_TARGET_DIR="$srcdir/target"
   # Tier 1 only. The other tiers need a running compositor, NetworkManager,
   # BlueZ, logind and a bar, none of which exist in a build chroot — see
-  # check.sh's header.
+  # docs/testing.md.
   cargo test --release --frozen --workspace --features "$_procman_features"
   (cd crates/hyprforge-notif && cargo test --release --frozen --workspace)
 }
@@ -101,7 +101,7 @@ _bin() {
 # presets below enable them for every user, so it has to be right now.
 # The installer makes the same rewrite for its own $PREFIX.
 #
-# check.sh's "Every package is a repository" step reads these calls: the
+# `tools/hf check`'s "Every package is a repository" step reads these calls: the
 # command's first word must be a binary the same package installs.
 _unit() {
   local dst="$pkgdir/usr/lib/systemd/user/${1##*/}"

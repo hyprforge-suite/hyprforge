@@ -5,7 +5,7 @@
 //! every build of every crate that depends on `hyprforge-emoji`, for a
 //! file that changes only when Unicode publishes a new version. Running
 //! it by hand and committing the result means normal builds — and
-//! `check.sh` — never touch `data/emoji-test.txt` at all; only a human
+//! `tools/hf` — never touch `data/emoji-test.txt` at all; only a human
 //! re-running this binary does.
 //!
 //! To regenerate (e.g. after updating `data/emoji-test.txt` to a newer

@@ -8,7 +8,7 @@
 //! using, and `live_ecosystem.rs` already carries the one test in this
 //! project that changes hyprsunset's temperature and restores it
 //! (`hyprsunset_takes_and_reports_a_temperature`), gated behind the same
-//! `--ignored` flag and wired into `check.sh`'s "Live tests against
+//! `--ignored` flag and wired into `tools/hf check`'s "Live tests against
 //! Hyprland" step. Adding a second temperature-changing test here would
 //! double that risk for no new coverage, so this file only reads.
 //!

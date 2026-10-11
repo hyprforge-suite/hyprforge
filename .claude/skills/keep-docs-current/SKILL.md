@@ -1,6 +1,6 @@
 ---
 name: keep-docs-current
-description: Bring Hyprforge's docs back in line with the code after a change. Use before committing any change that adds, removes or renames a component, crate, binary, tray item, Settings screen, source file, protocol or check.sh tier; that finishes something a doc calls deferred, planned or not started; that changes a count a doc states; or that changes how something works — how it is built, resolved, released, ordered, installed or talked to — even when no name or number moves. Also use when asked to update, audit or sync the docs, which runs the whole-repository audit.
+description: Bring Hyprforge's docs back in line with the code after a change. Use before committing any change that adds, removes or renames a component, crate, binary, tray item, Settings screen, source file, protocol, nextest tier or live gate; that finishes something a doc calls deferred, planned or not started; that changes a count a doc states; or that changes how something works — how it is built, resolved, released, ordered, installed or talked to — even when no name or number moves. Also use when asked to update, audit or sync the docs, which runs the whole-repository audit.
 ---
 
 # Keep the docs current
@@ -28,10 +28,10 @@ resolves its siblings from here*. A doc that explains a reason goes
 stale when the mechanism under the reason changes, and it is the one
 kind of claim a name search can never find.
 
-`check.sh`'s **"Docs name things that exist"** step catches the part a
+`tools/hf check`'s **"Docs name things that exist"** step (`tools/hflib/lints/docs_name_things.py`) catches the part a
 machine can: source and doc paths that don't exist; the README's
 repository table and its spelled-out counts, and `docs/architecture.md`'s,
-against the crates that are actually standalone; CLAUDE.md's gated-tier count against `check.sh` itself. This skill is the part it can't.
+against the crates that are actually standalone; CLAUDE.md's live-gate count against `tools/hflib/tiers.py`. This skill is the part it can't.
 
 ## 1. Say what the change made true or false
 
@@ -62,12 +62,12 @@ a gap for the person you are working with, or a check for step 6.
 | `crates/<crate>/README.md` | what the crate is, its files, protocols | **Published** — it is the front page of the split repository |
 | `crates/<crate>/Cargo.toml` `description` | one-line summary | Published the same way, and usually lists features |
 | `README.md` | the repository table and its counts, install, the list of docs | The landing page, and the only place that says the other repositories exist |
-| `docs/*.md` | the workspace layout (`architecture.md`), displays, config integration, lock and greeter, the `check.sh` tiers (`testing.md`) | The reference the README links to; each explains how something works now |
+| `docs/*.md` | the workspace layout (`architecture.md`), displays, config integration, lock and greeter, the tiers and live gates (`testing.md`) | The reference the README links to; each explains how something works now |
 | `docs/design/vision.md` | component inventory (the Status column), "Where things stand" | Its "as of" date is part of the claim — update it with the facts |
 | `docs/design/repo-plan.md` | the Status checklist | A split, a new check, a finished step |
 | `CLAUDE.md` | rules, the tier count in "Checking your work", the layering diagram | Add a rule only for a mistake that was not obvious in advance |
 | `//!` module docs of every file touched | what the module does and does not do | Lists of items, backends and "the four …" live here too |
-| Comments and messages in `check.sh`, `hyprforge`, `.gitmodules` | why a step exists, why it runs in this order | These explain the mechanism they guard, and print it to whoever runs them — a stale reason here is believed |
+| Comments and messages in `tools/hf`, `tools/hflib/`, `.config/nextest.toml`, `hyprforge`, `.gitmodules` | why a step exists, why it runs in this order | These explain the mechanism they guard, and print it to whoever runs them — a stale reason here is believed |
 | `.github/workflows/*.yml`, and each component's own CI | what is built from where, which secret, which crates are excluded | Comments here state the build and release model outright |
 | A component README's build and install sections | where siblings come from, what a clone fetches | The first thing an outside contributor follows |
 | `packaging/arch/` (`PKGBUILD` and its comments) | which package ships which binaries, from which source | Packaging granularity is a claim about the suite's shape |
@@ -118,7 +118,7 @@ both kinds.
 
 grep reads one line at a time, and prose wraps: "Twelve gated" ending
 one line and "tiers" starting the next is invisible to the first search,
-which is exactly how CLAUDE.md said twelve tiers while `check.sh` had
+which is exactly how CLAUDE.md said twelve tiers while check.sh had
 fourteen. In the docs you are already editing, also search for the bare
 number words and read what follows them.
 
@@ -138,11 +138,11 @@ A doc fix belongs with the change that made it necessary, so the
 commit message and the docs describe the same thing. Stage the paths
 you edited by name, never `git add -A`.
 
-## 6. Move what can be mechanical into check.sh
+## 6. Move what can be mechanical into `tools/hf`
 
 If you found a claim a script could have checked — a count derived
 from files, a name that must exist — extend the "Docs name things that
-exist" step instead of relying on this skill next time. Plant the
+exist" lint (`tools/hflib/lints/docs_name_things.py`) instead of relying on this skill next time. Plant the
 error once to prove the check fails on it, then take it back out.
 
 ## The whole-repository audit

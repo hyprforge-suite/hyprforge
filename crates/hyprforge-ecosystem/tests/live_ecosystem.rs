@@ -21,7 +21,7 @@ use hyprforge_testkit::{hyprctl, Hyprland};
 
 /// Whether `daemon` answers on the targeted instance's own socket — not a
 /// machine-wide `pgrep`, which sees the session's daemon while `hyprctl`
-/// is talking to the nested instance. Says so in the marker `check.sh`
+/// is talking to the nested instance. Says so in the marker `tools/hf`
 /// and `tools/hf` report, because a test that returns early prints `ok`.
 fn running(live: &Hyprland, daemon: &str) -> bool {
     let up = live.daemon_running(daemon);

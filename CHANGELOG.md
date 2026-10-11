@@ -7,7 +7,7 @@ share each version number (see `docs/design/repo-plan.md`).
 
 Each component's repository keeps a `CHANGELOG.md` of its own from the
 first release after this file was started. `tools/changelog.py draft`
-drafts the next section from git; `tools/release.sh` files it.
+drafts the next section from git; `tools/hf release` files it.
 
 ## [Unreleased]
 
@@ -23,6 +23,24 @@ drafts the next section from git; `tools/release.sh` files it.
   right-click menu, moved into the shared layer with its placement rule
   and the pointer tracking it opens at, so the process manager's menus
   are the same menu.
+- `tools/hf`, replacing `check.sh` and `tools/release.sh`: every test in
+  one nextest tier (unit, live, visible, disposable, root, manual), the
+  tests that change a compositor run only against a disposable nested
+  Hyprland, a session guard that fails a check which changed the running
+  one, `hf land` for the push-then-pin order, a two-phase `hf release`
+  that publishes the libraries before the components that need them, and
+  `hf sandbox`, which runs the procman recorder's new `--self-test` inside
+  its unit's own sandbox.
+- `hyprforge-testkit` (unpublished): a live test that changes Hyprland
+  refuses to run against the session.
+
+### Changed
+
+- publish.yml waits out crates.io's rate limit by itself instead of
+  failing for a person to re-run, and publishes on a `libs-vX.Y.Z` tag.
+- The daemon parse tests run hyprpaper in a runtime directory of its own,
+  so they no longer skip whenever hyprpaper is running.
+- Debug builds carry line tables only, and dependencies no debug info.
 
 ## [0.1.13] - 2026-10-10
 

@@ -1,0 +1,15 @@
+# nextest configuration for crates/hyprforge-notif, which is its own cargo
+# workspace (see the root Cargo.toml's `exclude`) and its own repository.
+# Kept here rather than in notif's tree so the suite's tooling does not
+# need a commit in the component to change how the suite runs it;
+# `tools/hf` passes it with --config-file.
+
+[store]
+dir = "target/nextest"
+
+[profile.default]
+fail-fast = false
+
+[profile.default.junit]
+path = "junit.xml"
+store-success-output = true
