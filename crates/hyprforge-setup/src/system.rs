@@ -131,6 +131,11 @@ pub trait System {
     /// Writes `path` as root through `pkexec` — or, given `None`, removes
     /// it. Only ever a PAM stack: see `items/fingerprint.rs`.
     fn write_as_root(&self, path: &Path, content: Option<&str>) -> Result<(), String>;
+    /// `systemctl is-enabled <unit>` for a *system* unit — answered for
+    /// anyone, no password.
+    fn system_unit_state(&self, unit: &str) -> Result<UnitState, String>;
+    /// `pkexec systemctl enable --now` (or `disable --now`) a system unit.
+    fn system_enable_now(&self, unit: &str, enable: bool) -> Result<(), String>;
 }
 
 /// The real system: `systemctl --user`, `pgrep`, `hyprctl`, `busctl`.
@@ -304,6 +309,38 @@ impl System for RealSystem {
             Some(126) => Err("the password prompt was dismissed".to_string()),
             Some(127) => Err("this account isn't allowed to change snapper's settings".to_string()),
             _ => Err(format!("snapper said: {}", String::from_utf8_lossy(&out.stderr).trim())),
+        }
+    }
+
+    fn system_unit_state(&self, unit: &str) -> Result<UnitState, String> {
+        let out = run("systemctl", &["is-enabled", unit])?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        match stdout.split_whitespace().next() {
+            Some(word) => Ok(UnitState::parse(word)),
+            None => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if stderr.contains("No such file") || stderr.contains("not found") {
+                    Ok(UnitState::NotFound)
+                } else {
+                    Err(format!("systemctl is-enabled {unit} said nothing: {}", stderr.trim()))
+                }
+            }
+        }
+    }
+
+    fn system_enable_now(&self, unit: &str, enable: bool) -> Result<(), String> {
+        let verb = if enable { "enable" } else { "disable" };
+        let mut command = Command::new("pkexec");
+        command.args(["systemctl", verb, "--now", unit]);
+        // Two minutes, not the shared bound: someone is reading a prompt
+        // and typing a password.
+        let out = hyprforge_process::output(&mut command, std::time::Duration::from_secs(120))
+            .map_err(|e| format!("couldn't run pkexec: {e}"))?;
+        match out.status.code() {
+            Some(0) => Ok(()),
+            Some(126) => Err("the password prompt was dismissed".to_string()),
+            Some(127) => Err(format!("this account isn't allowed to {verb} {unit}")),
+            _ => Err(format!("systemctl said: {}", String::from_utf8_lossy(&out.stderr).trim())),
         }
     }
 

@@ -803,3 +803,38 @@ fn previous_versions_is_unavailable_without_a_home_config() {
     std::fs::remove_file(r.env.snapper_configs.join("home")).unwrap();
     assert!(matches!(r.state("previous-versions"), State::Unavailable { .. }));
 }
+
+// --- record-history ---------------------------------------------------
+
+#[test]
+fn recording_history_is_the_system_unit_enabled_through_pkexec_and_undo_keeps_what_was_recorded() {
+    let r = rig();
+    r.apply("record-history").unwrap();
+    assert_eq!(r.sys.system_unit(crate::items::recorder::UNIT), Some(true));
+    assert!(r.sys.calls().contains(&format!("pkexec systemctl enable --now {}", crate::items::recorder::UNIT)));
+    let undone = undo(&r.env, &r.sys, &["record-history"]).unwrap();
+    assert_eq!(r.sys.system_unit(crate::items::recorder::UNIT), Some(false));
+    assert!(format!("{undone:?}").contains("kept"), "undo says the history stays: {undone:?}");
+}
+
+#[test]
+fn a_dismissed_password_prompt_leaves_the_recorder_off_and_unrecorded() {
+    let r = rig();
+    r.sys.refusing_root();
+    assert!(r.apply("record-history").is_err());
+    assert_eq!(r.sys.system_unit(crate::items::recorder::UNIT), Some(false));
+    assert!(is_todo(&r.state("record-history")));
+    assert!(record::load(&r.env.setup_toml()).unwrap().items.is_empty());
+}
+
+#[test]
+fn without_the_recorders_unit_the_item_is_unavailable_not_to_do() {
+    let r = rig();
+    // The binary and pkexec, but no unit: a hand install that skipped
+    // packaging/.
+    let sys = MockSystem::new();
+    sys.install_binary("hyprforge-procman-recorder");
+    sys.install_binary("pkexec");
+    let state = check(&r.env, &sys, item("record-history").unwrap());
+    assert!(matches!(&state, State::Unavailable { why } if why.contains("isn't installed")), "{state:?}");
+}

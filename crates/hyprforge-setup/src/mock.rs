@@ -43,6 +43,8 @@ struct Inner {
     fingerprint: Option<bool>,
     /// Make the next root write fail, as a dismissed prompt does.
     root_refuses: bool,
+    /// System units by name: enabled or not. Absent is not installed.
+    system_units: BTreeMap<String, bool>,
 }
 
 /// See the module doc.
@@ -65,6 +67,7 @@ impl Default for MockSystem {
                 snapper_files: BTreeMap::new(),
                 fingerprint: None,
                 root_refuses: false,
+                system_units: BTreeMap::new(),
             }),
         }
     }
@@ -92,10 +95,15 @@ impl MockSystem {
             "hyprforge-displayd",
             "hyprforge-trayd",
             "hyprforge-clipd",
+            "hyprforge-procman",
+            "hyprforge-procman-recorder",
             "hypridle",
         ] {
             sys.install_binary(name);
         }
+        // The recorder is a system unit, installed and never enabled by
+        // its package.
+        sys.set_system_unit(crate::items::recorder::UNIT, false);
         for unit in crate::items::SUITE_UNITS {
             sys.set_unit(unit, MockUnit::default());
         }
@@ -162,6 +170,14 @@ impl MockSystem {
     }
 
     /// Root writes fail from now on, as when the prompt is dismissed.
+    pub fn set_system_unit(&self, unit: &str, enabled: bool) {
+        self.inner.borrow_mut().system_units.insert(unit.into(), enabled);
+    }
+
+    pub fn system_unit(&self, unit: &str) -> Option<bool> {
+        self.inner.borrow().system_units.get(unit).copied()
+    }
+
     pub fn refusing_root(&self) {
         self.inner.borrow_mut().root_refuses = true;
     }
@@ -291,6 +307,29 @@ impl System for MockSystem {
     }
 
     /// Recorded, and done for real — to the test's own rooted paths.
+    fn system_unit_state(&self, unit: &str) -> Result<UnitState, String> {
+        Ok(match self.inner.borrow().system_units.get(unit) {
+            None => UnitState::NotFound,
+            Some(true) => UnitState::Enabled,
+            Some(false) => UnitState::Disabled,
+        })
+    }
+
+    fn system_enable_now(&self, unit: &str, enable: bool) -> Result<(), String> {
+        self.record(format!("pkexec systemctl {} --now {unit}", if enable { "enable" } else { "disable" }));
+        let mut inner = self.inner.borrow_mut();
+        if inner.root_refuses {
+            return Err("the password prompt was dismissed".to_string());
+        }
+        match inner.system_units.get_mut(unit) {
+            Some(state) => {
+                *state = enable;
+                Ok(())
+            }
+            None => Err(format!("Unit {unit} not found.")),
+        }
+    }
+
     fn write_as_root(&self, path: &Path, content: Option<&str>) -> Result<(), String> {
         if self.inner.borrow().root_refuses {
             return Err("the password prompt was dismissed".to_string());

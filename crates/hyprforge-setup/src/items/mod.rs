@@ -20,6 +20,7 @@ mod gtk;
 mod idle;
 mod lock_restore;
 mod portal;
+pub(crate) mod recorder;
 mod services;
 mod snapshots;
 mod wiring;
@@ -94,6 +95,7 @@ enum Kind {
     GtkPortal,
     PreviousVersions,
     FingerprintPolkit,
+    Recorder,
 }
 
 impl Item {
@@ -124,6 +126,7 @@ impl Item {
             Kind::ShowInFolder => &["hyprforge-files"],
             Kind::PreviousVersions => &["hyprforge-files", "snapper", "pkexec"],
             Kind::FingerprintPolkit => &["pkexec", "fprintd-list"],
+            Kind::Recorder => &["hyprforge-procman-recorder", "pkexec"],
         }
     }
 
@@ -156,6 +159,7 @@ impl Item {
             Kind::GtkPortal => gtk::check(cx),
             Kind::PreviousVersions => snapshots::check(cx),
             Kind::FingerprintPolkit => fingerprint::check(cx),
+            Kind::Recorder => recorder::check(cx),
         }
     }
 
@@ -176,6 +180,7 @@ impl Item {
             Kind::GtkPortal => gtk::apply(cx),
             Kind::PreviousVersions => snapshots::apply(cx),
             Kind::FingerprintPolkit => fingerprint::apply(cx),
+            Kind::Recorder => recorder::apply(cx),
         }
     }
 
@@ -213,6 +218,7 @@ impl Item {
             (Kind::FingerprintPolkit, Change::FingerprintPam { previous }) => {
                 fingerprint::undo(cx, previous.as_deref())
             }
+            (Kind::Recorder, Change::SystemService { unit }) => recorder::undo(cx, unit),
             // A record edited by hand into the wrong shape for its item.
             // Refused rather than guessed at.
             _ => Err(format!("setup.toml records a change {} didn't make", self.id)),
@@ -221,7 +227,7 @@ impl Item {
 }
 
 /// Every item, in order. See the module doc for why the order matters.
-pub static ITEMS: [Item; 23] = [
+pub static ITEMS: [Item; 25] = [
     Item::new(
         "wiring",
         "Connect Hyprforge to your Hyprland config",
@@ -307,6 +313,13 @@ pub static ITEMS: [Item; 23] = [
         Kind::Bind(&binds::LOCK),
     ),
     Item::new(
+        "bind-procman",
+        "Ctrl+Shift+Escape opens the process manager",
+        "What is running and what it costs, on the chord Windows uses for Task Manager.",
+        true,
+        Kind::Bind(&binds::PROCMAN),
+    ),
+    Item::new(
         "idle-lock",
         "Lock with Hyprforge's lock screen",
         "hypridle runs hyprforge-lock when the session is asked to lock.",
@@ -383,6 +396,13 @@ pub static ITEMS: [Item; 23] = [
         false,
         Kind::FingerprintPolkit,
     ),
+    Item::new(
+        "record-history",
+        "Record system history",
+        "Keeps a record of every process, every ten seconds, so the process manager can show what was slowing the machine down hours ago. Readable by root alone.",
+        false,
+        Kind::Recorder,
+    ),
 ];
 
 /// The item with this id.
@@ -414,6 +434,7 @@ mod tests {
                 "bind-dnd",
                 "bind-files",
                 "bind-lock",
+                "bind-procman",
                 "idle-lock",
                 "lock-restore",
                 "notif-blur",
@@ -425,6 +446,7 @@ mod tests {
                 "gtk-portal",
                 "previous-versions",
                 "fingerprint-polkit",
+                "record-history",
             ]
         );
     }
@@ -435,6 +457,6 @@ mod tests {
     #[test]
     fn only_the_gtk_portal_variable_and_the_root_changes_are_off_by_default() {
         let off: Vec<&str> = ITEMS.iter().filter(|i| !i.default_on).map(|i| i.id).collect();
-        assert_eq!(off, ["gtk-portal", "previous-versions", "fingerprint-polkit"]);
+        assert_eq!(off, ["gtk-portal", "previous-versions", "fingerprint-polkit", "record-history"]);
     }
 }

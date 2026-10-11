@@ -1,4 +1,4 @@
-//! The six keybinds, each its own item.
+//! The seven keybinds, each its own item.
 //!
 //! They go into `shortcuts.toml` exactly as the Shortcuts page would put
 //! them there — a `Shortcut` with the usual `hyprforge: ` description —
@@ -70,6 +70,13 @@ pub(crate) const FILES: BindSpec = BindSpec {
     command: "hyprforge-files",
     label: "Files",
     requires: &["hyprforge-files"],
+};
+pub(crate) const PROCMAN: BindSpec = BindSpec {
+    mods: &[Modifier::Ctrl, Modifier::Shift],
+    key: "Escape",
+    command: "hyprforge-procman",
+    label: "Process manager",
+    requires: &["hyprforge-procman"],
 };
 pub(crate) const LOCK: BindSpec = BindSpec {
     mods: &[Modifier::Super],
@@ -268,6 +275,7 @@ mod tests {
         assert_eq!(EMOJI.chord(), "Super+.");
         assert_eq!(DND.chord(), "Super+Shift+N");
         assert_eq!(LOCK.chord(), "Super+Escape");
+        assert_eq!(PROCMAN.chord(), "Ctrl+Shift+Escape");
     }
 
     /// What Hyprland is given is the keysym name — `SUPER + period`, which

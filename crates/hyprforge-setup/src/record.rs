@@ -81,6 +81,8 @@ pub enum Change {
     },
     /// A unit setup enabled for this user.
     Service { unit: String },
+    /// A system unit setup enabled for everyone, through pkexec.
+    SystemService { unit: String },
     /// notifd, and whichever daemons were turned off to make room for it.
     Notifd {
         /// False when notifd was already enabled and only a competitor had

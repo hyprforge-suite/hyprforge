@@ -44,19 +44,22 @@
 //! in place, and applying would overwrite the only record of what was
 //! there before.
 //!
-//! **Two items are done as root, and neither by default.** "Previous
+//! **Three items are done as root, and none by default.** "Previous
 //! versions of your files" lets this user read snapper's snapshots of
 //! `/home`, through snapper's own `set-config`; "Fingerprint for
 //! administrator prompts" adds pam_fprintd to polkit's PAM stack, as a
-//! local copy in `/etc/pam.d` that undo removes. Both go through `pkexec`
-//! — a password prompt — so both are off unless ticked. Everything else
+//! local copy in `/etc/pam.d` that undo removes; "Record system history"
+//! enables hyprforge-procman's recorder, a system unit, and undo disables
+//! it and keeps what it recorded. All three go through `pkexec` — a
+//! password prompt — so all three are off unless ticked. Everything else
 //! setup does is in files this user owns.
 //!
 //! # What is where
 //!
 //! [`Env`] is every path, explicit so a test can point all of it at a
 //! temp directory; [`System`] is every other process (`systemctl --user`,
-//! `hyprctl`, `pgrep`, the session bus), with [`RealSystem`] bounding each
+//! `systemctl is-enabled` for the one system unit, `hyprctl`, `pgrep`, the
+//! session bus), with [`RealSystem`] bounding each
 //! call and `mock::MockSystem` (feature `mock`) standing in for all of
 //! it, `pkexec` included; [`record`] is `setup.toml`; [`state`] is the four states and the
 //! `--porcelain` line the installer parses.
