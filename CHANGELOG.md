@@ -11,6 +11,8 @@ drafts the next section from git; `tools/hf release` files it.
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-10-11
+
 ### Added
 
 - `hyprforge-procman`, the twelfth component: a process manager with Task
