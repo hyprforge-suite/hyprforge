@@ -41,8 +41,13 @@ fn hyprpaper_accepts_every_fit_mode_this_crate_writes() {
     if !running(&live, "hyprpaper") {
         return;
     }
+    // One line per monitor. Splitting the whole answer at its first colon
+    // took every later line into the "path" — invisible on a one-monitor
+    // session, and hyprpaper's "bad path" on the nested instance, which
+    // has its window's output and a headless one.
     let active = hyprctl(&["hyprpaper", "listactive"]);
-    let Some((monitor, path)) = active.trim().split_once(':') else {
+    let first = active.lines().find(|l| l.contains(':')).unwrap_or_default();
+    let Some((monitor, path)) = first.split_once(':') else {
         eprintln!("HYPRFORGE-SKIP: no active wallpaper to probe with");
         return;
     };

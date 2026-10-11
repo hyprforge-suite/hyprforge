@@ -181,9 +181,13 @@ fn a_later_animation_call_overrides_the_same_leaf() {
         ));
     };
 
-    write(4.79, "easeOutQuint");
+    // Only the built-in curve: a clean compositor has no other. The first
+    // run against a fresh nested instance found this test had been naming
+    // `easeOutQuint`, a curve the session's own config defines, and so
+    // only ever passed on this machine's desktop. Speed is what it reads.
+    write(4.79, "default");
     assert_eq!(live_speed("windows"), Some(4.79));
-    write(9.99, "linear");
+    write(9.99, "default");
     assert_eq!(live_speed("windows"), Some(9.99), "the later call must win");
 
     reload();
