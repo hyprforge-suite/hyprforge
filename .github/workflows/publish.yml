@@ -70,6 +70,12 @@ jobs:
         # on a 429 sleeps until the time crates.io names plus a minute,
         # then goes again. Until 0.1.13 this was a person running
         # `gh run rerun --failed` after reading the time off the log.
+        #
+        # `shell: bash` is what turns on pipefail. A bare `run:` gets
+        # `bash -e` without it, so `cargo publish | tee` took tee's exit
+        # status: 0.1.14's first 429 printed "everything is published"
+        # with five crates missing, and the run went green.
+        shell: bash
         env:
           # An organisation secret: a crates.io API token scoped to
           # publish-update (and publish-new, for a library added later),
