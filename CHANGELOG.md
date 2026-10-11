@@ -11,6 +11,25 @@ drafts the next section from git; `tools/release.sh` files it.
 
 ## [Unreleased]
 
+### Added
+
+- `hyprforge-polkit`, the eleventh component: the administrator prompt,
+  drawn with the lock screen's card, with your fingerprint offered
+  beside the password. Packaged as `hyprforge-polkit`, and `--polkit`
+  in the installer.
+- `hyprforge-ui`: `stacked_bar`, one bar split into coloured parts, and
+  a downward chevron (`Nav::Down`), so a disclosure can show it is open.
+- Set up: "Ctrl+Shift+Escape opens the process manager", and "Record
+  system history", off by default — enables the process manager's
+  recorder through pkexec; undo stops it and keeps what it recorded.
+  Both wait for `hyprforge-procman`, which follows this release.
+
+### Fixed
+
+- polkit: the agent started as a systemd user unit found no login
+  session — a user unit belongs to none — and restarted every two
+  seconds; it now answers for the session your display is in.
+
 ## [0.1.12] - 2026-10-10
 
 ### Added
