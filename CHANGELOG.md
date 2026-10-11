@@ -11,6 +11,8 @@ drafts the next section from git; `tools/release.sh` files it.
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-10-10
+
 ### Added
 
 - `hyprforge-polkit`, the eleventh component: the administrator prompt,

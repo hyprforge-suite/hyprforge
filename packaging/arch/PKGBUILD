@@ -33,7 +33,7 @@ pkgname=(
   hyprforge-notif
   hyprforge
 )
-pkgver=0.1.12
+pkgver=0.1.13
 pkgrel=1
 pkgdesc="Native Hyprland desktop applications"
 arch=(x86_64)
