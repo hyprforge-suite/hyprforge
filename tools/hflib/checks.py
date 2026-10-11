@@ -289,6 +289,17 @@ def setup_ids() -> None:
         ui.ok(f"all {(_lines(out, 'CHECKED ') or ['?'])[0]} Set up items are undone by uninstalling their component, or Settings")
 
 
+def backlog() -> None:
+    ui.step("The backlog keeps its shape")
+    _, out = _lint("backlog")
+    problems = _lines(out, "PROBLEM ")
+    if problems:
+        ui.bad(f"{len(problems)} problem(s) in docs/backlog.md")
+        ui.detail(problems)
+    else:
+        ui.ok(f"{(_lines(out, 'CHECKED ') or ['?'])[0]} backlog item(s), each with a title and the day it was added")
+
+
 def lua_dispatch() -> None:
     ui.step("Nothing shipped dispatches in hyprlang syntax")
     _, out = _lint("lua_dispatch")
@@ -522,6 +533,7 @@ def check(fast: bool) -> int:
     setup_ids()
     lua_dispatch()
     docs_name_things()
+    backlog()
     crate_readmes()
     versions()
     changelog()
@@ -548,6 +560,7 @@ def lint() -> int:
     setup_ids()
     lua_dispatch()
     docs_name_things()
+    backlog()
     crate_readmes()
     versions()
     changelog()

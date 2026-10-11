@@ -707,6 +707,11 @@ compositor, by hand — the `disposable-hyprland` skill.
 `./hyprforge --install` restarts a running user service whose binary it
 just replaced; the `install-locally` skill has the rest.
 
+What is left to do lives in `docs/backlog.md` and nowhere else — a
+deferred step or a parked idea goes there in the same commit, and an item
+is checked against the code before it is reported as open. The `backlog`
+skill has the shape.
+
 ### Working with the components
 
 The twelve components are **git submodules** at `crates/<component>`, each

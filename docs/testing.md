@@ -89,6 +89,9 @@ tier:
   said exactly that, and every login logged the failure for nobody.
 - **Every ignored test has one tier**, and every `live` or `visible` test
   sits behind exactly one gate.
+- **The backlog keeps its shape** — `docs/backlog.md`'s four sections in
+  order, every item with a title and the day it was added, so the
+  `backlog` skill can move items without guessing.
 
 ## The live gates
 

@@ -200,6 +200,7 @@ session. Tests that do change a compositor run against a nested one.
 - [`docs/displays.md`](docs/displays.md) — `hyprforge-displayd`: profiles, confirm/revert, scales as 120ths, the `monitors.lua` fallback, competing `hl.monitor()` rules, and the D-Bus API
 - [`docs/lock-and-greeter.md`](docs/lock-and-greeter.md) — the lock screen and the greeter
 - [`docs/testing.md`](docs/testing.md) — `tools/hf` and its tiers
+- [`docs/backlog.md`](docs/backlog.md) — what is left to do: what waits on a person, open engineering work, parked ideas
 - [`docs/design/`](docs/design/) — the suite's [vision](docs/design/vision.md), the [repository plan](docs/design/repo-plan.md) and the [media viewer plan](docs/design/media-plan.md)
 - [`site/`](site/) — the website, built by `tools/build-site.py`; a screenshot a page asks for is drawn from the PNG of that name in docs/images once it exists, and as a placeholder naming the file until then
 - [`CLAUDE.md`](CLAUDE.md) — the working conventions, and the rules that came from being wrong
