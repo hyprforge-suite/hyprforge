@@ -28,7 +28,7 @@ else:
     for block in re.findall(r"^- .*(?:\n  .*)*", text, re.M):
         items += 1
         title = block.splitlines()[0][:70]
-        if not re.match(r"- \*\*.+?\*\*", block):
+        if not re.match(r"- \*\*.+?\*\*", block, re.S):
             problems.append(f"no bold title: {title}")
         if not re.search(r"\*Added \d{4}-\d{2}-\d{2}\.\*", block):
             problems.append(f"no *Added YYYY-MM-DD.*: {title}")

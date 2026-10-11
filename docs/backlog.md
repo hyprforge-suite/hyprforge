@@ -8,49 +8,164 @@ stale.
 
 Each item is one bullet: a bold title, why it matters or what it waits
 on, and the date it was added. `tools/hf lint` holds the file to that
-shape.
+shape. Within a section, items are ranked: the first is the one most
+worth doing next.
 
 ## Needs you
 
 Things only the user can do — an account, a password, a decision, or
-someone watching the screen. In the order of what each one unblocks.
+someone watching the screen. Ranked by what each one unblocks.
 
-- **A first look at procman, together.** The window has only ever been
-  drawn offscreen (`render_every_tab`); open it with the user watching
-  and go through every tab. *Added 2026-10-10.*
+- **A first look at procman, together, and its screenshots.** The
+  window has only ever been drawn offscreen (`render_every_tab`); open
+  it with the user watching and go through every tab. Its site page
+  (`site/pages/procman.html`) shows three placeholders, one as the hero
+  — `procman`, `procman-recorded`, `procman-top` — and the README has no
+  procman image. The same session can take them (`live-screenshots`
+  skill). *Added 2026-10-10.*
+- **Sound: which audio work comes first.** The suite has no volume,
+  output or per-app mixer anywhere: Settings' Sound page is deferred
+  (`crates/hyprforge-settings/DESIGN.md`, "needs a backend") and the
+  vision's PipeWire module is not started. The biggest visible gap;
+  scope (a Settings page, a tray item, both) is the user's call.
+  *Added 2026-10-11.*
+- **Previous Versions against real snapshots.** Files' sheet has only
+  been tested against snapper's documented `info.xml`, never this
+  machine's. Apply Set up → "Previous versions" (pkexec, the user's
+  password), then look together (`crates/hyprforge-files/DESIGN.md`
+  around line 1122). *Added 2026-10-11.*
+- **The greeter: more than one user, and a session choice.** It logs in
+  one account named in `hyprland-greeter.lua` (`CHANGE_ME`) and always
+  starts Hyprland (`crates/hyprforge-greet/src/main.rs:30`). A user
+  picker needs a design decision: how it meets the export directory and
+  avatars. *Added 2026-10-11.*
+- **The greeter: a power menu, or deliberately none.** There is no way
+  to shut down or reboot from the login screen
+  (`crates/hyprforge-greet/src/main.rs:85`). authui already has the
+  lock's logind-checked menu; offering power actions before login is a
+  security trade-off for the user to accept. *Added 2026-10-11.*
+- **The lock screen: input methods.** The greeter has an IME (fcitx5,
+  sandboxed); the lock has none (`docs/lock-and-greeter.md` known gaps),
+  so a password that needs an IME can log in but not unlock. Worth doing
+  is the user's call; testing is by hand on a nested compositor.
+  *Added 2026-10-11.*
+- **Media's Edit button.** A disabled ✎ in the toolbar
+  (`crates/hyprforge-media/src/view.rs:116`); crop, straighten, exposure
+  and saving a rotation are unbuilt, because `docs/design/media-plan.md`
+  phase 3 leaves writing back to someone's original as a decision
+  nobody has made. Decide, or remove the dead control.
+  *Added 2026-10-11.*
+- **OK to delete two leftovers?** A stale agent worktree
+  (`.claude/worktrees/agent-ab5de03282eb204ef`, 2.8 GB, fully merged,
+  clean) and the suite repository's `files-phones` branch on GitHub
+  (fully merged). Nothing would be lost; deleting is the user's say.
+  *Added 2026-10-11.*
 - **The AUR.** No AUR account or SSH key yet, so nothing from this suite
   has been pushed there. When there is one, push the latest tag's
   render only (`packaging/aur/hyprforge/`, the commands `hf release`
   prints at B4); skipped versions need no replay. Install `devtools`
   first, so the release's clean-chroot build stops skipping.
   *Added 2026-10-11.*
-- **`pam-fprint-grosshack`, or not.** The only way to offer a finger and
-  a password at the same moment, in the lock screen or polkit prompt.
-  It is a third-party AUR package, so installing it is the user's call.
-  *Added 2026-10-10.*
 - **Files' last two screenshots.** `files-devices` and `files-dialog` are
   still placeholders in `site/pages/files.html`; the live screenshot rig
-  needs the user present (`live-screenshots` skill). *Added 2026-10-10.*
-- **Does cancelling a fingerprint cost a faillock slot?** Read from the
-  source, probably yes, about ten seconds later. Measure only with the
-  user's OK, and never with a wrong password. Optional.
-  *Added 2026-10-10.*
+  needs the user present. *Added 2026-10-10.*
 - **Files' Open as administrator, live.** The pkexec helper has passed
   its tests but never a real round trip with the user's password.
   *Added 2026-10-06.*
 - **Phones and cameras with a real device.** Files' gvfs code was built
   from real published `gio` output and has never seen a phone plugged
   in. *Added 2026-10-07.*
+- **Network: enterprise Wi-Fi, VPN, hotspot.** 802.1X networks say
+  "Hyprforge cannot join it yet — use nmcli"
+  (`crates/hyprforge-network/src/types.rs:146`); no VPN or hotspot code.
+  Large, and testing needs a real enterprise network or VPN.
+  *Added 2026-10-11.*
+- **`pam-fprint-grosshack`, or not.** The only way to offer a finger and
+  a password at the same moment. A third-party AUR package, so
+  installing it is the user's call. *Added 2026-10-10.*
+- **Does cancelling a fingerprint cost a faillock slot?** Read from the
+  source, probably yes, about ten seconds later. Measure only with the
+  user's OK, and never with a wrong password. Optional.
+  *Added 2026-10-10.*
 
 ## Engineering
 
 Open work Claude can do unattended. Nothing here blocks a release.
 
+- **The lock borrows hyprlock's PAM file, which rejects correct
+  passwords.** `service_name()` falls back to `/etc/pam.d/hyprlock`
+  when the lock's own file is missing, and its comment calls that file
+  "exactly the right shape to borrow"
+  (`crates/hyprforge-lock/src/pam.rs:33`). It isn't: hyprlock's stack
+  has no account section and ends in `pam_deny` (CLAUDE.md, the PAM
+  notes). A source build without the PAM file locks its user out. Drop
+  the fallback or accept only a file with an `account` line. Small.
+  *Added 2026-10-11.*
+- **Docs that say the wrong thing.** One sweep (`keep-docs-current`):
+  `docs/design/repo-plan.md:541` still shows 0.1.14 as unreleased;
+  `docs/displays.md` calls displayd's unit opt-in in one section and
+  installed in another; Files' DESIGN.md (around line 792) describes an
+  unreadable-source message fileops fixed (`ReadDenied`);
+  `docs/design/media-plan.md` lists Quick Look as left to do; greet's
+  README says it has no ignored tests (it has one); notif's
+  `headless_daemon.rs` example and PLAN.md describe a center panel and
+  notif-ipc as unbuilt; Settings' Bluetooth module says the pairing
+  agent isn't connected (it is), with stale `allow(dead_code)` there and
+  in Displays; Settings' and displayd's released changelog sections
+  still carry the "sort before releasing" draft note. Small, several
+  submodule commits. *Added 2026-10-11.*
+- **Animated GIFs show their first frame only.** In Media and Files'
+  preview (`docs/design/media-plan.md`, `hyprforge-image` has no frame
+  iteration). Needs frame decoding inside the memory budget and the
+  per-frame redraw `hyprforge-viewer`'s film already solved. Medium.
+  *Added 2026-10-11.*
+- **Layer rules can't be edited in Settings.** Window rules saves them
+  back untouched (`crates/hyprforge-settings/src/modules/window_rules.rs:616`),
+  so the notification-blur rule Set up adds can't be seen or removed
+  from the UI. Medium. *Added 2026-10-11.*
+- **Media blurs instead of re-decoding when zoomed in.**
+  `sharpen_if_needed` runs on resize, mode and scale changes but never
+  on zoom (`crates/hyprforge-media/src/main.rs:1611`), so 1:1 on a large
+  photo is soft. The plan's crop-at-native-resolution decode was never
+  built. Medium to large. *Added 2026-10-11.*
+- **Files has no redo.** Ctrl+Shift+Z is held for it
+  (`crates/hyprforge-files-core/src/action.rs:646`); redo needs undo's
+  "the folder still matches" check in reverse. Medium.
+  *Added 2026-10-11.*
+- **Encrypted drives can't be unlocked.** A LUKS stick shows as Locked
+  and stops there (`crates/hyprforge-volumes/src/backend.rs:169`).
+  Needs a passphrase prompt, UDisks2 `Encrypted.Unlock`, and locking
+  again on eject. Medium; a live test with a loop-device image wants
+  the user watching the prompt. *Added 2026-10-11.*
 - **Procman's journal leaves three things unsaid.** Whether delay
   accounting was on (block-I/O delay reads 0, not unknown, when it was
   off), which frames dropped exits (ENOBUFS), and that `run_delay` and
   `open_files` fall back to 0 and show as measured. All three need a
   journal format change. *Added 2026-10-10.*
+- **A two-number editor in Settings.** `input:tablet:*` and
+  `decoration:shadow:offset` are shown as not editable for want of one
+  (`crates/hyprforge-input/src/catalog.rs:60`,
+  `crates/hyprforge-appearance/src/catalog.rs:117`). Medium, unlocks
+  both. *Added 2026-10-11.*
+- **Displays' keep-or-revert prompt can't say what changed.**
+  `RevertPending` carries only the countdown
+  (`crates/hyprforge-displayd/src/daemon.rs:34`), so the prompt shows no
+  diff and no backup path. Medium. *Added 2026-10-11.*
+- **A Keyboard screen for the suite's own bindings.** Media's keys can
+  only be changed by editing `media-config.toml`; `docs/design/vision.md`
+  plans a Settings screen on the `hyprforge-keys` grammar, and Files'
+  `config_edit` is there to reuse. Medium. *Added 2026-10-11.*
+- **Files' split view divider doesn't drag.** The halves are always
+  equal; no ratio state exists (`crates/hyprforge-files/DESIGN.md:1751`).
+  Small to medium. *Added 2026-10-11.*
+- **Golden-image tests for Media and the viewer panes.** The centre-pixel
+  check was done by hand once; a colour or orientation regression in the
+  window would go uncaught. notif-render's golden tests are the
+  precedent. Medium. *Added 2026-10-11.*
+- **The tray's popup drops submenus.** The menu model and the dbusmenu
+  fallback both nest (`crates/hyprforge-tray/src/menu.rs:51`); traymenu
+  never draws children. No item nests today, so nothing is lost yet.
+  Medium. *Added 2026-10-11.*
 - **`hf hyprland up --for-lock`.** The tooling plan had the disposable
   instance replace `crates/hyprforge-lock/testing/nested.sh`; the lock
   screen still uses the script. *Added 2026-10-11.*
@@ -58,20 +173,32 @@ Open work Claude can do unattended. Nothing here blocks a release.
   `--mime` installs `hyprforge-mimetype` and `hyprforge-mimeopen`; the
   PKGBUILD has no package for them. Decide, then make the two agree.
   *Added 2026-10-11.*
+- **Media's model autoreload has no switch.** On by default and only
+  changeable in `media.toml` (`crates/hyprforge-media/src/prefs.rs:54`).
+  May be deliberate; small either way. *Added 2026-10-11.*
+- **Media's model view, live.** Drag to rotate and pan has never been
+  exercised with a real pointer, and view3d's `--screenshot` was not
+  carried over. *Added 2026-09-26.*
 - **Reason strings on `#[ignore]`.** Skipped when the tiers arrived,
   because `.config/nextest.toml` is what enforces a test's tier; a
   reason would still say why at the test. *Added 2026-10-11.*
 - **Time `hf check` against what it replaced.** `check.sh` was never
   timed, so "lighter" is measured on one side only (a warm
   `hf check --fast` is 102 s). *Added 2026-10-11.*
-- **Media's model view, live.** Drag to rotate and pan has never been
-  exercised with a real pointer, and view3d's `--screenshot` was not
-  carried over. *Added 2026-09-26.*
 
 ## Ideas
 
 Parked on purpose — written down so they are not lost, not scheduled.
 
+- **The vision's unbuilt components.** Users and time (accountsservice,
+  timedated), a bar to replace waybar (and be the tray host), Disk
+  Utility, Notepad, Calculator, Calendar — `docs/design/vision.md`.
+  Audio is under Needs you. *Added 2026-10-11.*
+- **Settings' "needs a backend" list.** Network's IP/DNS panel and
+  throughput graph, Power's 24-hour chart and charge limit, a live
+  tiling preview, Displays' VRR and 10-bit rows, the palette's inline
+  toggle, Wi-Fi Disconnect (`crates/hyprforge-settings/DESIGN.md`).
+  *Added 2026-10-11.*
 - **The GPU broker, `hyprforge-gpud`.** Launch routing by policy, the
   discrete GPU kept asleep, and per-app GPU choice moved here from
   procman. `docs/design/vision.md` has it; moving an arbitrary running
@@ -80,16 +207,31 @@ Parked on purpose — written down so they are not lost, not scheduled.
   to the first data device a client made, which is iced's clipboard's.
   A fork of that was declined; this waits on Hyprland or iced upstream.
   *Added 2026-10-03.*
+- **An animation curve editor.** Settings can only pick curves the
+  config already defines. Large. *Added 2026-10-11.*
+- **Files' deliberate omissions.** Pausing transfers, a content index,
+  `network://` browsing and remembered servers, thumbnails on phones,
+  git and a terminal drawer, writing single-file `.gz` archives; and
+  bulk rename on network shares, unmeasured and outside the job queue
+  (`crates/hyprforge-files/DESIGN.md`). *Added 2026-10-11.*
 - **Procman: io_uring waits are not I/O trouble.** Ghostty idles in
   `io_cqring_wait`, which the kernel counts as iowait, so raw I/O
   pressure reads 80–90% with idle disks. Don't call that "struggling".
   *Added 2026-10-10.*
+- **Blur behind the lock's card.** A software-renderer limit, accepted
+  in `docs/lock-and-greeter.md`. Large, cosmetic. *Added 2026-10-11.*
+- **notif on sway.** Its README claims any layer-shell compositor; the
+  sway check is deferred and sway isn't installed. *Added 2026-10-11.*
 
 ## Done recently
 
 Kept for a few weeks so "what happened to X" has an answer, then
 pruned; git history has the rest.
 
+- **The whole-suite survey** of 2026-10-11: five agents read every
+  crate, doc and submodule for unfinished work; their findings are the
+  items above dated that day. GitHub had no open issues or pull
+  requests, and every repository's CI was green. *Added 2026-10-11.*
 - **0.1.14 released**, the first two-phase release, with `tools/hf`,
   procman as the twelfth component, and the exits fix for
   single-threaded processes. *Added 2026-10-11.*
