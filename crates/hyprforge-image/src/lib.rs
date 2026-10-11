@@ -33,6 +33,9 @@
 //! depends on its answer. Then [`budget`], which is pure arithmetic and
 //! the only place a cap lives. Then [`decode::decode_to_fit`].
 //!
+//! [`animation::decode_animation`] is its sibling for an animated GIF:
+//! every frame, all of them together inside what one still may keep.
+//!
 //! # Honest about what the budget bounds
 //!
 //! What is *retained* is capped by the viewport: 56MB for a
@@ -56,6 +59,7 @@
 //! `Limits` does *not* bound that peak — the measurement is identical
 //! with and without it.
 
+pub mod animation;
 pub mod budget;
 pub mod camera;
 pub mod decode;
@@ -65,6 +69,7 @@ mod jpeg;
 pub mod measure;
 pub mod orientation;
 
+pub use animation::{decode_animation, Animation};
 pub use budget::{Budget, DecodePixels, ViewportPixels};
 pub use camera::Camera;
 pub use decode::{decode_to_fit, Decoded};

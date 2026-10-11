@@ -16,6 +16,12 @@ worth doing next.
 Things only the user can do — an account, a password, a decision, or
 someone watching the screen. Ranked by what each one unblocks.
 
+- **Try redo and animated GIFs once, on screen.** Built while you were
+  away, unit-tested, never seen running: in Files, a rename then Ctrl+Z
+  then Ctrl+Shift+Z (and the same with a trash); a GIF in Media, zoomed
+  in and back out, turned, and in a slideshow; a GIF in Files' Quick
+  Look. Both live on Media's and Files' `next` branches, so a build
+  from this checkout has them. *Added 2026-10-11.*
 - **A first look at procman, together, and its screenshots.** The
   window has only ever been drawn offscreen (`render_every_tab`); open
   it with the user watching and go through every tab. Its site page
@@ -92,11 +98,6 @@ someone watching the screen. Ranked by what each one unblocks.
 
 Open work Claude can do unattended. Nothing here blocks a release.
 
-- **Animated GIFs show their first frame only.** In Media and Files'
-  preview (`docs/design/media-plan.md`, `hyprforge-image` has no frame
-  iteration). Needs frame decoding inside the memory budget and the
-  per-frame redraw `hyprforge-viewer`'s film already solved. Medium.
-  *Added 2026-10-11.*
 - **Layer rules can't be edited in Settings.** Window rules saves them
   back untouched (`crates/hyprforge-settings/src/modules/window_rules.rs:616`),
   so the notification-blur rule Set up adds can't be seen or removed
@@ -202,6 +203,11 @@ Parked on purpose — written down so they are not lost, not scheduled.
 Kept for a few weeks so "what happened to X" has an answer, then
 pruned; git history has the rest.
 
+- **Animated GIFs play** in Media and Files' Quick Look:
+  `hyprforge_image::decode_animation` (every frame inside one still's
+  budget) and `hyprforge_viewer::animation` on the film. Media and
+  Files carry it on their `next` branches until the release publishes
+  both libraries. Not yet watched on screen. *Added 2026-10-11.*
 - **Files has redo**: Ctrl+Shift+Z and Ctrl+Y, for everything undo
   covers; a copy, extraction or archive comes back out of the Trash
   from where its undo put it. On Files' `next` until the next release

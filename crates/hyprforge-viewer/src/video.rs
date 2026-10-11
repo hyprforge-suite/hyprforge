@@ -81,7 +81,7 @@ impl std::fmt::Debug for VideoPane {
 /// The colour the player paints behind a picture that does not fill the
 /// pane: the theme's root surface, so the bars are the window's and not
 /// mpv's black.
-fn backdrop() -> [u8; 3] {
+pub(crate) fn backdrop() -> [u8; 3] {
     let root = surface::root();
     let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
     [byte(root.r), byte(root.g), byte(root.b)]

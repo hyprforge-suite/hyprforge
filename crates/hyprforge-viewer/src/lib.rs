@@ -12,6 +12,9 @@
 //!   GPU texture rewritten per frame, because an image handle per frame
 //!   is never drawn — and has the bar beneath: play, the clock, the seek
 //!   bar, sound.
+//! - [`animation::Animation`] plays an animated GIF through the same
+//!   film, its frames already decoded by `hyprforge-image`; the window
+//!   owns the clock.
 //! - [`model_pane::ModelPane`] holds a mesh ([`hyprforge_mesh`]) and its
 //!   camera, drawn by [`model`]'s renderer on iced's wgpu, with drag to
 //!   turn, right-drag to pan and scroll to zoom.
@@ -22,6 +25,7 @@
 //! is parsed and validated in the tests by naga, the compiler wgpu uses,
 //! because a shader wgpu refuses at run time takes the whole window down.
 
+pub mod animation;
 pub mod film;
 pub mod model;
 pub mod model_pane;

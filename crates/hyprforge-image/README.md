@@ -37,6 +37,9 @@ picture is turned twice.
 depends on its answer. Then `budget`, which is pure arithmetic and
 the only place a cap lives. Then `decode::decode_to_fit`.
 
+`animation::decode_animation` is its sibling for an animated GIF:
+every frame, all of them together inside what one still may keep.
+
 # Honest about what the budget bounds
 
 What is *retained* is capped by the viewport: 56MB for a
