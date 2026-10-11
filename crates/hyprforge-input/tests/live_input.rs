@@ -18,29 +18,7 @@
 use hyprforge_input::catalog::{Kind, CATALOG};
 use hyprforge_input::apply::generate;
 use hyprforge_input::{Settings, Value};
-use std::process::Command;
-use std::sync::{Mutex, MutexGuard};
-
-/// These tests share one compositor and each reloads to undo itself, so two
-/// running at once would restore each other's values mid-assertion. Same
-/// reason as the shortcuts live suite.
-static COMPOSITOR: Mutex<()> = Mutex::new(());
-
-fn compositor() -> MutexGuard<'static, ()> {
-    COMPOSITOR.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-fn hyprctl(args: &[&str]) -> String {
-    let out = Command::new("hyprctl")
-        .args(args)
-        .output()
-        .expect("hyprctl not runnable");
-    String::from_utf8_lossy(&out.stdout).to_string()
-}
-
-fn reload() {
-    hyprctl(&["reload"]);
-}
+use hyprforge_testkit::{config_errors, hyprctl, reload, Hyprland};
 
 fn getoption(key: &str) -> serde_json::Value {
     let raw = hyprctl(&["getoption", key, "-j"]);
@@ -54,7 +32,7 @@ fn getoption(key: &str) -> serde_json::Value {
 #[test]
 #[ignore]
 fn hyprland_has_every_catalogued_option_with_the_declared_type() {
-    let _live = compositor();
+    let _live = Hyprland::read_only();
     let mut wrong = Vec::new();
     for setting in CATALOG.settings {
         let raw = hyprctl(&["getoption", setting.key, "-j"]);
@@ -88,7 +66,7 @@ fn hyprland_has_every_catalogued_option_with_the_declared_type() {
 #[test]
 #[ignore]
 fn hyprland_accepts_a_file_setting_every_option() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     reload();
     let before = config_errors();
     assert!(
@@ -112,7 +90,7 @@ fn hyprland_accepts_a_file_setting_every_option() {
 #[test]
 #[ignore]
 fn a_generated_setting_takes_effect() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     reload();
 
     // Deliberately not a value anything else here uses, and read back
@@ -142,7 +120,7 @@ fn a_generated_setting_takes_effect() {
 #[test]
 #[ignore]
 fn a_later_config_call_wins_over_an_earlier_one() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     reload();
 
     eval_and_assert_clean("hl.config({ input = { repeat_delay = 611 } })\n");
@@ -162,7 +140,7 @@ fn a_later_config_call_wins_over_an_earlier_one() {
 #[test]
 #[ignore]
 fn a_partial_config_call_leaves_other_keys_alone() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     reload();
     let layout_before = getoption("input:kb_layout")["str"].clone();
 
@@ -183,7 +161,7 @@ fn a_partial_config_call_leaves_other_keys_alone() {
 #[test]
 #[ignore]
 fn the_set_flag_tracks_whether_a_key_was_written() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     reload();
     assert_eq!(
         getoption("input:follow_mouse_shrink")["set"],
@@ -205,7 +183,7 @@ fn the_set_flag_tracks_whether_a_key_was_written() {
 #[test]
 #[ignore]
 fn hyprland_accepts_the_extremes_of_every_declared_range() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     reload();
     assert!(config_errors().is_empty(), "config already has errors");
 
@@ -304,14 +282,4 @@ fn eval_and_assert_clean(lua: &str) {
         errors.is_empty(),
         "the compositor reported config errors: {errors}\n--- lua ---\n{lua}"
     );
-}
-
-fn config_errors() -> String {
-    let out = hyprctl(&["configerrors"]);
-    let trimmed = out.trim();
-    if trimmed == "no errors" || trimmed.is_empty() {
-        String::new()
-    } else {
-        trimmed.to_string()
-    }
 }

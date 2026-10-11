@@ -13,7 +13,7 @@
 //! so evaluating them can't shadow a real shortcut, and they're gone at the
 //! next reload either way.
 //!
-//! The tests take [`COMPOSITOR`] because they share one: each probe loads
+//! The tests take one compositor at a time because they share one: each probe loads
 //! binds into the running Hyprland and then reloads to drop them, so two
 //! running at once means one test's reload deletes another's bind before it
 //! can be observed. That failed exactly the way a real bug would — a
@@ -24,17 +24,7 @@ use hyprforge_shortcuts::catalog::{self, CallShape, Entry, ParamKind};
 use hyprforge_shortcuts::codegen::generate;
 use hyprforge_shortcuts::model::{Action, BindFlags, KeyCombo, Modifier, ParamValue, Shortcut};
 use std::collections::BTreeMap;
-use std::process::Command;
-use std::sync::{Mutex, MutexGuard};
-
-/// The running compositor, which every probe here mutates. A poisoned lock
-/// is still usable: the only shared state is Hyprland's own bind list, and
-/// each test reloads before it starts.
-static COMPOSITOR: Mutex<()> = Mutex::new(());
-
-fn compositor() -> MutexGuard<'static, ()> {
-    COMPOSITOR.lock().unwrap_or_else(|e| e.into_inner())
-}
+use hyprforge_testkit::{config_errors, hyprctl, reload, Hyprland};
 
 /// The four-modifier chord no real config binds, plus an F-key per probe so
 /// they don't overwrite each other.
@@ -113,7 +103,7 @@ fn probe_shortcuts(fill: Fill) -> Vec<Shortcut> {
 #[test]
 #[ignore]
 fn hyprland_accepts_every_catalog_entry() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     reload();
     let errors_before = config_errors();
     assert!(
@@ -134,7 +124,7 @@ fn hyprland_accepts_every_catalog_entry() {
 #[test]
 #[ignore]
 fn hyprland_accepts_raw_actions_and_flags() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     reload();
     assert!(config_errors().is_empty(), "config already has errors");
 
@@ -192,7 +182,7 @@ fn hyprland_accepts_raw_actions_and_flags() {
 #[test]
 #[ignore]
 fn hyprland_rejects_repeating_with_release() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     reload();
     assert!(config_errors().is_empty(), "config already has errors");
 
@@ -210,12 +200,7 @@ fn hyprland_rejects_repeating_with_release() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("probe-bad-flags.lua");
     std::fs::write(&path, generate(&[shortcut])).unwrap();
-    let out = Command::new("hyprctl")
-        .arg("eval")
-        .arg(format!("dofile([[{}]])", path.display()))
-        .output()
-        .expect("hyprctl not runnable");
-    let body = String::from_utf8_lossy(&out.stdout).to_lowercase();
+    let body = hyprctl(&["eval", &format!("dofile([[{}]])", path.display())]).to_lowercase();
     let _ = std::fs::remove_file(&path);
     reload();
 
@@ -227,7 +212,7 @@ fn hyprland_rejects_repeating_with_release() {
 #[test]
 #[ignore]
 fn a_generated_description_reaches_hyprctl_binds() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     let shortcuts = vec![Shortcut {
         name: "hyprforge-probe-desc".to_string(),
         enabled: true,
@@ -241,8 +226,7 @@ fn a_generated_description_reaches_hyprctl_binds() {
 
     // Deliberately before the reload below: reloading drops the probe bind,
     // so listing has to happen while it's still live.
-    let listed = Command::new("hyprctl").arg("binds").arg("-j").output().unwrap();
-    let listed = String::from_utf8_lossy(&listed.stdout);
+    let listed = hyprctl(&["binds", "-j"]);
     assert!(
         listed.contains("hyprforge: live probe description"),
         "the description did not reach hyprctl binds"
@@ -256,12 +240,7 @@ fn eval_and_assert_clean(lua: &str, what: &str) {
     let path = dir.join(format!("probe-{what}.lua").replace(' ', "-"));
     std::fs::write(&path, lua).unwrap();
 
-    let out = Command::new("hyprctl")
-        .arg("eval")
-        .arg(format!("dofile([[{}]])", path.display()))
-        .output()
-        .expect("hyprctl not runnable");
-    let body = String::from_utf8_lossy(&out.stdout);
+    let body = hyprctl(&["eval", &format!("dofile([[{}]])", path.display())]);
     let body = body.trim().to_string();
 
     let errors = config_errors();
@@ -271,20 +250,6 @@ fn eval_and_assert_clean(lua: &str, what: &str) {
     }
     let _ = std::fs::remove_file(&path);
     assert!(clean, "Hyprland rejected the {what} probes.\neval: {body}\nconfigerrors: {errors}");
-}
-
-/// Clears the probe binds out of the live session, and with them any
-/// `configerrors` a failed probe left behind. Every test brackets itself with
-/// this rather than relying on the previous one having cleaned up — otherwise
-/// one genuine failure cascades into every test after it failing for the
-/// wrong reason.
-fn reload() {
-    let _ = Command::new("hyprctl").arg("reload").output();
-}
-
-fn config_errors() -> String {
-    let out = Command::new("hyprctl").arg("configerrors").output().expect("hyprctl not runnable");
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 /// Sanity check that runs without Hyprland: every entry produces a bind line.

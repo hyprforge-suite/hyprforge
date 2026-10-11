@@ -46,6 +46,7 @@ members = [
     "crates/hyprforge-volumes",
     "crates/hyprforge-files",
     "crates/hyprforge-setup",
+    "crates/hyprforge-testkit",
 ]
 # `crates/hyprforge-notif/` is a nested cargo workspace, deliberately kept
 # out of this one.

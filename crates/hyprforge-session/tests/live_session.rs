@@ -10,30 +10,7 @@
 //! false reading happened while writing this.
 
 use hyprforge_session::{autostart, environment, gestures, permissions};
-use std::process::Command;
-use std::sync::{Mutex, MutexGuard};
-
-/// These share one compositor and each reloads to undo itself.
-static COMPOSITOR: Mutex<()> = Mutex::new(());
-
-fn compositor() -> MutexGuard<'static, ()> {
-    COMPOSITOR.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-fn hyprctl(args: &[&str]) -> String {
-    String::from_utf8_lossy(
-        &Command::new("hyprctl")
-            .args(args)
-            .output()
-            .expect("hyprctl not runnable")
-            .stdout,
-    )
-    .to_string()
-}
-
-fn reload() {
-    hyprctl(&["reload"]);
-}
+use hyprforge_testkit::{hyprctl, reload, Hyprland};
 
 /// Evaluates `lua` and returns what Hyprland said.
 fn eval(lua: &str) -> String {
@@ -49,7 +26,7 @@ fn refused(out: &str) -> bool {
 #[test]
 #[ignore]
 fn hyprland_accepts_every_gesture_direction() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     let mut wrong = Vec::new();
     for (direction, _) in gestures::DIRECTIONS {
         // Between each: an earlier gesture shadows a later one, which
@@ -70,7 +47,7 @@ fn hyprland_accepts_every_gesture_direction() {
 #[test]
 #[ignore]
 fn hyprland_accepts_every_gesture_action_with_its_argument() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     let mut wrong = Vec::new();
     for (action, _, argument) in gestures::ACTIONS {
         reload();
@@ -98,7 +75,7 @@ fn hyprland_accepts_every_gesture_action_with_its_argument() {
 #[test]
 #[ignore]
 fn hyprland_refuses_a_shadowed_gesture() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     reload();
     let first = eval("hl.gesture({ fingers = 4, direction = 'up', action = 'close' })");
     assert!(!refused(&first), "the first gesture should register: {first}");
@@ -120,7 +97,7 @@ fn hyprland_refuses_a_shadowed_gesture() {
 #[test]
 #[ignore]
 fn hyprland_accepts_every_permission_type_and_mode() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     reload();
     let mut wrong = Vec::new();
     for (kind, _, _) in permissions::TYPES {
@@ -145,7 +122,7 @@ fn hyprland_accepts_every_permission_type_and_mode() {
 #[test]
 #[ignore]
 fn hyprland_loads_a_complete_generated_file() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     reload();
     let before = hyprctl(&["configerrors"]);
     assert!(
@@ -203,7 +180,7 @@ fn hyprland_loads_a_complete_generated_file() {
 #[test]
 #[ignore]
 fn a_generated_environment_variable_is_accepted() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     reload();
     let out = eval("hl.env([[HYPRFORGE_PROBE]], [[1]])");
     reload();

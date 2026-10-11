@@ -1,0 +1,17 @@
+[package]
+name = "hyprforge-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Test support for Hyprforge's live suites: which Hyprland a test may talk to, and putting it back afterwards."
+# Never published. Libraries take it as a path-only dev-dependency,
+# which `cargo publish` strips from the uploaded manifest, so a crate
+# using it still packages cleanly — and no component names it, because
+# a component's own repository has no path to point at.
+publish = false
+
+[dependencies]
+hyprforge-process = { path = "../hyprforge-process" }
+serde_json.workspace = true

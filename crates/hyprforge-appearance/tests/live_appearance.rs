@@ -19,28 +19,7 @@ use hyprforge_appearance::apply::generate;
 use hyprforge_appearance::catalog::{Kind, CATALOG};
 use hyprforge_appearance::storage::Appearance;
 use hyprforge_core::hlconfig::{Settings, Value};
-use std::process::Command;
-use std::sync::{Mutex, MutexGuard};
-
-/// These tests share one compositor and each reloads to undo itself, so
-/// two running at once would restore each other's values mid-assertion.
-static COMPOSITOR: Mutex<()> = Mutex::new(());
-
-fn compositor() -> MutexGuard<'static, ()> {
-    COMPOSITOR.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-fn hyprctl(args: &[&str]) -> String {
-    let out = Command::new("hyprctl")
-        .args(args)
-        .output()
-        .expect("hyprctl not runnable");
-    String::from_utf8_lossy(&out.stdout).to_string()
-}
-
-fn reload() {
-    hyprctl(&["reload"]);
-}
+use hyprforge_testkit::{config_errors, hyprctl, reload, Hyprland};
 
 fn getoption(key: &str) -> serde_json::Value {
     let raw = hyprctl(&["getoption", key, "-j"]);
@@ -53,7 +32,7 @@ fn getoption(key: &str) -> serde_json::Value {
 #[test]
 #[ignore]
 fn hyprland_has_every_catalogued_option_with_the_declared_type() {
-    let _live = compositor();
+    let _live = Hyprland::read_only();
     let mut wrong = Vec::new();
     for setting in CATALOG.settings {
         let raw = hyprctl(&["getoption", setting.key, "-j"]);
@@ -87,7 +66,7 @@ fn hyprland_has_every_catalogued_option_with_the_declared_type() {
 #[test]
 #[ignore]
 fn declared_unsupported_categories_are_still_absent_or_still_untyped() {
-    let _live = compositor();
+    let _live = Hyprland::read_only();
     let raw = hyprctl(&["getoption", "decoration:wobble:enabled", "-j"]);
     assert!(
         !raw.trim_start().starts_with('{'),
@@ -100,7 +79,7 @@ fn declared_unsupported_categories_are_still_absent_or_still_untyped() {
 #[test]
 #[ignore]
 fn hyprland_accepts_a_file_setting_every_option() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     reload();
     let before = config_errors();
     assert!(
@@ -126,7 +105,7 @@ fn hyprland_accepts_a_file_setting_every_option() {
 #[test]
 #[ignore]
 fn hyprland_accepts_the_colour_form_this_crate_writes() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     reload();
     assert!(config_errors().is_empty(), "config already has errors");
 
@@ -157,7 +136,7 @@ fn hyprland_accepts_the_colour_form_this_crate_writes() {
 #[test]
 #[ignore]
 fn a_gap_written_as_an_integer_takes_effect_and_reads_back() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     reload();
 
     let mut settings = Settings::default();
@@ -182,7 +161,7 @@ fn a_gap_written_as_an_integer_takes_effect_and_reads_back() {
 #[test]
 #[ignore]
 fn a_later_animation_call_overrides_the_same_leaf() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     reload();
 
     let write = |speed: f64, bezier: &str| {
@@ -216,7 +195,7 @@ fn a_later_animation_call_overrides_the_same_leaf() {
 #[test]
 #[ignore]
 fn live_animations_and_curves_parse() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     reload();
     let (leaves, curves) = animations::live().expect("hyprctl animations");
     assert!(leaves.len() > 20, "expected the full leaf list, got {}", leaves.len());
@@ -240,7 +219,7 @@ fn live_speed(leaf: &str) -> Option<f64> {
 #[test]
 #[ignore]
 fn hyprland_accepts_the_extremes_of_every_declared_range() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     reload();
     assert!(config_errors().is_empty(), "config already has errors");
 
@@ -341,14 +320,4 @@ fn eval_and_assert_clean(lua: &str) {
         errors.is_empty(),
         "the compositor reported config errors: {errors}\n--- lua ---\n{lua}"
     );
-}
-
-fn config_errors() -> String {
-    let out = hyprctl(&["configerrors"]);
-    let trimmed = out.trim();
-    if trimmed == "no errors" || trimmed.is_empty() {
-        String::new()
-    } else {
-        trimmed.to_string()
-    }
 }

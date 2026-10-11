@@ -91,8 +91,13 @@ def libraries():
         package = tomllib.loads(manifest.read_text()).get("package")
         # No [package] is a nested workspace (hyprforge-notif): a
         # component, whose README is written by hand like the others'.
-        if package is not None and package["name"] not in COMPONENTS:
-            yield manifest.parent
+        if package is None or package["name"] in COMPONENTS:
+            continue
+        # Never published (hyprforge-testkit): there is no crates.io or
+        # docs.rs page for a README to be the front of.
+        if package.get("publish") is False:
+            continue
+        yield manifest.parent
 
 
 def main() -> int:

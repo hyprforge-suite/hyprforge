@@ -8,16 +8,18 @@
 //! compositor silently ignores — the exact failure mode that made the display
 //! scale bug take so long to find.
 //!
-//! It is deliberately read-only with respect to the user's config: it writes
-//! only to a temp dir, sources that file into the *running* compositor via
-//! `hyprctl keyword`-free means (see below), and never edits `hyprland.lua`.
+//! It writes only to a temp dir and never edits `hyprland.lua`, but it does
+//! load rules into the compositor it talks to — so it takes the disposable
+//! door (`hyprforge_testkit`), and the handle's reload on drop removes them
+//! again. Before that existed this test never reloaded at all, and its
+//! probe rules stayed live in the user's session until the next reload.
 
 use hyprforge_windowrules::codegen::generate_all;
 use hyprforge_windowrules::model::{
     Effects, LayerRule, Matcher, Opacity, Rule, Workspace, WorkspaceRule,
 };
 use hyprforge_windowrules::storage::Rules;
-use std::process::Command;
+use hyprforge_testkit::{config_errors, hyprctl, Hyprland};
 
 /// Every field a workspace rule can emit. The workspace is named rather than
 /// numbered so evaluating this can't disturb a workspace the user is on, and
@@ -112,14 +114,6 @@ fn every_supported_layer_rule() -> Vec<LayerRule> {
     }]
 }
 
-fn config_errors() -> String {
-    let out = Command::new("hyprctl")
-        .arg("configerrors")
-        .output()
-        .expect("hyprctl not runnable — is Hyprland running?");
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
-
 /// Loads a generated file into the running compositor and asks Hyprland
 /// whether it had any complaint.
 ///
@@ -129,6 +123,8 @@ fn config_errors() -> String {
 #[test]
 #[ignore]
 fn hyprland_accepts_every_field_the_codegen_emits() {
+    let live = Hyprland::disposable();
+    live.reload();
     // Read once: a second call can return something different, and a
     // failure message that re-queries can end up printing nothing at all.
     let preexisting = config_errors();
@@ -153,12 +149,7 @@ fn hyprland_accepts_every_field_the_codegen_emits() {
     // `hyprctl eval` runs a Lua string in the live config context, so the
     // rules are evaluated exactly as a require()d file would be, without
     // touching hyprland.lua. They're gone at the next reload.
-    let out = Command::new("hyprctl")
-        .arg("eval")
-        .arg(format!("dofile({})", lua_quote(&path.display().to_string())))
-        .output()
-        .expect("hyprctl not runnable");
-    let body = String::from_utf8_lossy(&out.stdout);
+    let body = hyprctl(&["eval", &format!("dofile({})", lua_quote(&path.display().to_string()))]);
     let body = body.trim();
     eprintln!("eval: {body}");
     // eval reports a Lua failure in the body, not the exit status — the same

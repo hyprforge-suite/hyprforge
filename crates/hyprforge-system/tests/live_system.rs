@@ -9,45 +9,13 @@
 use hyprforge_system::apply::generate;
 use hyprforge_system::catalog::{Kind, CATALOG};
 use hyprforge_core::hlconfig::{Settings, Value};
-use std::process::Command;
-use std::sync::{Mutex, MutexGuard};
-
-static COMPOSITOR: Mutex<()> = Mutex::new(());
-
-fn compositor() -> MutexGuard<'static, ()> {
-    COMPOSITOR.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-fn hyprctl(args: &[&str]) -> String {
-    String::from_utf8_lossy(
-        &Command::new("hyprctl")
-            .args(args)
-            .output()
-            .expect("hyprctl not runnable")
-            .stdout,
-    )
-    .to_string()
-}
-
-fn reload() {
-    hyprctl(&["reload"]);
-}
-
-fn config_errors() -> String {
-    let out = hyprctl(&["configerrors"]);
-    let trimmed = out.trim();
-    if trimmed == "no errors" || trimmed.is_empty() {
-        String::new()
-    } else {
-        trimmed.to_string()
-    }
-}
+use hyprforge_testkit::{config_errors, hyprctl, reload, Hyprland};
 
 /// Every catalogued key exists with the type this crate claims.
 #[test]
 #[ignore]
 fn hyprland_has_every_catalogued_option_with_the_declared_type() {
-    let _live = compositor();
+    let _live = Hyprland::read_only();
     let mut wrong = Vec::new();
     for setting in CATALOG.settings {
         let raw = hyprctl(&["getoption", setting.key, "-j"]);
@@ -80,7 +48,7 @@ fn hyprland_has_every_catalogued_option_with_the_declared_type() {
 #[test]
 #[ignore]
 fn options_declared_unsupported_are_still_absent() {
-    let _live = compositor();
+    let _live = Hyprland::read_only();
     for (key, _) in CATALOG.unsupported {
         let raw = hyprctl(&["getoption", key, "-j"]);
         assert!(
@@ -98,7 +66,7 @@ fn options_declared_unsupported_are_still_absent() {
 #[test]
 #[ignore]
 fn hyprland_accepts_a_file_setting_every_safe_option() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     reload();
     let before = config_errors();
     assert!(before.is_empty(), "config already has errors:\n{before}");
@@ -139,7 +107,7 @@ const UNSAFE_TO_PROBE: &[&str] = &[
 #[test]
 #[ignore]
 fn hyprland_accepts_the_extremes_of_every_declared_range() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     reload();
     assert!(config_errors().is_empty(), "config already has errors");
 
@@ -163,7 +131,7 @@ fn hyprland_accepts_the_extremes_of_every_declared_range() {
 #[test]
 #[ignore]
 fn a_plain_colour_round_trips_through_hyprland() {
-    let _live = compositor();
+    let _live = Hyprland::disposable();
     reload();
     let mut settings = Settings::default();
     settings.set("misc:background_color", Value::Text("rgba(112233ff)".into()));

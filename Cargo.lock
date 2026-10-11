@@ -2099,6 +2099,7 @@ dependencies = [
  "hyprforge-look",
  "hyprforge-lua-import",
  "hyprforge-paths",
+ "hyprforge-testkit",
  "serde",
  "serde_json",
  "tempfile",
@@ -2232,6 +2233,7 @@ name = "hyprforge-ecosystem"
 version = "0.1.13"
 dependencies = [
  "hyprforge-core",
+ "hyprforge-testkit",
  "serde",
  "serde_json",
  "tempfile",
@@ -2385,6 +2387,7 @@ version = "0.1.13"
 dependencies = [
  "hyprforge-core",
  "hyprforge-lua-import",
+ "hyprforge-testkit",
  "serde",
  "serde_json",
  "tempfile",
@@ -2650,6 +2653,7 @@ name = "hyprforge-session"
 version = "0.1.13"
 dependencies = [
  "hyprforge-core",
+ "hyprforge-testkit",
  "serde",
  "serde_json",
  "tempfile",
@@ -2721,6 +2725,7 @@ version = "0.1.13"
 dependencies = [
  "hyprforge-core",
  "hyprforge-lua-import",
+ "hyprforge-testkit",
  "serde",
  "serde_json",
  "tempfile",
@@ -2733,10 +2738,19 @@ name = "hyprforge-system"
 version = "0.1.13"
 dependencies = [
  "hyprforge-core",
+ "hyprforge-testkit",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "hyprforge-testkit"
+version = "0.1.13"
+dependencies = [
+ "hyprforge-process",
+ "serde_json",
 ]
 
 [[package]]
@@ -2837,6 +2851,7 @@ version = "0.1.13"
 dependencies = [
  "hyprforge-core",
  "hyprforge-lua-import",
+ "hyprforge-testkit",
  "serde",
  "serde_json",
  "tempfile",

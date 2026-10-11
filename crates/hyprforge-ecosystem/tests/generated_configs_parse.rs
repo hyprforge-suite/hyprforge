@@ -27,14 +27,6 @@
 use hyprforge_ecosystem::{idle, wallpaper};
 use std::process::Command;
 
-fn is_running(daemon: &str) -> bool {
-    Command::new("pgrep")
-        .args(["-x", daemon])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 /// What hyprlang prints when it rejects a **key or its syntax**. Matched
 /// on the message rather than the exit code, which is 0 either way.
 ///
@@ -80,16 +72,20 @@ impl Parsed {
 
 /// Runs `daemon --config <path>` briefly and captures what it said.
 ///
-/// `None` when the check could not be made — the daemon isn't installed,
-/// or is already running. Every such path prints [`SKIP_MARKER`] first,
-/// because a silent `None` here is a test that passes without checking
-/// anything.
+/// `None` when the check could not be made — the daemon isn't installed.
+/// Every such path prints [`SKIP_MARKER`] first, because a silent `None`
+/// here is a test that passes without checking anything.
 ///
-/// The running check is not caution, it is required. A second hyprpaper
-/// takes over the IPC socket, and when it exits the socket is gone —
-/// leaving the original process alive but unreachable, so every
-/// `hyprctl hyprpaper` afterwards answers "failed to connect". That
-/// happened once here and needed a manual restart to undo.
+/// The daemon runs in a runtime directory of its own, under a signature
+/// nobody else has, and with no `WAYLAND_DISPLAY`. A second hyprpaper
+/// under the session's signature takes over the session's IPC socket,
+/// and when it exits the socket is gone — leaving the original alive but
+/// unreachable, which happened once here and needed a manual restart.
+/// This used to be avoided by skipping whenever hyprpaper was running,
+/// which on any machine actually using hyprpaper meant the check never
+/// ran. Its socket now lands in the temp dir, and with no display to
+/// connect to it gets as far as parsing and no further — which is all
+/// this asks of it.
 fn parse_with(daemon: &str, contents: &str) -> Option<Parsed> {
     let installed = Command::new("which")
         .arg(daemon)
@@ -98,16 +94,6 @@ fn parse_with(daemon: &str, contents: &str) -> Option<Parsed> {
         .unwrap_or(false);
     if !installed {
         eprintln!("{SKIP_MARKER} {daemon} is not installed");
-        return None;
-    }
-    // Only hyprpaper. A second hypridle just tracks idle on its own for
-    // the two seconds it lives, with a timeout far too long to fire.
-    if daemon == "hyprpaper" && is_running(daemon) {
-        eprintln!(
-            "{SKIP_MARKER} hyprpaper is running. A second instance takes over its IPC \
-             socket, and when it exits the socket is gone, leaving the original \
-             alive but unreachable."
-        );
         return None;
     }
     let dir = match tempfile::tempdir() {
@@ -130,6 +116,9 @@ fn parse_with(daemon: &str, contents: &str) -> Option<Parsed> {
         .arg(daemon)
         .arg("--config")
         .arg(&path)
+        .env("XDG_RUNTIME_DIR", dir.path())
+        .env("HYPRLAND_INSTANCE_SIGNATURE", "hyprforge-parse-probe")
+        .env_remove("WAYLAND_DISPLAY")
         .output()
     {
         Ok(out) => out,

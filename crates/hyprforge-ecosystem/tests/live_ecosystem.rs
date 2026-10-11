@@ -5,36 +5,30 @@
 //! Nothing here writes to the user's config files. Generated text is
 //! checked against the daemons' own parsers by writing it to a temp file
 //! and sourcing nothing, and live behaviour is exercised through the same
-//! `hyprctl` requests the app uses — then put back.
+//! `hyprctl` requests the app uses.
+//!
+//! The tests that *change* a daemon — the wallpaper in every fit mode,
+//! the screen temperature at both ends of its range — take the
+//! disposable door (`hyprforge_testkit`), and `tools/hf test disposable`
+//! starts a hyprpaper and a hyprsunset under the nested instance's
+//! signature for them. Each instance has its own socket directory, so
+//! those never touch the session's daemons. Run against the session,
+//! the fit-mode test left the wallpaper on `cover` whatever it had been,
+//! because hyprpaper has no way to report the mode it is using.
 
 use hyprforge_ecosystem::{apply, sunset, wallpaper};
-use std::process::Command;
-use std::sync::{Mutex, MutexGuard};
+use hyprforge_testkit::{hyprctl, Hyprland};
 
-/// The daemons are shared, and each test restores what it changed.
-static DAEMONS: Mutex<()> = Mutex::new(());
-
-fn daemons() -> MutexGuard<'static, ()> {
-    DAEMONS.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-fn hyprctl(args: &[&str]) -> String {
-    String::from_utf8_lossy(
-        &Command::new("hyprctl")
-            .args(args)
-            .output()
-            .expect("hyprctl not runnable")
-            .stdout,
-    )
-    .to_string()
-}
-
-fn running(name: &str) -> bool {
-    Command::new("pgrep")
-        .args(["-x", name])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+/// Whether `daemon` answers on the targeted instance's own socket — not a
+/// machine-wide `pgrep`, which sees the session's daemon while `hyprctl`
+/// is talking to the nested instance. Says so in the marker `check.sh`
+/// and `tools/hf` report, because a test that returns early prints `ok`.
+fn running(live: &Hyprland, daemon: &str) -> bool {
+    let up = live.daemon_running(daemon);
+    if !up {
+        eprintln!("HYPRFORGE-SKIP: {daemon} isn't running on this instance");
+    }
+    up
 }
 
 /// The wallpaper request this crate builds is one hyprpaper accepts, in
@@ -43,14 +37,13 @@ fn running(name: &str) -> bool {
 #[test]
 #[ignore]
 fn hyprpaper_accepts_every_fit_mode_this_crate_writes() {
-    let _live = daemons();
-    if !running("hyprpaper") {
-        eprintln!("hyprpaper isn't running — skipping");
+    let live = Hyprland::disposable();
+    if !running(&live, "hyprpaper") {
         return;
     }
     let active = hyprctl(&["hyprpaper", "listactive"]);
     let Some((monitor, path)) = active.trim().split_once(':') else {
-        eprintln!("no active wallpaper to probe with — skipping");
+        eprintln!("HYPRFORGE-SKIP: no active wallpaper to probe with");
         return;
     };
     let (monitor, path) = (monitor.trim(), path.trim());
@@ -63,7 +56,8 @@ fn hyprpaper_accepts_every_fit_mode_this_crate_writes() {
             "hyprpaper refused {request}: {out}"
         );
     }
-    // Put it back the way it was.
+    // hyprpaper cannot say which mode it was in, so this is a guess —
+    // harmless only because the instance is a disposable one.
     hyprctl(&["hyprpaper", "wallpaper", &format!("{monitor},{path},cover")]);
 }
 
@@ -73,9 +67,8 @@ fn hyprpaper_accepts_every_fit_mode_this_crate_writes() {
 #[test]
 #[ignore]
 fn hyprpaper_still_answers_listactive() {
-    let _live = daemons();
-    if !running("hyprpaper") {
-        eprintln!("hyprpaper isn't running — skipping");
+    let live = Hyprland::read_only();
+    if !running(&live, "hyprpaper") {
         return;
     }
     let out = hyprctl(&["hyprpaper", "listactive"]);
@@ -92,9 +85,8 @@ fn hyprpaper_still_answers_listactive() {
 #[test]
 #[ignore]
 fn hyprsunset_takes_and_reports_a_temperature() {
-    let _live = daemons();
-    if !running("hyprsunset") {
-        eprintln!("hyprsunset isn't running — skipping");
+    let live = Hyprland::disposable();
+    if !running(&live, "hyprsunset") {
         return;
     }
     let before = hyprctl(&["hyprsunset", "temperature"]).trim().to_string();
@@ -113,9 +105,8 @@ fn hyprsunset_takes_and_reports_a_temperature() {
 #[test]
 #[ignore]
 fn hyprsunset_accepts_the_extremes_of_the_declared_range() {
-    let _live = daemons();
-    if !running("hyprsunset") {
-        eprintln!("hyprsunset isn't running — skipping");
+    let live = Hyprland::disposable();
+    if !running(&live, "hyprsunset") {
         return;
     }
     let before = hyprctl(&["hyprsunset", "temperature"]).trim().to_string();
@@ -136,7 +127,7 @@ fn hyprsunset_accepts_the_extremes_of_the_declared_range() {
 #[test]
 #[ignore]
 fn hypridle_still_has_no_ipc() {
-    let _live = daemons();
+    let _live = Hyprland::read_only();
     let out = hyprctl(&["hypridle"]).to_lowercase();
     assert!(
         out.contains("unknown request") || out.contains("invalid"),

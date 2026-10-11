@@ -18,5 +18,7 @@ toml.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+# Path only, so `cargo publish` strips it: the testkit is never published.
+hyprforge-testkit = { path = "../hyprforge-testkit" }
 tempfile = "3"
 hyprforge-lua-import.workspace = true
