@@ -38,7 +38,8 @@ fn desktop_entry(env: &Env, id: &str, name: &str, exec: &Path, mimes: &str) {
 }
 
 /// A machine with the whole suite installed, a `hyprland.lua` of the
-/// user's own, Nemo as their folder handler, and nothing set up.
+/// user's own, Nemo as their folder handler, idle commands in the old
+/// dispatch syntax, and nothing set up.
 fn rig() -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let env = Env::rooted_at(dir.path());
@@ -71,6 +72,14 @@ fn rig() -> Rig {
     std::fs::write(env.pam_modules.join("pam_fprintd.so"), "").unwrap();
     std::fs::create_dir_all(&env.vendor_pam_dir).unwrap();
     std::fs::write(env.vendor_pam_dir.join("polkit-1"), POLKIT_STACK).unwrap();
+    // Idle settings imported from a hypridle.conf written for a hyprlang
+    // Hyprland: screen off in the old dispatch syntax — for idle-dispatch.
+    std::fs::create_dir_all(env.idle_toml().parent().unwrap()).unwrap();
+    std::fs::write(
+        env.idle_toml(),
+        "[[listener]]\ntimeout = 330\non_timeout = \"hyprctl dispatch dpms off\"\non_resume = \"hyprctl dispatch dpms on\"\n",
+    )
+    .unwrap();
     Rig { dir, env, sys }
 }
 
@@ -486,6 +495,50 @@ fn the_previous_lock_command_is_named_and_restored() {
     assert_eq!(back.general.lock_cmd, "hyprlock");
 }
 
+/// An idle command in hyprlang dispatch syntax is rewritten, and undo
+/// puts the user's own text back.
+#[test]
+fn an_old_dpms_dispatch_is_rewritten_and_undo_restores_it() {
+    let r = rig();
+    let mut settings = hyprforge_ecosystem::idle::Settings::default();
+    settings.listeners.push(hyprforge_ecosystem::idle::Listener {
+        timeout: 330,
+        on_timeout: "hyprctl dispatch dpms off".into(),
+        on_resume: "hyprctl dispatch dpms on".into(),
+        ..Default::default()
+    });
+    hyprforge_ecosystem::storage::save(&r.env.idle_toml(), &settings).unwrap();
+    assert!(r.state("idle-dispatch").is_todo());
+
+    r.apply("idle-dispatch").unwrap();
+    let conf = r.read(&r.env.idle_conf());
+    assert!(conf.contains("hl.dsp.dpms({ action = \"off\" })"), "{conf}");
+    assert!(!conf.contains("dispatch dpms off"), "{conf}");
+    assert_eq!(r.state("idle-dispatch"), State::Done);
+
+    r.undo("idle-dispatch").unwrap();
+    let back: hyprforge_ecosystem::idle::Settings =
+        hyprforge_ecosystem::storage::load(&r.env.idle_toml()).unwrap();
+    assert_eq!(back, settings);
+}
+
+/// A dispatch this cannot translate is the user's to fix, and setup says
+/// so instead of offering to do something it would not.
+#[test]
+fn an_old_dispatch_only_a_person_can_translate_is_unavailable() {
+    let r = rig();
+    let mut settings = hyprforge_ecosystem::idle::Settings::default();
+    settings.listeners.push(hyprforge_ecosystem::idle::Listener {
+        timeout: 60,
+        on_timeout: "hyprctl dispatch exec kitty".into(),
+        ..Default::default()
+    });
+    hyprforge_ecosystem::storage::save(&r.env.idle_toml(), &settings).unwrap();
+    let state = r.state("idle-dispatch");
+    let State::Unavailable { why } = &state else { panic!("{state:?}") };
+    assert!(why.contains("exec kitty"), "{why}");
+}
+
 /// The lock command in the user's own hypridle.conf is what runs today,
 /// and the item says what it would replace.
 #[test]
@@ -689,7 +742,7 @@ fn a_check_that_cannot_read_its_file_is_unknown_never_done() {
     ] {
         std::fs::write(path, "= not toml").unwrap();
     }
-    for id in ["bind-files", "idle-lock", "lock-restore", "notif-blur", "gtk-portal"] {
+    for id in ["bind-files", "idle-lock", "idle-dispatch", "lock-restore", "notif-blur", "gtk-portal"] {
         assert!(matches!(r.state(id), State::Unknown { .. }), "{id}: {:?}", r.state(id));
     }
 }

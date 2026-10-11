@@ -77,6 +77,15 @@ tier:
 - **The installer can plan every component** and **The installer's dry run
   touches nothing** — the second compares a scratch home byte for byte
   before and after every component's dry-run uninstall.
+- **The installer and the package install the same files** — the
+  greeter's package once shipped its binary without the sysusers and
+  tmpfiles entries the installer always put down.
+- **Every Set up item is undone by some uninstall** — three items were in
+  no component's list, so uninstalling Files or the polkit agent left
+  their changes behind.
+- **Nothing shipped dispatches in hyprlang syntax** — under a Lua config
+  `hyprctl dispatch exit` is a Lua error; the greeter's compositor config
+  said exactly that, and every login logged the failure for nobody.
 - **Every ignored test has one tier**, and every `live` or `visible` test
   sits behind exactly one gate.
 

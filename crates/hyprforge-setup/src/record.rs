@@ -95,6 +95,9 @@ pub enum Change {
     Bind { name: String },
     /// `idle.toml`'s `lock_cmd` before setup set it.
     IdleLock { previous: String },
+    /// `idle.toml` before its commands were moved to the Lua dispatch
+    /// form, whole: undo puts it back only if nobody has edited it since.
+    IdleDispatch { previous: hyprforge_ecosystem::idle::Settings },
     /// `misc:allow_session_lock_restore` set in `system.toml`, and what
     /// `system.toml` held for it before — absent when it did not own the
     /// key, so undo gives it back to Hyprland and the user's own config

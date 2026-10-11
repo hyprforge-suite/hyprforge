@@ -267,6 +267,39 @@ def installer_dry_run_touches_nothing() -> None:
         ui.detail(sorted(set(before) ^ set(after))[:10])
 
 
+def install_parity() -> None:
+    ui.step("The installer and the package install the same files")
+    _, out = _lint("install_parity")
+    problems = _lines(out, "PROBLEM ")
+    if problems:
+        ui.bad(f"{len(problems)} file(s) installed one way and not the other")
+        ui.detail(problems)
+    else:
+        ui.ok(f"{(_lines(out, 'CHECKED ') or ['?'])[0]} repository files, installed by both ./hyprforge and the PKGBUILD")
+
+
+def setup_ids() -> None:
+    ui.step("Every Set up item is undone by some uninstall")
+    _, out = _lint("setup_ids")
+    problems = _lines(out, "PROBLEM ")
+    if problems:
+        ui.bad(f"{len(problems)} Set up item(s) out of step with the installer")
+        ui.detail(problems)
+    else:
+        ui.ok(f"all {(_lines(out, 'CHECKED ') or ['?'])[0]} Set up items are undone by uninstalling their component, or Settings")
+
+
+def lua_dispatch() -> None:
+    ui.step("Nothing shipped dispatches in hyprlang syntax")
+    _, out = _lint("lua_dispatch")
+    problems = _lines(out, "PROBLEM ")
+    if problems:
+        ui.bad(f"{len(problems)} `hyprctl dispatch` call(s) a Lua config rejects")
+        ui.detail(problems)
+    else:
+        ui.ok(f"{(_lines(out, 'CHECKED ') or ['?'])[0]} scripts and configs dispatch in Lua")
+
+
 def docs_name_things() -> None:
     ui.step("Docs name things that exist")
     _, out = _lint("docs_name_things")
@@ -485,6 +518,9 @@ def check(fast: bool) -> int:
     packages_are_repositories()
     installer_plan()
     installer_dry_run_touches_nothing()
+    install_parity()
+    setup_ids()
+    lua_dispatch()
     docs_name_things()
     crate_readmes()
     versions()
@@ -508,6 +544,9 @@ def lint() -> int:
     dependency_pins()
     siblings()
     packages_are_repositories()
+    install_parity()
+    setup_ids()
+    lua_dispatch()
     docs_name_things()
     crate_readmes()
     versions()

@@ -133,7 +133,8 @@ pub fn idle(doc: &Document) -> (Option<Imported<idle::General>>, Review<idle::Li
                 "ignore_dbus_inhibit" => general.ignore_dbus_inhibit = flag(value),
                 "ignore_systemd_inhibit" => general.ignore_systemd_inhibit = flag(value),
                 "ignore_wayland_inhibit" => general.ignore_wayland_inhibit = flag(value),
-                _ => general.set_command(key, value.to_string()),
+                // In the form a Lua Hyprland accepts: see idle::lua_dispatch.
+                _ => general.set_command(key, idle::lua_dispatch(value).unwrap_or_else(|| value.to_string())),
             }
         }
         let (line, end_line) = span(item);
@@ -155,8 +156,14 @@ pub fn idle(doc: &Document) -> (Option<Imported<idle::General>>, Review<idle::Li
                     Err(_) => unreadable
                         .push((line, format!("`timeout = {value}` isn't a number of seconds"))),
                 },
-                "on-timeout" | "on_timeout" => listener.on_timeout = value.to_string(),
-                "on-resume" | "on_resume" => listener.on_resume = value.to_string(),
+                // Translated on the way in, so the Idle page shows the
+                // command that will actually run (idle::lua_dispatch).
+                "on-timeout" | "on_timeout" => {
+                    listener.on_timeout = idle::lua_dispatch(value).unwrap_or_else(|| value.to_string())
+                }
+                "on-resume" | "on_resume" => {
+                    listener.on_resume = idle::lua_dispatch(value).unwrap_or_else(|| value.to_string())
+                }
                 "ignore_inhibit" => listener.ignore_inhibit = flag(value),
                 _ => {}
             }

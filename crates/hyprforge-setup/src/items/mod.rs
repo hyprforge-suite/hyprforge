@@ -87,6 +87,7 @@ enum Kind {
     PolkitAgent,
     Bind(&'static binds::BindSpec),
     IdleLock,
+    IdleDispatch,
     LockRestore,
     Blur(&'static blur::BlurSpec),
     Defaults(&'static defaults::DefaultsSpec),
@@ -119,6 +120,7 @@ impl Item {
             Kind::PolkitAgent => &["hyprforge-polkit"],
             Kind::Bind(spec) => spec.requires,
             Kind::IdleLock => &["hypridle", "hyprforge-lock"],
+            Kind::IdleDispatch => &["hypridle"],
             Kind::LockRestore => &["hyprforge-lock"],
             Kind::Blur(spec) => spec.requires,
             Kind::Defaults(spec) => spec.requires,
@@ -151,6 +153,7 @@ impl Item {
             Kind::PolkitAgent => polkit::check(cx),
             Kind::Bind(spec) => binds::check(cx, spec),
             Kind::IdleLock => idle::check(cx),
+            Kind::IdleDispatch => idle::check_dispatch(cx),
             Kind::LockRestore => lock_restore::check(cx),
             Kind::Blur(spec) => blur::check(cx, spec),
             Kind::Defaults(spec) => defaults::check(cx, spec),
@@ -172,6 +175,7 @@ impl Item {
             Kind::PolkitAgent => polkit::apply(cx),
             Kind::Bind(spec) => binds::apply(cx, spec),
             Kind::IdleLock => idle::apply(cx),
+            Kind::IdleDispatch => idle::apply_dispatch(cx),
             Kind::LockRestore => lock_restore::apply(cx),
             Kind::Blur(spec) => blur::apply(cx, spec),
             Kind::Defaults(spec) => defaults::apply(cx, spec),
@@ -198,6 +202,7 @@ impl Item {
             }
             (Kind::Bind(spec), Change::Bind { name }) => binds::undo(cx, spec, name),
             (Kind::IdleLock, Change::IdleLock { previous }) => idle::undo(cx, previous),
+            (Kind::IdleDispatch, Change::IdleDispatch { previous }) => idle::undo_dispatch(cx, previous),
             (Kind::LockRestore, Change::LockRestore { previous }) => {
                 lock_restore::undo(cx, previous.as_ref())
             }
@@ -227,7 +232,7 @@ impl Item {
 }
 
 /// Every item, in order. See the module doc for why the order matters.
-pub static ITEMS: [Item; 25] = [
+pub static ITEMS: [Item; 26] = [
     Item::new(
         "wiring",
         "Connect Hyprforge to your Hyprland config",
@@ -325,6 +330,13 @@ pub static ITEMS: [Item; 25] = [
         "hypridle runs hyprforge-lock when the session is asked to lock.",
         true,
         Kind::IdleLock,
+    ),
+    Item::new(
+        "idle-dispatch",
+        "Turn the screen off on idle again",
+        "Idle commands imported from an older hypridle.conf call `hyprctl dispatch dpms` in a form a Lua Hyprland config rejects, so the screen never turns off; this rewrites them.",
+        true,
+        Kind::IdleDispatch,
     ),
     Item::new(
         "lock-restore",
@@ -436,6 +448,7 @@ mod tests {
                 "bind-lock",
                 "bind-procman",
                 "idle-lock",
+                "idle-dispatch",
                 "lock-restore",
                 "notif-blur",
                 "polkit-blur",

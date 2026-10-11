@@ -135,8 +135,119 @@ impl Settings {
     }
 }
 
+/// A listener or `general` command rewritten from hyprlang-era
+/// `hyprctl dispatch` syntax to the form a Lua Hyprland config accepts,
+/// or `None` when it needs nothing.
+///
+/// Under a Lua config, `hyprctl dispatch` takes Lua: `hyprctl dispatch
+/// dpms off` is evaluated as `hl.dispatch(dpms off)`, which is a syntax
+/// error, and hyprctl exits 7 — inside a hypridle listener, where nobody
+/// sees it. A `hypridle.conf` written for a hyprlang Hyprland and
+/// imported unchanged left screen-off on idle silently doing nothing
+/// (2026-10-10). The form this writes was checked against Hyprland
+/// 0.56.2: `hyprctl dispatch 'hl.dsp.dpms({ action = "on" })'` answers
+/// `ok`.
+///
+/// Only `dpms`, the one dispatcher an idle config uses in practice — the
+/// catalogue in hyprforge-shortcuts has its Lua shape. Anything else is
+/// left as written and reported by [`old_dispatches`], so a command this
+/// does not understand is shown to the user rather than guessed at.
+pub fn lua_dispatch(command: &str) -> Option<String> {
+    const OLD: &str = "hyprctl dispatch dpms";
+    if !command.contains(OLD) {
+        return None;
+    }
+    let mut out = String::new();
+    let mut rest = command;
+    while let Some(at) = rest.find(OLD) {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + OLD.len()..];
+        // Words up to the next shell separator are the arguments.
+        let end = after.find(['&', '|', ';', '\n']).unwrap_or(after.len());
+        let mut words = after[..end].split_whitespace();
+        let action = words.next().unwrap_or("toggle");
+        if !matches!(action, "on" | "off" | "toggle") {
+            // Not a form this knows; keep the whole command as written.
+            return None;
+        }
+        let call = match words.next() {
+            Some(monitor) => format!("{{ action = \"{action}\", monitor = \"{monitor}\" }}"),
+            None => format!("{{ action = \"{action}\" }}"),
+        };
+        out.push_str(&format!("hyprctl dispatch 'hl.dsp.dpms({call})'"));
+        // Keep the separator's spacing as the user wrote it.
+        let trailing = &after[..end];
+        let kept = &trailing[trailing.trim_end().len()..];
+        out.push_str(kept);
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
+/// Commands that still call `hyprctl dispatch` in hyprlang syntax after
+/// [`lua_dispatch`] — something only a person can translate. Empty when
+/// every dispatch is Lua.
+pub fn old_dispatches(settings: &Settings) -> Vec<String> {
+    let mut out = Vec::new();
+    for command in settings.commands() {
+        let fixed = lua_dispatch(command).unwrap_or_else(|| command.to_string());
+        for (at, _) in fixed.match_indices("hyprctl dispatch ") {
+            let arg = fixed[at + "hyprctl dispatch ".len()..].trim_start();
+            if !(arg.starts_with('\'') || arg.starts_with('"') || arg.starts_with("hl.")) {
+                out.push(command.to_string());
+                break;
+            }
+        }
+    }
+    out
+}
+
+impl Settings {
+    /// Every command string these settings hold: `general`'s and each
+    /// listener's.
+    pub fn commands(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = self.general.commands().into_iter().map(|(_, _, v)| v.as_str()).collect();
+        for l in &self.listeners {
+            out.push(&l.on_timeout);
+            out.push(&l.on_resume);
+        }
+        out.retain(|c| !c.trim().is_empty());
+        out
+    }
+
+    /// These settings with every command passed through [`lua_dispatch`],
+    /// or `None` when none needed it.
+    pub fn with_lua_dispatch(&self) -> Option<Settings> {
+        let mut out = self.clone();
+        let mut changed = false;
+        let mut fix = |s: &mut String| {
+            if let Some(new) = lua_dispatch(s) {
+                *s = new;
+                changed = true;
+            }
+        };
+        for (field, _, value) in self.general.commands() {
+            let mut v = value.clone();
+            fix(&mut v);
+            out.general.set_command(field, v);
+        }
+        for l in &mut out.listeners {
+            fix(&mut l.on_timeout);
+            fix(&mut l.on_resume);
+        }
+        changed.then_some(out)
+    }
+}
+
 /// Renders the generated `idle.conf`.
+///
+/// Every command goes out in the Lua dispatch form ([`lua_dispatch`]):
+/// whatever `idle.toml` still holds, the file hypridle reads is one a Lua
+/// Hyprland accepts.
 pub fn generate(settings: &Settings) -> String {
+    let fixed = settings.with_lua_dispatch();
+    let settings = fixed.as_ref().unwrap_or(settings);
     let bad: Vec<usize> = settings.invalid().into_iter().map(|(i, _)| i).collect();
     let mut out = hyprlang::header("idle settings");
 
@@ -191,6 +302,63 @@ pub fn render_one(listener: &Listener) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_old_dpms_dispatch_becomes_the_lua_form() {
+        assert_eq!(
+            lua_dispatch("hyprctl dispatch dpms off").as_deref(),
+            Some("hyprctl dispatch 'hl.dsp.dpms({ action = \"off\" })'")
+        );
+        assert_eq!(
+            lua_dispatch("hyprctl dispatch dpms on eDP-1").as_deref(),
+            Some("hyprctl dispatch 'hl.dsp.dpms({ action = \"on\", monitor = \"eDP-1\" })'")
+        );
+    }
+
+    #[test]
+    fn the_rest_of_a_compound_command_is_kept_exactly() {
+        assert_eq!(
+            lua_dispatch("hyprctl dispatch dpms on && brightnessctl -r").as_deref(),
+            Some("hyprctl dispatch 'hl.dsp.dpms({ action = \"on\" })' && brightnessctl -r")
+        );
+    }
+
+    #[test]
+    fn a_command_already_in_lua_form_is_left_alone() {
+        assert_eq!(lua_dispatch("hyprctl dispatch 'hl.dsp.dpms({ action = \"off\" })'"), None);
+        assert_eq!(lua_dispatch("loginctl lock-session"), None);
+    }
+
+    #[test]
+    fn a_dpms_form_this_does_not_know_is_not_guessed_at() {
+        assert_eq!(lua_dispatch("hyprctl dispatch dpms sideways"), None);
+    }
+
+    #[test]
+    fn generated_idle_conf_never_carries_the_old_syntax() {
+        let settings = Settings {
+            listeners: vec![Listener {
+                timeout: 330,
+                on_timeout: "hyprctl dispatch dpms off".into(),
+                on_resume: "hyprctl dispatch dpms on".into(),
+                ..Listener::default()
+            }],
+            ..Settings::default()
+        };
+        let text = generate(&settings);
+        assert!(!text.contains("dispatch dpms"), "{text}");
+        assert!(text.contains("hl.dsp.dpms({ action = \"off\" })"), "{text}");
+        assert!(old_dispatches(&settings).is_empty());
+    }
+
+    #[test]
+    fn a_dispatch_only_a_person_can_translate_is_reported() {
+        let settings = Settings {
+            listeners: vec![listener(60, "hyprctl dispatch exec kitty")],
+            ..Settings::default()
+        };
+        assert_eq!(old_dispatches(&settings), vec!["hyprctl dispatch exec kitty".to_string()]);
+    }
 
     fn listener(timeout: u32, on_timeout: &str) -> Listener {
         Listener {

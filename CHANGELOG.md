@@ -34,6 +34,21 @@ drafts the next section from git; `tools/hf release` files it.
 - `hyprforge-testkit` (unpublished): a live test that changes Hyprland
   refuses to run against the session.
 
+- Set up: "Turn the screen off on idle again" rewrites idle commands
+  imported in hyprlang `hyprctl dispatch dpms` syntax, which a Lua config
+  rejects, so screen-off on idle silently did nothing. Imports translate
+  them on the way in, and `idle.conf` is always written in the Lua form.
+
+### Fixed
+
+- The greeter's compositor exits when the greeter does: its config said
+  `hyprctl dispatch exit`, which a Lua config rejects on every login.
+- The `hyprforge-greet` package ships the sysusers and tmpfiles entries
+  the installer always did, and the greeter templates in
+  `/usr/share/hyprforge-greet/`.
+- Uninstalling Files or the polkit agent offers to undo their GTK portal,
+  Previous Versions and fingerprint-prompt Set up items.
+
 ### Changed
 
 - publish.yml waits out crates.io's rate limit by itself instead of

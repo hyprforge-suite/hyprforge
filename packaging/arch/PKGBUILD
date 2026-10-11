@@ -282,6 +282,22 @@ package_hyprforge-greet() {
   )
   cd "$startdir/../.."
   _bin hyprforge-greet
+  # The `greeter` user and the directory Settings exports the look and
+  # monitor layout into; pacman's hooks run sysusers and tmpfiles on
+  # install. Without them the greeter runs with default colours and a
+  # fallback display scale, silently — `./hyprforge --install --greeter`
+  # always installed these, and the package did not.
+  install -Dm644 crates/hyprforge-greet/config/hyprforge-greet.sysusers \
+    "$pkgdir/usr/lib/sysusers.d/hyprforge-greet.conf"
+  install -Dm644 crates/hyprforge-greet/config/hyprforge-greet.tmpfiles \
+    "$pkgdir/usr/lib/tmpfiles.d/hyprforge-greet.conf"
+  # Templates, not config: hyprland-greeter.lua names the account to log
+  # in (CHANGE_ME), so it is copied to /etc/greetd and edited by hand —
+  # crates/hyprforge-greet/INSTALL.md walks through it.
+  install -Dm644 crates/hyprforge-greet/config/hyprland-greeter.lua \
+    "$pkgdir/usr/share/hyprforge-greet/hyprland-greeter.lua"
+  install -Dm644 crates/hyprforge-greet/config/greetd.toml \
+    "$pkgdir/usr/share/hyprforge-greet/greetd.toml"
   _license
 }
 

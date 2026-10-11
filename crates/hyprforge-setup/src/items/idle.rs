@@ -120,3 +120,49 @@ pub(super) fn undo(cx: &Cx<'_>, previous: &str) -> Result<Option<String>, String
     settings.general.set_command("lock_cmd", previous.to_string());
     write(cx, &settings)
 }
+
+// --- idle-dispatch ---------------------------------------------------------
+//
+// Commands imported from a hypridle.conf written for a hyprlang Hyprland
+// still say `hyprctl dispatch dpms off`, which a Lua config rejects — so
+// screen-off on idle silently did nothing (2026-10-10). The generator
+// writes the Lua form whatever idle.toml holds
+// (`hyprforge_ecosystem::idle::lua_dispatch`), but an idle.conf written
+// before that, and the Idle page showing the old command, both need the
+// stored settings moved too. That is this item.
+
+pub(super) fn check_dispatch(cx: &Cx<'_>) -> State {
+    let settings = match load(cx) {
+        Ok(s) => s,
+        Err(e) => return State::Unknown { why: e },
+    };
+    if settings.with_lua_dispatch().is_some() {
+        return State::Todo {
+            what: "Rewrite `hyprctl dispatch dpms` in your idle commands to the form your Lua config accepts \
+                   — the old form silently does nothing"
+                .to_string(),
+        };
+    }
+    let untranslatable = idle::old_dispatches(&settings);
+    if let Some(first) = untranslatable.first() {
+        return State::Unavailable {
+            why: format!("\"{first}\" uses the old dispatch syntax, and only a person can translate it — on the Idle & lock page"),
+        };
+    }
+    State::Done
+}
+
+pub(super) fn apply_dispatch(cx: &Cx<'_>) -> Result<Applied, String> {
+    let previous = load(cx)?;
+    let fixed = previous.with_lua_dispatch().ok_or("nothing to rewrite")?;
+    let note = write(cx, &fixed)?;
+    Ok(Applied { change: Change::IdleDispatch { previous }, note })
+}
+
+pub(super) fn undo_dispatch(cx: &Cx<'_>, previous: &idle::Settings) -> Result<Option<String>, String> {
+    let now = load(cx)?;
+    if Some(&now) != previous.with_lua_dispatch().as_ref() {
+        return Ok(Some("idle.toml has been changed since setup rewrote it, so it was left alone".into()));
+    }
+    write(cx, previous)
+}

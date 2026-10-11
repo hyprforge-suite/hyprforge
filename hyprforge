@@ -322,6 +322,11 @@ EOF
 
 [[ $# -eq 0 ]] && { usage; exit 1; }
 
+# Every component, once: --all expands to it and the "needs a component"
+# message lists it, so neither can fall behind the other again — the
+# message named nine of the thirteen.
+ALL_COMPONENTS=(greeter lock displayd tray clipboard notif emoji polkit procman files media mime settings)
+
 set_action() {
     [[ -n $ACTION ]] && die "--install, --uninstall and --status are mutually exclusive"
     ACTION=$1
@@ -346,7 +351,7 @@ while [[ $# -gt 0 ]]; do
         --mime)          COMPONENTS+=(mime) ;;
         --provide-mimetype) PROVIDE_MIMETYPE=true ;;
         --settings)      COMPONENTS+=(settings) ;;
-        --all)           COMPONENTS+=(greeter lock displayd tray clipboard notif emoji polkit procman files media mime settings) ;;
+        --all)           COMPONENTS+=("${ALL_COMPONENTS[@]}") ;;
         --force-cleanup) FORCE_CLEANUP=true ;;
         --dry-run)       DRY_RUN=true ;;
         --no-restart)    NO_RESTART=true ;;
@@ -359,7 +364,7 @@ done
 
 [[ -n $ACTION ]] || die "pick one of --install, --uninstall or --status"
 if [[ $ACTION != status && ${#COMPONENTS[@]} -eq 0 ]]; then
-    die "--$ACTION needs at least one component (--greeter, --lock, --displayd, --tray, --clipboard, --notif, --polkit, --procman, --settings, --all)"
+    die "--$ACTION needs at least one component ($(printf -- '--%s, ' "${ALL_COMPONENTS[@]}")--all)"
 fi
 
 has_component() {
@@ -1545,6 +1550,10 @@ run_setup() {
 #
 # The ids are setup's own (`hyprforge-settings --setup --porcelain`
 # lists them); an item that was never applied is nothing for undo to do.
+# `wiring` and `idle-dispatch` belong to no one component — the require
+# lines serve every page, and the idle commands are the user's own — so
+# only removing Settings undoes them. `tools/hf check` fails on an item
+# in neither place.
 setup_ids_for() {
     case $1 in
         displayd)  echo service-displayd ;;
@@ -1552,9 +1561,9 @@ setup_ids_for() {
         clipboard) echo service-clipd bind-clipboard ;;
         notif)     echo service-notifd bind-notifications bind-dnd notif-blur ;;
         emoji)     echo bind-emoji ;;
-        polkit)    echo service-polkit polkit-blur ;;
+        polkit)    echo service-polkit polkit-blur fingerprint-polkit ;;
         procman)   echo bind-procman record-history ;;
-        files)     echo bind-files default-folders portal-dialog show-in-folder ;;
+        files)     echo bind-files default-folders portal-dialog show-in-folder gtk-portal previous-versions ;;
         media)     echo default-images ;;
         lock)      echo bind-lock idle-lock lock-restore ;;
     esac
