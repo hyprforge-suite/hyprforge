@@ -98,10 +98,6 @@ someone watching the screen. Ranked by what each one unblocks.
 
 Open work Claude can do unattended. Nothing here blocks a release.
 
-- **Layer rules can't be edited in Settings.** Window rules saves them
-  back untouched (`crates/hyprforge-settings/src/modules/window_rules.rs:616`),
-  so the notification-blur rule Set up adds can't be seen or removed
-  from the UI. Medium. *Added 2026-10-11.*
 - **Media blurs instead of re-decoding when zoomed in.**
   `sharpen_if_needed` runs on resize, mode and scale changes but never
   on zoom (`crates/hyprforge-media/src/main.rs:1611`), so 1:1 on a large
@@ -203,6 +199,9 @@ Parked on purpose — written down so they are not lost, not scheduled.
 Kept for a few weeks so "what happened to X" has an answer, then
 pruned; git history has the rest.
 
+- **Layer rules are editable** in Settings' Window rules page: a row
+  each for the namespace, blur and on/off, add and remove (Settings
+  b69919c). *Added 2026-10-11.*
 - **Animated GIFs play** in Media and Files' Quick Look:
   `hyprforge_image::decode_animation` (every frame inside one still's
   budget) and `hyprforge_viewer::animation` on the film. Media and
