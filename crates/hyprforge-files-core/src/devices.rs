@@ -82,6 +82,11 @@ pub enum Ask {
     /// Mount it — and when `open`, go there in the tab that asked once
     /// it is mounted, which is what clicking an unmounted drive means.
     Mount { id: VolumeId, open: bool },
+    /// An encrypted drive: ask for its passphrase, then unlock and mount
+    /// it — going there when `open`, as for [`Ask::Mount`]. The host
+    /// owns the prompt, because the browser does no I/O and holds no
+    /// secrets.
+    Unlock { id: VolumeId, open: bool },
     Unmount(VolumeId),
     Eject(VolumeId),
     /// Disconnect the share mounted at this path.
@@ -211,6 +216,15 @@ impl Devices {
         match (op, result) {
             (Operation::Mount, Ok(Some(point))) => {
                 if let Some(v) = volumes.iter_mut().find(|v| &v.id == id) {
+                    v.mount_point = Some(point.clone());
+                }
+            }
+            // UDisks2's next listing replaces the locked row with what is
+            // inside it, under its own id; until then the row it was says
+            // where it opened.
+            (Operation::Unlock, Ok(Some(point))) => {
+                if let Some(v) = volumes.iter_mut().find(|v| &v.id == id) {
+                    v.locked = false;
                     v.mount_point = Some(point.clone());
                 }
             }

@@ -22,7 +22,7 @@ use crate::devices::{Ask, DeviceMessage, Devices, Listing, CONNECT_ICON};
 use crate::icon;
 use crate::sidebar::Tint;
 use hyprforge_ui::theme::FontScale;
-use hyprforge_volumes::{Operation, VolumeId};
+use hyprforge_volumes::VolumeId;
 use iced::Element;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -280,12 +280,7 @@ impl Browser {
                     return Outcome::None;
                 }
                 if volume.locked {
-                    let label = volume.label.clone();
-                    return Outcome::Notice(hyprforge_volumes::sentence(
-                        Operation::Mount,
-                        &label,
-                        &hyprforge_volumes::VolumeError::Locked,
-                    ));
+                    return Outcome::Devices(Ask::Unlock { id, open: true });
                 }
                 Outcome::Devices(Ask::Mount { id, open: true })
             }
@@ -333,11 +328,12 @@ impl Browser {
             Some(t) => self.devices.volume_named(t),
             None => self.devices.volume_holding(&self.current_dir),
         };
-        let Some(id) = volume.map(|v| v.id.clone()) else { return Outcome::None };
+        let Some((id, locked)) = volume.map(|v| (v.id.clone(), v.locked)) else { return Outcome::None };
         Outcome::Devices(match action {
             // From a menu, mounting means mounting: the person asked for
             // that and not to be taken there, which is what a click on
-            // the row is for.
+            // the row is for. A locked drive is mounted by unlocking it.
+            Action::Mount if locked => Ask::Unlock { id, open: false },
             Action::Mount => Ask::Mount { id, open: false },
             Action::Unmount => Ask::Unmount(id),
             _ => Ask::Eject(id),
@@ -352,7 +348,7 @@ mod tests {
     use crate::devices::Share;
     use crate::menu::MenuItem;
     use crate::prefs::Prefs;
-    use hyprforge_volumes::{Detach, Volume, VolumeKind};
+    use hyprforge_volumes::{Detach, Operation, Volume, VolumeKind};
 
     fn stick(label: &str, mounted: Option<&str>) -> Volume {
         Volume {
@@ -490,13 +486,18 @@ mod tests {
         assert_eq!(section(&browser, "Devices").rows[0].meta.as_deref(), Some("Mounting\u{2026}"));
     }
 
+    /// A click on a locked drive asks for its passphrase — opening it
+    /// once unlocked, as a click on any drive does — and Mount from its
+    /// menu asks too, without going there.
     #[test]
-    fn a_locked_drive_says_why_it_will_not_open() {
+    fn a_locked_drive_asks_for_its_passphrase_to_open() {
         let mut locked = stick("SECRET", None);
         locked.locked = true;
         let mut browser = with(listed(vec![locked]));
         let outcome = browser.update(Message::Device(DeviceMessage::Open(id("SECRET"))));
-        assert!(matches!(&outcome, Outcome::Notice(s) if s.contains("encrypted")), "{outcome:?}");
+        assert_eq!(outcome, Outcome::Devices(Ask::Unlock { id: id("SECRET"), open: true }));
+        browser.update(Message::OpenContextMenu { spot: MenuSpot::Sidebar("/dev/SECRET".into()), at: (0.0, 0.0) });
+        assert_eq!(choose(&mut browser, "Mount"), Outcome::Devices(Ask::Unlock { id: id("SECRET"), open: false }));
     }
 
     /// Unmounted, there is nothing to open in a tab and nothing to

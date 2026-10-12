@@ -22,6 +22,7 @@ use crate::backend::VolumeBackend;
 use crate::inventory::{self, RawBlock, RawDrive};
 use crate::types::{Volume, VolumeError, VolumeId};
 use futures_util::StreamExt;
+use hyprforge_secret::Secret;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -63,6 +64,28 @@ trait Filesystem {
 trait Drive {
     fn eject(&self, options: HashMap<&str, Value<'_>>) -> zbus::Result<()>;
     fn power_off(&self, options: HashMap<&str, Value<'_>>) -> zbus::Result<()>;
+}
+
+#[zbus::proxy(interface = "org.freedesktop.UDisks2.Encrypted", default_service = "org.freedesktop.UDisks2")]
+trait Encrypted {
+    fn unlock(&self, passphrase: &str, options: HashMap<&str, Value<'_>>) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
+    fn lock(&self, options: HashMap<&str, Value<'_>>) -> zbus::Result<()>;
+}
+
+/// How long the inside of a just-unlocked volume may take to be probed.
+/// `Unlock` answers once the device-mapper device exists, and udev then
+/// reads what is on it — until it has, the object has no `Filesystem`
+/// to mount. Measured in tens of milliseconds; the bound is for a slow
+/// stick, not a number tuned until it stopped failing.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// What libblockdev says when a passphrase does not fit: "Failed to
+/// activate device: Incorrect passphrase." in libblockdev 3 (read out of
+/// `libbd_crypto.so.3` on the machine this was written on), and
+/// cryptsetup's "No key available with this passphrase" before it.
+fn is_wrong_passphrase(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("incorrect passphrase") || message.contains("no key available")
 }
 
 #[zbus::proxy(interface = "org.freedesktop.UDisks2.Loop", default_service = "org.freedesktop.UDisks2")]
@@ -172,6 +195,39 @@ impl UDisks2Backend {
         let connection = self.connection().await?;
         bounded(TIMEOUT, FilesystemProxy::builder(connection).path(id.0.clone())?.build()).await
     }
+
+    async fn encrypted(&self, id: &str) -> Result<EncryptedProxy<'static>, VolumeError> {
+        let connection = self.connection().await?;
+        bounded(TIMEOUT, EncryptedProxy::builder(connection).path(id.to_string())?.build()).await
+    }
+
+    /// Locks the encrypted container `id`. Already locked is what was
+    /// wanted.
+    async fn lock(&self, id: &str) -> Result<(), VolumeError> {
+        let encrypted = self.encrypted(id).await?;
+        match bounded(UNMOUNT_TIMEOUT, encrypted.lock(options())).await {
+            Err(VolumeError::Refused(m)) if m.contains("not unlocked") => Ok(()),
+            other => other,
+        }
+    }
+
+    /// Waits for the inside of a just-unlocked container to be probed —
+    /// see [`PROBE_TIMEOUT`]. `Ok(false)` when it was probed and holds no
+    /// filesystem (LVM, or nothing at all).
+    async fn probed(&self, cleartext: &str) -> Result<bool, VolumeError> {
+        let deadline = tokio::time::Instant::now() + PROBE_TIMEOUT;
+        loop {
+            let (blocks, _) = raw(&self.objects().await?);
+            let block = blocks.iter().find(|b| b.id == cleartext);
+            if block.is_some_and(|b| b.has_filesystem) {
+                return Ok(true);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(false);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
 }
 
 impl From<zbus::Error> for VolumeError {
@@ -223,8 +279,18 @@ impl VolumeBackend for UDisks2Backend {
         let filesystem = self.filesystem(id).await?;
         match bounded(UNMOUNT_TIMEOUT, filesystem.unmount(options())).await {
             // Not mounted is what was wanted.
-            Err(VolumeError::Refused(m)) if m.contains("not mounted") => Ok(()),
-            other => other,
+            Err(VolumeError::Refused(m)) if m.contains("not mounted") => {}
+            other => other?,
+        }
+        // The inside of an encrypted volume: lock it again, as every
+        // other file manager does — an unmounted stick left unlocked
+        // would open for anyone, with no passphrase, until it was pulled
+        // out.
+        let (blocks, _) = raw(&self.objects().await?);
+        let backing = blocks.iter().find(|b| b.id == id.0).and_then(|b| b.crypto_backing.clone());
+        match backing {
+            Some(container) => self.lock(&container).await,
+            None => Ok(()),
         }
     }
 
@@ -232,20 +298,30 @@ impl VolumeBackend for UDisks2Backend {
         let objects = self.objects().await?;
         let (blocks, drives) = raw(&objects);
         let block = blocks.iter().find(|b| b.id == id.0).ok_or(VolumeError::Gone)?;
+        // An unlocked volume is ejected as the stick it is on.
+        let block = inventory::outer(block, &blocks);
         let connection = self.connection().await?;
         // Everything mounted on the same drive goes first — powering off
         // a stick with its second partition still mounted would be the
-        // unsafe removal Eject exists to prevent. A disk image has no
-        // drive; only itself.
+        // unsafe removal Eject exists to prevent — and every encrypted
+        // volume on it is locked, or the kernel keeps a mapping onto a
+        // device that is about to vanish. A disk image has no drive; only
+        // itself.
         let siblings: Vec<&RawBlock> = match &block.drive {
             Some(drive) => blocks.iter().filter(|b| b.drive.as_ref() == Some(drive)).collect(),
             None => vec![block],
         };
-        for sibling in siblings.iter().filter(|b| !b.mount_points.is_empty()) {
-            self.unmount(&VolumeId(sibling.id.clone())).await?;
+        for sibling in siblings {
+            match inventory::cleartext_of(sibling, &blocks) {
+                // Unmounting the inside locks it too.
+                Some(inside) if !inside.mount_points.is_empty() => self.unmount(&VolumeId(inside.id.clone())).await?,
+                Some(_) => self.lock(&sibling.id).await?,
+                None if !sibling.mount_points.is_empty() => self.unmount(&VolumeId(sibling.id.clone())).await?,
+                None => {}
+            }
         }
         if block.loop_setup_by.is_some() {
-            let image = bounded(TIMEOUT, LoopProxy::builder(connection).path(id.as_str())?.build()).await?;
+            let image = bounded(TIMEOUT, LoopProxy::builder(connection).path(block.id.as_str())?.build()).await?;
             return bounded(UNMOUNT_TIMEOUT, image.delete(options())).await;
         }
         let Some(drive_id) = &block.drive else { return Ok(()) };
@@ -259,6 +335,37 @@ impl VolumeBackend for UDisks2Backend {
             // Unmounted, which is as far as this drive goes.
             Ok(())
         }
+    }
+
+    async fn unlock(&self, id: &VolumeId, passphrase: &Secret<String>) -> Result<PathBuf, VolumeError> {
+        let (blocks, _) = raw(&self.objects().await?);
+        let block = blocks.iter().find(|b| b.id == id.0).ok_or(VolumeError::Gone)?;
+        if !block.encrypted {
+            return Err(VolumeError::Refused("it isn't encrypted".into()));
+        }
+        // Unlocked already — by another window, or `udisksctl` — is half
+        // the work done, not a failure.
+        let cleartext = match inventory::cleartext_of(block, &blocks) {
+            Some(inside) => inside.id.clone(),
+            None => {
+                let encrypted = self.encrypted(&id.0).await?;
+                // The passphrase goes onto the bus and nowhere else: not
+                // into an error, not into a log line. UDisks2's own
+                // message for a refusal names the device, not the key.
+                match bounded(MOUNT_TIMEOUT, encrypted.unlock(passphrase.expose(), options())).await {
+                    Ok(path) => path.as_str().to_string(),
+                    Err(VolumeError::Refused(m)) if is_wrong_passphrase(&m) => return Err(VolumeError::WrongPassphrase),
+                    Err(e) => return Err(e),
+                }
+            }
+        };
+        if !self.probed(&cleartext).await? {
+            // Unlocked onto something there is no opening — locked again
+            // rather than left mapped with nothing to show for it.
+            let _ = self.lock(&id.0).await;
+            return Err(VolumeError::Refused("there is no filesystem inside it to open".into()));
+        }
+        self.mount(&VolumeId(cleartext)).await
     }
 
     async fn watch(&self) -> Result<mpsc::Receiver<()>, VolumeError> {
@@ -513,6 +620,18 @@ mod tests {
         assert_eq!(classify_name("org.freedesktop.DBus.Error.ServiceUnknown", String::new()), VolumeError::Unavailable);
         assert_eq!(classify_name("org.freedesktop.DBus.Error.UnknownObject", String::new()), VolumeError::Gone);
         assert_eq!(classify_name("org.freedesktop.UDisks2.Error.Failed", "nope".into()), VolumeError::Refused("nope".into()));
+    }
+
+    /// The words libblockdev uses for a key that does not fit, against
+    /// the ones it uses for everything else that can go wrong unlocking.
+    #[test]
+    fn only_a_wrong_passphrase_reads_as_one() {
+        assert!(is_wrong_passphrase("Error unlocking /dev/sdb1: Failed to activate device: Incorrect passphrase."));
+        assert!(is_wrong_passphrase("No key available with this passphrase."));
+        assert!(!is_wrong_passphrase(
+            "Error unlocking /dev/sdb1: Failed to activate device: Unknown or unsupported LUKS2 requirements detected."
+        ));
+        assert!(!is_wrong_passphrase("Device /dev/sdb1 is already unlocked as /dev/dm-0"));
     }
 
     #[test]

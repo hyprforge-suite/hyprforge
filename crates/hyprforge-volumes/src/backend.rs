@@ -9,6 +9,7 @@
 
 use crate::gadgets::Gadgets;
 use crate::types::{Answers, ConnectError, Gvfs, Share, Volume, VolumeError, VolumeId};
+use hyprforge_secret::Secret;
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
@@ -21,11 +22,25 @@ pub trait VolumeBackend: Send + Sync {
     /// Mounts `id`, answering where.
     async fn mount(&self, id: &VolumeId) -> Result<PathBuf, VolumeError>;
 
+    /// Unmounts `id` — and when it is the inside of an encrypted
+    /// volume, locks that volume again, so the passphrase is needed the
+    /// next time as it was this time.
     async fn unmount(&self, id: &VolumeId) -> Result<(), VolumeError>;
 
-    /// Unmounts everything on `id`'s drive and lets go of it — powers a
-    /// stick off, opens a tray, detaches a disk image.
+    /// Unmounts everything on `id`'s drive, locks every encrypted volume
+    /// on it, and lets go of it — powers a stick off, opens a tray,
+    /// detaches a disk image.
     async fn eject(&self, id: &VolumeId) -> Result<(), VolumeError>;
+
+    /// Unlocks the encrypted volume `id` with `passphrase` and mounts the
+    /// filesystem inside, answering where — the one step a click on a
+    /// locked drive means. A passphrase that does not fit is
+    /// [`VolumeError::WrongPassphrase`].
+    ///
+    /// Once unlocked, the volume is listed as what is inside it, under
+    /// an id of its own; `id` names the locked container, which is no
+    /// longer listed.
+    async fn unlock(&self, id: &VolumeId, passphrase: &Secret<String>) -> Result<PathBuf, VolumeError>;
 
     /// A receiver that gets `()` whenever the volumes may have changed.
     ///
@@ -87,6 +102,7 @@ pub mod mock {
     #[derive(Default)]
     struct State {
         volumes: Vec<Volume>,
+        passphrases: HashMap<VolumeId, String>,
         unavailable: bool,
         failures: HashMap<(Operation, VolumeId), VolumeError>,
         calls: Vec<(Operation, VolumeId)>,
@@ -126,6 +142,11 @@ pub mod mock {
         pub fn replace(&self, volumes: Vec<Volume>) {
             self.state().volumes = volumes;
             self.poke();
+        }
+
+        /// `id` is encrypted, and unlocks with `passphrase`.
+        pub fn set_passphrase(&self, id: &VolumeId, passphrase: &str) {
+            self.state().passphrases.insert(id.clone(), passphrase.to_string());
         }
 
         /// What has been asked, in order.
@@ -174,9 +195,17 @@ pub mod mock {
             Ok(point)
         }
 
+        /// An encrypted volume locks again, as the real one does.
         async fn unmount(&self, id: &VolumeId) -> Result<(), VolumeError> {
             let at = self.act(Operation::Unmount, id)?;
-            self.state().volumes[at].mount_point = None;
+            let mut state = self.state();
+            let encrypted = state.passphrases.contains_key(id);
+            let volume = &mut state.volumes[at];
+            volume.mount_point = None;
+            if encrypted {
+                volume.locked = true;
+                volume.filesystem = None;
+            }
             Ok(())
         }
 
@@ -190,6 +219,23 @@ pub mod mock {
             let (tx, rx) = mpsc::channel(1);
             self.state().watchers.push(tx);
             Ok(rx)
+        }
+
+        /// Unlocked in place, keeping its id — simpler than UDisks2's new
+        /// object for the inside, and enough for a window's tests, which
+        /// ask what the row says and where the tab went.
+        async fn unlock(&self, id: &VolumeId, passphrase: &Secret<String>) -> Result<PathBuf, VolumeError> {
+            let at = self.act(Operation::Unlock, id)?;
+            let mut state = self.state();
+            if state.passphrases.get(id).map(String::as_str) != Some(passphrase.expose().as_str()) {
+                return Err(VolumeError::WrongPassphrase);
+            }
+            let volume = &mut state.volumes[at];
+            volume.locked = false;
+            volume.filesystem = Some("ext4".into());
+            let point = PathBuf::from("/run/media/mock").join(&volume.label);
+            volume.mount_point = Some(point.clone());
+            Ok(point)
         }
     }
 

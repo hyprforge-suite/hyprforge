@@ -24,6 +24,11 @@ someone watching the screen. Ranked by what each one unblocks.
   sharpen a moment after the zoom stops, and stay sharp through a short
   pan and a turn. All on Media's and Files' `next` branches, so a build
   from this checkout has them. *Added 2026-10-11.*
+- **An encrypted stick, once, for real.** Unlocking was built against
+  UDisks2's interface and a mock, never a real LUKS device. A stick (or
+  a LUKS image attached with `udisksctl loop-setup`) clicked in Files:
+  the prompt, a wrong passphrase, the right one, then Eject — after
+  which `lsblk` should show no `crypt` mapping left. *Added 2026-10-12.*
 - **A first look at procman, together, and its screenshots.** The
   window has only ever been drawn offscreen (`render_every_tab`); open
   it with the user watching and go through every tab. Its site page
@@ -100,11 +105,6 @@ someone watching the screen. Ranked by what each one unblocks.
 
 Open work Claude can do unattended. Nothing here blocks a release.
 
-- **Encrypted drives can't be unlocked.** A LUKS stick shows as Locked
-  and stops there (`crates/hyprforge-volumes/src/backend.rs:169`).
-  Needs a passphrase prompt, UDisks2 `Encrypted.Unlock`, and locking
-  again on eject. Medium; a live test with a loop-device image wants
-  the user watching the prompt. *Added 2026-10-11.*
 - **Procman's journal leaves three things unsaid.** Whether delay
   accounting was on (block-I/O delay reads 0, not unknown, when it was
   off), which frames dropped exits (ENOBUFS), and that `run_delay` and
@@ -203,6 +203,12 @@ Parked on purpose — written down so they are not lost, not scheduled.
 Kept for a few weeks so "what happened to X" has an answer, then
 pruned; git history has the rest.
 
+- **Encrypted drives open in Files**: a click (or Mount) on a locked
+  LUKS or BitLocker drive asks for its passphrase, unlocks it through
+  UDisks2 and opens it; a wrong passphrase asks again; unmounting or
+  ejecting locks it again. An unlocked stick still shows as removable,
+  with its eject. The open/save dialog says to unlock it in Files.
+  *Added 2026-10-11.*
 - **Zooming in on a photo is sharp**: once a zoom settles, Media
   decodes the visible part (plus a margin) at the density it is drawn
   at, through the new `hyprforge_image::decode_region`, and lays it

@@ -873,9 +873,10 @@ pub fn enabled(action: Action, ctx: &ActionContext) -> bool {
         // a trashed item's storage name and an archive's member have no
         // copy in a snapshot to find.
         Action::PreviousVersions => ctx.selected == 1 && !ctx.in_trash && !ctx.in_archive,
-        // Nothing is offered twice while it is already happening, and a
-        // locked (encrypted) drive cannot be mounted here at all.
-        Action::Mount => ctx.device.volume && !ctx.device.mounted && !ctx.device.busy && !ctx.device.locked,
+        // Nothing is offered twice while it is already happening. A
+        // locked (encrypted) drive mounts too — by asking for its
+        // passphrase first.
+        Action::Mount => ctx.device.volume && !ctx.device.mounted && !ctx.device.busy,
         Action::Unmount => ctx.device.volume && ctx.device.mounted && !ctx.device.busy,
         Action::Eject => ctx.device.volume && ctx.device.can_eject && !ctx.device.busy,
         Action::Disconnect => ctx.device.share,
@@ -1049,7 +1050,7 @@ mod tests {
         let internal = ActionContext { device: DeviceTarget { can_eject: false, ..mounted.device }, ..mounted };
         assert!(!enabled(Action::Eject, &internal));
         let locked = ActionContext { device: DeviceTarget { locked: true, ..unmounted.device }, ..unmounted };
-        assert!(!enabled(Action::Mount, &locked), "unlocking is not built, so mounting cannot work");
+        assert!(enabled(Action::Mount, &locked), "mounting a locked drive asks for its passphrase");
         assert!(!enabled(Action::Disconnect, &ActionContext::default()));
     }
 

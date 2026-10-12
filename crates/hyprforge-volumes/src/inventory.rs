@@ -83,6 +83,28 @@ fn mounted_for_a_person(mount_points: &[PathBuf]) -> bool {
         .any(|p| p.starts_with("/run/media") || p.starts_with("/media"))
 }
 
+/// The encrypted container an unlocked volume came from, or the block
+/// itself when it is not the inside of one.
+///
+/// What is inside a LUKS stick is a device-mapper device with no drive
+/// of its own (`Block.Drive` is `/`) and its own system hint. Which
+/// stick it is on, whether it can be ejected and whether a disk image
+/// is this user's are all questions about the *container*, so they are
+/// asked of this.
+pub fn outer<'a>(block: &'a RawBlock, all: &'a [RawBlock]) -> &'a RawBlock {
+    block
+        .crypto_backing
+        .as_deref()
+        .and_then(|backing| all.iter().find(|b| b.id == backing))
+        .unwrap_or(block)
+}
+
+/// The unlocked inside of the encrypted container `block`, when it is
+/// unlocked.
+pub fn cleartext_of<'a>(block: &RawBlock, all: &'a [RawBlock]) -> Option<&'a RawBlock> {
+    all.iter().find(|b| b.crypto_backing.as_deref() == Some(block.id.as_str()))
+}
+
 /// Whether `block` belongs in a sidebar for the user `uid`. See the
 /// module doc for the rules.
 pub fn shows(block: &RawBlock, all: &[RawBlock], uid: u32) -> bool {
@@ -93,14 +115,15 @@ pub fn shows(block: &RawBlock, all: &[RawBlock], uid: u32) -> bool {
     let locked_container = block.encrypted
         // Unlocked already: its cleartext device is what is shown, and
         // the container beside it would be the same drive twice.
-        && !all.iter().any(|other| other.crypto_backing.as_deref() == Some(block.id.as_str()));
+        && cleartext_of(block, all).is_none();
     if !mountable && !locked_container {
         return false;
     }
-    if let Some(owner) = block.loop_setup_by {
+    let outer = outer(block, all);
+    if let Some(owner) = outer.loop_setup_by {
         return owner == uid;
     }
-    !block.hint_system || mounted_for_a_person(&block.mount_points)
+    !outer.hint_system || mounted_for_a_person(&block.mount_points)
 }
 
 /// What to call a volume: the name a person or the system gave it, or
@@ -172,11 +195,12 @@ pub fn assemble(blocks: &[RawBlock], drives: &[RawDrive], uid: u32) -> Vec<Volum
         .iter()
         .filter(|block| shows(block, blocks, uid))
         .map(|block| {
-            let drive = block
+            let outer = outer(block, blocks);
+            let drive = outer
                 .drive
                 .as_deref()
                 .and_then(|id| drives.iter().find(|d| d.id == id));
-            let (kind, detach) = kind_and_detach(block, drive);
+            let (kind, detach) = kind_and_detach(outer, drive);
             let locked = !block.has_filesystem && block.encrypted;
             let volume = Volume {
                 id: VolumeId(block.id.clone()),
@@ -189,7 +213,7 @@ pub fn assemble(blocks: &[RawBlock], drives: &[RawDrive], uid: u32) -> Vec<Volum
                 detach,
                 locked,
             };
-            (block.drive.clone(), volume)
+            (outer.drive.clone(), volume)
         })
         .collect();
     // Drives first and disk images after: a stick is the thing a person
@@ -332,6 +356,41 @@ mod tests {
         };
         let volumes = assemble(&[container, cleartext], &[], UID);
         assert_eq!(volumes.iter().map(|v| v.label.as_str()).collect::<Vec<_>>(), ["Secret"]);
+    }
+
+    /// Unlocked, the stick is still a stick: what is inside has no drive
+    /// of its own, so its kind and its Eject come from the container. Read
+    /// from itself, an unlocked stick was an internal disk nobody could
+    /// eject.
+    #[test]
+    fn an_unlocked_stick_is_still_removable_and_still_ejects() {
+        let (_, drive) = card();
+        let container = RawBlock {
+            id: "/b/sdb1".into(),
+            drive: Some(drive.id.clone()),
+            id_usage: "crypto".into(),
+            encrypted: true,
+            ..RawBlock::default()
+        };
+        let cleartext = RawBlock {
+            id: "/b/dm_2d0".into(),
+            id_usage: "filesystem".into(),
+            id_type: "ext4".into(),
+            has_filesystem: true,
+            // As UDisks2 says of a device-mapper device: no drive, and a
+            // system device by its own lights.
+            hint_system: true,
+            crypto_backing: Some("/b/sdb1".into()),
+            ..RawBlock::default()
+        };
+        let blocks = [container.clone(), cleartext.clone()];
+        assert_eq!(outer(&cleartext, &blocks).id, container.id);
+        assert_eq!(cleartext_of(&container, &blocks).map(|b| b.id.as_str()), Some("/b/dm_2d0"));
+        let volumes = assemble(&blocks, &[drive], UID);
+        assert_eq!(volumes.len(), 1);
+        assert_eq!(volumes[0].kind, VolumeKind::Removable);
+        assert_eq!(volumes[0].detach, Some(Detach::PowerOff));
+        assert!(!volumes[0].locked);
     }
 
     /// The loop device this was tested against: `udisksctl loop-setup`

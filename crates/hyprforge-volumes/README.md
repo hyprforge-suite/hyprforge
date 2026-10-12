@@ -49,10 +49,14 @@ list, which would claim every drive had been unplugged — and gvfs
 missing is `Gvfs::Absent` with a sentence, never a Connect button
 that silently does nothing.
 
+An encrypted drive (LUKS, BitLocker) shows as locked and opens with
+its passphrase: `backend::VolumeBackend::unlock` unlocks it and
+mounts what is inside in one step, and unmounting or ejecting locks
+it again.
+
 # What is not here
 
-Unlocking an encrypted drive (it shows, and says it is locked),
-formatting, partitioning, and browsing a network for servers. The
+Formatting, partitioning, and browsing a network for servers. The
 last is gvfs's `network://`, and a list of whatever answered a
 broadcast is a different feature from "connect to this address".
 

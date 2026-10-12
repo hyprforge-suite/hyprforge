@@ -78,8 +78,8 @@ pub struct Volume {
     /// How Eject lets go of it; `None` when it cannot — an internal disk.
     pub detach: Option<Detach>,
     /// An encrypted container (LUKS, BitLocker) that is not unlocked.
-    /// Mounting one means unlocking it first, which this crate does not
-    /// do yet — see [`VolumeError::Locked`].
+    /// Opening one is [`VolumeBackend::unlock`](crate::backend::VolumeBackend::unlock)
+    /// with its passphrase, not a mount — see [`VolumeError::Locked`].
     pub locked: bool,
 }
 
@@ -105,6 +105,9 @@ pub enum Operation {
     Mount,
     Unmount,
     Eject,
+    /// Unlocking an encrypted volume with its passphrase, and mounting
+    /// what is inside.
+    Unlock,
 }
 
 impl Operation {
@@ -114,6 +117,7 @@ impl Operation {
             Operation::Mount => "Mounting\u{2026}",
             Operation::Unmount => "Unmounting\u{2026}",
             Operation::Eject => "Ejecting\u{2026}",
+            Operation::Unlock => "Unlocking\u{2026}",
         }
     }
 
@@ -122,6 +126,7 @@ impl Operation {
             Operation::Mount => "open",
             Operation::Unmount => "unmount",
             Operation::Eject => "eject",
+            Operation::Unlock => "unlock",
         }
     }
 }
@@ -154,9 +159,16 @@ pub enum VolumeError {
     /// It is not there any more — unplugged while this was happening.
     #[error("the volume is no longer there")]
     Gone,
-    /// An encrypted container: unlocking is not built.
+    /// An encrypted container, asked to be mounted: it has to be
+    /// unlocked with its passphrase instead.
     #[error("the volume is encrypted")]
     Locked,
+    /// The passphrase did not unlock it. Its own case, apart from
+    /// [`VolumeError::Refused`], because it is the one failure answered
+    /// by asking again — a prompt that closed on a typo, or kept asking
+    /// after a refusal it could not fix, would be wrong either way.
+    #[error("the passphrase was not accepted")]
+    WrongPassphrase,
     /// UDisks2 refused for another reason, in its own words.
     #[error("{0}")]
     Refused(String),
@@ -180,7 +192,7 @@ pub fn sentence(op: Operation, label: &str, error: &VolumeError) -> String {
                 "{name} is taking a long time to finish writing — wait before unplugging it. (Stopped waiting after {}s.)",
                 limit.as_secs()
             ),
-            Operation::Mount => format!("{name} didn't open within {}s.", limit.as_secs()),
+            Operation::Mount | Operation::Unlock => format!("{name} didn't open within {}s.", limit.as_secs()),
         },
         VolumeError::Busy(_) => format!(
             "{name} is in use — close the files and terminals open on it, then {} it again.",
@@ -191,9 +203,8 @@ pub fn sentence(op: Operation, label: &str, error: &VolumeError) -> String {
         }
         VolumeError::Dismissed => format!("Didn't {} {name}: the password prompt was cancelled.", op.verb()),
         VolumeError::Gone => format!("{name} is no longer connected."),
-        VolumeError::Locked => {
-            format!("{name} is encrypted, and unlocking encrypted drives isn't built yet.")
-        }
+        VolumeError::Locked => format!("{name} is encrypted — it needs its passphrase to open."),
+        VolumeError::WrongPassphrase => format!("That passphrase didn't unlock {name}."),
         VolumeError::Refused(why) => format!("Couldn't {} {name}: {why}", op.verb()),
     }
 }
@@ -325,6 +336,17 @@ mod tests {
         let slow = sentence(Operation::Eject, "STICK", &VolumeError::TimedOut(Duration::from_secs(300)));
         assert!(slow.contains("wait before unplugging"), "{slow}");
         assert!(!slow.to_lowercase().contains("safe to"), "{slow}");
+    }
+
+    /// A locked drive and a passphrase that did not fit want different
+    /// things: one needs a passphrase, the other a different one.
+    #[test]
+    fn a_locked_drive_and_a_wrong_passphrase_never_read_alike() {
+        let locked = sentence(Operation::Mount, "STICK", &VolumeError::Locked);
+        let wrong = sentence(Operation::Unlock, "STICK", &VolumeError::WrongPassphrase);
+        assert!(locked.contains("needs its passphrase"), "{locked}");
+        assert!(wrong.contains("didn't unlock"), "{wrong}");
+        assert!(!locked.contains("isn't built"), "{locked}");
     }
 
     #[test]
