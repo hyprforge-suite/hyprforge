@@ -41,7 +41,7 @@ fn gio_listing() -> Option<String> {
 /// counted the plainest way there is, by its `Type:` line — and nothing
 /// UDisks2 reported is.
 #[test]
-#[ignore]
+#[ignore = "live (gio's phones and cameras): changes nothing"]
 fn every_phone_and_camera_gio_lists_is_read_and_no_drive_is() {
     let Some(text) = gio_listing() else { return };
     let by_type = text
@@ -66,7 +66,7 @@ fn every_phone_and_camera_gio_lists_is_read_and_no_drive_is() {
 /// device read without its interfaces could never be recognised as a
 /// phone.
 #[test]
-#[ignore]
+#[ignore = "live (gio's phones and cameras): changes nothing"]
 fn the_kernels_usb_listing_reads_with_interfaces() {
     let root = Path::new("/sys/bus/usb/devices");
     if !root.is_dir() {

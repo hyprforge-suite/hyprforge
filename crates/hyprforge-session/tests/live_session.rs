@@ -24,7 +24,7 @@ fn refused(out: &str) -> bool {
 
 /// Every gesture direction this crate offers is one Hyprland takes.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn hyprland_accepts_every_gesture_direction() {
     let _live = Hyprland::disposable();
     let mut wrong = Vec::new();
@@ -45,7 +45,7 @@ fn hyprland_accepts_every_gesture_direction() {
 
 /// Every gesture action, with the extra argument it declares.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn hyprland_accepts_every_gesture_action_with_its_argument() {
     let _live = Hyprland::disposable();
     let mut wrong = Vec::new();
@@ -73,7 +73,7 @@ fn hyprland_accepts_every_gesture_action_with_its_argument() {
 /// If this ever changed, the conflict detection would be needless caution
 /// instead of a requirement.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn hyprland_refuses_a_shadowed_gesture() {
     let _live = Hyprland::disposable();
     reload();
@@ -95,7 +95,7 @@ fn hyprland_refuses_a_shadowed_gesture() {
 
 /// Every permission type this crate offers is one Hyprland takes.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn hyprland_accepts_every_permission_type_and_mode() {
     let _live = Hyprland::disposable();
     reload();
@@ -120,7 +120,7 @@ fn hyprland_accepts_every_permission_type_and_mode() {
 /// gestures and autostart together, which is the shape a user actually
 /// gets.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn hyprland_loads_a_complete_generated_file() {
     let _live = Hyprland::disposable();
     reload();
@@ -178,7 +178,7 @@ fn hyprland_loads_a_complete_generated_file() {
 
 /// An environment variable this crate writes actually reaches Hyprland.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn a_generated_environment_variable_is_accepted() {
     let _live = Hyprland::disposable();
     reload();

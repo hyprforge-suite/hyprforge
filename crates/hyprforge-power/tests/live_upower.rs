@@ -38,7 +38,7 @@ async fn backend() -> Option<UPowerBackend> {
 /// system bus under its well-known name and `EnumerateDevices` answers
 /// without error.
 #[tokio::test]
-#[ignore]
+#[ignore = "live (UPower): changes nothing"]
 async fn upower_answers_on_the_system_bus() {
     let Some(backend) = backend().await else { return };
     match backend.battery().await {
@@ -58,7 +58,7 @@ async fn upower_answers_on_the_system_bus() {
 /// when one exists. It is not skipped in that case (there is nothing
 /// UPower failed to answer), it simply has nothing further to assert.
 #[tokio::test]
-#[ignore]
+#[ignore = "live (UPower): changes nothing"]
 async fn the_system_battery_if_present_has_a_percentage_and_state_this_crate_understands() {
     let Some(backend) = backend().await else { return };
     match backend.battery().await {
@@ -95,7 +95,7 @@ async fn the_system_battery_if_present_has_a_percentage_and_state_this_crate_und
 /// than a week would mean either the guard stopped working or UPower
 /// sent something this crate has never seen.
 #[tokio::test]
-#[ignore]
+#[ignore = "live (UPower): changes nothing"]
 async fn a_reported_time_remaining_is_never_negative_or_absurdly_long() {
     let Some(backend) = backend().await else { return };
     match backend.battery().await {

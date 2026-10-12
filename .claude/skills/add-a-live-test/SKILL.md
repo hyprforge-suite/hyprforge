@@ -24,8 +24,13 @@ When unsure between `live` and `disposable`, it is `disposable`. A
 
 ## 2. Write it
 
-- `#[ignore = "<what it needs>"]` — the reason is for people; the tier is
-  in `.config/nextest.toml`.
+- `#[ignore = "<tier> (<gate>): <what it does>"]` — for people; the tier
+  itself is decided in `.config/nextest.toml`. The shapes in use:
+  `live (UDisks2): changes nothing`, `visible (a tray host): briefly
+  visible, then undone`, `disposable: changes a compositor or the
+  clipboard; tools/hf test disposable`, `root: needs root; tools/hf test
+  root`, `manual: a tool or a measurement, never run automatically`.
+  `tools/hf lint` refuses a bare `#[ignore]`.
 - Hyprland, in a library crate: add the dev-dependency
   `hyprforge-testkit = { path = "../hyprforge-testkit" }` (path only — it
   is never published) and open the test with

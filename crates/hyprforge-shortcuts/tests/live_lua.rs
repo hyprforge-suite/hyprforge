@@ -101,7 +101,7 @@ fn probe_shortcuts(fill: Fill) -> Vec<Shortcut> {
 /// point of having one. The generated Lua is printed on failure so the
 /// offending line is readable directly.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn hyprland_accepts_every_catalog_entry() {
     let _live = Hyprland::disposable();
     reload();
@@ -122,7 +122,7 @@ fn hyprland_accepts_every_catalog_entry() {
 /// The raw escape hatch and the bind flags, which aren't catalog entries and
 /// so aren't covered above.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn hyprland_accepts_raw_actions_and_flags() {
     let _live = Hyprland::disposable();
     reload();
@@ -180,7 +180,7 @@ fn hyprland_accepts_raw_actions_and_flags() {
 /// real behaviour, so the editor isn't guarding against a rule that quietly
 /// stopped existing.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn hyprland_rejects_repeating_with_release() {
     let _live = Hyprland::disposable();
     reload();
@@ -210,7 +210,7 @@ fn hyprland_rejects_repeating_with_release() {
 /// The description round-trips through the compositor — that's what lets the
 /// app recognise its own binds in `hyprctl binds` later.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn a_generated_description_reaches_hyprctl_binds() {
     let _live = Hyprland::disposable();
     let shortcuts = vec![Shortcut {

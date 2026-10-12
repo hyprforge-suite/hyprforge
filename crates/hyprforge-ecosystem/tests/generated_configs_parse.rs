@@ -184,7 +184,7 @@ fn maximal_idle() -> idle::Settings {
 }
 
 #[test]
-#[ignore]
+#[ignore = "live (the ecosystem daemons' parsers): changes nothing"]
 fn hyprpaper_parses_every_wallpaper_option_this_crate_writes() {
     let contents = wallpaper::generate(&maximal_wallpapers());
     let Some(parsed) = parse_with("hyprpaper", &contents) else {
@@ -199,7 +199,7 @@ fn hyprpaper_parses_every_wallpaper_option_this_crate_writes() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "live (the ecosystem daemons' parsers): changes nothing"]
 fn hypridle_parses_every_idle_option_this_crate_writes() {
     let contents = idle::generate(&maximal_idle());
     let Some(parsed) = parse_with("hypridle", &contents) else {
@@ -221,7 +221,7 @@ fn hypridle_parses_every_idle_option_this_crate_writes() {
 /// above would pass forever while catching nothing. This feeds each
 /// daemon a key that definitely doesn't exist and insists it complains.
 #[test]
-#[ignore]
+#[ignore = "live (the ecosystem daemons' parsers): changes nothing"]
 fn a_misspelled_key_is_actually_detected() {
     let cases = [
         (
@@ -260,7 +260,7 @@ fn a_misspelled_key_is_actually_detected() {
 /// configured, has to parse too — it is what the user's config sources
 /// from the moment the screen is first opened.
 #[test]
-#[ignore]
+#[ignore = "live (the ecosystem daemons' parsers): changes nothing"]
 fn the_empty_generated_files_parse() {
     for (daemon, contents) in [
         ("hyprpaper", wallpaper::generate(&wallpaper::Settings::default())),
@@ -291,7 +291,7 @@ fn the_empty_generated_files_parse() {
 /// using gets to do. So "the later block wins" is hyprlang's assignment
 /// semantics, not something this test measured.
 #[test]
-#[ignore]
+#[ignore = "live (the ecosystem daemons' parsers): changes nothing"]
 fn hypridle_accepts_a_user_general_block_followed_by_the_sourced_one() {
     let sourced_dir = match tempfile::tempdir() {
         Ok(dir) => dir,

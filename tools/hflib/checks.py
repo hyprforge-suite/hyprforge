@@ -311,6 +311,17 @@ def lua_dispatch() -> None:
         ui.ok(f"{(_lines(out, 'CHECKED ') or ['?'])[0]} scripts and configs dispatch in Lua")
 
 
+def ignore_reasons() -> None:
+    ui.step("Every #[ignore] says why")
+    _, out = _lint("ignore_reasons")
+    problems = _lines(out, "PROBLEM ")
+    if problems:
+        ui.bad(f"{len(problems)} bare #[ignore]")
+        ui.detail(problems)
+    else:
+        ui.ok(f"{(_lines(out, 'CHECKED ') or ['?'])[0]} ignored test(s), each with its tier")
+
+
 def docs_name_things() -> None:
     ui.step("Docs name things that exist")
     _, out = _lint("docs_name_things")
@@ -532,6 +543,7 @@ def check(fast: bool) -> int:
     install_parity()
     setup_ids()
     lua_dispatch()
+    ignore_reasons()
     docs_name_things()
     backlog()
     crate_readmes()
@@ -559,6 +571,7 @@ def lint() -> int:
     install_parity()
     setup_ids()
     lua_dispatch()
+    ignore_reasons()
     docs_name_things()
     backlog()
     crate_readmes()

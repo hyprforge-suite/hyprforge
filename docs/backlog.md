@@ -124,9 +124,6 @@ Open work Claude can do unattended. Nothing here blocks a release.
 - **Media's model view, live.** Drag to rotate and pan has never been
   exercised with a real pointer, and view3d's `--screenshot` was not
   carried over. *Added 2026-09-26.*
-- **Reason strings on `#[ignore]`.** Skipped when the tiers arrived,
-  because `.config/nextest.toml` is what enforces a test's tier; a
-  reason would still say why at the test. *Added 2026-10-11.*
 - **Time `hf check` against what it replaced.** `check.sh` was never
   timed, so "lighter" is measured on one side only (a warm
   `hf check --fast` is 102 s). *Added 2026-10-11.*
@@ -185,6 +182,10 @@ Parked on purpose — written down so they are not lost, not scheduled.
 Kept for a few weeks so "what happened to X" has an answer, then
 pruned; git history has the rest.
 
+- **Every `#[ignore]` says why**: 100 bare ones got their tier and,
+  for live and visible tests, their gate — read from nextest and
+  `tools/hflib/tiers.py`, not written by hand — and `hf lint` now
+  refuses a bare one. *Added 2026-10-11.*
 - **Media's model autoreload has a switch**: Live in the model's
   toolbar beside Axes, and Ctrl+Shift+R, saved like the other model
   settings. *Added 2026-10-11.*

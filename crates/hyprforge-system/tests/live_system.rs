@@ -13,7 +13,7 @@ use hyprforge_testkit::{config_errors, hyprctl, reload, Hyprland};
 
 /// Every catalogued key exists with the type this crate claims.
 #[test]
-#[ignore]
+#[ignore = "live (Hyprland, read-only): changes nothing"]
 fn hyprland_has_every_catalogued_option_with_the_declared_type() {
     let _live = Hyprland::read_only();
     let mut wrong = Vec::new();
@@ -46,7 +46,7 @@ fn hyprland_has_every_catalogued_option_with_the_declared_type() {
 /// The options declared unsupported must still be absent. If one ships,
 /// the note telling users it doesn't exist becomes the wrong answer.
 #[test]
-#[ignore]
+#[ignore = "live (Hyprland, read-only): changes nothing"]
 fn options_declared_unsupported_are_still_absent() {
     let _live = Hyprland::read_only();
     for (key, _) in CATALOG.unsupported {
@@ -64,7 +64,7 @@ fn options_declared_unsupported_are_still_absent() {
 /// unusable for the rest of the run — a test that blanks the screen is
 /// not a test anyone will run twice.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn hyprland_accepts_a_file_setting_every_safe_option() {
     let _live = Hyprland::disposable();
     reload();
@@ -105,7 +105,7 @@ const UNSAFE_TO_PROBE: &[&str] = &[
 ];
 
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn hyprland_accepts_the_extremes_of_every_declared_range() {
     let _live = Hyprland::disposable();
     reload();
@@ -129,7 +129,7 @@ fn hyprland_accepts_the_extremes_of_every_declared_range() {
 /// A plain colour is written as rgba() and reported as a number, so the
 /// round trip is worth pinning against the real thing.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn a_plain_colour_round_trips_through_hyprland() {
     let _live = Hyprland::disposable();
     reload();

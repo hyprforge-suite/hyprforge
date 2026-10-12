@@ -121,7 +121,7 @@ fn every_supported_layer_rule() -> Vec<LayerRule> {
 /// error overlay draws on — which is what makes this meaningful where a
 /// string assertion isn't.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn hyprland_accepts_every_field_the_codegen_emits() {
     let live = Hyprland::disposable();
     live.reload();

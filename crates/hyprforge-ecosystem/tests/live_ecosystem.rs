@@ -35,7 +35,7 @@ fn running(live: &Hyprland, daemon: &str) -> bool {
 /// every fit mode. A refused request is a wallpaper that silently doesn't
 /// change.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn hyprpaper_accepts_every_fit_mode_this_crate_writes() {
     let live = Hyprland::disposable();
     if !running(&live, "hyprpaper") {
@@ -70,7 +70,7 @@ fn hyprpaper_accepts_every_fit_mode_this_crate_writes() {
 /// and it is not in `hyprctl hyprpaper --help` — so a version that drops
 /// it should fail here rather than silently reporting nothing.
 #[test]
-#[ignore]
+#[ignore = "live (Hyprland, read-only): changes nothing"]
 fn hyprpaper_still_answers_listactive() {
     let live = Hyprland::read_only();
     if !running(&live, "hyprpaper") {
@@ -88,7 +88,7 @@ fn hyprpaper_still_answers_listactive() {
 /// reports the value back — so a rejected temperature can't look like a
 /// successful save.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn hyprsunset_takes_and_reports_a_temperature() {
     let live = Hyprland::disposable();
     if !running(&live, "hyprsunset") {
@@ -108,7 +108,7 @@ fn hyprsunset_takes_and_reports_a_temperature() {
 /// The catalogued temperature range has to be one hyprsunset actually
 /// accepts at both ends.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn hyprsunset_accepts_the_extremes_of_the_declared_range() {
     let live = Hyprland::disposable();
     if !running(&live, "hyprsunset") {
@@ -130,7 +130,7 @@ fn hyprsunset_accepts_the_extremes_of_the_declared_range() {
 /// a restart is needed instead of implying the change is live. If it ever
 /// gains one, that message becomes a lie.
 #[test]
-#[ignore]
+#[ignore = "live (Hyprland, read-only): changes nothing"]
 fn hypridle_still_has_no_ipc() {
     let _live = Hyprland::read_only();
     let out = hyprctl(&["hypridle"]).to_lowercase();
@@ -145,7 +145,7 @@ fn hypridle_still_has_no_ipc() {
 /// checks the generated text parses as hyprlang by handing it to
 /// hyprpaper as a sourced file in a temp tree — no user config involved.
 #[test]
-#[ignore]
+#[ignore = "live (Hyprland, read-only): changes nothing"]
 fn the_generated_wallpaper_file_is_well_formed() {
     let dir = tempfile::tempdir().unwrap();
     let generated = dir.path().join("wallpaper.conf");

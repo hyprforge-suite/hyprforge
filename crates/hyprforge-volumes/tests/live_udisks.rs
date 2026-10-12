@@ -48,7 +48,7 @@ fn root_device() -> Option<String> {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "live (UDisks2): changes nothing"]
 async fn udisks_lists_block_devices_with_real_device_paths() {
     let Some((blocks, _)) = raw().await else { return };
     assert!(!blocks.is_empty(), "UDisks2 listed no block devices at all");
@@ -62,7 +62,7 @@ async fn udisks_lists_block_devices_with_real_device_paths() {
 /// `MountPoints` is `aay`. Read wrongly it comes out empty, and every
 /// mounted stick would show as unmounted.
 #[tokio::test]
-#[ignore]
+#[ignore = "live (UDisks2): changes nothing"]
 async fn the_root_filesystem_is_mounted_at_slash_by_udisks_own_account() {
     let Some((blocks, _)) = raw().await else { return };
     let Some(root) = root_device() else {
@@ -90,7 +90,7 @@ async fn the_root_filesystem_is_mounted_at_slash_by_udisks_own_account() {
 /// The rule the sidebar depends on most: whatever else it offers, it
 /// never offers the disk the system is running from.
 #[tokio::test]
-#[ignore]
+#[ignore = "live (UDisks2): changes nothing"]
 async fn the_volumes_offered_never_include_the_root_filesystem() {
     let backend = UDisks2Backend::new();
     match backend.volumes().await {
@@ -111,7 +111,7 @@ async fn the_volumes_offered_never_include_the_root_filesystem() {
 /// are: a drive with `CanPowerOff` read as `false` everywhere would lose
 /// every Eject button.
 #[tokio::test]
-#[ignore]
+#[ignore = "live (UDisks2): changes nothing"]
 async fn drive_ids_named_by_blocks_are_drives_udisks_lists() {
     let Some((blocks, drives)) = raw().await else { return };
     for block in &blocks {
@@ -128,7 +128,7 @@ async fn drive_ids_named_by_blocks_are_drives_udisks_lists() {
 /// The signal subscription is accepted by the bus — a rule it rejected
 /// would mean a sidebar that never hears a stick arrive.
 #[tokio::test]
-#[ignore]
+#[ignore = "live (UDisks2): changes nothing"]
 async fn the_bus_accepts_the_change_subscription() {
     let backend = UDisks2Backend::new();
     match backend.watch().await {

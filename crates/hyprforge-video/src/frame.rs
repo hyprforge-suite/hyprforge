@@ -114,7 +114,7 @@ mod tests {
     /// it needs ffmpeg, which tier 1 does not — so run it by hand:
     /// `cargo test -p hyprforge-video -- --ignored`.
     #[test]
-    #[ignore]
+    #[ignore = "live (ffmpeg and libmpv): changes nothing"]
     fn a_video_that_fades_in_is_thumbnailed_after_the_fade() {
         let dir = tempfile::tempdir().unwrap();
         let clip = dir.path().join("fade.mp4");

@@ -30,7 +30,7 @@ fn getoption(key: &str) -> serde_json::Value {
 /// Every catalog key exists on the running compositor with the type this
 /// crate claims. This is what caught `decoration:wobble` not existing.
 #[test]
-#[ignore]
+#[ignore = "live (Hyprland, read-only): changes nothing"]
 fn hyprland_has_every_catalogued_option_with_the_declared_type() {
     let _live = Hyprland::read_only();
     let mut wrong = Vec::new();
@@ -64,7 +64,7 @@ fn hyprland_has_every_catalogued_option_with_the_declared_type() {
 /// unsupportable — if `decoration:wobble` ever ships, the note telling
 /// users it doesn't exist becomes the wrong answer.
 #[test]
-#[ignore]
+#[ignore = "live (Hyprland, read-only): changes nothing"]
 fn declared_unsupported_categories_are_still_absent_or_still_untyped() {
     let _live = Hyprland::read_only();
     let raw = hyprctl(&["getoption", "decoration:wobble:enabled", "-j"]);
@@ -77,7 +77,7 @@ fn declared_unsupported_categories_are_still_absent_or_still_untyped() {
 
 /// The generated file loads cleanly with every option set at once.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn hyprland_accepts_a_file_setting_every_option() {
     let _live = Hyprland::disposable();
     reload();
@@ -103,7 +103,7 @@ fn hyprland_accepts_a_file_setting_every_option() {
 /// Colours are the type most likely to be written in a form Hyprland
 /// refuses, and a refused value takes the whole file with it.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn hyprland_accepts_the_colour_form_this_crate_writes() {
     let _live = Hyprland::disposable();
     reload();
@@ -134,7 +134,7 @@ fn hyprland_accepts_the_colour_form_this_crate_writes() {
 /// numbers `read_gaps` collapses. The wiki calls this type `css_gaps` and
 /// implies a string; the compositor refuses one.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn a_gap_written_as_an_integer_takes_effect_and_reads_back() {
     let _live = Hyprland::disposable();
     reload();
@@ -159,7 +159,7 @@ fn a_gap_written_as_an_integer_takes_effect_and_reads_back() {
 /// later call for the same leaf wins — the fact that lets animations share
 /// the settings' placement instead of needing their own.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn a_later_animation_call_overrides_the_same_leaf() {
     let _live = Hyprland::disposable();
     reload();
@@ -197,7 +197,7 @@ fn a_later_animation_call_overrides_the_same_leaf() {
 /// compositor rather than a hardcoded list, so this checks the parsing
 /// against the real thing.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn live_animations_and_curves_parse() {
     let _live = Hyprland::disposable();
     reload();
@@ -221,7 +221,7 @@ fn live_speed(leaf: &str) -> Option<f64> {
 /// A value the catalog declares within range that Hyprland refuses would
 /// be a range this crate got wrong.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn hyprland_accepts_the_extremes_of_every_declared_range() {
     let _live = Hyprland::disposable();
     reload();

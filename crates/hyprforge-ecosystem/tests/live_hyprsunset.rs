@@ -92,7 +92,7 @@ fn live_instance() -> Option<Instance> {
 /// `hyprctl` rather than reimplementing its socket protocol is a choice
 /// this crate can actually make.
 #[test]
-#[ignore]
+#[ignore = "live (hyprsunset): changes nothing"]
 fn hyprsunset_the_binary_reports_a_version() {
     let output = match hyprforge_core::command::output(
         Command::new("hyprsunset").arg("--version"),
@@ -115,7 +115,7 @@ fn hyprsunset_the_binary_reports_a_version() {
 /// one. This does not connect to the socket; only that Hyprland reports
 /// an instance and the socket file exists under it.
 #[test]
-#[ignore]
+#[ignore = "live (hyprsunset): changes nothing"]
 fn the_live_instances_hyprsunset_socket_exists_where_expected() {
     let Some(instance) = live_instance() else { return };
     let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") else {
@@ -150,7 +150,7 @@ fn the_live_instances_hyprsunset_socket_exists_where_expected() {
 /// being tuned to a wiki example that turns out to be wrong. Read-only —
 /// nothing is set.
 #[test]
-#[ignore]
+#[ignore = "live (hyprsunset): changes nothing"]
 fn hyprsunset_reports_its_current_temperature_within_the_declared_range() {
     let backend = Hyprsunset;
     match backend.current_temperature() {

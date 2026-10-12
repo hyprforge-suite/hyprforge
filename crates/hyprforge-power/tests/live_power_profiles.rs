@@ -41,7 +41,7 @@ async fn backend() -> Option<PowerProfilesDaemonBackend> {
 /// is on the system bus under `net.hadess.PowerProfiles` and its
 /// `Profiles` property answers in the shape this crate expects.
 #[tokio::test]
-#[ignore]
+#[ignore = "live (power-profiles-daemon): changes nothing"]
 async fn power_profiles_daemon_answers_on_the_system_bus() {
     let Some(backend) = backend().await else { return };
     match backend.profiles().await {
@@ -58,7 +58,7 @@ async fn power_profiles_daemon_answers_on_the_system_bus() {
 /// something the compiler can see: a daemon version that renamed or
 /// dropped one would make this crate silently unable to show or set it.
 #[tokio::test]
-#[ignore]
+#[ignore = "live (power-profiles-daemon): changes nothing"]
 async fn the_three_documented_profiles_are_all_offered() {
     let Some(backend) = backend().await else { return };
     match backend.profiles().await {
@@ -86,7 +86,7 @@ async fn the_three_documented_profiles_are_all_offered() {
 /// only asking the live daemon both questions at once can catch it
 /// drifting apart.
 #[tokio::test]
-#[ignore]
+#[ignore = "live (power-profiles-daemon): changes nothing"]
 async fn the_active_profile_is_one_of_the_offered_profiles() {
     let Some(backend) = backend().await else { return };
     let profiles = match backend.profiles().await {

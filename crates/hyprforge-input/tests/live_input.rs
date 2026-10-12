@@ -30,7 +30,7 @@ fn getoption(key: &str) -> serde_json::Value {
 /// catalog claims. A key Hyprland renamed, or one whose type changed, fails
 /// here rather than producing a config error for a user.
 #[test]
-#[ignore]
+#[ignore = "live (Hyprland, read-only): changes nothing"]
 fn hyprland_has_every_catalogued_option_with_the_declared_type() {
     let _live = Hyprland::read_only();
     let mut wrong = Vec::new();
@@ -64,7 +64,7 @@ fn hyprland_has_every_catalogued_option_with_the_declared_type() {
 /// broadest check that the Lua this crate writes is Lua Hyprland accepts,
 /// including the nesting and the number formatting.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn hyprland_accepts_a_file_setting_every_option() {
     let _live = Hyprland::disposable();
     reload();
@@ -88,7 +88,7 @@ fn hyprland_accepts_a_file_setting_every_option() {
 /// could generate perfect Lua that Hyprland loads and ignores, and every
 /// test above would still pass.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn a_generated_setting_takes_effect() {
     let _live = Hyprland::disposable();
     reload();
@@ -118,7 +118,7 @@ fn a_generated_setting_takes_effect() {
 /// one. If this ever stopped being true, `setup::PLACEMENT` would be
 /// backwards and every save would silently do nothing.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn a_later_config_call_wins_over_an_earlier_one() {
     let _live = Hyprland::disposable();
     reload();
@@ -138,7 +138,7 @@ fn a_later_config_call_wins_over_an_earlier_one() {
 /// The other half of the design: a call updates only the keys it passes, so
 /// the generated overlay leaves everything else to the user's own config.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn a_partial_config_call_leaves_other_keys_alone() {
     let _live = Hyprland::disposable();
     reload();
@@ -159,7 +159,7 @@ fn a_partial_config_call_leaves_other_keys_alone() {
 /// What [`hyprforge_input::import`] reads has to mean what it thinks it
 /// means: `set` false before anything writes the key, true after.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn the_set_flag_tracks_whether_a_key_was_written() {
     let _live = Hyprland::disposable();
     reload();
@@ -181,7 +181,7 @@ fn the_set_flag_tracks_whether_a_key_was_written() {
 /// refuses would be a range this crate got wrong. Every catalogued minimum
 /// and maximum is pushed at the compositor.
 #[test]
-#[ignore]
+#[ignore = "disposable: changes a compositor or the clipboard; tools/hf test disposable"]
 fn hyprland_accepts_the_extremes_of_every_declared_range() {
     let _live = Hyprland::disposable();
     reload();

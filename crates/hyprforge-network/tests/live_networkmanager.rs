@@ -36,7 +36,7 @@ async fn backend() -> Option<NetworkManagerBackend> {
 /// The claim every other call rests on: NetworkManager is on the system
 /// bus under this name, and answers a property read.
 #[tokio::test]
-#[ignore]
+#[ignore = "live (NetworkManager): changes nothing"]
 async fn networkmanager_answers_on_the_system_bus() {
     let Some(backend) = backend().await else { return };
     match backend.status().await {
@@ -57,7 +57,7 @@ async fn networkmanager_answers_on_the_system_bus() {
 /// as `u`, and the three flag words — all read in one pass, because the
 /// point is the property names and types rather than any value.
 #[tokio::test]
-#[ignore]
+#[ignore = "live (NetworkManager): changes nothing"]
 async fn every_access_point_property_this_crate_reads_exists_and_has_the_type_it_expects() {
     let Some(backend) = backend().await else { return };
     match backend.access_points().await {
@@ -92,7 +92,7 @@ async fn every_access_point_property_this_crate_reads_exists_and_has_the_type_it
 /// the kind of claim that is right until it isn't, and the symptom would
 /// be "this machine has no Wi-Fi adapter" on a machine holding one.
 #[tokio::test]
-#[ignore]
+#[ignore = "live (NetworkManager): changes nothing"]
 async fn a_machine_with_a_wifi_adapter_is_not_reported_as_having_none() {
     let Some(backend) = backend().await else { return };
     let has_wireless_interface = std::path::Path::new("/sys/class/net")
@@ -119,7 +119,7 @@ async fn a_machine_with_a_wifi_adapter_is_not_reported_as_having_none() {
 /// of them — `802-11-wireless.ssid` as bytes and the `autoconnect`
 /// default.
 #[tokio::test]
-#[ignore]
+#[ignore = "live (NetworkManager): changes nothing"]
 async fn saved_networks_are_read_without_needing_their_secrets() {
     let Some(backend) = backend().await else { return };
     match backend.saved_networks().await {
@@ -143,7 +143,7 @@ async fn saved_networks_are_read_without_needing_their_secrets() {
 /// Read-only like everything here: it lists, and connects or
 /// disconnects nothing.
 #[tokio::test]
-#[ignore]
+#[ignore = "live (NetworkManager): changes nothing"]
 async fn every_wired_property_this_crate_reads_exists_and_has_the_type_it_expects() {
     use hyprforge_network::WiredState;
     let Some(backend) = backend().await else { return };

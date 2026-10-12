@@ -39,7 +39,7 @@ fn installed_db() -> Option<MimeDb> {
 /// types that content sniffing gets wrong are the ones `globs2` gets
 /// right. `file --mime-type` calls these octet-stream, zip and zstd.
 #[test]
-#[ignore]
+#[ignore = "live (the shared MIME database): changes nothing"]
 fn the_types_content_sniffing_gets_wrong_are_right_by_name() {
     let Some(db) = installed_db() else { return };
     for (name, expected) in [
@@ -66,7 +66,7 @@ fn the_types_content_sniffing_gets_wrong_are_right_by_name() {
 /// case where the two deliberately differ — see
 /// [`an_empty_file_is_typed_by_its_name_where_the_system_gives_up`].
 #[test]
-#[ignore]
+#[ignore = "live (the shared MIME database): changes nothing"]
 fn the_type_matches_what_gio_says() {
     let Some(db) = installed_db() else { return };
     let dir = tempfile::tempdir().unwrap();
@@ -99,7 +99,7 @@ fn the_type_matches_what_gio_says() {
 /// the corpus is wide on purpose: one entry per *shape* of rule, not
 /// one per format anybody cares about.
 #[test]
-#[ignore]
+#[ignore = "live (the shared MIME database): changes nothing"]
 fn a_spread_of_ordinary_names_agrees_with_gio() {
     let Some(db) = installed_db() else { return };
     let dir = tempfile::tempdir().unwrap();
@@ -137,7 +137,7 @@ fn a_spread_of_ordinary_names_agrees_with_gio() {
 /// application, so both send it to a browser. An empty `.svg` is still
 /// an SVG, and it should open in whatever opens SVGs.
 #[test]
-#[ignore]
+#[ignore = "live (the shared MIME database): changes nothing"]
 fn an_empty_file_is_typed_by_its_name_where_the_system_gives_up() {
     let Some(db) = installed_db() else { return };
     let dir = tempfile::tempdir().unwrap();
@@ -153,7 +153,7 @@ fn an_empty_file_is_typed_by_its_name_where_the_system_gives_up() {
 /// and it is offered. A machine with no browser at all would be odd
 /// enough to say so rather than to assert through.
 #[test]
-#[ignore]
+#[ignore = "live (the shared MIME database): changes nothing"]
 fn a_common_type_has_an_installed_application_to_open_it() {
     let Some(db) = installed_db() else { return };
     let apps = db.apps_for("text/html");
@@ -172,7 +172,7 @@ fn a_common_type_has_an_installed_application_to_open_it() {
 /// The reading half of the thing the file manager is about to offer:
 /// whatever the user's own choice is, it is found and it is described.
 #[test]
-#[ignore]
+#[ignore = "live (the shared MIME database): changes nothing"]
 fn the_users_own_default_is_read_back() {
     let Some(db) = installed_db() else { return };
     let Some(default) = db.default_for("text/html") else {
@@ -191,7 +191,7 @@ fn the_users_own_default_is_read_back() {
 /// `update-mime-database`, and a parser that only ever reads its own
 /// test fixtures has proved nothing about it.
 #[test]
-#[ignore]
+#[ignore = "live (the shared MIME database): changes nothing"]
 fn the_installed_magic_rules_recognise_a_file_with_no_useful_name() {
     let Some(db) = installed_db() else { return };
     let dir = tempfile::tempdir().unwrap();
@@ -215,7 +215,7 @@ fn the_installed_magic_rules_recognise_a_file_with_no_useful_name() {
 /// Descriptions come out of the per-type XML files the database ships,
 /// and they are what a person would actually read.
 #[test]
-#[ignore]
+#[ignore = "live (the shared MIME database): changes nothing"]
 fn a_type_describes_itself_in_words() {
     let Some(db) = installed_db() else { return };
     let dirs = hyprforge_mime::data_dirs();
@@ -231,7 +231,7 @@ fn a_type_describes_itself_in_words() {
 /// The subclass graph is real and this reads it: a 3MF is a zip, an
 /// ODF document is a zip, a shell script is text.
 #[test]
-#[ignore]
+#[ignore = "live (the shared MIME database): changes nothing"]
 fn the_installed_subclass_graph_answers_what_is_a_kind_of_what() {
     let Some(db) = installed_db() else { return };
     assert!(db.is_subclass_of("model/3mf", "application/zip"), "a 3MF really is a zip");

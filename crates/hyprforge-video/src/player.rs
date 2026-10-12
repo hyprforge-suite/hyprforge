@@ -488,7 +488,7 @@ mod tests {
     /// ffmpeg, which tier 1 does not, so it runs by hand:
     /// `cargo test -p hyprforge-video -- --ignored`.
     #[test]
-    #[ignore]
+    #[ignore = "live (ffmpeg and libmpv): changes nothing"]
     fn a_played_clip_delivers_its_own_pixels() {
         let dir = tempfile::tempdir().unwrap();
         let clip = dir.path().join("orange.mp4");

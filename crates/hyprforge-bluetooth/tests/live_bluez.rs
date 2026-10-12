@@ -41,7 +41,7 @@ async fn backend() -> Option<BlueZBackend> {
 /// with the types this crate expects (`Powered`/`Discovering` as `b`,
 /// `Alias` as `s`).
 #[tokio::test]
-#[ignore]
+#[ignore = "live (BlueZ): changes nothing"]
 async fn bluez_answers_on_the_system_bus() {
     let Some(backend) = backend().await else { return };
     match backend.status().await {
@@ -70,7 +70,7 @@ async fn bluez_answers_on_the_system_bus() {
 /// device that has never resolved one of them — the single most likely
 /// bug this crate could have.
 #[tokio::test]
-#[ignore]
+#[ignore = "live (BlueZ): changes nothing"]
 async fn every_device_enumerates_even_when_its_optional_properties_are_missing() {
     let Some(backend) = backend().await else { return };
     match backend.devices().await {
@@ -115,7 +115,7 @@ async fn every_device_enumerates_even_when_its_optional_properties_are_missing()
 /// back as `NoAdapter` — that would mean BlueZ's `Adapter1` discovery in
 /// this crate has drifted from what BlueZ actually exposes.
 #[tokio::test]
-#[ignore]
+#[ignore = "live (BlueZ): changes nothing"]
 async fn a_machine_with_a_bluetooth_controller_is_not_reported_as_having_no_adapter() {
     let Some(backend) = backend().await else { return };
     let has_bluetooth_controller = std::path::Path::new("/sys/class/bluetooth")
@@ -146,7 +146,7 @@ async fn a_machine_with_a_bluetooth_controller_is_not_reported_as_having_no_adap
 /// which is not something a test may do. The agent is unregistered on
 /// every path.
 #[tokio::test]
-#[ignore]
+#[ignore = "visible (BlueZ, registering an agent): briefly visible, then undone"]
 async fn bluez_accepts_the_pairing_agent_this_crate_registers() {
     let connection = match zbus::Connection::system().await {
         Ok(connection) => connection,

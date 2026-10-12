@@ -48,7 +48,7 @@ async fn backend() -> Option<LogindBackend> {
 /// this crate expects — `(what, who, why, mode, uid, pid)`, deserializing
 /// without error regardless of how many locks exist right now.
 #[tokio::test]
-#[ignore]
+#[ignore = "live (systemd-logind): changes nothing"]
 async fn logind_answers_list_inhibitors_on_the_system_bus() {
     let Some(backend) = backend().await else { return };
     match backend.list_inhibitors().await {
@@ -76,7 +76,7 @@ async fn logind_answers_list_inhibitors_on_the_system_bus() {
 /// exited), that is not a failure of this crate — it just means there is
 /// nothing to find, and the test says so rather than asserting blind.
 #[tokio::test]
-#[ignore]
+#[ignore = "live (systemd-logind): changes nothing"]
 async fn a_hand_run_systemd_inhibit_is_visible_in_the_list() {
     let Some(backend) = backend().await else { return };
     let inhibitors = match backend.list_inhibitors().await {
