@@ -16,11 +16,13 @@ worth doing next.
 Things only the user can do — an account, a password, a decision, or
 someone watching the screen. Ranked by what each one unblocks.
 
-- **Try redo and animated GIFs once, on screen.** Built while you were
-  away, unit-tested, never seen running: in Files, a rename then Ctrl+Z
-  then Ctrl+Shift+Z (and the same with a trash); a GIF in Media, zoomed
-  in and back out, turned, and in a slideshow; a GIF in Files' Quick
-  Look. Both live on Media's and Files' `next` branches, so a build
+- **Try redo, animated GIFs and sharp zoom once, on screen.** Built
+  while you were away, unit-tested, never seen running: in Files, a
+  rename then Ctrl+Z then Ctrl+Shift+Z (and the same with a trash); a
+  GIF in Media, zoomed in and back out, turned, and in a slideshow; a
+  GIF in Files' Quick Look; a large photo in Media at 1:1, which should
+  sharpen a moment after the zoom stops, and stay sharp through a short
+  pan and a turn. All on Media's and Files' `next` branches, so a build
   from this checkout has them. *Added 2026-10-11.*
 - **A first look at procman, together, and its screenshots.** The
   window has only ever been drawn offscreen (`render_every_tab`); open
@@ -98,11 +100,6 @@ someone watching the screen. Ranked by what each one unblocks.
 
 Open work Claude can do unattended. Nothing here blocks a release.
 
-- **Media blurs instead of re-decoding when zoomed in.**
-  `sharpen_if_needed` runs on resize, mode and scale changes but never
-  on zoom (`crates/hyprforge-media/src/main.rs:1611`), so 1:1 on a large
-  photo is soft. The plan's crop-at-native-resolution decode was never
-  built. Medium to large. *Added 2026-10-11.*
 - **Encrypted drives can't be unlocked.** A LUKS stick shows as Locked
   and stops there (`crates/hyprforge-volumes/src/backend.rs:169`).
   Needs a passphrase prompt, UDisks2 `Encrypted.Unlock`, and locking
@@ -156,6 +153,13 @@ Open work Claude can do unattended. Nothing here blocks a release.
 - **Time `hf check` against what it replaced.** `check.sh` was never
   timed, so "lighter" is measured on one side only (a warm
   `hf check --fast` is 102 s). *Added 2026-10-11.*
+- **A screenshot tool, like Flameshot.** A new component: drag out a
+  region (or pick a window or an output) over a frozen frame, then mark
+  it up in place — arrows, boxes, text, highlight, blur and numbered
+  steps — and copy, save or pin it. The suite has nothing here; today
+  it's grim and slurp, which have no editing step. Built on the layer
+  shell and `wlr-screencopy`, and themed like everything else. Large.
+  *Added 2026-10-12.*
 
 ## Ideas
 
@@ -199,6 +203,11 @@ Parked on purpose — written down so they are not lost, not scheduled.
 Kept for a few weeks so "what happened to X" has an answer, then
 pruned; git history has the rest.
 
+- **Zooming in on a photo is sharp**: once a zoom settles, Media
+  decodes the visible part (plus a margin) at the density it is drawn
+  at, through the new `hyprforge_image::decode_region`, and lays it
+  over the enlarged picture; what is kept stays inside the same budget.
+  *Added 2026-10-11.*
 - **Layer rules are editable** in Settings' Window rules page: a row
   each for the namespace, blur and on/off, add and remove (Settings
   b69919c). *Added 2026-10-11.*

@@ -121,7 +121,7 @@ pub fn decode_to_fit(path: &Path, budget: &Budget) -> Result<Decoded, ImageError
 
 /// The picture at its full stored size, by whichever of `image`'s
 /// decoders the format names.
-fn decode_whole(path: &Path, measured: &Measured, budget: &Budget) -> Result<image::DynamicImage, ImageError> {
+pub(crate) fn decode_whole(path: &Path, measured: &Measured, budget: &Budget) -> Result<image::DynamicImage, ImageError> {
     let file = std::fs::File::open(path)
         .map_err(|source| ImageError::Unreadable { path: path.to_path_buf(), source })?;
     let mut reader = image::ImageReader::new(std::io::BufReader::new(file));

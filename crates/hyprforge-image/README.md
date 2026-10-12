@@ -39,6 +39,9 @@ the only place a cap lives. Then `decode::decode_to_fit`.
 
 `animation::decode_animation` is its sibling for an animated GIF:
 every frame, all of them together inside what one still may keep.
+`region::decode_region` is the other: the part of a picture a
+zoomed-in window can see, at the resolution it is drawn at, so 1:1 is
+sharp without the whole picture being kept at full size.
 
 # Honest about what the budget bounds
 

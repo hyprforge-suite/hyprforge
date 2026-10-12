@@ -11,10 +11,12 @@ questions at the end were answered by the owner — PNG, JPEG, WebP and GIF;
 Set as Wallpaper in scope; the keyboard grammar merged as
 `hyprforge-keys`. Phase 4 is built too: the file manager's preview pane
 and its grid thumbnails both decode through `hyprforge-image`. The
-spacebar Quick Look overlay followed in Files (2026-10-03). One gap is named rather than hidden:
-zooming past the size that was decoded upsamples rather than re-decoding
-a sharper crop. (An animated GIF played its first frame only until
-2026-10-11; it plays now, in Media and in Files' Quick Look.)
+spacebar Quick Look overlay followed in Files (2026-10-03). Zooming past
+the size that was decoded only enlarged it until 2026-10-12; once a zoom
+settles, Media now decodes the visible part at the density it is drawn
+at (`hyprforge_image::decode_region`) and lays it over the picture. (An
+animated GIF played its first frame only until 2026-10-11; it plays now,
+in Media and in Files' Quick Look.)
 
 **2026-09-25: the shell.** The `Hyprview Photo Viewer` design moved the
 window into the file manager's shell — header, Places sidebar, status
