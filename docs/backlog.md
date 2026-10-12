@@ -114,10 +114,6 @@ Open work Claude can do unattended. Nothing here blocks a release.
   only be changed by editing `media-config.toml`; `docs/design/vision.md`
   plans a Settings screen on the `hyprforge-keys` grammar, and Files'
   `config_edit` is there to reuse. Medium. *Added 2026-10-11.*
-- **Golden-image tests for Media and the viewer panes.** The centre-pixel
-  check was done by hand once; a colour or orientation regression in the
-  window would go uncaught. notif-render's golden tests are the
-  precedent. Medium. *Added 2026-10-11.*
 - **The tray's popup drops submenus.** The menu model and the dbusmenu
   fallback both nest (`crates/hyprforge-tray/src/menu.rs:51`); traymenu
   never draws children. No item nests today, so nothing is lost yet.
@@ -141,6 +137,11 @@ Open work Claude can do unattended. Nothing here blocks a release.
 - **Time `hf check` against what it replaced.** `check.sh` was never
   timed, so "lighter" is measured on one side only (a warm
   `hf check --fast` is 102 s). *Added 2026-10-11.*
+- **Pixel tests for the video and 3D panes.** Media's still picture is
+  now drawn and read back in tests, but the video and model panes are
+  `shader` widgets, which `iced_tiny_skia` doesn't draw, and CI has no
+  GPU for `iced_test`'s wgpu backend. Needs either a software wgpu
+  adapter in CI or a test-only CPU path. Medium. *Added 2026-10-12.*
 - **A screenshot tool, like Flameshot.** A new component: drag out a
   region (or pick a window or an output) over a frozen frame, then mark
   it up in place — arrows, boxes, text, highlight, blur and numbered
@@ -191,6 +192,10 @@ Parked on purpose — written down so they are not lost, not scheduled.
 Kept for a few weeks so "what happened to X" has an answer, then
 pruned; git history has the rest.
 
+- **Media's picture is pixel-tested**: three `iced_test` tests draw
+  the canvas headless on tiny-skia and check each quadrant's place and
+  exact colour (upright and turned) and the theme's backdrop; `App::blank`
+  is the one constructor `main` and the tests share. *Added 2026-10-11.*
 - **Files' split divider drags**, through a new shared
   `split_handle` in `hyprforge-ui`; double click for even halves, and
   the session keeps the ratio. *Added 2026-10-11.*
