@@ -81,7 +81,13 @@ and the next hotplug would re-apply the layout you just escaped.
 
 On the wire this is `ApplyProfileReversible` (returns the number of seconds),
 `ConfirmLayout`, `RevertLayout`, plus the `RevertPending`/`RevertResolved`
-signals. Plain `ApplyProfile` stays immediate and irreversible — that's what
+signals. `PendingChanges` describes the change for the prompt, one line
+per output (`DP-4: 1920×1080 at 60 Hz → 2560×1440 at 144 Hz; scale 1 →
+1.6`), from the snapshot against what the compositor reports now. It is a
+method rather than more `RevertPending` arguments because a signal's
+arguments are its signature: the tray and an older Settings would stop
+hearing it. A prompt newer than the daemon gets "unknown method" and asks
+without the list. Plain `ApplyProfile` stays immediate and irreversible — that's what
 `displayctl apply` uses, since a scripted caller has no banner to click and
 shouldn't have its change silently undone.
 
@@ -276,7 +282,7 @@ Bus name `dev.hyprforge.Displayd`, object path `/dev/hyprforge/Displayd`,
 interface `dev.hyprforge.Displayd1`. See
 `crates/hyprforge-core/src/displayd_proxy.rs` for the full method/signal
 list (`ListProfiles`, `ApplyProfile`, `ApplyProfileReversible`,
-`ConfirmLayout`, `RevertLayout`, `RenameProfile`, `DeleteProfile`,
+`PendingChanges`, `ConfirmLayout`, `RevertLayout`, `RenameProfile`, `DeleteProfile`,
 `SwapHeads`, `SetExtraOutputPolicy`, `SetHeadGeometry`, `GetProfile`,
 `GetAvailableModes`, `GetCurrentFingerprint`, `GetCurrentLayout`, the
 `ProfileApplied`/`NewTopologySeen`/`RevertPending`/`RevertResolved` signals,

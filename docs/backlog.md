@@ -110,10 +110,6 @@ someone watching the screen. Ranked by what each one unblocks.
 
 Open work Claude can do unattended. Nothing here blocks a release.
 
-- **Displays' keep-or-revert prompt can't say what changed.**
-  `RevertPending` carries only the countdown
-  (`crates/hyprforge-displayd/src/daemon.rs:34`), so the prompt shows no
-  diff and no backup path. Medium. *Added 2026-10-11.*
 - **A Keyboard screen for the suite's own bindings.** Media's keys can
   only be changed by editing `media-config.toml`; `docs/design/vision.md`
   plans a Settings screen on the `hyprforge-keys` grammar, and Files'
@@ -198,6 +194,11 @@ Parked on purpose — written down so they are not lost, not scheduled.
 Kept for a few weeks so "what happened to X" has an answer, then
 pruned; git history has the rest.
 
+- **The keep-or-revert prompt names the change**: displayd's new
+  `PendingChanges` describes each output that moved (mode, scale,
+  rotation, position, on/off), and Settings' prompt lists up to three.
+  There was never a backup file to show — the snapshot is in memory.
+  *Added 2026-10-11.*
 - **Settings edits pairs of numbers**: a `vec2` kind in
   `hyprforge-core` (two fields, applied together, written as `{ x, y }`
   as Hyprland 0.56.2's parser reads it), which brings in the shadow

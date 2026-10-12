@@ -24,6 +24,11 @@ pub trait Displayd {
     /// Pair with `confirm_layout` / `revert_layout`.
     fn apply_profile_reversible(&self, profile_id: &str) -> zbus::Result<u32>;
 
+    /// What a provisional change changed, one line per output; empty
+    /// when nothing is pending. A daemon older than this answers
+    /// "unknown method".
+    fn pending_changes(&self) -> zbus::Result<Vec<String>>;
+
     fn confirm_layout(&self) -> zbus::Result<()>;
 
     fn revert_layout(&self) -> zbus::Result<()>;
