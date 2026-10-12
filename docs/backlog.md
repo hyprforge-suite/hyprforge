@@ -105,11 +105,6 @@ someone watching the screen. Ranked by what each one unblocks.
 
 Open work Claude can do unattended. Nothing here blocks a release.
 
-- **Procman's journal leaves three things unsaid.** Whether delay
-  accounting was on (block-I/O delay reads 0, not unknown, when it was
-  off), which frames dropped exits (ENOBUFS), and that `run_delay` and
-  `open_files` fall back to 0 and show as measured. All three need a
-  journal format change. *Added 2026-10-10.*
 - **A two-number editor in Settings.** `input:tablet:*` and
   `decoration:shadow:offset` are shown as not editable for want of one
   (`crates/hyprforge-input/src/catalog.rs:60`,
@@ -203,6 +198,10 @@ Parked on purpose — written down so they are not lost, not scheduled.
 Kept for a few weeks so "what happened to X" has an answer, then
 pruned; git history has the rest.
 
+- **Procman's journal says what it couldn't see** (format 3): whether
+  delay accounting was on, whether exits were dropped or unheard, and
+  unknown rather than 0 for run delay and open files; format 2 days
+  still read. *Added 2026-10-10.*
 - **Encrypted drives open in Files**: a click (or Mount) on a locked
   LUKS or BitLocker drive asks for its passphrase, unlocks it through
   UDisks2 and opens it; a wrong passphrase asks again; unmounting or
