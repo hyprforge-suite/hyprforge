@@ -21,6 +21,7 @@ mod panel;
 mod ring;
 mod scrim;
 mod selection;
+mod split;
 mod suggestions;
 mod wheel_zoom;
 
@@ -45,6 +46,7 @@ pub use panel::{fact, fact_row, panel_tabs};
 pub use ring::{countdown_ring, remaining_fraction};
 pub use scrim::{scrim, scrim_color, SCRIM_ALPHA};
 pub use selection::{section_label, selectable_row_style, spaced_caps, Tint};
+pub use split::{split_handle, split_ratio, SPLIT_HANDLE_WIDTH};
 pub use suggestions::{suggestions, Suggestion};
 pub use wheel_zoom::{steps_from_pixels, wheel_zoom, WheelZoom, PIXELS_PER_STEP};
 

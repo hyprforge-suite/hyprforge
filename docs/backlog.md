@@ -114,9 +114,6 @@ Open work Claude can do unattended. Nothing here blocks a release.
   only be changed by editing `media-config.toml`; `docs/design/vision.md`
   plans a Settings screen on the `hyprforge-keys` grammar, and Files'
   `config_edit` is there to reuse. Medium. *Added 2026-10-11.*
-- **Files' split view divider doesn't drag.** The halves are always
-  equal; no ratio state exists (`crates/hyprforge-files/DESIGN.md:1751`).
-  Small to medium. *Added 2026-10-11.*
 - **Golden-image tests for Media and the viewer panes.** The centre-pixel
   check was done by hand once; a colour or orientation regression in the
   window would go uncaught. notif-render's golden tests are the
@@ -194,6 +191,9 @@ Parked on purpose — written down so they are not lost, not scheduled.
 Kept for a few weeks so "what happened to X" has an answer, then
 pruned; git history has the rest.
 
+- **Files' split divider drags**, through a new shared
+  `split_handle` in `hyprforge-ui`; double click for even halves, and
+  the session keeps the ratio. *Added 2026-10-11.*
 - **The keep-or-revert prompt names the change**: displayd's new
   `PendingChanges` describes each output that moved (mode, scale,
   rotation, position, on/off), and Settings' prompt lists up to three.
