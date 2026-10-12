@@ -114,10 +114,6 @@ Open work Claude can do unattended. Nothing here blocks a release.
   only be changed by editing `media-config.toml`; `docs/design/vision.md`
   plans a Settings screen on the `hyprforge-keys` grammar, and Files'
   `config_edit` is there to reuse. Medium. *Added 2026-10-11.*
-- **The tray's popup drops submenus.** The menu model and the dbusmenu
-  fallback both nest (`crates/hyprforge-tray/src/menu.rs:51`); traymenu
-  never draws children. No item nests today, so nothing is lost yet.
-  Medium. *Added 2026-10-11.*
 - **`hf hyprland up --for-lock`.** The tooling plan had the disposable
   instance replace `crates/hyprforge-lock/testing/nested.sh`; the lock
   screen still uses the script. *Added 2026-10-11.*
@@ -192,6 +188,10 @@ Parked on purpose — written down so they are not lost, not scheduled.
 Kept for a few weeks so "what happened to X" has an answer, then
 pruned; git history has the rest.
 
+- **The tray's popup opens submenus**: a row with children shows `›`
+  and opens them in place under a Back row (Right and Left from the
+  keyboard); the popup is sized for its largest level. Before, the tree
+  was flattened into one list. *Added 2026-10-11.*
 - **Media's picture is pixel-tested**: three `iced_test` tests draw
   the canvas headless on tiny-skia and check each quadrant's place and
   exact colour (upright and turned) and the theme's backdrop; `App::blank`
