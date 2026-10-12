@@ -121,15 +121,21 @@ fn render_value(value: &Value) -> String {
         // syntax error that would take the whole file down. Debug
         // formatting of a finite f64 always carries a `.` or an `e`, so
         // the fallback is belt and braces.
-        Value::Float(f) => {
-            let s = format!("{f:?}");
-            if s.contains(['.', 'e']) {
-                s
-            } else {
-                format!("{s}.0")
-            }
-        }
+        Value::Float(f) => float(*f),
+        // An array, which Hyprland's vec2 parser takes as written; see
+        // `Kind::Vec2`. Each element by the float rule, so neither can be
+        // `NaN.0` either — `validate` refuses non-finite pairs too.
+        Value::Pair([x, y]) => format!("{{ {}, {} }}", float(*x), float(*y)),
         Value::Text(s) => lua_string(s),
+    }
+}
+
+fn float(f: f64) -> String {
+    let s = format!("{f:?}");
+    if s.contains(['.', 'e']) {
+        s
+    } else {
+        format!("{s}.0")
     }
 }
 
@@ -208,6 +214,13 @@ mod tests {
 
     /// A float that happens to be whole must not render as `1`, so a
     /// setting Hyprland types as a float never arrives as an integer.
+    /// The array form Hyprland's vec2 parser takes, each number a float.
+    #[test]
+    fn a_pair_is_written_as_an_array_of_two_floats() {
+        let out = lua(&settings(&[("demo:offset", Value::Pair([2.0, -3.5]))]));
+        assert!(out.contains("offset = { 2.0, -3.5 }"), "{out}");
+    }
+
     #[test]
     fn a_whole_float_keeps_its_decimal_point() {
         let out = lua(&settings(&[("demo:ratio", Value::Float(1.0))]));

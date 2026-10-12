@@ -109,6 +109,17 @@ pub enum Kind {
         min: Option<i64>,
         max: Option<i64>,
     },
+    /// Two numbers — an offset, a position, a size. Hyprland's type is
+    /// `vec2`; in Lua it takes an array of two numbers (`{2, 3}`) or a
+    /// string of two (`"2 3"`), and `getoption -j` reports
+    /// `"vec2": [2, 3]` — read out of `LuaConfigVec2.cpp` at the 0.56.2
+    /// tag, not guessed. Each axis has its own range, because Hyprland's
+    /// `vec2Range` gives it one.
+    Vec2 {
+        default: (f64, f64),
+        min: (f64, f64),
+        max: (f64, f64),
+    },
 }
 
 impl Kind {
@@ -124,6 +135,7 @@ impl Kind {
             Kind::Color { .. } => "gradient",
             Kind::ColorInt { .. } => "int",
             Kind::Gaps { .. } => "css",
+            Kind::Vec2 { .. } => "vec2",
         }
     }
 }

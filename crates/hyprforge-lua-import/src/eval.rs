@@ -511,4 +511,21 @@ mod tests {
         let result = evaluate(dir.path());
         assert_eq!(result.calls.len(), 1);
     }
+
+    /// A Lua array reaches the importers as a JSON array, not as an
+    /// object keyed "1" and "2" — the shape `hyprforge-core` reads a
+    /// vec2 (`shadow.offset = {2, 3}`) from. Checked here because it is
+    /// mlua's choice, not this crate's.
+    #[test]
+    fn a_lua_array_is_recorded_as_a_json_array() {
+        let dir = dir_with(&[(
+            "hyprland.lua",
+            r#"hl.config({ decoration = { shadow = { offset = { 2, 3.5 } } } })"#,
+        )]);
+        let result = evaluate(dir.path());
+        assert!(result.failures.is_empty(), "unexpected failures: {:?}", result.failures);
+        let offset = &result.calls[0].args[0]["decoration"]["shadow"]["offset"];
+        assert_eq!(offset, &serde_json::json!([2, 3.5]));
+    }
+
 }

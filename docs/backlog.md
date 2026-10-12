@@ -24,6 +24,11 @@ someone watching the screen. Ranked by what each one unblocks.
   sharpen a moment after the zoom stops, and stay sharp through a short
   pan and a turn. All on Media's and Files' `next` branches, so a build
   from this checkout has them. *Added 2026-10-11.*
+- **Run the disposable tier once for the pair settings.** Hyprland's
+  own source says it reads `offset = { 2.0, 3.0 }`, and the read-only
+  check agrees every new key is a `vec2`, but no generated file with a
+  pair in it has been loaded by a compositor yet: `tools/hf test
+  disposable` in a terminal of yours does that. *Added 2026-10-12.*
 - **An encrypted stick, once, for real.** Unlocking was built against
   UDisks2's interface and a mock, never a real LUKS device. A stick (or
   a LUKS image attached with `udisksctl loop-setup`) clicked in Files:
@@ -105,11 +110,6 @@ someone watching the screen. Ranked by what each one unblocks.
 
 Open work Claude can do unattended. Nothing here blocks a release.
 
-- **A two-number editor in Settings.** `input:tablet:*` and
-  `decoration:shadow:offset` are shown as not editable for want of one
-  (`crates/hyprforge-input/src/catalog.rs:60`,
-  `crates/hyprforge-appearance/src/catalog.rs:117`). Medium, unlocks
-  both. *Added 2026-10-11.*
 - **Displays' keep-or-revert prompt can't say what changed.**
   `RevertPending` carries only the countdown
   (`crates/hyprforge-displayd/src/daemon.rs:34`), so the prompt shows no
@@ -198,6 +198,10 @@ Parked on purpose — written down so they are not lost, not scheduled.
 Kept for a few weeks so "what happened to X" has an answer, then
 pruned; git history has the rest.
 
+- **Settings edits pairs of numbers**: a `vec2` kind in
+  `hyprforge-core` (two fields, applied together, written as `{ x, y }`
+  as Hyprland 0.56.2's parser reads it), which brings in the shadow
+  offset and the whole drawing-tablet section. *Added 2026-10-11.*
 - **Procman's journal says what it couldn't see** (format 3): whether
   delay accounting was on, whether exits were dropped or unheard, and
   unknown rather than 0 for run delay and open files; format 2 days

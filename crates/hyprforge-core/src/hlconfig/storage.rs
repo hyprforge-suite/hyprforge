@@ -71,6 +71,7 @@ mod tests {
         s.set("demo:count", Value::Int(3));
         s.set("demo:ratio", Value::Float(-0.25));
         s.set("demo:nested:deep", Value::Bool(true));
+        s.set("demo:offset", Value::Pair([2.0, -3.0]));
         s
     }
 

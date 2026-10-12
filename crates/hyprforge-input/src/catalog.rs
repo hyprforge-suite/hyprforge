@@ -12,11 +12,12 @@
 //! live test and [`crate::import`] address them. [`crate::codegen`] turns
 //! them back into the nested Lua tables `hl.config` wants.
 //!
-//! **`input:tablet:*` is deliberately absent.** Four of its nine fields are
-//! `vec2`, a type nothing else here uses and which needs its own editor,
-//! and there is no drawing tablet on hand to verify any of it against. An
-//! unverified guess about hardware nobody here can test is worth less than
-//! an honest gap — see [`CATALOG`]'s `unsupported` list.
+//! **`input:tablet:*`** waited on a pair editor: four of its nine fields
+//! are `vec2` ([`Kind::Vec2`]). Every key, type, default and range is
+//! Hyprland 0.56.2's own (`ConfigValues.cpp`), and the live test checks
+//! the keys and types against a running compositor the way it does every
+//! other — but there is still no drawing tablet here, so what the mapping
+//! *does* to one is unverified, and the help text doesn't claim more.
 
 pub use hyprforge_core::hlconfig::{Catalog, Category, Kind, Setting};
 
@@ -44,23 +45,20 @@ pub const CATEGORIES: &[Category] = &[
     Category {
         key: "input:tablettool",
         label: "Tablet stylus",
-        help: "Stylus buttons and pressure range. The tablet surface itself isn't editable here yet.",
+        help: "Stylus buttons and pressure range.",
+    },
+    Category {
+        key: "input:tablet",
+        label: "Drawing tablet",
+        help: "Which display a drawing tablet maps to, and which part of the tablet it uses.",
     },
 ];
 
 /// Everything this module claims about Hyprland's input surface.
-///
-/// `input:tablet` is listed as unsupported rather than omitted, so a
-/// tablet key in a hand-edited file is reported as "not editable here"
-/// instead of as a typo — otherwise a user hunts for a misspelling that
-/// isn't there.
 pub const CATALOG: Catalog = Catalog {
     settings: SETTINGS,
     categories: CATEGORIES,
-    unsupported: &[(
-        "input:tablet",
-        "Drawing tablet mapping isn't editable here yet — keep it in your own config.",
-    )],
+    unsupported: &[],
 };
 
 pub fn get(key: &str) -> Option<&'static Setting> {
@@ -447,6 +445,63 @@ pub const SETTINGS: &[Setting] = &[
         label: "Maximum pressure",
         help: "Highest pressure the stylus reports, 0.0–1.0. Negative uses the tool's own maximum.",
         kind: Kind::Float { default: -1.0, min: Some(-1.0), max: Some(1.0) },
+    },
+    // ---- input:tablet ----
+    // Ranges are Hyprland's own `vec2Range`s, so a value it would refuse —
+    // taking the generated file with it — is refused here first.
+    Setting {
+        key: "input:tablet:output",
+        label: "Mapped display",
+        help: "Which display the tablet maps to, by name. Empty maps it across every display.",
+        kind: Kind::Text { default: "" },
+    },
+    Setting {
+        key: "input:tablet:transform",
+        label: "Tablet rotation",
+        help: "Rotates the tablet's input, for a tablet used turned on the desk.",
+        kind: Kind::IntEnum { default: 0, choices: TOUCH_TRANSFORM },
+    },
+    Setting {
+        key: "input:tablet:left_handed",
+        label: "Left-handed",
+        help: "Turns the tablet's input half a turn, for a tablet used upside down.",
+        kind: Kind::Bool { default: false },
+    },
+    Setting {
+        key: "input:tablet:relative_input",
+        label: "Move like a mouse",
+        help: "The stylus moves the pointer from where it is, rather than to the spot it touches.",
+        kind: Kind::Bool { default: false },
+    },
+    Setting {
+        key: "input:tablet:region_position",
+        label: "Mapped area position",
+        help: "Where the area the tablet maps to starts, in pixels from the display's corner. 0, 0 with a size of 0, 0 is the whole display.",
+        kind: Kind::Vec2 { default: (0.0, 0.0), min: (-20000.0, -20000.0), max: (20000.0, 20000.0) },
+    },
+    Setting {
+        key: "input:tablet:absolute_region_position",
+        label: "Position across all displays",
+        help: "Measure the mapped area's position across the whole desktop instead of from the mapped display.",
+        kind: Kind::Bool { default: false },
+    },
+    Setting {
+        key: "input:tablet:region_size",
+        label: "Mapped area size",
+        help: "How big the area the tablet maps to is, in pixels. 0, 0 is the whole display.",
+        kind: Kind::Vec2 { default: (0.0, 0.0), min: (-100.0, -100.0), max: (4000.0, 4000.0) },
+    },
+    Setting {
+        key: "input:tablet:active_area_size",
+        label: "Tablet area used",
+        help: "How much of the tablet's surface is used, in millimetres. 0, 0 is all of it.",
+        kind: Kind::Vec2 { default: (0.0, 0.0), min: (0.0, 0.0), max: (500.0, 500.0) },
+    },
+    Setting {
+        key: "input:tablet:active_area_position",
+        label: "Tablet area start",
+        help: "Where the part of the tablet that's used starts, in millimetres from its corner.",
+        kind: Kind::Vec2 { default: (0.0, 0.0), min: (0.0, 0.0), max: (500.0, 500.0) },
     },
 ];
 

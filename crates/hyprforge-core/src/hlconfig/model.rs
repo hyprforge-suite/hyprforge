@@ -19,6 +19,8 @@ pub enum Value {
     Bool(bool),
     Int(i64),
     Float(f64),
+    /// Two numbers, for [`Kind::Vec2`] — `[2.0, 3.0]` in the TOML.
+    Pair([f64; 2]),
     Text(String),
 }
 
@@ -35,6 +37,14 @@ impl Value {
             | Kind::TextEnum { default, .. }
             | Kind::Color { default }
             | Kind::ColorInt { default } => Value::Text(default.to_string()),
+            Kind::Vec2 { default: (x, y), .. } => Value::Pair([x, y]),
+        }
+    }
+
+    pub fn as_pair(&self) -> Option<[f64; 2]> {
+        match self {
+            Value::Pair(p) => Some(*p),
+            _ => None,
         }
     }
 
@@ -168,6 +178,13 @@ fn check(setting: &Setting, value: &Value) -> Option<String> {
             .as_float()
             .ok_or("expected a number".to_string())
             .and_then(|f| in_range(f, min, max)),
+        Kind::Vec2 { min, max, .. } => value
+            .as_pair()
+            .ok_or("expected two numbers, like [2, 3]".to_string())
+            .and_then(|[x, y]| {
+                in_range(x, Some(min.0), Some(max.0))
+                    .and_then(|()| in_range(y, Some(min.1), Some(max.1)))
+            }),
         Kind::Text { .. } => value.as_text().map(|_| ()).ok_or("expected text".to_string()),
         Kind::Color { .. } | Kind::ColorInt { .. } => value
             .as_text()
@@ -286,6 +303,12 @@ pub(super) mod test_catalog {
             kind: Kind::Color { default: "rgba(000000ff)" },
         },
         Setting {
+            key: "demo:offset",
+            label: "Offset",
+            help: "two numbers",
+            kind: Kind::Vec2 { default: (0.0, 0.0), min: (-10.0, -20.0), max: (10.0, 20.0) },
+        },
+        Setting {
             key: "demo:nested:deep",
             label: "Deep",
             help: "a subcategory",
@@ -309,6 +332,20 @@ pub(super) mod test_catalog {
 mod tests {
     use super::test_catalog::CATALOG;
     use super::*;
+
+    /// Each axis has its own range, as Hyprland's `vec2Range` does, and
+    /// a pair can't carry a NaN past validation any more than a float.
+    #[test]
+    fn a_pair_is_checked_axis_by_axis() {
+        let ok = Settings::from_one("demo:offset", Value::Pair([10.0, -20.0]));
+        assert!(ok.validate(&CATALOG).is_empty());
+        let y_out = Settings::from_one("demo:offset", Value::Pair([0.0, 21.0]));
+        assert_eq!(y_out.validate(&CATALOG)[0].problem, "must be at most 20");
+        let nan = Settings::from_one("demo:offset", Value::Pair([f64::NAN, 0.0]));
+        assert!(nan.validate(&CATALOG)[0].problem.contains("ordinary number"));
+        let not_a_pair = Settings::from_one("demo:offset", Value::Int(3));
+        assert!(not_a_pair.validate(&CATALOG)[0].problem.contains("two numbers"));
+    }
 
     #[test]
     fn a_valid_set_has_nothing_to_report() {

@@ -169,6 +169,28 @@ fn read_value(obj: &serde_json::Value, kind: &Kind) -> Option<Value> {
         Kind::Color { .. } => read_gradient(obj.get("gradient")?.as_str()?),
         Kind::ColorInt { .. } => read_int_color(obj.get("int")?.as_u64()?),
         Kind::Gaps { .. } => read_gaps(obj.get("css")?.as_str()?),
+        Kind::Vec2 { .. } => pair(obj.get("vec2")?),
+    }
+}
+
+/// Two numbers, as `getoption` reports a vec2 (`[2, 3]`) and as a Lua
+/// array arrives from the evaluator. Anything else — three numbers, a
+/// non-number — is nothing, never a half-read pair.
+fn pair(value: &serde_json::Value) -> Option<Value> {
+    match value.as_array()?.as_slice() {
+        [x, y] => Some(Value::Pair([x.as_f64()?, y.as_f64()?])),
+        _ => None,
+    }
+}
+
+/// A vec2 written as Hyprland's string form, `"2 3"` or `"2,3"`: exactly
+/// two numbers, as its own parser insists.
+fn pair_text(s: &str) -> Option<Value> {
+    let replaced = s.replace(',', " ");
+    let mut parts = replaced.split_whitespace().map(str::parse::<f64>);
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(Ok(x)), Some(Ok(y)), None) => Some(Value::Pair([x, y])),
+        _ => None,
     }
 }
 
@@ -297,6 +319,9 @@ fn coerce(value: &serde_json::Value, kind: &Kind) -> Option<Value> {
         // per-side gap this editor can't represent, and it arrives here
         // as an object, which `flatten` has already recursed into.
         Kind::Gaps { .. } => value.as_i64().map(Value::Int),
+        // Either form Hyprland takes: `{2, 3}` arrives as an array, and
+        // `"2 3"` as a string.
+        Kind::Vec2 { .. } => pair(value).or_else(|| pair_text(value.as_str()?)),
     }
 }
 
@@ -373,6 +398,29 @@ mod tests {
         assert_eq!(found[0].value, Value::Text("us".into()));
         assert_eq!(found[1].value, Value::Float(0.0));
         assert_eq!(found[2].value, Value::Bool(false));
+    }
+
+    /// A vec2 as `hyprctl getoption -j` printed it on 0.56.2 — the
+    /// `{"option": ..., "vec2": [0,0], ...}` shape, read off a real one.
+    #[test]
+    fn a_live_vec2_is_read_as_a_pair() {
+        let json = r#"{"option": "demo:offset", "vec2": [2,-3], "set": true }"#;
+        let found = parse(json, &CATALOG, &Settings::default());
+        assert_eq!(found[0].value, Value::Pair([2.0, -3.0]));
+        let three = r#"{"option": "demo:offset", "vec2": [1,2,3], "set": true }"#;
+        assert_eq!(parse(three, &CATALOG, &Settings::default()), vec![], "never half a pair");
+    }
+
+    /// Both forms Hyprland's vec2 parser takes in a config: an array of
+    /// two numbers and a string of two, comma or space separated.
+    #[test]
+    fn a_vec2_in_a_config_is_read_from_either_form() {
+        let call = |offset: serde_json::Value| {
+            settings_from_call("config", &[serde_json::json!({ "demo": { "offset": offset } })], &CATALOG)
+        };
+        assert_eq!(call(serde_json::json!([2, 3.5])), vec![("demo:offset", Value::Pair([2.0, 3.5]))]);
+        assert_eq!(call(serde_json::json!("4, 5")), vec![("demo:offset", Value::Pair([4.0, 5.0]))]);
+        assert_eq!(call(serde_json::json!("4 5 6")), vec![]);
     }
 
     /// A sentinel is display text for "unset". Importing it literally

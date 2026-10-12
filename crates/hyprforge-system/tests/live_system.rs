@@ -160,6 +160,8 @@ fn range_extreme(kind: &Kind, which: Extreme) -> Option<Value> {
         (Kind::Int { max, .. } | Kind::Gaps { max, .. }, Extreme::Max) => max.map(Value::Int),
         (Kind::Float { min, .. }, Extreme::Min) => min.map(Value::Float),
         (Kind::Float { max, .. }, Extreme::Max) => max.map(Value::Float),
+        (Kind::Vec2 { min, .. }, Extreme::Min) => Some(Value::Pair([min.0, min.1])),
+        (Kind::Vec2 { max, .. }, Extreme::Max) => Some(Value::Pair([max.0, max.1])),
         _ => None,
     }
 }
@@ -200,6 +202,9 @@ fn probe_value(kind: &Kind) -> Value {
                 .unwrap_or(&default)
                 .to_string(),
         ),
+        // One step along each axis, inside the range: a pair Hyprland
+        // ignored would read back as the default.
+        Kind::Vec2 { default, max, .. } => Value::Pair([(default.0 + 1.0).min(max.0), (default.1 + 1.0).min(max.1)]),
     }
 }
 

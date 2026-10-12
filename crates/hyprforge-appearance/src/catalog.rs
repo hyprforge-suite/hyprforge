@@ -10,14 +10,9 @@
 //! option"), so it is absent here. A catalog built from the wiki alone
 //! would have shipped eight settings that silently do nothing.
 //!
-//! Two options are deliberately omitted rather than listed as
-//! unsupported, because they aren't appearance:
-//!
-//! - `general:locale` — an i18n setting that happens to live in
-//!   `general`; it belongs with users and time.
-//! - `decoration:shadow:offset` — a `vec2`, the one type this editor has
-//!   no control for. It is in the unsupported list so a config using it
-//!   is explained rather than called a typo.
+//! One option is deliberately omitted, because it isn't appearance:
+//! `general:locale`, an i18n setting that happens to live in `general`;
+//! it belongs with users and time.
 
 pub use hyprforge_core::hlconfig::{Catalog, Category, Kind, Setting};
 
@@ -113,10 +108,6 @@ pub const CATALOG: Catalog = Catalog {
         (
             "group:groupbar:font_weight",
             "Group bar font weight isn't in Hyprland 0.56 — the wiki documents it ahead of the release.",
-        ),
-        (
-            "decoration:shadow:offset",
-            "A shadow offset is a pair of numbers, which isn't editable here yet.",
         ),
     ],
 };
@@ -508,6 +499,13 @@ pub const SETTINGS: &[Setting] = &[
         label: "Shadow scale",
         help: "Size of the shadow relative to the window, 0.0 to 1.0.",
         kind: Kind::Float { default: 1.0, min: Some(0.0), max: Some(1.0) },
+    },
+    Setting {
+        key: "decoration:shadow:offset",
+        label: "Shadow offset",
+        help: "How far the shadow is moved from the window, in pixels: right, then down. Negative moves it left or up.",
+        // Hyprland's own `vec2Range(-250, -250, 250, 250)`.
+        kind: Kind::Vec2 { default: (0.0, 0.0), min: (-250.0, -250.0), max: (250.0, 250.0) },
     },
     Setting {
         key: "decoration:shadow:color",

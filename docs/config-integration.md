@@ -271,18 +271,21 @@ as if you had written them.
 
 ### What Input covers
 
-51 options: keyboard layout/variant/model, repeat rate and delay, pointer
+60 options: keyboard layout/variant/model, repeat rate and delay, pointer
 sensitivity and acceleration, scrolling, focus-follows-mouse, and the
-touchpad, touchscreen, virtual keyboard and tablet stylus subcategories.
+touchpad, touchscreen, virtual keyboard, tablet stylus and drawing tablet
+subcategories.
 
-`input:tablet:*` is deliberately absent — four of its nine fields are
-`vec2`, which needs an editor nothing else here uses. It is listed as
-unsupported rather than omitted, so a tablet key in a hand-edited file is
-reported as "not editable here" instead of as a typo.
+The drawing tablet (`input:tablet:*`) waited on a pair editor: four of
+its nine options are `vec2`, two numbers, which Settings now edits as two
+fields applied together and writes as a Lua array (`{ 2.0, 3.0 }`, the
+form Hyprland 0.56.2's `LuaConfigVec2.cpp` reads). Its keys and types are
+checked against the running compositor like every other option; what the
+mapping does to a real tablet has not been tried, for want of one.
 
 ### What Appearance covers
 
-155 options across `general` (with snapping and border colours),
+156 options across `general` (with snapping and border colours),
 `decoration` (blur, shadow, glow, motion blur), the `dwindle` and `master`
 layouts, window groups and their group bar, and `cursor` — and two things
 that aren't `hl.config` at all:
