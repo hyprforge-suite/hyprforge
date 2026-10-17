@@ -105,6 +105,14 @@ someone watching the screen. Ranked by what each one unblocks.
 
 Open work Claude can do unattended. Nothing here blocks a release.
 
+- **A check that builds the pins, not the checkout.** `main`'s CI has
+  failed since `738b5ab` (2026-10-12): it added `Ask::Unlock` to
+  `hyprforge-files-core`, and the pinned Files matches `Ask`
+  exhaustively; only Files' `next` handles it. Every local check passed
+  because this checkout builds Files from `next`. `hf check` should
+  build each component at its pin when it is checked out elsewhere, or
+  refuse a library change that breaks one. The release fixes the red
+  itself. *Added 2026-10-16.*
 - **A Keyboard screen for the suite's own bindings.** Media's keys can
   only be changed by editing `media-config.toml`; `docs/design/vision.md`
   plans a Settings screen on the `hyprforge-keys` grammar, and Files'
