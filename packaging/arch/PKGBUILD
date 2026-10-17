@@ -410,6 +410,11 @@ package_hyprforge-procman() {
   _bin hyprforge-procman
   _bin hyprforge-top
   _bin hyprforge-procman-recorder
+  # Efficiency mode, a user service — and, like the recorder, no preset:
+  # it changes how much CPU other apps get, which is the user's to switch
+  # on, from the Processes tab.
+  _bin hyprforge-procman-efficiency
+  _unit crates/hyprforge-procman/packaging/hyprforge-procman-efficiency.service hyprforge-procman-efficiency
   # The helper is started by the system bus, never by a person, so it
   # lives where its activation file says: /usr/lib/hyprforge.
   install -Dm755 "$srcdir/target/release/hyprforge-procman-helper" "$pkgdir/usr/lib/hyprforge/hyprforge-procman-helper"

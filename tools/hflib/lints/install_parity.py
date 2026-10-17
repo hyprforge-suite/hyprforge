@@ -25,8 +25,24 @@ DELIBERATE = {
     "crates/hyprforge-files/packaging/org.freedesktop.impl.portal.desktop.hyprforge.service": "installer",
 }
 
-installer = set(SOURCE.findall(Path("hyprforge").read_text()))
-package = set(SOURCE.findall(Path("packaging/arch/PKGBUILD").read_text()))
+# Both files name procman's packaging directory once, `local p=crates/…`,
+# and every file in it as `$p/name`. Matching only literal paths left
+# all of those out of the comparison on both sides at once — the
+# recorder's unit, the helper's bus and polkit files — so the check
+# reported nothing while comparing nothing. The variable is expanded
+# before matching.
+LOCAL = re.compile(r"local p=(crates/\S+)")
+
+
+def named(path: str) -> set[str]:
+    text = Path(path).read_text()
+    for prefix in LOCAL.findall(text):
+        text = text.replace("$p/", prefix.rstrip("/") + "/")
+    return set(SOURCE.findall(text))
+
+
+installer = named("hyprforge")
+package = named("packaging/arch/PKGBUILD")
 problems = []
 for path in sorted(installer - package):
     if path not in DELIBERATE:

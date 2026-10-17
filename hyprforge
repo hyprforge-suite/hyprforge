@@ -1146,7 +1146,7 @@ install_procman() {
     # Four programs, one crate; the terminal view and the eBPF network
     # counter are features a plain build leaves off.
     BUILD_FEATURES=tui,netbpf build hyprforge-procman hyprforge-procman hyprforge-top \
-        hyprforge-procman-helper hyprforge-procman-recorder
+        hyprforge-procman-helper hyprforge-procman-recorder hyprforge-procman-efficiency
     step "Process manager"
     local p=crates/hyprforge-procman/packaging generated
     install_file target/release/hyprforge-procman "$PREFIX/hyprforge-procman" 755
@@ -1191,6 +1191,24 @@ install_procman() {
         fi
     fi
 
+    # Efficiency mode: a user service, its unit pointed at this install,
+    # never enabled here — the Processes tab switches it on.
+    COMPONENT_CHANGED=false
+    install_file target/release/hyprforge-procman-efficiency "$PREFIX/hyprforge-procman-efficiency" 755
+    local unit_dir="$HOME/.config/systemd/user"
+    sed "s|^ExecStart=.*|ExecStart=$PREFIX/hyprforge-procman-efficiency|" "$p/hyprforge-procman-efficiency.service" > "$generated"
+    if $DRY_RUN; then
+        skip "would install $unit_dir/hyprforge-procman-efficiency.service (ExecStart=$PREFIX/hyprforge-procman-efficiency)"
+    elif [[ -e $unit_dir/hyprforge-procman-efficiency.service ]] && cmp -s "$generated" "$unit_dir/hyprforge-procman-efficiency.service"; then
+        mark_current
+    else
+        install -Dm644 "$generated" "$unit_dir/hyprforge-procman-efficiency.service"
+        systemctl --user daemon-reload
+        ok "installed $unit_dir/hyprforge-procman-efficiency.service"
+    fi
+    flush_current
+    restart_if_running hyprforge-procman-efficiency "efficiency mode"
+
     local entry=$p/hyprforge-procman.desktop dst="$DESKTOP_DIR/hyprforge-procman.desktop"
     if $DRY_RUN; then
         skip "would install $dst"
@@ -1216,6 +1234,16 @@ uninstall_procman() {
     remove_file "$SYSTEM_UNIT_DIR/hyprforge-procman-recorder.service"
     [[ -e $SYSTEM_UNIT_DIR/hyprforge-procman-recorder.service ]] || $DRY_RUN || run_root systemctl daemon-reload || true
     remove_file "$PREFIX/hyprforge-procman-recorder"
+    # Stopped before it goes, which gives back every CPU weight it set.
+    if ! $DRY_RUN && timeout 5 systemctl --user is-enabled hyprforge-procman-efficiency >/dev/null 2>&1; then
+        timeout 20 systemctl --user disable --now hyprforge-procman-efficiency || true
+        ok "switched efficiency mode off"
+    fi
+    if [[ -e "$HOME/.config/systemd/user/hyprforge-procman-efficiency.service" ]]; then
+        remove_user_path "$HOME/.config/systemd/user/hyprforge-procman-efficiency.service"
+        $DRY_RUN || timeout 20 systemctl --user daemon-reload || true
+    fi
+    remove_file "$PREFIX/hyprforge-procman-efficiency"
     remove_file "$DBUS_SYSTEM_SERVICES_DIR/dev.hyprforge.ProcMan1.service"
     remove_file "$DBUS_SYSTEM_POLICY_DIR/dev.hyprforge.ProcMan1.conf"
     remove_file "$POLKIT_ACTIONS_DIR/org.hyprforge.procman.policy"
