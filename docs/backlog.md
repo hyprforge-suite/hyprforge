@@ -16,6 +16,13 @@ worth doing next.
 Things only the user can do — an account, a password, a decision, or
 someone watching the screen. Ranked by what each one unblocks.
 
+- **The NVIDIA card is held awake by its power setting.**
+  `/sys/bus/pci/devices/0000:01:00.0/power/control` is `on`, which
+  disables runtime power management outright, though the driver runs
+  fine-grained D3 (`DynamicPowerManagement: 2`) and could sleep the card
+  when idle. On battery that is a few watts all the time. Setting it to
+  `auto` (usually a udev rule) is a system change and the user's call.
+  *Added 2026-10-17.*
 - **Procman: containers, once Podman or Docker is installed.** Neither
   is on this machine, so a container's cgroup and its name can't be
   checked against the real thing, and a fixture written from memory
