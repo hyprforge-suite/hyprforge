@@ -2093,7 +2093,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-appearance"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "hyprforge-core",
  "hyprforge-look",
@@ -2110,7 +2110,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-archive"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "bzip2",
  "flate2",
@@ -2127,7 +2127,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-authui"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "chrono",
  "hyprforge-look",
@@ -2144,7 +2144,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-bluetooth"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2158,7 +2158,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-clipboard"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2192,7 +2192,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-core"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "hyprforge-look",
  "hyprforge-paths",
@@ -2207,7 +2207,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-displayd"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2230,7 +2230,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-ecosystem"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "hyprforge-core",
  "hyprforge-testkit",
@@ -2243,11 +2243,11 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-emoji"
-version = "0.1.14"
+version = "0.1.15"
 
 [[package]]
 name = "hyprforge-emojimenu"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "hyprforge-appearance",
@@ -2269,7 +2269,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-fileops"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "hyprforge-paths",
  "serde",
@@ -2280,7 +2280,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-files"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "chrono",
  "hyprforge-appearance",
@@ -2319,7 +2319,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-files-core"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "chrono",
  "hyprforge-archive",
@@ -2345,7 +2345,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-greet"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "chrono",
  "clap",
@@ -2363,7 +2363,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-icons"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "hyprforge-process",
  "tempfile",
@@ -2371,7 +2371,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-image"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "image",
  "jpeg-decoder",
@@ -2383,7 +2383,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-input"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "hyprforge-core",
  "hyprforge-lua-import",
@@ -2397,14 +2397,14 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-keys"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "thiserror 2.0.19",
 ]
 
 [[package]]
 name = "hyprforge-listing"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "serde",
  "tempfile",
@@ -2415,7 +2415,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-lock"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "calloop 0.14.4",
  "calloop-wayland-source 0.4.1",
@@ -2446,7 +2446,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-look"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "hyprforge-paths",
  "serde",
@@ -2457,7 +2457,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-lua-import"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "mlua",
  "serde_json",
@@ -2467,7 +2467,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-media"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "chrono",
  "hyprforge-appearance",
@@ -2502,7 +2502,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-mesh"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2518,7 +2518,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-mime"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "hyprforge-paths",
  "hyprforge-process",
@@ -2527,7 +2527,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-network"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2542,14 +2542,14 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-paths"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "tempfile",
 ]
 
 [[package]]
 name = "hyprforge-polkit"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2573,7 +2573,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-popup"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "calloop 0.14.4",
  "calloop-wayland-source 0.4.1",
@@ -2593,7 +2593,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-power"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2607,11 +2607,11 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-process"
-version = "0.1.14"
+version = "0.1.15"
 
 [[package]]
 name = "hyprforge-procman"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "aya",
  "chrono",
@@ -2644,14 +2644,14 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-secret"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "zeroize",
 ]
 
 [[package]]
 name = "hyprforge-session"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "hyprforge-core",
  "hyprforge-testkit",
@@ -2664,7 +2664,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-settings"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2701,7 +2701,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-setup"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "hyprforge-appearance",
  "hyprforge-core",
@@ -2722,7 +2722,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-shortcuts"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "hyprforge-core",
  "hyprforge-lua-import",
@@ -2736,7 +2736,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-system"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "hyprforge-core",
  "hyprforge-testkit",
@@ -2748,7 +2748,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-testkit"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "hyprforge-process",
  "serde_json",
@@ -2756,7 +2756,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-thumbnails"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "hyprforge-process",
  "md-5",
@@ -2767,7 +2767,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-tray"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -2797,7 +2797,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-ui"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "hyprforge-keys",
  "hyprforge-look",
@@ -2807,7 +2807,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-video"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "hyprforge-process",
  "libloading",
@@ -2819,7 +2819,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-viewer"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "bytemuck",
  "glam",
@@ -2832,7 +2832,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-volumes"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2848,7 +2848,7 @@ dependencies = [
 
 [[package]]
 name = "hyprforge-windowrules"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "hyprforge-core",
  "hyprforge-lua-import",

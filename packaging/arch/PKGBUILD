@@ -35,7 +35,7 @@ pkgname=(
   hyprforge-mime
   hyprforge
 )
-pkgver=0.1.14
+pkgver=0.1.15
 pkgrel=1
 pkgdesc="Native Hyprland desktop applications"
 arch=(x86_64)

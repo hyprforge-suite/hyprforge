@@ -11,6 +11,8 @@ drafts the next section from git; `tools/hf release` files it.
 
 ## [Unreleased]
 
+## [0.1.15] - 2026-10-16
+
 ### Added
 
 - Files: redo. Ctrl+Shift+Z and Ctrl+Y do again whatever undo took back,
