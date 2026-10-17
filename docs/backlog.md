@@ -65,12 +65,12 @@ someone watching the screen. Ranked by what each one unblocks.
   clean) and the suite repository's `files-phones` branch on GitHub
   (fully merged). Nothing would be lost; deleting is the user's say.
   *Added 2026-10-11.*
-- **The AUR.** No AUR account or SSH key yet, so nothing from this suite
-  has been pushed there. When there is one, push the latest tag's
-  render only (`packaging/aur/hyprforge/`, the commands `hf release`
-  prints at B4); skipped versions need no replay. Install `devtools`
-  first, so the release's clean-chroot build stops skipping.
-  *Added 2026-10-11.*
+- **The AUR.** No account yet: on 2026-10-16 the AUR was not accepting
+  signups, so this waits on them. When there is one, push the latest
+  tag's render only (`packaging/aur/hyprforge/`, the commands
+  `hf release` prints at B4); skipped versions need no replay.
+  `devtools` is installed now, so the next release's clean-chroot build
+  runs instead of skipping. *Added 2026-10-11.*
 - **Files' last two screenshots.** `files-devices` and `files-dialog` are
   still placeholders in `site/pages/files.html`; the live screenshot rig
   needs the user present. *Added 2026-10-10.*
