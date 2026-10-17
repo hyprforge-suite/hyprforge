@@ -16,14 +16,17 @@ worth doing next.
 Things only the user can do — an account, a password, a decision, or
 someone watching the screen. Ranked by what each one unblocks.
 
-- **Try procman's limits and efficiency mode once.** Both were built
+- **Try procman's limits, efficiency mode and rules once.** Both were built
   against a mock systemd and checked on throwaway processes; neither has
   touched one of the user's apps. Limits: Details → Limits… on a test
   app (a second Ghostty), 1 GB, then `systemctl --user show` on the
   scope it names. Efficiency: `hyprforge-procman-efficiency --dry-run`
   first, then the Processes tab's toggle, a busy app sent to another
   workspace, and the toggle off again — every weight should be given
-  back (`systemctl --user show -p CPUWeight`). *Added 2026-10-17.*
+  back (`systemctl --user show -p CPUWeight`). Rules: one for `cargo`
+  (priority 10, 8 GB), `hyprforge-procman-rules --dry-run`, the tab's
+  switch, then a build — `ps -o ni` and its scope should show both.
+  *Added 2026-10-17.*
 - **Close Files a few dozen times in the nested Hyprland.** The fix for
   its 32 segfaults (Files' `Never let go of the last reference to
   winit's connection`) keeps the drag worker's connection from being
@@ -144,10 +147,6 @@ Open work Claude can do unattended. Nothing here blocks a release.
   sum `/proc/<pid>/task/*/schedstat` over 20 s against the 1,131 it was.
   If it is still high, the next step is signals instead of the poll.
   *Added 2026-10-17.*
-- **Procman: rules.** Remembered per-program actions applied as a
-  process starts (a priority, a limit, a warning past a threshold),
-  ananicy's and Process Lasso's job. Approved 2026-10-17.
-  *Added 2026-10-17.*
 - **Procman: see deeper, the rest.** Hyprland touches — click a window
   to inspect it, end the focused window's tree, a tray item for
   pressure — want the user at the screen. Memory, Flatpaks and
@@ -221,6 +220,9 @@ Parked on purpose — written down so they are not lost, not scheduled.
 Kept for a few weeks so "what happened to X" has an answer, then
 pruned; git history has the rest.
 
+- **Procman has rules**: a Rules tab and a user service that apply a
+  priority, a cap or a warning to a program as it starts. In procman's
+  repository; local until landed. *Added 2026-10-17.*
 - **Procman limits apps and has efficiency mode**: memory and CPU caps
   per app through systemd (an app sharing the desktop's unit is moved
   out first), and a user service that lowers the CPU weight of apps

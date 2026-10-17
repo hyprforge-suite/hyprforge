@@ -1146,7 +1146,7 @@ install_procman() {
     # Four programs, one crate; the terminal view and the eBPF network
     # counter are features a plain build leaves off.
     BUILD_FEATURES=tui,netbpf build hyprforge-procman hyprforge-procman hyprforge-top \
-        hyprforge-procman-helper hyprforge-procman-recorder hyprforge-procman-efficiency
+        hyprforge-procman-helper hyprforge-procman-recorder hyprforge-procman-efficiency hyprforge-procman-rules
     step "Process manager"
     local p=crates/hyprforge-procman/packaging generated
     install_file target/release/hyprforge-procman "$PREFIX/hyprforge-procman" 755
@@ -1209,6 +1209,22 @@ install_procman() {
     flush_current
     restart_if_running hyprforge-procman-efficiency "efficiency mode"
 
+    # Rules: the same, switched on from the Rules tab.
+    COMPONENT_CHANGED=false
+    install_file target/release/hyprforge-procman-rules "$PREFIX/hyprforge-procman-rules" 755
+    sed "s|^ExecStart=.*|ExecStart=$PREFIX/hyprforge-procman-rules|" "$p/hyprforge-procman-rules.service" > "$generated"
+    if $DRY_RUN; then
+        skip "would install $unit_dir/hyprforge-procman-rules.service (ExecStart=$PREFIX/hyprforge-procman-rules)"
+    elif [[ -e $unit_dir/hyprforge-procman-rules.service ]] && cmp -s "$generated" "$unit_dir/hyprforge-procman-rules.service"; then
+        mark_current
+    else
+        install -Dm644 "$generated" "$unit_dir/hyprforge-procman-rules.service"
+        systemctl --user daemon-reload
+        ok "installed $unit_dir/hyprforge-procman-rules.service"
+    fi
+    flush_current
+    restart_if_running hyprforge-procman-rules "process rules"
+
     local entry=$p/hyprforge-procman.desktop dst="$DESKTOP_DIR/hyprforge-procman.desktop"
     if $DRY_RUN; then
         skip "would install $dst"
@@ -1244,6 +1260,15 @@ uninstall_procman() {
         $DRY_RUN || timeout 20 systemctl --user daemon-reload || true
     fi
     remove_file "$PREFIX/hyprforge-procman-efficiency"
+    if ! $DRY_RUN && timeout 5 systemctl --user is-enabled hyprforge-procman-rules >/dev/null 2>&1; then
+        timeout 20 systemctl --user disable --now hyprforge-procman-rules || true
+        ok "stopped applying process rules"
+    fi
+    if [[ -e "$HOME/.config/systemd/user/hyprforge-procman-rules.service" ]]; then
+        remove_user_path "$HOME/.config/systemd/user/hyprforge-procman-rules.service"
+        $DRY_RUN || timeout 20 systemctl --user daemon-reload || true
+    fi
+    remove_file "$PREFIX/hyprforge-procman-rules"
     remove_file "$DBUS_SYSTEM_SERVICES_DIR/dev.hyprforge.ProcMan1.service"
     remove_file "$DBUS_SYSTEM_POLICY_DIR/dev.hyprforge.ProcMan1.conf"
     remove_file "$POLKIT_ACTIONS_DIR/org.hyprforge.procman.policy"

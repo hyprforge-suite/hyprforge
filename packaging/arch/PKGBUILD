@@ -415,6 +415,9 @@ package_hyprforge-procman() {
   # on, from the Processes tab.
   _bin hyprforge-procman-efficiency
   _unit crates/hyprforge-procman/packaging/hyprforge-procman-efficiency.service hyprforge-procman-efficiency
+  # Rules, the same way: a user service the Rules tab switches on.
+  _bin hyprforge-procman-rules
+  _unit crates/hyprforge-procman/packaging/hyprforge-procman-rules.service hyprforge-procman-rules
   # The helper is started by the system bus, never by a person, so it
   # lives where its activation file says: /usr/lib/hyprforge.
   install -Dm755 "$srcdir/target/release/hyprforge-procman-helper" "$pkgdir/usr/lib/hyprforge/hyprforge-procman-helper"
