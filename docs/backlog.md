@@ -129,12 +129,13 @@ someone watching the screen. Ranked by what each one unblocks.
 
 Open work Claude can do unattended. Nothing here blocks a release.
 
-- **The tray daemon wakes in a burst every ten seconds.** About 550
-  wakeups each time, ~60 a second on average with nothing changing
-  (measured from `/proc/<pid>/task/*/schedstat`, 2026-10-17, while the
-  screen was locked) — most likely a periodic poll in
-  `hyprforge-trayd`. Find which item polls and whether a signal can
-  replace it. *Added 2026-10-17.*
+- **Measure the tray's wakeups after the next install.** trayd now runs
+  on one thread (tray: `One runtime thread`); before, its ten-second
+  poll cost ~560 wakeups a burst across five workers. After
+  `./hyprforge --install` restarts it, read procman's Battery page or
+  sum `/proc/<pid>/task/*/schedstat` over 20 s against the 1,131 it was.
+  If it is still high, the next step is signals instead of the poll.
+  *Added 2026-10-17.*
 - **Procman's run delay counts only each process's first thread.**
   `/proc/<pid>/schedstat` is the leader thread's alone: Hyprland's said
   84.5 s where its threads had waited 176.4. The Advanced view, the
