@@ -89,11 +89,16 @@ for package in packages:
         for manifest in manifests:
             data = tomllib.loads(manifest.read_text())
             declared = {b.get("name") for b in data.get("bin", [])}
-            if not declared:
-                # A crate with no [[bin]] but a src/main.rs builds one named
-                # after the package.
-                if (manifest.parent / "src" / "main.rs").is_file():
-                    declared = {data.get("package", {}).get("name")}
+            # Cargo also finds binaries nobody declared: src/main.rs, named
+            # after the package, and each src/bin/<name>.rs or
+            # src/bin/<name>/main.rs — hyprforge-mime's two are the latter,
+            # and reading only [[bin]] reported them as no crate's at all.
+            if data.get("package", {}).get("autobins", True):
+                if not data.get("bin") and (manifest.parent / "src" / "main.rs").is_file():
+                    declared.add(data.get("package", {}).get("name"))
+                bin_dir = manifest.parent / "src" / "bin"
+                declared |= {f.stem for f in bin_dir.glob("*.rs")}
+                declared |= {d.name for d in bin_dir.glob("*/") if (d / "main.rs").is_file()}
             for binary in binaries:
                 if binary in declared:
                     owners.setdefault(binary, top.parent.name)

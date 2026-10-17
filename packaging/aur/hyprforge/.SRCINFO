@@ -149,6 +149,11 @@ pkgname = hyprforge-notif
 	conflicts = notif-git
 	replaces = notif-git
 
+pkgname = hyprforge-mime
+	pkgdesc = mimetype and mimeopen that read the shared MIME database by name, so xdg-open stops sending files to a web browser
+	depends = shared-mime-info
+	optdepends = glib2: mimeopen launching the application it picked (gio)
+
 pkgname = hyprforge
 	pkgdesc = Native Hyprland desktop applications (everything)
 	depends = hyprforge-settings
@@ -162,4 +167,5 @@ pkgname = hyprforge
 	depends = hyprforge-files
 	depends = hyprforge-media
 	depends = hyprforge-notif
+	depends = hyprforge-mime
 	optdepends = hyprforge-greet: replace your display manager

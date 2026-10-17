@@ -24,11 +24,6 @@ someone watching the screen. Ranked by what each one unblocks.
   sharpen a moment after the zoom stops, and stay sharp through a short
   pan and a turn. All on Media's and Files' `next` branches, so a build
   from this checkout has them. *Added 2026-10-11.*
-- **Run the disposable tier once for the pair settings.** Hyprland's
-  own source says it reads `offset = { 2.0, 3.0 }`, and the read-only
-  check agrees every new key is a `vec2`, but no generated file with a
-  pair in it has been loaded by a compositor yet: `tools/hf test
-  disposable` in a terminal of yours does that. *Added 2026-10-12.*
 - **An encrypted stick, once, for real.** Unlocking was built against
   UDisks2's interface and a mock, never a real LUKS device. A stick (or
   a LUKS image attached with `udisksctl loop-setup`) clicked in Files:
@@ -117,10 +112,6 @@ Open work Claude can do unattended. Nothing here blocks a release.
 - **`hf hyprland up --for-lock`.** The tooling plan had the disposable
   instance replace `crates/hyprforge-lock/testing/nested.sh`; the lock
   screen still uses the script. *Added 2026-10-11.*
-- **Does `hyprforge-mime` need a package of its own?** The installer's
-  `--mime` installs `hyprforge-mimetype` and `hyprforge-mimeopen`; the
-  PKGBUILD has no package for them. Decide, then make the two agree.
-  *Added 2026-10-11.*
 - **Media's model view, live.** Drag to rotate and pan has never been
   exercised with a real pointer, and view3d's `--screenshot` was not
   carried over. *Added 2026-09-26.*
@@ -182,6 +173,15 @@ Parked on purpose — written down so they are not lost, not scheduled.
 Kept for a few weeks so "what happened to X" has an answer, then
 pruned; git history has the rest.
 
+- **`hyprforge-mime` is a package**: the user's call. It installs
+  `hyprforge-mimetype` and `hyprforge-mimeopen`, needs
+  `shared-mime-info`, and joins the metapackage; it doesn't take the
+  plain `mimetype`/`mimeopen` names, which stay the installer's opt-in
+  `--provide-mimetype`. *Added 2026-10-16.*
+- **The pair settings load in a real compositor**: `tools/hf test
+  disposable` (33/33) on 2026-10-16 evaluated a generated file holding
+  every catalogued `vec2`, the shadow offset and the tablet's included,
+  and both range extremes, without an error. *Added 2026-10-16.*
 - **Every `#[ignore]` says why**: 100 bare ones got their tier and,
   for live and visible tests, their gate — read from nextest and
   `tools/hflib/tiers.py`, not written by hand — and `hf lint` now

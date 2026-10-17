@@ -35,6 +35,7 @@ pkgname=(
   hyprforge-files
   hyprforge-media
   hyprforge-notif
+  hyprforge-mime
   hyprforge
 )
 pkgver=0.1.14
@@ -481,6 +482,25 @@ package_hyprforge-notif() {
   _license crates/hyprforge-notif/LICENSE
 }
 
+package_hyprforge-mime() {
+  pkgdesc="mimetype and mimeopen that read the shared MIME database by name, so xdg-open stops sending files to a web browser"
+  # The database is the whole of what these answer from; without it every
+  # file is unknown, which is broken rather than degraded.
+  depends=(shared-mime-info)
+  # mimeopen launches the chosen application through `gio launch` and
+  # says so when there is no gio, rather than guessing at Exec=.
+  optdepends=('glib2: mimeopen launching the application it picked (gio)')
+  # Only the hyprforge- names. The installer's --provide-mimetype puts
+  # them on PATH as plain `mimetype` and `mimeopen` too, which changes
+  # what xdg-open runs for every program, and would make this package
+  # conflict with perl-file-mimeinfo's /usr/bin files; that stays a
+  # choice the user makes with a symlink, not one a package makes.
+  cd "$srcdir/hyprforge"
+  _bin hyprforge-mimetype
+  _bin hyprforge-mimeopen
+  _license
+}
+
 package_hyprforge() {
   pkgdesc="Native Hyprland desktop applications (everything)"
   depends=(
@@ -495,6 +515,7 @@ package_hyprforge() {
     hyprforge-files
     hyprforge-media
     hyprforge-notif
+    hyprforge-mime
   )
   # The greeter is deliberately not here. Installing it is not the
   # dangerous step — enabling greetd is, because that decides which VT
