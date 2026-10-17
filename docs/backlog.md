@@ -16,6 +16,15 @@ worth doing next.
 Things only the user can do — an account, a password, a decision, or
 someone watching the screen. Ranked by what each one unblocks.
 
+- **Procman: a right click opens no menu, so start the nested
+  Hyprland.** The user reports nothing at all on a right click, on any
+  row. The menus are wired (`src/menus.rs`) and a real right press sent
+  through the drawn view by `iced_test` opens one (procman cf584b5), so
+  the cause is outside what headless iced reaches. Next: `tools/hf
+  hyprland up` in the user's terminal, then the installed procman in it
+  and a right click from a virtual pointer (`zwlr_virtual_pointer_v1`,
+  buttons 0x110/0x111; the nested-pointer-drag-rig memory), after
+  checking the rig gets a menu out of Files. *Added 2026-10-17.*
 - **An encrypted stick, once, for real.** Unlocking was built against
   UDisks2's interface and a mock, never a real LUKS device. A stick (or
   a LUKS image attached with `udisksctl loop-setup`) clicked in Files:
@@ -97,6 +106,34 @@ someone watching the screen. Ranked by what each one unblocks.
 
 Open work Claude can do unattended. Nothing here blocks a release.
 
+- **Procman: crashes and OOM kills.** What crashed (systemd-coredump,
+  with its stack trace) and what the kernel or systemd-oomd killed for
+  memory, in the window and in `hyprforge-top`. The user's go-ahead,
+  2026-10-17; in progress. *Added 2026-10-17.*
+- **Files segfaults in its drag-and-drop thread.** 2026-10-16 20:59,
+  `hyprforge-files` pid 16869, thread `files-dnd` (`src/dnd.rs`):
+  SIGSEGV in `wl_proxy_destroy`, two minutes after a reinstall replaced
+  the binary, so most likely while closing — a proxy destroyed after
+  its connection. The core is still in `coredumpctl info 16869`.
+  *Added 2026-10-17.*
+- **Procman: battery hogs.** Wakeups and estimated power per process,
+  powertop's question, from the APU package power it already reads.
+  Approved 2026-10-17. *Added 2026-10-17.*
+- **Procman: limits per app.** Cap an app's memory, CPU and I/O through
+  systemd's cgroup properties, on a running app or at launch.
+  Approved 2026-10-17. *Added 2026-10-17.*
+- **Procman: efficiency mode.** Background windows get less CPU while
+  another has focus, from Hyprland's focus events. Approved 2026-10-17.
+  *Added 2026-10-17.*
+- **Procman: rules.** Remembered per-program actions applied as a
+  process starts (a priority, a limit, a warning past a threshold),
+  ananicy's and Process Lasso's job. Approved 2026-10-17.
+  *Added 2026-10-17.*
+- **Procman: see deeper.** Connections per process with live bandwidth;
+  containers and Flatpaks grouped as such; memory split into private,
+  shared and swapped; and Hyprland touches — click a window to inspect
+  it, end the focused window's tree, a tray item for pressure. Approved
+  2026-10-17. *Added 2026-10-17.*
 - **A check that builds the pins, not the checkout.** `main`'s CI has
   failed since `738b5ab` (2026-10-12): it added `Ask::Unlock` to
   `hyprforge-files-core`, and the pinned Files matches `Ask`
