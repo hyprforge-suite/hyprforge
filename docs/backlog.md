@@ -136,13 +136,6 @@ Open work Claude can do unattended. Nothing here blocks a release.
   sum `/proc/<pid>/task/*/schedstat` over 20 s against the 1,131 it was.
   If it is still high, the next step is signals instead of the poll.
   *Added 2026-10-17.*
-- **Procman's run delay counts only each process's first thread.**
-  `/proc/<pid>/schedstat` is the leader thread's alone: Hyprland's said
-  84.5 s where its threads had waited 176.4. The Advanced view, the
-  Recorded tab and `hyprforge-top` all show it. Summing `task/*` fixes
-  it, but changes what recorded days mean, so a day spanning the
-  upgrade needs a marker (or a format bump) so no interval compares
-  one against the other. *Added 2026-10-17.*
 - **Procman: limits per app.** Cap an app's memory, CPU and I/O through
   systemd's cgroup properties, on a running app or at launch.
   Approved 2026-10-17. *Added 2026-10-17.*
@@ -226,6 +219,10 @@ Parked on purpose — written down so they are not lost, not scheduled.
 Kept for a few weeks so "what happened to X" has an answer, then
 pruned; git history has the rest.
 
+- **Procman's run delay is every thread's** (journal format 4): format
+  3 days read with run delay unknown, and today's format 3 file is set
+  aside, so no interval mixes the two. In procman's repository; local
+  until landed. *Added 2026-10-17.*
 - **`hf check` builds the pins**: "The pins build together" builds
   every component at its pinned commit whenever one is checked out
   elsewhere, as CI does — 63 s cold, 3 s warm. Recreating 738b5ab's
