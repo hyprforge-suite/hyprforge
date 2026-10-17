@@ -11,6 +11,47 @@ drafts the next section from git; `tools/hf release` files it.
 
 ## [Unreleased]
 
+### Added
+
+- Files: redo. Ctrl+Shift+Z and Ctrl+Y do again whatever undo took back,
+  for everything undo covers (`hyprforge-files-core`'s redo list).
+- Files: encrypted drives open with their passphrase. A click on a locked
+  LUKS or BitLocker drive asks for it, unlocks it through UDisks2 and
+  opens it; a wrong passphrase asks again, and unmounting or ejecting
+  locks it again (`hyprforge-volumes`).
+- Files: the split view's divider drags, double click for even halves,
+  and the session keeps the ratio — through a shared `split_handle` in
+  `hyprforge-ui`.
+- Media and Files' Quick Look: animated GIFs play
+  (`hyprforge_image::decode_animation`, `hyprforge_viewer::animation`).
+- Media: zoomed in, a photo is sharp. Once a zoom settles, the part on
+  screen is decoded again at the density it is drawn at
+  (`hyprforge_image::decode_region`), inside the same memory budget.
+- Media: a switch for the 3D model's autoreload — Live in the model
+  toolbar, and Ctrl+Shift+R.
+- Settings: pairs of numbers. A `vec2` kind in `hyprforge-core` brings
+  in the shadow offset and the whole drawing-tablet section of Input.
+- Settings: layer rules on the Window rules page — see, edit, add and
+  remove them.
+- Settings: the keep-or-revert prompt after a display change lists what
+  changed, from displayd's new `PendingChanges`.
+- The tray's popup opens submenus in place, under a Back row, rather
+  than flattening the whole tree into one list.
+- `hyprforge-mime` is its own Arch package: `hyprforge-mimetype` and
+  `hyprforge-mimeopen`, part of the `hyprforge` metapackage.
+
+### Changed
+
+- Procman's journal is format 3: it records whether delay accounting was
+  on, whether exits were dropped or unheard, and "unknown" rather than 0
+  for what a frame could not see. Format 2 days still read.
+
+### Fixed
+
+- The lock screen no longer borrows hyprlock's PAM file, whose missing
+  account stack refused every correct password; it falls back to
+  `login`.
+
 ## [0.1.14] - 2026-10-11
 
 ### Added

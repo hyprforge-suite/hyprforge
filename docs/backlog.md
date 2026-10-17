@@ -16,14 +16,6 @@ worth doing next.
 Things only the user can do — an account, a password, a decision, or
 someone watching the screen. Ranked by what each one unblocks.
 
-- **Try redo, animated GIFs and sharp zoom once, on screen.** Built
-  while you were away, unit-tested, never seen running: in Files, a
-  rename then Ctrl+Z then Ctrl+Shift+Z (and the same with a trash); a
-  GIF in Media, zoomed in and back out, turned, and in a slideshow; a
-  GIF in Files' Quick Look; a large photo in Media at 1:1, which should
-  sharpen a moment after the zoom stops, and stay sharp through a short
-  pan and a turn. All on Media's and Files' `next` branches, so a build
-  from this checkout has them. *Added 2026-10-11.*
 - **An encrypted stick, once, for real.** Unlocking was built against
   UDisks2's interface and a mock, never a real LUKS device. A stick (or
   a LUKS image attached with `udisksctl loop-setup`) clicked in Files:
@@ -181,6 +173,8 @@ Parked on purpose — written down so they are not lost, not scheduled.
 Kept for a few weeks so "what happened to X" has an answer, then
 pruned; git history has the rest.
 
+- **Redo, animated GIFs and sharp zoom, seen on screen**: the user
+  tried them before 0.1.15 and they work. *Added 2026-10-16.*
 - **`hyprforge-mime` is a package**: the user's call. It installs
   `hyprforge-mimetype` and `hyprforge-mimeopen`, needs
   `shared-mime-info`, and joins the metapackage; it doesn't take the
