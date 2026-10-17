@@ -38,13 +38,51 @@ DISPOSABLE_COVERS = [
 ]
 
 
+def _is_submodule(path: str) -> bool:
+    return run(["git", "ls-files", "-s", "--", path]).out.startswith("160000")
+
+
+def _next_head(path: str, *, fetch: bool) -> str | None:
+    """The component's `origin/next`, or None when it has none."""
+    if fetch and not run(["git", "-C", path, "fetch", "-q", "origin", "next"]).ok:
+        return None
+    r = run(["git", "-C", path, "rev-parse", "-q", "--verify", "origin/next^{commit}"])
+    return r.out.strip() if r.ok else None
+
+
 def coverage_fingerprint() -> dict:
-    """Tree hash of each covered path at HEAD, plus whether any is dirty."""
-    trees = {}
+    """Tree hash of each covered path at HEAD, plus whether any is dirty.
+
+    A component checked out at its pushed `origin/next` counts as
+    committed, recorded under `next`: when a library change lands ahead
+    of the component code that handles it, the pins do not compile
+    together, and the only tree the disposable tier can test is the one
+    the release builds after A1 merges every `next` — which, with `next`
+    descending from the pin, is that `next` exactly. Refusing it left no
+    commit a release could ever accept (0.1.15, Files and `Ask::Unlock`).
+    """
+    trees, via_next = {}, {}
+    dirty = run(["git", "status", "--porcelain", "--ignore-submodules=all", "--", *DISPOSABLE_COVERS]).out.strip() != ""
     for path in DISPOSABLE_COVERS:
-        trees[path] = run(["git", "rev-parse", f"HEAD:{path}"]).out.strip()
-    dirty = run(["git", "status", "--porcelain", "--", *DISPOSABLE_COVERS]).out.strip() != ""
-    return {"trees": trees, "dirty": dirty}
+        pin = run(["git", "rev-parse", f"HEAD:{path}"]).out.strip()
+        trees[path] = pin
+        if not _is_submodule(path):
+            continue
+        if run(["git", "-C", path, "status", "--porcelain"]).out.strip():
+            dirty = True
+            continue
+        head = run(["git", "-C", path, "rev-parse", "HEAD"]).out.strip()
+        if head == pin:
+            continue
+        on_next = (
+            head == _next_head(path, fetch=False)
+            and run(["git", "-C", path, "merge-base", "--is-ancestor", pin, head]).ok
+        )
+        if on_next:
+            via_next[path] = head
+        else:
+            dirty = True
+    return {"trees": trees, "next": via_next, "dirty": dirty}
 
 
 def disposable_stamp_is_fresh() -> tuple[bool, str]:
@@ -60,7 +98,18 @@ def disposable_stamp_is_fresh() -> tuple[bool, str]:
     changed = [p for p, t in now["trees"].items() if recorded["trees"].get(p) != t]
     if changed:
         return False, f"changed since the disposable tier last passed: {', '.join(changed)} — run `tools/hf test disposable`"
-    return True, f"passed {time.strftime('%Y-%m-%d %H:%M', time.localtime(recorded['at']))}"
+    # A pass on a component's `next` vouches for the release only while
+    # that `next` is still what A1 will merge: fetched, not the local
+    # ref, because a push from elsewhere would put untested code in.
+    # And `now` must be at the pin, not on `next` itself, or the release
+    # refuses for that reason first.
+    for path, tested in recorded.get("next", {}).items():
+        if now["next"].get(path, tested) != tested:
+            return False, f"{path}: checked out at a different `next` than the disposable tier tested"
+        if _next_head(path, fetch=True) != tested:
+            return False, f"{path}: its `next` has moved since the disposable tier tested it — run `tools/hf test disposable` again"
+    tested_next = "".join(f"; {p} at next {c[:7]}" for p, c in recorded.get("next", {}).items())
+    return True, f"passed {time.strftime('%Y-%m-%d %H:%M', time.localtime(recorded['at']))}{tested_next}"
 
 
 def _disposable(keep: bool, unattended_ok: bool) -> int:
