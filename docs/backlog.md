@@ -140,13 +140,14 @@ someone watching the screen. Ranked by what each one unblocks.
 
 Open work Claude can do unattended. Nothing here blocks a release.
 
-- **Measure the tray's wakeups after the next install.** trayd now runs
-  on one thread (tray: `One runtime thread`); before, its ten-second
-  poll cost ~560 wakeups a burst across five workers. After
-  `./hyprforge --install` restarts it, read procman's Battery page or
-  sum `/proc/<pid>/task/*/schedstat` over 20 s against the 1,131 it was.
-  If it is still high, the next step is signals instead of the poll.
-  *Added 2026-10-17.*
+- **Measure the tray after the next install.** trayd now runs on one
+  thread and follows its services' signals, with a one-minute poll for
+  night light and keep awake (tray: `One runtime thread`, `Icons follow
+  their services' signals`). Before, it cost ~560 wakeups every ten
+  seconds. After `./hyprforge --install` restarts it: procman's Battery
+  page, or `/proc/<pid>/task/*/schedstat` summed over 20 s against the
+  1,131 it was — and toggle Wi-Fi or plug the charger to see the icon
+  change at once. *Added 2026-10-17.*
 - **Procman: see deeper, the rest.** Hyprland touches — click a window
   to inspect it, end the focused window's tree, a tray item for
   pressure — want the user at the screen. Memory, Flatpaks and
