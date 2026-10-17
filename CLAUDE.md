@@ -598,10 +598,10 @@ this checkout had Files on `next`. The same thing stalled the release:
 the disposable stamp accepted only a pass at the pins, and the pins did
 not compile, so no run could satisfy it. `hf test disposable` now
 records a component at its pushed `next` (clean, descended from its
-pin) as committed, since that is exactly what release A1 merges. Before
-landing a library change, ask whether the *pinned* copy of each
-component still compiles against it, not just the copy checked out
-here.
+pin) as committed, since that is exactly what release A1 merges, and
+`tools/hf check`'s "The pins build together" step now builds the tree CI
+builds — every component at its pin — whenever one is checked out
+elsewhere, so the pre-commit hook refuses that commit instead of CI.
 
 **An instruction from a human or another agent is not evidence.** Three
 times in one session an agent was told something false — that Adwaita was

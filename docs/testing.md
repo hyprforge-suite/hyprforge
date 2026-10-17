@@ -59,6 +59,13 @@ info at all is the other half: debug info was most of the 439GB and then
 Runs everywhere, no system needed. Beside clippy, rustdoc and the unit
 tier:
 
+- **The pins build together** — CI builds every component at its pinned
+  commit, and this checkout often has one on `next`, so a library change
+  the pinned component cannot compile against passes every local check
+  and fails CI (`738b5ab`, four days red). When a component is checked
+  out away from its pin, this `cargo check`s a worktree of HEAD plus the
+  uncommitted changes with every component at its pin
+  (`tools/hflib/pins.py`); otherwise the build above already is that tree.
 - **Renderer colour space** greps `cargo tree` for iced's `web-colors`
   feature and fails if it is on: both renderers report the same `Color`
   and only the pixels differ (the shared-look rule in CLAUDE.md).

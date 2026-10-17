@@ -102,6 +102,25 @@ def submodules() -> bool:
 # --- tier 1: static -------------------------------------------------------
 
 
+def pins_build() -> None:
+    ui.step("The pins build together")
+    from . import pins
+    moved = pins.moved()
+    if not moved:
+        ui.ok("every component is at its pin, so the build above is the one CI makes")
+        return
+    built, said = pins.build(tiers.feature_args())
+    names = ", ".join(Path(p).name for p in moved)
+    if built:
+        ui.ok(f"built with every component at its pin, as CI will ({names} checked out elsewhere here)")
+    else:
+        # The 738b5ab case: a library change the pinned component can't
+        # compile against. CI on main fails from this commit until the
+        # release moves the pins — or the change is made compatible.
+        ui.bad(f"with every component at its pin, the workspace doesn't build — CI on main would fail from this commit ({names} checked out elsewhere here)")
+        ui.detail(said + ["make the library change compatible with the pinned component, or release so the pins can move"])
+
+
 def clippy() -> None:
     ui.step("Lint")
     r = run(["cargo", "clippy", "--workspace", "--all-targets", *tiers.feature_args()], env=cargo_env(), timeout=BUILD)
@@ -533,6 +552,7 @@ def check(fast: bool) -> int:
     if not room_to_build() or not submodules():
         return ui.summary()
     clippy()
+    pins_build()
     docs()
     web_colors()
     dependency_pins()

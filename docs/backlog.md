@@ -157,14 +157,6 @@ Open work Claude can do unattended. Nothing here blocks a release.
   pressure — want the user at the screen. Memory, Flatpaks and
   connections are done (Details already listed sockets). Approved
   2026-10-17. *Added 2026-10-17.*
-- **A check that builds the pins, not the checkout.** `main`'s CI has
-  failed since `738b5ab` (2026-10-12): it added `Ask::Unlock` to
-  `hyprforge-files-core`, and the pinned Files matches `Ask`
-  exhaustively; only Files' `next` handles it. Every local check passed
-  because this checkout builds Files from `next`. `hf check` should
-  build each component at its pin when it is checked out elsewhere, or
-  refuse a library change that breaks one. The release fixes the red
-  itself. *Added 2026-10-16.*
 - **A Keyboard screen for the suite's own bindings.** Media's keys can
   only be changed by editing `media-config.toml`; `docs/design/vision.md`
   plans a Settings screen on the `hyprforge-keys` grammar, and Files'
@@ -233,6 +225,10 @@ Parked on purpose — written down so they are not lost, not scheduled.
 Kept for a few weeks so "what happened to X" has an answer, then
 pruned; git history has the rest.
 
+- **`hf check` builds the pins**: "The pins build together" builds
+  every component at its pinned commit whenever one is checked out
+  elsewhere, as CI does — 63 s cold, 3 s warm. Recreating 738b5ab's
+  break made it fail naming the unmatched variant. *Added 2026-10-17.*
 - **Procman sees deeper**: Details splits a process's memory into its
   own, shared and swapped (`smaps_rollup`), and a Flatpak app is one
   group with its whole sandbox. In procman's repository; local until
