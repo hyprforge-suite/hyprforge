@@ -113,9 +113,19 @@ Open work Claude can do unattended. Nothing here blocks a release.
   after a reinstall, so at least one is a proxy outliving its
   connection. `coredumpctl list hyprforge-files` and `coredumpctl info
   <pid>` have the stacks. *Added 2026-10-17.*
-- **Procman: battery hogs.** Wakeups and estimated power per process,
-  powertop's question, from the APU package power it already reads.
-  Approved 2026-10-17. *Added 2026-10-17.*
+- **The tray daemon wakes in a burst every ten seconds.** About 550
+  wakeups each time, ~60 a second on average with nothing changing
+  (measured from `/proc/<pid>/task/*/schedstat`, 2026-10-17, while the
+  screen was locked) — most likely a periodic poll in
+  `hyprforge-trayd`. Find which item polls and whether a signal can
+  replace it. *Added 2026-10-17.*
+- **Procman's run delay counts only each process's first thread.**
+  `/proc/<pid>/schedstat` is the leader thread's alone: Hyprland's said
+  84.5 s where its threads had waited 176.4. The Advanced view, the
+  Recorded tab and `hyprforge-top` all show it. Summing `task/*` fixes
+  it, but changes what recorded days mean, so a day spanning the
+  upgrade needs a marker (or a format bump) so no interval compares
+  one against the other. *Added 2026-10-17.*
 - **Procman: limits per app.** Cap an app's memory, CPU and I/O through
   systemd's cgroup properties, on a running app or at launch.
   Approved 2026-10-17. *Added 2026-10-17.*
@@ -207,6 +217,10 @@ Parked on purpose — written down so they are not lost, not scheduled.
 Kept for a few weeks so "what happened to X" has an answer, then
 pruned; git history has the rest.
 
+- **Procman says what is using power**: on the Battery page, estimated
+  watts on battery and the share of activity plugged in, with every
+  thread's wakeups, averaged over ten seconds. In procman's repository;
+  local until landed. *Added 2026-10-17.*
 - **Procman's Crashes tab**: crashes from systemd-coredump with their
   stack traces, and kills for memory from the kernel, systemd and
   systemd-oomd, with what each was using. In procman's repository;
