@@ -16,6 +16,15 @@ worth doing next.
 Things only the user can do — an account, a password, a decision, or
 someone watching the screen. Ranked by what each one unblocks.
 
+- **Procman: containers, once Podman or Docker is installed.** Neither
+  is on this machine, so a container's cgroup and its name can't be
+  checked against the real thing, and a fixture written from memory
+  tests the memory. Installing one is the user's call.
+  *Added 2026-10-17.*
+- **Procman: bandwidth per connection, with root.** Details lists each
+  process's connections; their bytes need the eBPF counter to key on
+  the socket as well as the process, and loading it needs root — the
+  root tier, in the user's terminal. *Added 2026-10-17.*
 - **Procman: a right click opens no menu, so start the nested
   Hyprland.** The user reports nothing at all on a right click, on any
   row. The menus are wired (`src/menus.rs`) and a real right press sent
@@ -136,10 +145,10 @@ Open work Claude can do unattended. Nothing here blocks a release.
   process starts (a priority, a limit, a warning past a threshold),
   ananicy's and Process Lasso's job. Approved 2026-10-17.
   *Added 2026-10-17.*
-- **Procman: see deeper.** Connections per process with live bandwidth;
-  containers and Flatpaks grouped as such; memory split into private,
-  shared and swapped; and Hyprland touches — click a window to inspect
-  it, end the focused window's tree, a tray item for pressure. Approved
+- **Procman: see deeper, the rest.** Hyprland touches — click a window
+  to inspect it, end the focused window's tree, a tray item for
+  pressure — want the user at the screen. Memory, Flatpaks and
+  connections are done (Details already listed sockets). Approved
   2026-10-17. *Added 2026-10-17.*
 - **A check that builds the pins, not the checkout.** `main`'s CI has
   failed since `738b5ab` (2026-10-12): it added `Ask::Unlock` to
@@ -217,6 +226,10 @@ Parked on purpose — written down so they are not lost, not scheduled.
 Kept for a few weeks so "what happened to X" has an answer, then
 pruned; git history has the rest.
 
+- **Procman sees deeper**: Details splits a process's memory into its
+  own, shared and swapped (`smaps_rollup`), and a Flatpak app is one
+  group with its whole sandbox. In procman's repository; local until
+  landed. *Added 2026-10-17.*
 - **Procman says what is using power**: on the Battery page, estimated
   watts on battery and the share of activity plugged in, with every
   thread's wakeups, averaged over ten seconds. In procman's repository;
