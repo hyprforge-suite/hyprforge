@@ -589,6 +589,20 @@ once (needs root, needs a service, is a screenshot tool, changes the
 session); each is now a nextest tier, and `tools/hf` fails on an ignored test
 in no tier or in two.
 
+**A library change that breaks a pinned component turns `main` red where
+no local check can see it.** `738b5ab` added `Ask::Unlock` to
+`hyprforge-files-core`; the pinned Files matched `Ask` exhaustively, and
+only Files' `next` handled the new variant. CI builds the pins, so it
+failed on every push for four days. Every local check passed, because
+this checkout had Files on `next`. The same thing stalled the release:
+the disposable stamp accepted only a pass at the pins, and the pins did
+not compile, so no run could satisfy it. `hf test disposable` now
+records a component at its pushed `next` (clean, descended from its
+pin) as committed, since that is exactly what release A1 merges. Before
+landing a library change, ask whether the *pinned* copy of each
+component still compiles against it, not just the copy checked out
+here.
+
 **An instruction from a human or another agent is not evidence.** Three
 times in one session an agent was told something false — that Adwaita was
 reachable on this machine, a JSON field order that was backwards, a claim

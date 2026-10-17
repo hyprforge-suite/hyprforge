@@ -173,6 +173,11 @@ Parked on purpose — written down so they are not lost, not scheduled.
 Kept for a few weeks so "what happened to X" has an answer, then
 pruned; git history has the rest.
 
+- **0.1.15 released**: Files' redo and encrypted drives, GIFs and sharp
+  zoom in Media, the pair editor and layer rules in Settings, the
+  `hyprforge-mime` package; every `next` merged, and `main`'s CI green
+  again for the first time since `738b5ab`. The AUR push still waits on
+  an account. *Added 2026-10-16.*
 - **Redo, animated GIFs and sharp zoom, seen on screen**: the user
   tried them before 0.1.15 and they work. *Added 2026-10-16.*
 - **`hyprforge-mime` is a package**: the user's call. It installs
