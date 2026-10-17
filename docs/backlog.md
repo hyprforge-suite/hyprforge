@@ -16,6 +16,13 @@ worth doing next.
 Things only the user can do — an account, a password, a decision, or
 someone watching the screen. Ranked by what each one unblocks.
 
+- **Close Files a few dozen times in the nested Hyprland.** The fix for
+  its 32 segfaults (Files' `Never let go of the last reference to
+  winit's connection`) keeps the drag worker's connection from being
+  torn down after winit disconnects the display; every stack matched
+  that teardown. Proof is closing it repeatedly with a drag done first,
+  then `coredumpctl list hyprforge-files` showing nothing new.
+  *Added 2026-10-17.*
 - **The NVIDIA card is held awake by its power setting.**
   `/sys/bus/pci/devices/0000:01:00.0/power/control` is `on`, which
   disables runtime power management outright, though the driver runs
@@ -122,13 +129,6 @@ someone watching the screen. Ranked by what each one unblocks.
 
 Open work Claude can do unattended. Nothing here blocks a release.
 
-- **Files segfaults, 32 times in 30 days.** Procman's new Crashes tab
-  counted them: all SIGSEGV — 16 in the main thread, 14 in `files-dnd`
-  (`src/dnd.rs`) and 2 in `files-drag-out`, spread from 2026-09-26 to
-  10-16. The latest (pid 16869) died in `wl_proxy_destroy` two minutes
-  after a reinstall, so at least one is a proxy outliving its
-  connection. `coredumpctl list hyprforge-files` and `coredumpctl info
-  <pid>` have the stacks. *Added 2026-10-17.*
 - **The tray daemon wakes in a burst every ten seconds.** About 550
   wakeups each time, ~60 a second on average with nothing changing
   (measured from `/proc/<pid>/task/*/schedstat`, 2026-10-17, while the
