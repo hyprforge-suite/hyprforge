@@ -84,7 +84,7 @@ default-filter = """
   | binary_id(hyprforge-polkit::live_polkit)
   | binary_id(hyprforge-polkit::bin/hyprforge-polkit) and test(=agent::tests::a_process_outside_any_session_answers_for_the_users_display)
   | binary_id(hyprforge-power::live_logind) | binary_id(hyprforge-power::live_upower) | binary_id(hyprforge-power::live_power_profiles)
-  | binary_id(hyprforge-procman) and test(/^(services|sessions)::/)
+  | binary_id(hyprforge-procman) and test(/^(services|sessions|incidents)::/)
   | binary_id(hyprforge-tray::live_icons)
   | binary_id(hyprforge-video)
   | binary_id(hyprforge-volumes::live_udisks) | binary_id(hyprforge-volumes::live_gadgets)

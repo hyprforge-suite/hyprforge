@@ -106,16 +106,13 @@ someone watching the screen. Ranked by what each one unblocks.
 
 Open work Claude can do unattended. Nothing here blocks a release.
 
-- **Procman: crashes and OOM kills.** What crashed (systemd-coredump,
-  with its stack trace) and what the kernel or systemd-oomd killed for
-  memory, in the window and in `hyprforge-top`. The user's go-ahead,
-  2026-10-17; in progress. *Added 2026-10-17.*
-- **Files segfaults in its drag-and-drop thread.** 2026-10-16 20:59,
-  `hyprforge-files` pid 16869, thread `files-dnd` (`src/dnd.rs`):
-  SIGSEGV in `wl_proxy_destroy`, two minutes after a reinstall replaced
-  the binary, so most likely while closing — a proxy destroyed after
-  its connection. The core is still in `coredumpctl info 16869`.
-  *Added 2026-10-17.*
+- **Files segfaults, 32 times in 30 days.** Procman's new Crashes tab
+  counted them: all SIGSEGV — 16 in the main thread, 14 in `files-dnd`
+  (`src/dnd.rs`) and 2 in `files-drag-out`, spread from 2026-09-26 to
+  10-16. The latest (pid 16869) died in `wl_proxy_destroy` two minutes
+  after a reinstall, so at least one is a proxy outliving its
+  connection. `coredumpctl list hyprforge-files` and `coredumpctl info
+  <pid>` have the stacks. *Added 2026-10-17.*
 - **Procman: battery hogs.** Wakeups and estimated power per process,
   powertop's question, from the APU package power it already reads.
   Approved 2026-10-17. *Added 2026-10-17.*
@@ -210,6 +207,10 @@ Parked on purpose — written down so they are not lost, not scheduled.
 Kept for a few weeks so "what happened to X" has an answer, then
 pruned; git history has the rest.
 
+- **Procman's Crashes tab**: crashes from systemd-coredump with their
+  stack traces, and kills for memory from the kernel, systemd and
+  systemd-oomd, with what each was using. In procman's repository;
+  local until landed. *Added 2026-10-17.*
 - **0.1.15 released**: Files' redo and encrypted drives, GIFs and sharp
   zoom in Media, the pair editor and layer rules in Settings, the
   `hyprforge-mime` package; every `next` merged, and `main`'s CI green
