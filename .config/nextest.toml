@@ -148,5 +148,6 @@ test-group = "serial"
 default-filter = """
     binary_id(hyprforge-polkit::bin/hyprforge-polkit) and test(=prompt::tests::render_the_card)
   | binary_id(hyprforge-procman::bin/hyprforge-procman) and test(/^render::/)
+  | binary_id(hyprforge-files::bin/hyprforge-files) and test(=tests::render_the_window)
   | binary_id(hyprforge-procman) and test(/^(journal|recorder|tui)::/)
 """

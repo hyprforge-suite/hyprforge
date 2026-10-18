@@ -200,8 +200,24 @@ where
     ) {
         let state = tree.state.downcast_ref::<State<Renderer::Paragraph>>();
         let paragraph = state.paragraph.raw();
-        let anchor = layout.bounds().anchor(paragraph.min_bounds(), paragraph.align_x(), paragraph.align_y());
-        renderer.fill_paragraph(paragraph, anchor, self.color.unwrap_or(style.text_color), *viewport);
+        let bounds = layout.bounds();
+        let anchor = bounds.anchor(paragraph.min_bounds(), paragraph.align_x(), paragraph.align_y());
+        // Clipped at its own sides, never above or below. A name is cut
+        // with "…" to its width, so nothing should cross either side — and
+        // the clip makes sure of it for a frame laid out before the cut
+        // caught up. Callers used to get that by wrapping this in a
+        // `container(..).clip(true)`, which clips all four sides at the
+        // line box, and a font's descenders hang below its line box:
+        // with Noto Sans every g, p and y in Files' names was cut through
+        // (2026-10-18). A line's height of room above and below is more
+        // than any font's overhang.
+        let room = paragraph.min_bounds().height.max(1.0);
+        let clip = Rectangle { x: bounds.x, y: bounds.y - room, width: bounds.width, height: bounds.height + room * 2.0 };
+        // Through the paragraph's own clip bounds — iced clips text by
+        // that argument, not by a layer; a layer around it was measured to
+        // cut nothing.
+        let Some(clip) = viewport.intersection(&clip) else { return };
+        renderer.fill_paragraph(paragraph, anchor, self.color.unwrap_or(style.text_color), clip);
     }
 }
 
@@ -256,6 +272,68 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    /// Draws `element` at `w`×`h` logical pixels, at this machine's 1.6
+    /// output scale, on black, and returns which *physical* pixels got
+    /// any ink — through iced's own renderer with tiny-skia inside.
+    const SCALE: f32 = 1.6;
+
+    fn ink(element: Element<'_, ()>, w: u32, h: u32) -> Vec<bool> {
+        use iced_runtime::user_interface::{Cache, UserInterface};
+        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(iced::Font::DEFAULT, Pixels(16.0)));
+        let size = Size::new(w as f32, h as f32);
+        let mut ui = UserInterface::build(element, size, Cache::default(), &mut renderer);
+        ui.draw(&mut renderer, &iced::Theme::Dark, &iced::advanced::renderer::Style { text_color: Color::WHITE }, iced::mouse::Cursor::Unavailable);
+        let iced::Renderer::Secondary(mut skia) = renderer else { unreachable!() };
+        let (pw, ph) = ((w as f32 * SCALE) as u32, (h as f32 * SCALE) as u32);
+        let mut pixmap = tiny_skia::Pixmap::new(pw, ph).unwrap();
+        let mut mask = tiny_skia::Mask::new(pw, ph).unwrap();
+        skia.draw(&mut pixmap.as_mut(), &mut mask, &iced_tiny_skia::graphics::Viewport::with_physical_size(Size::new(pw, ph), SCALE), &[Rectangle::with_size(size)], Color::BLACK);
+        // Drawn text borrows from the tree: only now may it go.
+        drop(ui);
+        pixmap.data().chunks_exact(4).map(|px| px[0] > 60).collect()
+    }
+
+    /// A descender hangs below a font's line box: at a line height of 1.0
+    /// a g's tail is below the box, and the widget must still draw it.
+    /// Files wrapped this in clipping containers and cut every g, p and y
+    /// with Noto Sans (2026-10-18); this pins that the widget's own clip,
+    /// which replaced theirs, keeps the tail. Verified to fail when the
+    /// clip cuts into the glyph. (A clip exactly at the box did not cut
+    /// here, by how tiny-skia clips a paragraph — so the test asks for
+    /// what is drawn, not for where the clip is.)
+    #[test]
+    fn a_descender_below_the_line_box_is_drawn() {
+        let (w, h) = (120u32, 90u32);
+        let text: Element<'_, ()> =
+            iced::widget::Column::new().push(clamped_text("ggg", 1).size(40.0).line_height(LineHeight::Relative(1.0)).width(Length::Fill)).into();
+        let lit = ink(text, w, h);
+        assert!(lit.iter().any(|on| *on), "the rig drew nothing at all, so it would prove nothing");
+        let (pw, ph) = ((w as f32 * SCALE) as u32, (h as f32 * SCALE) as u32);
+        let floor = (40.0 * SCALE).ceil() as u32 + 1;
+        let below = (floor..ph).any(|y| (0..pw).any(|x| lit[(y * pw + x) as usize]));
+        assert!(below, "nothing drawn below the 40px line box: the descenders were clipped");
+    }
+
+    /// And it still clips its sides: an unbreakable word wider than the
+    /// widget never draws past its right edge.
+    #[test]
+    fn nothing_is_drawn_past_its_right_edge() {
+        let (w, h) = (300u32, 40u32);
+        let text: Element<'_, ()> =
+            iced::widget::Row::new().push(container_of(clamped_text("WWWWWWWWWWWWWWWWWWWW", 1).size(20.0).wrapping(Wrapping::None).width(Length::Fill), 100.0)).into();
+        let lit = ink(text, w, h);
+        assert!(lit.iter().any(|on| *on), "the rig drew nothing at all, so it would prove nothing");
+        let (pw, ph) = ((w as f32 * SCALE) as u32, (h as f32 * SCALE) as u32);
+        let edge = (100.0 * SCALE).ceil() as u32 + 2;
+        let past = (0..ph).any(|y| (edge..pw).any(|x| lit[(y * pw + x) as usize]));
+        assert!(!past, "ink past the widget's right edge");
+    }
+
+    fn container_of(text: ClampedText<'_>, width: f32) -> Element<'_, ()> {
+        iced::widget::container(text).width(Length::Fixed(width)).into()
+    }
+
     use super::*;
     use iced::advanced::graphics::text::Paragraph as Shaped;
     use iced::Font;

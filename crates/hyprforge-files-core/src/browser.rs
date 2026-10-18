@@ -5669,8 +5669,9 @@ fn trail_row_style(theme: &iced::Theme, status: iced::widget::button::Status, on
 /// does get an ellipsis, through `clamped_text`: it is the column people
 /// read, and the one most often too long.
 /// One line of a list row, cut with "…" at its column's edge rather
-/// than sliced through a letter — "DESKTOP fil" was the report — and
-/// clipped as well, for the frame laid out before the cut caught up.
+/// than sliced through a letter — "DESKTOP fil" was the report.
+/// `clamped_text` clips its own sides; a container clip here would cut
+/// the descenders too.
 fn clamped_cell<'a>(text: String, color: iced::Color, base: f32, portion: u16, scale: FontScale) -> Element<'a, Message> {
     container(
         clamped_text(text, 1)
@@ -5680,13 +5681,14 @@ fn clamped_cell<'a>(text: String, color: iced::Color, base: f32, portion: u16, s
             .width(Length::Fill),
     )
     .width(Length::FillPortion(portion))
-    .clip(true)
     .into()
 }
 
 /// A list row's name: one line, cut with "…" at its column's edge —
-/// see `clamped_text` — and clipped as well, so a frame laid out before
-/// the cut caught up can never draw across the next column.
+/// see `clamped_text`, which also clips its own sides, so a frame laid
+/// out before the cut caught up can never draw across the next column.
+/// Not a clipping container: that cut every g, p and y through
+/// (2026-10-18).
 fn list_name<'a>(entry: &'a Entry, scale: FontScale) -> Element<'a, Message> {
     container(
         clamped_text(entry.name.as_str(), 1)
@@ -5695,7 +5697,6 @@ fn list_name<'a>(entry: &'a Entry, scale: FontScale) -> Element<'a, Message> {
             .width(Length::Fill),
     )
     .width(Length::FillPortion(NAME_PORTION))
-    .clip(true)
     .into()
 }
 
@@ -6050,7 +6051,6 @@ fn list_header<'a>(
         iced::widget::button(content)
             .on_press(Message::SortBy(column))
             .width(Length::FillPortion(portion))
-            .clip(true)
             .style(header_button_style)
     };
 
@@ -6472,14 +6472,17 @@ fn grid_cell<'a>(
     let name: Element<'a, Message> = match folder {
         Some(folder) => column![
             name,
+            // Cut with "…" and clipped at its own sides by `clamped_text`;
+            // a clipping container here cut its descenders off.
             container(
-                meta_text(folder, density::META_TEXT_BASE, scale.text)
+                clamped_text(folder, 1)
+                    .size(scale.text.apply(density::META_TEXT_BASE))
+                    .color(hyprforge_ui::theme::text_dim())
                     .align_x(iced::Alignment::Center)
                     .wrapping(iced::widget::text::Wrapping::None)
                     .width(Length::Fill),
             )
-            .height(Length::Fixed(density::grid_folder_height(scale)))
-            .clip(true),
+            .height(Length::Fixed(density::grid_folder_height(scale))),
         ]
         .into(),
         None => name,

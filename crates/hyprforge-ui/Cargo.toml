@@ -33,3 +33,9 @@ iced = { workspace = true, features = ["canvas", "advanced"] }
 # one — an accent is not left without its letter. Already in the tree
 # under cosmic-text, at this version.
 unicode-segmentation = "1.12"
+
+[dev-dependencies]
+# Drawing a clamped text to pixels, to see what its clip keeps.
+iced_tiny_skia.workspace = true
+iced_runtime.workspace = true
+tiny-skia = "0.11"

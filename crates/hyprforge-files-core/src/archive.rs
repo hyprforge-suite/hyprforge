@@ -73,6 +73,21 @@ pub fn split(path: &Path) -> Option<(PathBuf, String)> {
     None
 }
 
+/// A member *inside* an archive: [`split`] when it names something in
+/// one, and nothing for the archive file itself.
+///
+/// The two questions look alike and are not. `split` answers for the
+/// zip too (member `""`), because a folder being browsed can be the
+/// archive's root and has to route there. A *selection* is different: a
+/// zip picked in its folder is a file, and copying, dragging, deleting or
+/// renaming it is file work. Asking `split(p).is_some()` of a selection
+/// sent Ctrl+C on a zip down the unpack-these-members road with one empty
+/// member, and nothing reached the clipboard (2026-10-18). Ask this of
+/// anything picked; ask `split` of a place.
+pub fn member_of(path: &Path) -> Option<(PathBuf, String)> {
+    split(path).filter(|(_, member)| !member.is_empty())
+}
+
 /// Whether a *name* is one this suite could open as an archive.
 ///
 /// The name and nothing else — no filesystem access at all, which is
@@ -435,9 +450,19 @@ mod tests {
         );
         assert_eq!(
             split(&archive),
-            Some((archive, String::new())),
+            Some((archive.clone(), String::new())),
             "the archive itself is its own root"
         );
+    }
+
+    /// A zip picked in its folder is a file: copying, dragging, deleting
+    /// or renaming it is file work, so it is no member of itself.
+    #[test]
+    fn the_archive_itself_is_not_one_of_its_members() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = on_disk(dir.path(), "sample.zip");
+        assert_eq!(member_of(&archive), None);
+        assert_eq!(member_of(&archive.join("docs/guide.txt")), Some((archive, "docs/guide.txt".to_string())));
     }
 
     #[test]
