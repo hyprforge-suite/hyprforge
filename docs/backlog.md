@@ -140,6 +140,12 @@ someone watching the screen. Ranked by what each one unblocks.
 
 Open work Claude can do unattended. Nothing here blocks a release.
 
+- **Files and Media onto the shared `sidebar_toggle`.** Both draw their
+  own copy of the show/hide square (`hyprforge-files-core`'s
+  `browser.rs`, Media's `view.rs`); `hyprforge_ui::widgets::sidebar_toggle`
+  is that widget, added for procman. Files keeps its pref-setting
+  message, so the shared one takes the message to send.
+  *Added 2026-10-17.*
 - **Why receiving one D-Bus signal costs the tray ~45 wakeups.** After
   the 2026-10-17 work the tray idles at ~1,590 wakeups a minute, from
   ~3,400. What is left is not refreshing — filtered signals still cost
