@@ -16,6 +16,12 @@ worth doing next.
 Things only the user can do — an account, a password, a decision, or
 someone watching the screen. Ranked by what each one unblocks.
 
+- **Try procman's window picking once.** Processes → Pick a window,
+  then click another window: its app should be selected and procman come
+  back to the front (the refocus is a `hyprctl dispatch`, untested
+  against a real click). And a bind running `hyprforge-procman
+  --end-focused`: it should open asking about the focused app.
+  *Added 2026-10-18.*
 - **Look at procman's Recorded tab once.** Redesigned 2026-10-18 (procman
   7486ee0) but never rendered: its journal is root's. `sudo cp
   /var/log/hyprforge/procman/$(date +%F)* ~/`, then `JOURNAL=~/<file>
@@ -167,11 +173,11 @@ Open work Claude can do unattended. Nothing here blocks a release.
   every 30 s) just to arrive, on a single-threaded runtime. A profiler
   (`perf trace` on the trayd pid) would say whether it is zbus's
   reader, tokio's driver or the match-rule streams. *Added 2026-10-17.*
-- **Procman: see deeper, the rest.** Hyprland touches — click a window
-  to inspect it, end the focused window's tree, a tray item for
-  pressure — want the user at the screen. Memory, Flatpaks and
-  connections are done (Details already listed sockets). Approved
-  2026-10-17. *Added 2026-10-17.*
+- **Procman: see deeper, the rest.** A tray item for pressure, in the
+  tray component (it owns the icons; procman would only be what it
+  opens). Picking a window and `--end-focused` landed 2026-10-18
+  (procman 0a26b91); memory, Flatpaks and connections before that.
+  Approved 2026-10-17. *Added 2026-10-17.*
 - **A Keyboard screen for the suite's own bindings.** Media's keys can
   only be changed by editing `media-config.toml`; `docs/design/vision.md`
   plans a Settings screen on the `hyprforge-keys` grammar, and Files'
