@@ -108,3 +108,45 @@ pub fn fact<'a, Message: 'a>(
         scale,
     )
 }
+
+/// One figure as a tile: a small spaced label, the figure large, and a
+/// line saying what it is of — `TEMPERATURE / 74 °C / package`. For a
+/// page that states a handful of facts about one thing at a glance, laid
+/// out in a grid ([`fact`] is the same fact as a line, for a panel to
+/// read down). `warn` draws the figure in the warning colour, for the
+/// one that is likely why someone is looking.
+///
+/// Written for Processes' Performance page, whose labels ("Waiting for
+/// CPU") wrapped in a two-column list once its window was half a
+/// screen; Settings' battery page states the same kind of facts.
+pub fn stat_tile<'a, Message: 'a>(
+    label: &str,
+    value: impl IntoFragment<'a>,
+    note: Option<String>,
+    warn: bool,
+    scale: FontScale,
+) -> Element<'a, Message> {
+    let mut body = column![
+        super::section_label(label, scale),
+        scaled_text(value, STAT_VALUE_BASE, scale)
+            .font(theme::mono_font())
+            .color(if warn { theme::warning() } else { theme::text() }),
+    ]
+    .spacing(2.0);
+    if let Some(note) = note {
+        body = body.push(super::clamped_text(note, 1).size(scale.apply(density::META_TEXT_BASE)).color(theme::text_dim()));
+    }
+    container(body)
+        .width(Length::Fill)
+        .padding([spacing::SM, spacing::SM + spacing::XS])
+        .style(|_t: &iced::Theme| iced::widget::container::Style {
+            background: Some(Background::Color(theme::surface::card())),
+            border: iced::Border { radius: density::inner_radius().into(), width: 1.0, color: theme::surface::card_border() },
+            ..iced::widget::container::Style::default()
+        })
+        .into()
+}
+
+/// A [`stat_tile`]'s figure at 100%: large enough to read across a
+/// desk, a step under a page's own headline figure.
+const STAT_VALUE_BASE: f32 = 18.0;

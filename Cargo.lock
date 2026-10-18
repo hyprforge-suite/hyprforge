@@ -2617,6 +2617,7 @@ dependencies = [
  "chrono",
  "crc32fast",
  "hyprforge-appearance",
+ "hyprforge-icons",
  "hyprforge-keys",
  "hyprforge-look",
  "hyprforge-mime",
