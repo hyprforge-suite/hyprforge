@@ -2303,6 +2303,7 @@ dependencies = [
  "hyprforge-volumes",
  "iced",
  "iced_runtime",
+ "iced_test",
  "iced_tiny_skia",
  "inotify",
  "libc",

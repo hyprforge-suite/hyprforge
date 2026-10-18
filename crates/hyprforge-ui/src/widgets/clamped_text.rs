@@ -188,6 +188,15 @@ where
         layout::Node::new(limits.resolve(self.width, Length::Shrink, measured))
     }
 
+    /// Says what it reads as, as iced's own text does: the whole of it,
+    /// not the "…"-cut part drawn — a search or a screen reader wants the
+    /// name, and a test finds a row by it. Without this nothing drawn
+    /// with it could be found at all, so Files' tabs and names were
+    /// invisible to `iced_test` and to anything else walking the tree.
+    fn operate(&mut self, _tree: &mut Tree, layout: Layout<'_>, _renderer: &Renderer, operation: &mut dyn iced::advanced::widget::Operation) {
+        operation.text(None, layout.bounds(), &self.content);
+    }
+
     fn draw(
         &self,
         tree: &Tree,
