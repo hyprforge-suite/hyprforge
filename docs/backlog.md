@@ -171,11 +171,15 @@ Open work Claude can do unattended. Nothing here blocks a release.
   move the canvas designs' hex values to the derived ones. *Added 2026-10-18.*
 - **Why receiving one D-Bus signal costs the tray ~45 wakeups.** After
   the 2026-10-17 work the tray idles at ~1,590 wakeups a minute, from
-  ~3,400. What is left is not refreshing — filtered signals still cost
-  ~45 each (Wi-Fi strength, every 6 s) and ~85 each (UPower's pair,
-  every 30 s) just to arrive, on a single-threaded runtime. A profiler
-  (`perf trace` on the trayd pid) would say whether it is zbus's
-  reader, tokio's driver or the match-rule streams. *Added 2026-10-17.*
+  ~3,400. Measured again 2026-10-18 (one thread, nothing else in the
+  process): 324 voluntary switches one minute and 1,433 the next, so it
+  follows what the system bus delivers (Wi-Fi strength, UPower) rather
+  than a steady cost. Which part wakes — zbus's reader, tokio's driver or
+  the match-rule streams — needs a tracer, and that needs you:
+  `ptrace_scope` is 1 here, so an agent cannot attach to the running
+  tray, and starting a second one to trace breaks the one-instance rule.
+  `sudo strace -c -f -p $(pidof hyprforge-trayd)` for a minute, or
+  `perf` installed. *Added 2026-10-17.*
 - **Procman: see deeper, the rest.** A tray item for pressure, in the
   tray component (it owns the icons; procman would only be what it
   opens). Picking a window and `--end-focused` landed 2026-10-18
