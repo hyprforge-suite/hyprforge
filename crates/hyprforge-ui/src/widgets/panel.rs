@@ -109,16 +109,17 @@ pub fn fact<'a, Message: 'a>(
     )
 }
 
-/// One figure as a tile: a small spaced label, the figure large, and a
-/// line saying what it is of — `TEMPERATURE / 74 °C / package`. For a
-/// page that states a handful of facts about one thing at a glance, laid
-/// out in a grid ([`fact`] is the same fact as a line, for a panel to
-/// read down). `warn` draws the figure in the warning colour, for the
-/// one that is likely why someone is looking.
+/// One figure in a grid of them: a dim label, the figure large, and a
+/// dim line saying what it is of — `Temperature / 74 °C / package`. For
+/// a page that states a handful of facts about one thing at a glance
+/// ([`fact`] is the same fact as a line, for a panel to read down).
+/// `warn` draws the figure in the warning colour, for the one that is
+/// likely why someone is looking.
 ///
-/// Written for Processes' Performance page, whose labels ("Waiting for
-/// CPU") wrapped in a two-column list once its window was half a
-/// screen; Settings' battery page states the same kind of facts.
+/// No card around it, and the label in sentence case: a grid of boxed,
+/// spaced-capital tiles is a dashboard template, and it was read as one
+/// (Processes' Performance page, 2026-10-18). The grid's own spacing is
+/// what groups them.
 pub fn stat_tile<'a, Message: 'a>(
     label: &str,
     value: impl IntoFragment<'a>,
@@ -127,7 +128,7 @@ pub fn stat_tile<'a, Message: 'a>(
     scale: FontScale,
 ) -> Element<'a, Message> {
     let mut body = column![
-        super::section_label(label, scale),
+        meta_text(label.to_string(), density::META_TEXT_BASE, scale),
         scaled_text(value, STAT_VALUE_BASE, scale)
             .font(theme::mono_font())
             .color(if warn { theme::warning() } else { theme::text() }),
@@ -136,15 +137,7 @@ pub fn stat_tile<'a, Message: 'a>(
     if let Some(note) = note {
         body = body.push(super::clamped_text(note, 1).size(scale.apply(density::META_TEXT_BASE)).color(theme::text_dim()));
     }
-    container(body)
-        .width(Length::Fill)
-        .padding([spacing::SM, spacing::SM + spacing::XS])
-        .style(|_t: &iced::Theme| iced::widget::container::Style {
-            background: Some(Background::Color(theme::surface::card())),
-            border: iced::Border { radius: density::inner_radius().into(), width: 1.0, color: theme::surface::card_border() },
-            ..iced::widget::container::Style::default()
-        })
-        .into()
+    container(body).width(Length::Fill).padding([spacing::XS, 0.0]).into()
 }
 
 /// A [`stat_tile`]'s figure at 100%: large enough to read across a
