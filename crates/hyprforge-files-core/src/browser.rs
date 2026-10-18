@@ -4056,38 +4056,13 @@ fn drop_zone<'a>(
 /// button states what it is about to do by showing what is currently
 /// true, rather than needing two different icons.
 fn sidebar_toggle<'a>(collapsed: bool, scale: FontScale) -> Element<'a, Message> {
-    let side = density::glyph_button(scale);
-    iced::widget::button(
-        container(glyph::sidebar(side, hyprforge_ui::theme::text()))
-            .center_x(Length::Fill)
-            .center_y(Length::Fill),
-    )
-    .width(Length::Fixed(side))
-    .height(Length::Fixed(side))
-    .padding(0)
-    // The opposite of what is on screen *now*, so the first press after
+    // The suite's own (`hyprforge_ui::widgets::sidebar_toggle`), given
+    // the opposite of what is on screen *now*, so the first press after
     // an automatic collapse opens the sidebar rather than recording
     // "hidden" to match what is already hidden and appearing to do
     // nothing.
-    .on_press(Message::SetSidebar(if collapsed {
-        crate::prefs::SidebarPref::Shown
-    } else {
-        crate::prefs::SidebarPref::Hidden
-    }))
-    .style(move |_t: &iced::Theme, status| {
-        let hovered = matches!(status, iced::widget::button::Status::Hovered);
-        iced::widget::button::Style {
-            background: (!collapsed || hovered)
-                .then(|| iced::Background::Color(hyprforge_ui::theme::surface::row())),
-            text_color: hyprforge_ui::theme::text(),
-            border: iced::Border {
-                radius: density::nested_radius().into(),
-                ..iced::Border::default()
-            },
-            ..iced::widget::button::Style::default()
-        }
-    })
-    .into()
+    let next = if collapsed { crate::prefs::SidebarPref::Shown } else { crate::prefs::SidebarPref::Hidden };
+    hyprforge_ui::widgets::sidebar_toggle(!collapsed, Message::SetSidebar(next), scale)
 }
 
 /// The preview pane's show/hide control, at the far right of the header
@@ -4114,8 +4089,11 @@ fn preview_toggle<'a>(on: bool, scale: FontScale) -> Element<'a, Message> {
         iced::widget::button::Style {
             background: (on || hovered).then(|| iced::Background::Color(hyprforge_ui::theme::surface::row())),
             text_color: hyprforge_ui::theme::text(),
+            // A top-level control's radius, as Back and Forward and the
+            // sidebar's toggle beside them; `nested_radius` is for what
+            // sits inside a control.
             border: iced::Border {
-                radius: density::nested_radius().into(),
+                radius: density::inner_radius().into(),
                 ..iced::Border::default()
             },
             ..iced::widget::button::Style::default()

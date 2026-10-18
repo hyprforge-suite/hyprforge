@@ -169,12 +169,6 @@ Open work Claude can do unattended. Nothing here blocks a release.
   screenshot's pixels against the theme (CLAUDE.md's rule about two hosts
   looking the same); the half-width layouts of the five over-time tabs;
   move the canvas designs' hex values to the derived ones. *Added 2026-10-18.*
-- **Files and Media onto the shared `sidebar_toggle`.** Both draw their
-  own copy of the show/hide square (`hyprforge-files-core`'s
-  `browser.rs`, Media's `view.rs`); `hyprforge_ui::widgets::sidebar_toggle`
-  is that widget, added for procman. Files keeps its pref-setting
-  message, so the shared one takes the message to send.
-  *Added 2026-10-17.*
 - **Why receiving one D-Bus signal costs the tray ~45 wakeups.** After
   the 2026-10-17 work the tray idles at ~1,590 wakeups a minute, from
   ~3,400. What is left is not refreshing — filtered signals still cost
