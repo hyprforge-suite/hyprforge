@@ -52,11 +52,12 @@ someone watching the screen. Ranked by what each one unblocks.
   when idle. On battery that is a few watts all the time. Setting it to
   `auto` (usually a udev rule) is a system change and the user's call.
   *Added 2026-10-17.*
-- **Procman: containers, once Podman or Docker is installed.** Neither
-  is on this machine, so a container's cgroup and its name can't be
-  checked against the real thing, and a fixture written from memory
-  tests the memory. Installing one is the user's call.
-  *Added 2026-10-17.*
+- **Procman: container names, and Podman.** Containers are listed
+  (procman, 2026-10-18), but Docker only names them for the `docker`
+  group, which this user is not in — and that group is root by another
+  name, so joining it is a real decision, not a setting. Without it a
+  container goes by its first process. Podman is not handled until one
+  is installed to read its cgroups from. *Added 2026-10-18.*
 - **Procman: bandwidth per connection, with root.** Details lists each
   process's connections; their bytes need the eBPF counter to key on
   the socket as well as the process, and loading it needs root — the
