@@ -2790,6 +2790,7 @@ dependencies = [
  "iced_runtime",
  "iced_tiny_skia",
  "iced_widget",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

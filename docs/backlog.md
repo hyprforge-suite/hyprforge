@@ -16,6 +16,10 @@ worth doing next.
 Things only the user can do — an account, a password, a decision, or
 someone watching the screen. Ranked by what each one unblocks.
 
+- **Switch the pressure icon on once.** Settings → Tray → Pressure
+  (tray 623b3b0, Settings on `next`). It should show calm, and change
+  only when something waits — the trigger wake has been tested by hand,
+  not by a real slowdown. *Added 2026-10-18.*
 - **Try procman's window picking once.** Processes → Pick a window,
   then click another window: its app should be selected and procman come
   back to the front (the refocus is a `hyprctl dispatch`, untested
@@ -180,11 +184,6 @@ Open work Claude can do unattended. Nothing here blocks a release.
   tray, and starting a second one to trace breaks the one-instance rule.
   `sudo strace -c -f -p $(pidof hyprforge-trayd)` for a minute, or
   `perf` installed. *Added 2026-10-17.*
-- **Procman: see deeper, the rest.** A tray item for pressure, in the
-  tray component (it owns the icons; procman would only be what it
-  opens). Picking a window and `--end-focused` landed 2026-10-18
-  (procman 0a26b91); memory, Flatpaks and connections before that.
-  Approved 2026-10-17. *Added 2026-10-17.*
 - **A Keyboard screen for the suite's own bindings.** Media's keys can
   only be changed by editing `media-config.toml`; `docs/design/vision.md`
   plans a Settings screen on the `hyprforge-keys` grammar, and Files'
