@@ -187,7 +187,7 @@ GATES: list[Gate] = [
         " | binary_id(hyprforge-polkit::bin/hyprforge-polkit))",
         _system_bus_name("org.freedesktop.login1", "systemd-logind"),
     ),
-    Gate("systemd", "live", "binary_id(hyprforge-procman) & test(/^(services|incidents)::/)", _always),
+    Gate("systemd", "live", "binary_id(hyprforge-procman) & test(/^(services|incidents|bound)::/)", _always),
     Gate("UPower", "live", "binary_id(hyprforge-power::live_upower)", _systemd_active("upower")),
     Gate(
         "power-profiles-daemon",
