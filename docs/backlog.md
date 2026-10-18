@@ -16,6 +16,11 @@ worth doing next.
 Things only the user can do — an account, a password, a decision, or
 someone watching the screen. Ranked by what each one unblocks.
 
+- **Look at procman's Recorded tab once.** Redesigned 2026-10-18 (procman
+  7486ee0) but never rendered: its journal is root's. `sudo cp
+  /var/log/hyprforge/procman/$(date +%F)* ~/`, then `JOURNAL=~/<file>
+  SHOTS=… cargo test -p hyprforge-procman --bin hyprforge-procman
+  render_recorded -- --ignored`. *Added 2026-10-18.*
 - **Try procman's limits, efficiency mode and rules once.** Both were built
   against a mock systemd and checked on throwaway processes; neither has
   touched one of the user's apps. Limits: Details → Limits… on a test
@@ -140,6 +145,15 @@ someone watching the screen. Ranked by what each one unblocks.
 
 Open work Claude can do unattended. Nothing here blocks a release.
 
+- **Parked mid-pass: the look following Hyprland, and procman's redesign.**
+  Done and committed: every procman tab redesigned, data drawn in text
+  shades rather than state colours (procman b294a63, on `next`), and the
+  look reading both borders from the running Hyprland with surfaces in the
+  inactive border's hue (the monorepo commit after fa1e088). Left: render
+  Settings, Files and the lock screen under the new surfaces and compare a
+  screenshot's pixels against the theme (CLAUDE.md's rule about two hosts
+  looking the same); the half-width layouts of the five over-time tabs;
+  move the canvas designs' hex values to the derived ones. *Added 2026-10-18.*
 - **Files and Media onto the shared `sidebar_toggle`.** Both draw their
   own copy of the show/hide square (`hyprforge-files-core`'s
   `browser.rs`, Media's `view.rs`); `hyprforge_ui::widgets::sidebar_toggle`

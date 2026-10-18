@@ -39,33 +39,43 @@ And never a colour constant in an app. A missing colour is a missing
 
 Resolved once per process by `hyprforge-appearance`'s `look::resolve`, from
 settings the user already controls, and installed with
-`hyprforge_ui::theme::init`. "Follows Hyprland" means the value is read from
-Hyprland's own option, through the `appearance.toml` the Settings app keeps.
-It is not read from the live compositor. A value set by hand in
-`hyprland.lua` and never touched in Settings is not seen yet.
+`hyprforge_ui::theme::init`. "Follows Hyprland" means the value is the one
+the running compositor reports (`hyprctl getoption`, only when it says
+`set`), and failing that the one the Settings app stored in
+`appearance.toml`. Asking the compositor is what sees a colour written by
+hand in `hyprland.lua`, which is how most configs set their borders; `set`
+keeps Hyprland's own default — white, for the active border — from ever
+becoming a colour here.
 
 | Token | Means | Source |
 |---|---|---|
-| `accent` | selected, and nothing else | **Hyprland** `general:col:active_border` |
+| `accent` | selected, and nothing else | **Hyprland** `general:col:active_border` (a gradient's first stop) |
 | `rounding` | the window's corner; every radius derives from it | **Hyprland** `decoration:rounding` |
 | `font`, `font_size` | body text | desktop: gsettings `font-name` |
 | `mono_font` | paths, keys, config lines | desktop: gsettings `monospace-font-name`, if fontconfig has it |
 | `font_scale` | multiplies every text size | desktop: gsettings `text-scaling-factor` |
-| `surfaces.root` → `sidebar` → `card` → `row` | four elevation steps | `Theme` default |
-| `surfaces.card_border` | hairlines, the "you are here" chip | `Theme` default |
-| `surfaces.text`, `text_dim` | content, metadata | `Theme` default |
+| `surfaces.root` → `sidebar` → `card` → `row` | four elevation steps | **Hyprland's hue** `general:col:inactive_border`, at each step's own lightness |
+| `surfaces.card_border` | hairlines, the "you are here" chip | **Hyprland's hue**, as above |
+| `surfaces.text` | content | `Theme` default |
+| `surfaces.text_dim` | metadata | **Hyprland's hue** at half the surfaces' saturation |
 | `success`, `warning`, `error` | state | `Theme` default |
 | `info` | "this is somewhere else": remote, mounted | `Theme` default |
 
+The surfaces take the inactive border's hue and saturation — capped at
+`SURFACE_SATURATION`, 25% — and keep the lightness of the step they are.
+So a Dracula border (`#282a36`) gives the Dracula ramp this was drawn to,
+a grey border gives grey, and a red one tints the window red without
+lightening it: contrast against text never depends on what the border
+is. The lock screen's `background` and `surface` follow the same way.
+
 Known gaps, written down so nobody assumes otherwise:
 
-- Surfaces and state colours do not follow Hyprland. Hyprland has no
-  notion of either. `general:col:inactive_border` is the nearest candidate
-  for a border token and is not read.
+- The state colours do not follow Hyprland. Hyprland has none, and
+  borrowing a hue for "error" would stop it meaning error.
 - Border *widths* are 1px constants in the widgets. `general:border_size`
   is not read.
-- None of the Hyprland values are asked of the running compositor. See the
-  note above the table.
+- A colour changed while an app is open is seen by that app's next start:
+  the look is resolved once per process.
 
 ## Sizes: `density`
 

@@ -238,6 +238,41 @@ impl Default for Surfaces {
     }
 }
 
+/// How saturated the surfaces may get from the border's hue: enough to
+/// carry a tint — Dracula's `#282a36` sits at 15% — and never so much
+/// that a red border gives a red window.
+pub const SURFACE_SATURATION: f32 = 0.25;
+
+impl Surfaces {
+    /// The ramp in the hue of Hyprland's inactive border, each step at
+    /// its own lightness. Text keeps its colour; dim text takes the hue
+    /// at half the saturation, so it still reads as grey on the steps.
+    pub fn in_hue_of(self, border: Color) -> Surfaces {
+        let tint = |c: Color| c.in_hue_of(border, SURFACE_SATURATION);
+        Surfaces {
+            root: tint(self.root),
+            sidebar: tint(self.sidebar),
+            card: tint(self.card),
+            card_border: tint(self.card_border),
+            row: tint(self.row),
+            text: self.text,
+            text_dim: self.text_dim.in_hue_of(border, SURFACE_SATURATION / 2.0),
+        }
+    }
+}
+
+impl Theme {
+    /// Every shade the suite draws on, in the hue of Hyprland's inactive
+    /// border — the window ramp and the lock screen's own pair. The
+    /// state colours are left alone: Hyprland has none, and borrowing a
+    /// hue for "error" would stop it meaning error.
+    pub fn follow_inactive_border(&mut self, border: Color) {
+        self.surfaces = self.surfaces.in_hue_of(border);
+        self.background = self.background.in_hue_of(border, SURFACE_SATURATION);
+        self.surface = self.surface.in_hue_of(border, SURFACE_SATURATION);
+    }
+}
+
 impl Default for Theme {
     fn default() -> Self {
         Theme {
@@ -415,6 +450,34 @@ impl Theme {
 
 #[cfg(test)]
 mod tests {
+    use crate::Color as C;
+
+    /// This machine's inactive border is Dracula's background, and the
+    /// default ramp was drawn to Dracula: following it must be close to
+    /// the look that shipped, not a restyle.
+    #[test]
+    fn a_dracula_border_keeps_the_dracula_look() {
+        let followed = Surfaces::default().in_hue_of(C::rgba(0x28, 0x2a, 0x36, 0xff));
+        let d = Surfaces::default();
+        for (a, b) in [(followed.root, d.root), (followed.card, d.card), (followed.sidebar, d.sidebar), (followed.card_border, d.card_border)] {
+            for (x, y) in [(a.r, b.r), (a.g, b.g), (a.b, b.b)] {
+                assert!((i16::from(x) - i16::from(y)).abs() <= 6, "{a} strayed from {b}");
+            }
+        }
+        assert_eq!(followed.text, d.text, "text never takes a hue");
+    }
+
+    /// A loud border tints the window and leaves it dark: the steps keep
+    /// their lightness and their order, so text reads on every one.
+    #[test]
+    fn a_bright_border_tints_without_lightening() {
+        let lum = |c: C| u32::from(c.r) * 3 + u32::from(c.g) * 6 + u32::from(c.b);
+        let followed = Surfaces::default().in_hue_of(C::rgba(0xff, 0x40, 0x40, 0xff));
+        assert!(lum(followed.sidebar) < lum(followed.root) && lum(followed.root) < lum(followed.row) && lum(followed.row) < lum(followed.card) && lum(followed.card) < lum(followed.card_border));
+        assert!(followed.card.r > followed.card.b, "it is red-tinted");
+        assert!(lum(followed.card) < lum(C::rgba(0x40, 0x40, 0x40, 0xff)), "and still dark: {}", followed.card);
+    }
+
     /// The theme is a file a person can edit, so every number in it can
     /// be nonsense — and a zero font size panics on the first frame
     /// rather than looking wrong.

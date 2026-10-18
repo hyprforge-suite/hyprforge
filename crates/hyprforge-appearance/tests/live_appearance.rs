@@ -27,6 +27,23 @@ fn getoption(key: &str) -> serde_json::Value {
         .unwrap_or_else(|_| panic!("getoption {key} returned no JSON: {raw}"))
 }
 
+/// The look reads both borders from `getoption` and trusts two fields:
+/// `gradient`, a string whose first word is an `AARRGGBB` colour, and
+/// `set`, a bool. If Hyprland ever renames either, every app quietly
+/// falls back to the default look — so ask it.
+#[test]
+#[ignore = "live (Hyprland, read-only): changes nothing"]
+fn hyprland_reports_its_borders_in_the_shape_the_look_reads() {
+    let _live = Hyprland::read_only();
+    for key in ["general:col:active_border", "general:col:inactive_border"] {
+        let v = getoption(key);
+        let gradient = v.get("gradient").and_then(|g| g.as_str()).unwrap_or_else(|| panic!("{key}: no gradient string in {v}"));
+        let first = gradient.split_whitespace().next().unwrap_or_default();
+        assert!(hyprforge_look::Color::from_argb_hex(first).is_some(), "{key}: {gradient:?} doesn't start with AARRGGBB");
+        assert!(v.get("set").and_then(|s| s.as_bool()).is_some(), "{key}: no set flag in {v}");
+    }
+}
+
 /// Every catalog key exists on the running compositor with the type this
 /// crate claims. This is what caught `decoration:wobble` not existing.
 #[test]

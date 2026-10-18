@@ -109,6 +109,57 @@ impl Color {
     }
 }
 
+/// Hue in degrees, saturation and lightness 0 to 1.
+fn to_hsl(c: Color) -> (f32, f32, f32) {
+    let (r, g, b) = (f32::from(c.r) / 255.0, f32::from(c.g) / 255.0, f32::from(c.b) / 255.0);
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let l = (max + min) / 2.0;
+    let d = max - min;
+    if d == 0.0 {
+        return (0.0, 0.0, l);
+    }
+    let s = d / (1.0 - (2.0 * l - 1.0).abs());
+    let h = if max == r {
+        60.0 * (((g - b) / d).rem_euclid(6.0))
+    } else if max == g {
+        60.0 * ((b - r) / d + 2.0)
+    } else {
+        60.0 * ((r - g) / d + 4.0)
+    };
+    (h, s, l)
+}
+
+fn from_hsl(h: f32, s: f32, l: f32, a: u8) -> Color {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - ((h / 60.0).rem_euclid(2.0) - 1.0).abs());
+    let m = l - c / 2.0;
+    let (r, g, b) = match (h / 60.0) as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let byte = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    Color { r: byte(r), g: byte(g), b: byte(b), a }
+}
+
+impl Color {
+    /// This colour's lightness in `source`'s hue, at `source`'s
+    /// saturation or `max_saturation`, whichever is less.
+    ///
+    /// What lets a window's surfaces follow Hyprland's inactive border
+    /// without a bright or garish border making them unreadable: the
+    /// hue is the user's, the lightness — and so every contrast against
+    /// text — stays the step's own. A grey border gives grey surfaces.
+    pub fn in_hue_of(self, source: Color, max_saturation: f32) -> Color {
+        let (h, s, _) = to_hsl(source);
+        let (_, _, l) = to_hsl(self);
+        from_hsl(h, s.min(max_saturation), l, self.a)
+    }
+}
+
 impl fmt::Display for Color {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "rgba({:02x}{:02x}{:02x}{:02x})", self.r, self.g, self.b, self.a)
@@ -195,5 +246,37 @@ mod tests {
         let text = toml::to_string(&held).unwrap();
         assert!(text.contains(r#"accent = "rgba(bd93f9ff)""#), "{text}");
         assert_eq!(toml::from_str::<Holder>(&text).unwrap(), held);
+    }
+}
+
+#[cfg(test)]
+mod hue {
+    use super::*;
+
+    #[test]
+    fn a_colour_keeps_its_lightness_and_takes_the_sources_hue() {
+        let red = Color::rgba(0xff, 0x00, 0x00, 0xff);
+        let dark = Color::rgba(0x19, 0x1a, 0x21, 0xff);
+        let got = dark.in_hue_of(red, 0.3);
+        let (h, s, l) = to_hsl(got);
+        let (_, _, want_l) = to_hsl(dark);
+        assert!(!(2.0..=358.0).contains(&h), "red's hue, got {h}");
+        assert!((s - 0.3).abs() < 0.03, "saturation capped at 0.3, got {s}");
+        assert!((l - want_l).abs() < 0.01, "lightness kept: {l} vs {want_l}");
+    }
+
+    #[test]
+    fn a_grey_source_gives_grey() {
+        let got = Color::rgba(0x25, 0x27, 0x31, 0xff).in_hue_of(Color::rgba(0x44, 0x44, 0x44, 0xff), 0.3);
+        assert!(got.r == got.g && got.g == got.b, "{got}");
+    }
+
+    #[test]
+    fn hsl_survives_a_round_trip() {
+        for c in [Color::rgba(0x28, 0x2a, 0x36, 0xff), Color::rgba(0xbd, 0x93, 0xf9, 0xff), Color::rgba(0x12, 0x13, 0x19, 0x80)] {
+            let (h, s, l) = to_hsl(c);
+            let back = from_hsl(h, s, l, c.a);
+            assert!((i16::from(back.r) - i16::from(c.r)).abs() <= 1 && (i16::from(back.g) - i16::from(c.g)).abs() <= 1 && (i16::from(back.b) - i16::from(c.b)).abs() <= 1 && back.a == c.a, "{c} -> {back}");
+        }
     }
 }

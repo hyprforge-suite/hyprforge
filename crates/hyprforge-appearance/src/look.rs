@@ -25,6 +25,11 @@ use hyprforge_look::{Color, Theme};
 /// colour of the focused window's border.
 const ACCENT_KEY: &str = "general:col:active_border";
 
+/// The unfocused window's border: the colour the surfaces take their hue
+/// from, so a window's background belongs to the same scheme as the
+/// border around it.
+const INACTIVE_KEY: &str = "general:col:inactive_border";
+
 /// The corner radius, so panels match window rounding.
 const ROUNDING_KEY: &str = "decoration:rounding";
 
@@ -54,8 +59,17 @@ pub fn resolve() -> Theme {
         }
     };
 
-    if let Some(accent) = stored_color(&stored, ACCENT_KEY) {
+    // The borders Hyprland is drawing right now, first: most configs set
+    // them in hyprland.lua by hand, where Settings' stored copy never
+    // sees them. Then what Settings stored, for a machine where Hyprland
+    // isn't answering (a greeter's own compositor sets neither, and says
+    // so). Never the catalogue default — see `stored_color`.
+    let (live_accent, live_inactive) = live_borders();
+    if let Some(accent) = live_accent.or_else(|| stored_color(&stored, ACCENT_KEY)) {
         theme.accent = accent;
+    }
+    if let Some(border) = live_inactive.or_else(|| stored_color(&stored, INACTIVE_KEY)) {
+        theme.follow_inactive_border(border);
     }
     if let Some(Value::Int(rounding)) = stored.settings.get(ROUNDING_KEY) {
         if let Ok(rounding) = u32::try_from(*rounding) {
@@ -192,6 +206,45 @@ pub fn publish(theme: &Theme) -> Result<(), hyprforge_look::ThemeError> {
     Ok(())
 }
 
+/// Hyprland's two border colours as it reports them now, each only if
+/// something set it — `set: false` is Hyprland's default, white for the
+/// active border, and must never become the accent.
+///
+/// For a look, "set by anything since the last reload" is the right
+/// question, where import found it the wrong one
+/// (`hyprforge_core::hlconfig::import`'s module doc): the colour wanted
+/// is the one on screen, whoever chose it. Bounded, like every call out
+/// of this suite; no compositor and no answer are both "nothing".
+fn live_borders() -> (Option<Color>, Option<Color>) {
+    let batch = format!("getoption {ACCENT_KEY}; getoption {INACTIVE_KEY}");
+    match hyprforge_core::command::output(std::process::Command::new("hyprctl").args(["-j", "--batch", &batch]), hyprforge_core::command::TIMEOUT) {
+        Ok(out) if out.status.success() => parse_borders(&String::from_utf8_lossy(&out.stdout)),
+        _ => (None, None),
+    }
+}
+
+/// [`live_borders`]'s parsing: the first colour of each gradient that is
+/// set. A real gradient's first stop stands for it — a theme has one
+/// colour per role.
+fn parse_borders(json: &str) -> (Option<Color>, Option<Color>) {
+    let mut accent = None;
+    let mut inactive = None;
+    let objects = json.split_inclusive('}').filter_map(|chunk| chunk.find('{').map(|i| &chunk[i..]));
+    for obj in objects {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(obj) else { continue };
+        if v.get("set").and_then(|s| s.as_bool()) != Some(true) {
+            continue;
+        }
+        let first = v.get("gradient").and_then(|g| g.as_str()).and_then(|g| g.split_whitespace().next()).and_then(Color::from_argb_hex);
+        match v.get("option").and_then(|o| o.as_str()) {
+            Some(ACCENT_KEY) => accent = first,
+            Some(INACTIVE_KEY) => inactive = first,
+            _ => {}
+        }
+    }
+    (accent, inactive)
+}
+
 /// A stored colour setting, if it is set and parses.
 ///
 /// Deliberately reads the *stored* value rather than the catalogue
@@ -248,6 +301,29 @@ mod tests {
             format!("{:?}", catalogue_default.kind).contains("ffffffff"),
             "if this default stops being white the comment above needs revisiting"
         );
+    }
+
+    /// What `hyprctl -j --batch` printed on this machine (2026-10-18):
+    /// two objects, each with its `set` flag.
+    #[test]
+    fn both_borders_are_read_from_what_hyprland_reports() {
+        let json = "{\"option\": \"general:col:active_border\", \"gradient\": \"ffbd93f9 0deg\", \"set\": true }\n\n{\"option\": \"general:col:inactive_border\", \"gradient\": \"ff282a36 0deg\", \"set\": true }\n";
+        assert_eq!(parse_borders(json), (Some(Color::rgba(0xbd, 0x93, 0xf9, 0xff)), Some(Color::rgba(0x28, 0x2a, 0x36, 0xff))));
+    }
+
+    /// Unset is Hyprland's own default — white for the active border —
+    /// and resolving to it would make every app white.
+    #[test]
+    fn a_border_hyprland_reports_as_unset_is_not_used() {
+        let json = "{\"option\": \"general:col:active_border\", \"gradient\": \"ffffffff 0deg\", \"set\": false }";
+        assert_eq!(parse_borders(json), (None, None));
+    }
+
+    /// A gradient border stands for its first colour.
+    #[test]
+    fn a_gradient_border_stands_for_its_first_stop() {
+        let json = "{\"option\": \"general:col:active_border\", \"gradient\": \"ff33ccff ff00ff99 45deg\", \"set\": true }";
+        assert_eq!(parse_borders(json).0, Some(Color::rgba(0x33, 0xcc, 0xff, 0xff)));
     }
 
     /// A half-typed colour is not a reason to draw a white window.
