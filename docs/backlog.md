@@ -140,14 +140,13 @@ someone watching the screen. Ranked by what each one unblocks.
 
 Open work Claude can do unattended. Nothing here blocks a release.
 
-- **Measure the tray after the next install.** trayd now runs on one
-  thread and follows its services' signals, with a one-minute poll for
-  night light and keep awake (tray: `One runtime thread`, `Icons follow
-  their services' signals`). Before, it cost ~560 wakeups every ten
-  seconds. After `./hyprforge --install` restarts it: procman's Battery
-  page, or `/proc/<pid>/task/*/schedstat` summed over 20 s against the
-  1,131 it was — and toggle Wi-Fi or plug the charger to see the icon
-  change at once. *Added 2026-10-17.*
+- **Why receiving one D-Bus signal costs the tray ~45 wakeups.** After
+  the 2026-10-17 work the tray idles at ~1,590 wakeups a minute, from
+  ~3,400. What is left is not refreshing — filtered signals still cost
+  ~45 each (Wi-Fi strength, every 6 s) and ~85 each (UPower's pair,
+  every 30 s) just to arrive, on a single-threaded runtime. A profiler
+  (`perf trace` on the trayd pid) would say whether it is zbus's
+  reader, tokio's driver or the match-rule streams. *Added 2026-10-17.*
 - **Procman: see deeper, the rest.** Hyprland touches — click a window
   to inspect it, end the focused window's tree, a tray item for
   pressure — want the user at the screen. Memory, Flatpaks and
@@ -221,6 +220,11 @@ Parked on purpose — written down so they are not lost, not scheduled.
 Kept for a few weeks so "what happened to X" has an answer, then
 pruned; git history has the rest.
 
+- **The tray follows signals**: one runtime thread, icons refreshed by
+  their own service's signals with what no icon shows filtered out, a
+  one-minute poll for the rest. Idle wakeups ~3,400 → ~1,590 a minute,
+  measured on the installed daemon; changes show at once.
+  *Added 2026-10-17.*
 - **Procman has rules**: a Rules tab and a user service that apply a
   priority, a cap or a warning to a program as it starts. In procman's
   repository; local until landed. *Added 2026-10-17.*
