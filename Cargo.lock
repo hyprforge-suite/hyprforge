@@ -2626,6 +2626,7 @@ dependencies = [
  "hyprforge-ui",
  "iced",
  "iced_runtime",
+ "iced_test",
  "iced_tiny_skia",
  "libc",
  "postcard",
