@@ -153,6 +153,13 @@ someone watching the screen. Ranked by what each one unblocks.
 
 Open work Claude can do unattended. Nothing here blocks a release.
 
+- **The greeter's look lags a hand-edited border.** Apps resolve the look
+  as they open and Settings refreshes the lock screen's copy as it starts
+  (Settings, 2026-10-18), but the greeter's export is written only on an
+  Appearance save — on purpose, since an isolated run of Settings must not
+  write the real login screen's theme. A fix wants a writer that can tell
+  the real session from a test: an `hl.exec_cmd` at login, or a check that
+  `XDG_CONFIG_HOME` is the user's own. *Added 2026-10-18.*
 - **Parked mid-pass: the look following Hyprland, and procman's redesign.**
   Done and committed: every procman tab redesigned, data drawn in text
   shades rather than state colours (procman b294a63, on `next`), and the
