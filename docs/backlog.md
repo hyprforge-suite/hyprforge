@@ -38,13 +38,14 @@ someone watching the screen. Ranked by what each one unblocks.
   (priority 10, 8 GB), `hyprforge-procman-rules --dry-run`, the tab's
   switch, then a build — `ps -o ni` and its scope should show both.
   *Added 2026-10-17.*
-- **Close Files a few dozen times in the nested Hyprland.** The fix for
-  its 32 segfaults (Files' `Never let go of the last reference to
-  winit's connection`) keeps the drag worker's connection from being
-  torn down after winit disconnects the display; every stack matched
-  that teardown. Proof is closing it repeatedly with a drag done first,
-  then `coredumpctl list hyprforge-files` showing nothing new.
-  *Added 2026-10-17.*
+- **Close Files a few dozen times in the nested Hyprland.** Two fixes
+  for its 33 segfaults: the drag worker's connection is never torn down
+  (8233aaa), and since 2026-10-18 the worker is stopped before the
+  window closes (Files 0c218cd) — the one crash after the first fix was
+  the worker still dispatching on the display winit had just freed.
+  Proof is closing it both ways (last tab, titlebar ×) repeatedly with a
+  drag done first, then `coredumpctl list hyprforge-files` showing
+  nothing new, and the window still closing at once. *Added 2026-10-17.*
 - **The NVIDIA card is held awake by its power setting.**
   `/sys/bus/pci/devices/0000:01:00.0/power/control` is `on`, which
   disables runtime power management outright, though the driver runs
