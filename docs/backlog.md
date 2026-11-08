@@ -40,10 +40,21 @@ left, and move an item back to its section if it stops.
   Settings, Files and the lock screen under the new surfaces and compare a
   screenshot's pixels against the theme (CLAUDE.md's rule about two hosts
   looking the same); the half-width layouts of the five over-time tabs;
-  move the canvas designs' hex values to the derived ones. A start on the
-  first sits uncommitted: Settings' `render::render_every_screen` (its
-  `src/main.rs` and `Cargo.toml`), with its line in `.config/nextest.toml`
-  and the `Cargo.lock` entries it needs. *Added 2026-10-18.* *Started 2026-11-08.*
+  move the canvas designs' hex values to the derived ones. 2026-11-08:
+  Settings' render tool is committed (Settings, `next`), and Settings and
+  Files both draw `root`, `sidebar`, `card` and the accent's selection fill
+  exactly as the theme says (sampled; off by one at most, rounding). The
+  row stripe is `card_border` at 22%, translucent, so `iced_wgpu` draws it
+  about two levels lighter than tiny-skia does (`#22232c` against
+  `#20212a`) — invisible, written down so nobody re-measures it. The lock
+  and greeter copies could not be compared: `lock.toml` and the greeter's
+  `theme.toml` date from 2026-09-10, because the installed Settings
+  (built 2026-10-18 18:11) predates `republish_if_stale` (19:15) — the
+  user's lock and login screens have never had the look that follows
+  Hyprland. Reinstalling Settings fixes both copies on its next start.
+  Left: that reinstall (the user's OK), then render the lock screen
+  against the fresh copy; procman's half-width layouts; the canvas hex
+  values. *Added 2026-10-18.* *Started 2026-11-08.*
 
 ## Needs you
 
