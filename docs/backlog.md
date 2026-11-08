@@ -32,18 +32,7 @@ Started and not finished — so a second agent, or the next session, sees
 what is already in hand before it starts the same thing. Say what is
 left, and move an item back to its section if it stops.
 
-- [chore] **The hardening sweep, uncommitted.** 84 files in the monorepo
-  (+5,976/−679), written 2026-10-18 to 10-22 and found on 2026-11-07 with
-  no item naming it: symlink-safe opens (`O_NOFOLLOW`) in paths, fileops
-  and trash; tar hard links, zip symlinks and inflate limits in archive
-  and the mesh loaders; escaping in the Lua and hyprlang writers;
-  `replace_with_copy` for the shared export directory; bounded waits in
-  process. Clipboard's submodule has one dirty file to go with it, and
-  ten components have commits not yet on their `main`. Left, from `hf
-  check --fast`: clipboard's two new store tests want the directory
-  `0700` and get `0755`; three rustdoc warnings; one crate README out of
-  date. Then commit it crate by crate and land the components.
-  *Added 2026-11-07.* *Started 2026-11-07.*
+Nothing in hand.
 
 ## Needs you
 
@@ -206,7 +195,10 @@ Open work Claude can do unattended. Nothing here blocks a release.
   Settings, Files and the lock screen under the new surfaces and compare a
   screenshot's pixels against the theme (CLAUDE.md's rule about two hosts
   looking the same); the half-width layouts of the five over-time tabs;
-  move the canvas designs' hex values to the derived ones. *Added 2026-10-18.*
+  move the canvas designs' hex values to the derived ones. A start on the
+  first sits uncommitted: Settings' `render::render_every_screen` (its
+  `src/main.rs` and `Cargo.toml`), with its line in `.config/nextest.toml`
+  and the `Cargo.lock` entries it needs. *Added 2026-10-18.*
 - [bug] **Why receiving one D-Bus signal costs the tray ~45 wakeups.** After
   the 2026-10-17 work the tray idles at ~1,590 wakeups a minute, from
   ~3,400. Measured again 2026-10-18 (one thread, nothing else in the
@@ -285,3 +277,12 @@ Parked on purpose — written down so they are not lost, not scheduled.
 
 Landed items, each with what closed it, kept for two weeks and then
 pruned — git history has the rest.
+
+- **The hardening sweep, committed and landed**: 84 files written
+  2026-10-18 to 10-22 — symlink-safe writes and opens, archive and mesh
+  budgets, escaping in every config writer, bounded subprocess groups,
+  a private clipboard history, CI actions pinned by commit — as 28
+  library commits (b6d11b8..3570463). displayd, lock, notif and polkit
+  pushed to `main` and pinned; clipboard, files, media, procman and
+  settings pushed to `next` for the release. *Added 2026-11-07.*
+  *Done 2026-11-07.*
