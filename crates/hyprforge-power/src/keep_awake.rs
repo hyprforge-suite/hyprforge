@@ -200,9 +200,19 @@ impl InhibitBackend for DetachedBackend {
         let logind = self.logind().await?;
         let pids = holders_to_stop(&logind.list_inhibitors().await?, our_uid(), cmdline);
         for pid in pids {
-            let mut kill = std::process::Command::new("kill");
-            kill.args(["-TERM", &pid.to_string()]);
-            if let Err(e) = hyprforge_process::output(&mut kill, hyprforge_process::TIMEOUT) {
+            // `output` blocks its thread for up to its timeout. On a
+            // runtime thread that stalls every other task sharing it — the
+            // tray's whole D-Bus side, for as long as `kill` takes — so it
+            // runs where blocking is allowed.
+            let stopped = tokio::task::spawn_blocking(move || {
+                let mut kill = std::process::Command::new("kill");
+                kill.args(["-TERM", &pid.to_string()]);
+                hyprforge_process::output(&mut kill, hyprforge_process::TIMEOUT)
+            })
+            .await
+            .map_err(std::io::Error::other)
+            .and_then(|result| result);
+            if let Err(e) = stopped {
                 return Err(InhibitError::Refused(format!("keep awake could not be stopped: {e}")));
             }
         }
