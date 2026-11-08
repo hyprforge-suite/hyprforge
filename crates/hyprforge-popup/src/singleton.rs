@@ -47,13 +47,20 @@ extern "C" {
 }
 
 /// Where a lock file named `name` (e.g. `"hyprforge-clipmenu.lock"`)
-/// lives: `$XDG_RUNTIME_DIR` when it is set (every real session has one),
-/// falling back to the system temp directory only so this never panics
-/// on a machine with neither — a fallback that is never actually
-/// exercised outside a broken environment.
+/// lives: `$XDG_RUNTIME_DIR`, which every real session has and only its
+/// own user can write.
+///
+/// With no absolute runtime directory this is the bare, relative `name`,
+/// which [`acquire`] refuses — so the popup runs without a lock, the same
+/// "couldn't check, don't block on it" path as any other failure. It used
+/// to fall back to `/tmp`, which every user shares: another account could
+/// create `/tmp/hyprforge-clipmenu.lock` first and hold it forever, and
+/// this user's clipboard popup would quietly never open again.
 pub fn lock_path(name: &str) -> PathBuf {
-    let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    base.join(name)
+    match std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
+        Some(base) if base.is_absolute() => base.join(name),
+        _ => PathBuf::from(name),
+    }
 }
 
 /// Holds the exclusive lock for as long as this value lives. Dropping it
@@ -73,6 +80,15 @@ pub struct Lock(#[allow(dead_code)] File);
 /// so don't block on it", never as a reason to refuse to show the
 /// popup: a broken lock must never lock out every future one.
 pub fn acquire(path: &Path) -> io::Result<Option<Lock>> {
+    // A relative path is what `lock_path` hands back when there is no
+    // runtime directory; resolving it against the cwd would put the lock
+    // wherever the popup happened to be started.
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "no $XDG_RUNTIME_DIR to keep a single-instance lock in",
+        ));
+    }
     // `truncate(false)`: the lock's meaning is entirely in the flock
     // state, never the file's contents (there are none), so there is
     // nothing to preserve or discard either way — explicit so this
@@ -157,5 +173,27 @@ mod tests {
     fn a_missing_directory_is_reported_as_an_error_not_a_lock_state() {
         let path = Path::new("/nonexistent-hyprforge-popup-test-dir/test.lock");
         assert!(acquire(path).is_err());
+    }
+
+    /// With no runtime directory there is nowhere private to put the lock,
+    /// and a shared one is a lock another user can hold for ever.
+    #[test]
+    fn with_no_runtime_dir_the_lock_is_skipped_never_put_in_tmp() {
+        // SAFETY: the only test in this crate that touches the
+        // environment, and it restores what it found.
+        let saved = std::env::var_os("XDG_RUNTIME_DIR");
+        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+        let path = lock_path("hyprforge-test.lock");
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", "relative/dir") };
+        let relative = lock_path("hyprforge-test.lock");
+        if let Some(saved) = saved {
+            unsafe { std::env::set_var("XDG_RUNTIME_DIR", saved) };
+        } else {
+            unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+        }
+
+        assert!(!path.starts_with(std::env::temp_dir()), "{path:?}");
+        assert!(acquire(&path).is_err(), "no lock is taken, so the popup proceeds");
+        assert!(acquire(&relative).is_err());
     }
 }
