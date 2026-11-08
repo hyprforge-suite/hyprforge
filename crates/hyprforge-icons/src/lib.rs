@@ -127,6 +127,14 @@ impl Icons {
     /// `None` when nothing anywhere has any of them — the caller's own
     /// fallback, not a failure.
     pub fn lookup(&self, names: &[&str], size: u32, scale: u32) -> Option<PathBuf> {
+        // A name is joined under theme directories as it is, and names
+        // arrive from anywhere — a tray item picks its own over D-Bus — so
+        // one with a slash would be a path out of the theme to any image
+        // on disk. It is not a name the specification allows; it finds
+        // nothing. (An absolute `Icon=` path is the caller's to draw
+        // directly, as procman's `app_icons::named` does.)
+        let names: Vec<&str> = names.iter().copied().filter(|n| is_icon_name(n)).collect();
+        let names = names.as_slice();
         let key = (names.iter().map(|n| n.to_string()).collect::<Vec<_>>(), size, scale);
         if let Some(found) = self.cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
             return found;
@@ -147,6 +155,12 @@ impl Icons {
             EXTENSIONS.iter().map(|ext| dir.join(format!("{name}.{ext}"))).find(|p| p.is_file())
         })
     }
+}
+
+/// Whether `name` can be an icon name: something to look *up*, never a
+/// path to follow.
+fn is_icon_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains('/') && name != "." && name != ".."
 }
 
 /// Adds `name` and, depth first, everything it inherits.
@@ -200,6 +214,10 @@ impl Theme {
 
 impl Subdir {
     /// The specification's `DirectoryMatchesSize`.
+    ///
+    /// Saturating here and in [`Subdir::distance`]: sizes come from a
+    /// theme's own `index.theme`, and a number near `u32::MAX` there
+    /// overflowed the sums — a panic in a debug build.
     fn matches(&self, size: u32, scale: u32) -> bool {
         if self.scale != scale {
             return false;
@@ -208,7 +226,7 @@ impl Subdir {
             Kind::Fixed => self.size == size,
             Kind::Scalable => (self.min..=self.max).contains(&size),
             Kind::Threshold => {
-                (self.size.saturating_sub(self.threshold)..=self.size + self.threshold).contains(&size)
+                (self.size.saturating_sub(self.threshold)..=self.size.saturating_add(self.threshold)).contains(&size)
             }
         }
     }
@@ -216,13 +234,13 @@ impl Subdir {
     /// The specification's `DirectorySizeDistance`, in physical pixels
     /// so a 2x directory and a 1x one compare fairly.
     fn distance(&self, size: u32, scale: u32) -> u32 {
-        let want = size * scale;
+        let want = size.saturating_mul(scale);
         let (low, high) = match self.kind {
-            Kind::Fixed => (self.size * self.scale, self.size * self.scale),
-            Kind::Scalable => (self.min * self.scale, self.max * self.scale),
+            Kind::Fixed => (self.size.saturating_mul(self.scale), self.size.saturating_mul(self.scale)),
+            Kind::Scalable => (self.min.saturating_mul(self.scale), self.max.saturating_mul(self.scale)),
             Kind::Threshold => (
-                self.size.saturating_sub(self.threshold) * self.scale,
-                (self.size + self.threshold) * self.scale,
+                self.size.saturating_sub(self.threshold).saturating_mul(self.scale),
+                self.size.saturating_add(self.threshold).saturating_mul(self.scale),
             ),
         };
         if want < low {
@@ -405,6 +423,34 @@ mod tests {
     }
 
     const M48: (&str, &str) = ("mimetypes/48", "Size=48\nType=Fixed");
+
+    /// An icon name is a name, not a path: a tray item from any program
+    /// on the bus picks its own, and `../../../somewhere/secret` joined
+    /// under a theme directory reaches whatever image is there. A name
+    /// with a slash finds nothing, even when a file is at that path.
+    #[test]
+    fn an_icon_name_cannot_be_a_path() {
+        let f = Fixture::new();
+        f.theme("hicolor", "", &[M48], &["mimetypes/48/sub/inner.png", "secret.png"]);
+        let icons = f.icons("hicolor");
+        assert_eq!(icons.lookup(&["sub/inner"], 48, 1), None);
+        assert_eq!(icons.lookup(&["../../secret"], 48, 1), None);
+        assert_eq!(icons.lookup(&[".."], 48, 1), None);
+    }
+
+    /// A theme's sizes are numbers it wrote, and a size near `u32::MAX`
+    /// overflowed the size arithmetic — a panic in a debug build, a
+    /// wrapped and wrong match in a release one.
+    #[test]
+    fn a_theme_with_enormous_sizes_does_not_overflow() {
+        let f = Fixture::new();
+        let huge = ("huge", "Size=4294967295\nType=Threshold\nThreshold=4294967295\nScale=4294967295");
+        let wide = ("wide", "Size=4294967295\nType=Scalable\nMinSize=1\nMaxSize=4294967295\nScale=2");
+        f.theme("hicolor", "", &[huge, wide, M48], &["huge/a.png", "wide/a.png"]);
+        let icons = f.icons("hicolor");
+        assert!(icons.lookup(&["a"], 4_000_000_000, 4_000_000_000).is_some());
+        assert!(icons.lookup(&["a"], 48, 1).is_some());
+    }
 
     /// This machine's shape: the configured theme has no file-type icons
     /// at all, names a parent that is not installed, and one that is.
