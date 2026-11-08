@@ -501,3 +501,14 @@ fn no_layer_rules_leaves_the_toml_unchanged() {
     storage::save(&path, &stored).unwrap();
     assert!(!std::fs::read_to_string(&path).unwrap().contains("layer_rule"));
 }
+
+/// Rust's `f64` parser accepts `nan`, `inf` and `+5`. Written bare, the
+/// first two are Lua globals that read as nil and the third is not Lua at
+/// all — Hyprland then refuses the whole generated file.
+#[test]
+fn a_move_value_lua_cannot_read_as_a_number_is_quoted() {
+    let mut rule = discord_rule();
+    rule.effects.r#move = Some(["nan".to_string(), "+5".to_string()]);
+    let lua = generate(&[rule], &[]);
+    assert!(lua.contains("move = { [[nan]], [[+5]] }"), "{lua}");
+}

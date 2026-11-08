@@ -34,6 +34,8 @@ pub fn rule_from_call(kind: &str, args: &[Value]) -> Option<ImportedRule> {
 
     let mut dropped = unknown_keys(match_table, MATCHER_KEYS);
     dropped.extend(unknown_keys(table, EFFECT_KEYS));
+    dropped.extend(misread_keys(match_table, MATCHER_KEYS));
+    dropped.extend(misread_keys(table, EFFECT_KEYS));
     dropped.sort();
     dropped.dedup();
 
@@ -83,68 +85,120 @@ impl ImportedRule {
     }
 }
 
+/// The JSON shape each modelled key is read as — the getter that reads it
+/// below. A key whose value is not this shape reads as nothing, so it is
+/// as lost as a key the importer has never heard of (see [`misread_keys`]).
+#[derive(Clone, Copy)]
+enum Kind {
+    Str,
+    Bool,
+    /// An integer that fits an `i32`: `get_i32`.
+    Int,
+    /// Two entries, each a string or a number: `pair_from_json`.
+    Pair,
+    /// Two integers: `int_pair_from_json`.
+    IntPair,
+    /// The `match` table, read separately.
+    Table,
+}
+
+impl Kind {
+    fn reads(self, v: &Value) -> bool {
+        match self {
+            Kind::Str => v.is_string(),
+            Kind::Bool => v.is_boolean(),
+            Kind::Int => v.as_i64().is_some_and(|n| i32::try_from(n).is_ok()),
+            Kind::Pair => pair_from_json(Some(v)).is_some() && v.as_array().is_some_and(|a| a.len() == 2),
+            Kind::IntPair => {
+                int_pair_from_json(Some(v)).is_some() && v.as_array().is_some_and(|a| a.len() == 2)
+            }
+            Kind::Table => v.is_object(),
+        }
+    }
+}
+
 /// Keys of `match = { .. }` that [`matcher_from_json`] reads.
-const MATCHER_KEYS: &[&str] = &[
-    "class",
-    "title",
-    "initial_class",
-    "initial_title",
-    "fullscreen",
-    "float",
-    "xwayland",
-    "tag",
-    "content",
+const MATCHER_KEYS: &[(&str, Kind)] = &[
+    ("class", Kind::Str),
+    ("title", Kind::Str),
+    ("initial_class", Kind::Str),
+    ("initial_title", Kind::Str),
+    ("fullscreen", Kind::Bool),
+    ("float", Kind::Bool),
+    ("xwayland", Kind::Bool),
+    ("tag", Kind::Str),
+    ("content", Kind::Str),
 ];
 
 /// Top-level keys of `hl.window_rule({ .. })` that this importer reads.
 /// `match` and `enabled` are structural rather than effects.
-const EFFECT_KEYS: &[&str] = &[
-    "match",
-    "enabled",
-    "workspace",
-    "tag",
-    "float",
-    "move",
-    "size",
-    "opacity",
-    "border_color",
-    "no_blur",
-    "rounding",
-    "opaque",
-    "no_anim",
-    "no_focus",
-    "stay_focused",
-    "dim_around",
-    "keep_aspect_ratio",
-    "border_size",
-    "min_size",
-    "max_size",
-    "animation",
-    "idle_inhibit",
-    "tile",
-    "fullscreen",
-    "maximize",
-    "pin",
-    "center",
-    "no_initial_focus",
-    "monitor",
-    "suppress_event",
-    "group",
-    "no_close_for",
+const EFFECT_KEYS: &[(&str, Kind)] = &[
+    ("match", Kind::Table),
+    ("enabled", Kind::Bool),
+    ("workspace", Kind::Str),
+    ("tag", Kind::Str),
+    ("float", Kind::Bool),
+    ("move", Kind::Pair),
+    ("size", Kind::Pair),
+    ("opacity", Kind::Str),
+    ("border_color", Kind::Str),
+    ("no_blur", Kind::Bool),
+    ("rounding", Kind::Int),
+    ("opaque", Kind::Bool),
+    ("no_anim", Kind::Bool),
+    ("no_focus", Kind::Bool),
+    ("stay_focused", Kind::Bool),
+    ("dim_around", Kind::Bool),
+    ("keep_aspect_ratio", Kind::Bool),
+    ("border_size", Kind::Int),
+    ("min_size", Kind::IntPair),
+    ("max_size", Kind::IntPair),
+    ("animation", Kind::Str),
+    ("idle_inhibit", Kind::Str),
+    ("tile", Kind::Bool),
+    ("fullscreen", Kind::Bool),
+    ("maximize", Kind::Bool),
+    ("pin", Kind::Bool),
+    ("center", Kind::Bool),
+    ("no_initial_focus", Kind::Bool),
+    ("monitor", Kind::Str),
+    ("suppress_event", Kind::Str),
+    ("group", Kind::Str),
+    ("no_close_for", Kind::Int),
 ];
 
 /// Keys of `hl.workspace_rule({ .. })` that this importer reads.
-const WORKSPACE_KEYS: &[&str] = &["workspace", "monitor", "default", "persistent"];
+const WORKSPACE_KEYS: &[(&str, Kind)] = &[
+    ("workspace", Kind::Str),
+    ("monitor", Kind::Str),
+    ("default", Kind::Bool),
+    ("persistent", Kind::Bool),
+];
 
 /// Keys present in `t` that are not in `known`.
 ///
 /// A `null` counts as absent: the evaluator records an unset Lua field
 /// that way, and reporting it as unmodelled would make every rule look
 /// lossy.
-fn unknown_keys(t: &Map<String, Value>, known: &[&str]) -> Vec<String> {
+fn unknown_keys(t: &Map<String, Value>, known: &[(&str, Kind)]) -> Vec<String> {
     t.iter()
-        .filter(|(k, v)| !v.is_null() && !known.contains(&k.as_str()))
+        .filter(|(k, v)| !v.is_null() && !known.iter().any(|(name, _)| name == k))
         .map(|(k, _)| k.clone())
+        .collect()
+}
+
+/// Keys in `known` that are present, not null, and of a shape their
+/// getter does not read — `workspace = 3`, `opacity = 0.9`,
+/// `rounding = 2.5`.
+///
+/// Each of those reads as absent, so the regenerated rule lacks it, and
+/// counting only *unknown* keys as dropped let such a rule pass as
+/// faithful and have its original line removed.
+fn misread_keys(t: &Map<String, Value>, known: &[(&str, Kind)]) -> Vec<String> {
+    known
+        .iter()
+        .filter(|(name, kind)| t.get(*name).is_some_and(|v| !v.is_null() && !kind.reads(v)))
+        .map(|(name, _)| name.to_string())
         .collect()
 }
 
@@ -168,6 +222,7 @@ pub fn workspace_rule_from_call(kind: &str, args: &[Value]) -> Option<ImportedWo
         },
         dropped: {
             let mut d = unknown_keys(table, WORKSPACE_KEYS);
+            d.extend(misread_keys(table, WORKSPACE_KEYS));
             d.sort();
             d
         },
@@ -200,7 +255,7 @@ fn get_bool(t: &Map<String, Value>, k: &str) -> Option<bool> {
 }
 
 fn get_i32(t: &Map<String, Value>, k: &str) -> Option<i32> {
-    t.get(k).and_then(Value::as_i64).map(|n| n as i32)
+    t.get(k).and_then(Value::as_i64).and_then(|n| i32::try_from(n).ok())
 }
 
 fn matcher_from_json(m: &Map<String, Value>) -> Matcher {
@@ -463,6 +518,36 @@ mod fidelity {
             r#"hl.window_rule({ match = { class = "^steam$", title = nil }, float = true })"#,
         );
         assert!(rule.dropped.is_empty(), "dropped: {:?}", rule.dropped);
+    }
+
+    /// A key this importer models, with a value of a type it doesn't read
+    /// — `workspace = 3` where the getter wants a string, `opacity = 0.9`
+    /// as a number. The value came back as nothing, the rule regenerated
+    /// without it, and it still counted as faithful.
+    #[test]
+    fn a_known_key_of_the_wrong_type_makes_the_rule_unfaithful() {
+        for lua in [
+            r#"hl.window_rule({ match = { class = "^steam$" }, workspace = 3 })"#,
+            r#"hl.window_rule({ match = { class = "^steam$" }, opacity = 0.9 })"#,
+            r#"hl.window_rule({ match = { class = "^steam$" }, rounding = 2.5 })"#,
+            r#"hl.window_rule({ match = { class = "^steam$" }, min_size = { "50%", 10 } })"#,
+            r#"hl.window_rule({ match = { class = "^steam$", float = "yes" } })"#,
+            r#"hl.window_rule({ match = { class = "^steam$" }, enabled = "no" })"#,
+        ] {
+            let rule = imported(lua);
+            assert!(!rule.is_faithful(), "{lua} read as faithful");
+            assert_eq!(rule.dropped.len(), 1, "{lua}: {:?}", rule.dropped);
+        }
+    }
+
+    #[test]
+    fn a_workspace_rule_key_of_the_wrong_type_is_reported() {
+        let wr = workspace_rule_from_call(
+            "workspace_rule",
+            &[serde_json::json!({ "workspace": "3", "default": "yes" })],
+        )
+        .unwrap();
+        assert_eq!(wr.dropped, vec!["default".to_string()]);
     }
 
     #[test]

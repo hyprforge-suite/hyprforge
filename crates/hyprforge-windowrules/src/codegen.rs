@@ -222,13 +222,10 @@ fn render_matcher(m: &crate::model::Matcher) -> String {
 
 /// A literal numeric/pixel expression is emitted bare; anything else
 /// (Hyprland move/size expression strings like `"cursor_x-(window_w*0.5)"`)
-/// is quoted.
+/// is quoted. "Bare" means Lua reads it as the same finite number, which
+/// `parse::<f64>()` alone does not — see [`hyprforge_core::lua::lua_scalar`].
 fn lua_expr(s: &str) -> String {
-    if s.parse::<f64>().is_ok() {
-        s.to_string()
-    } else {
-        lua_string(s)
-    }
+    hyprforge_core::lua::lua_scalar(s)
 }
 
 /// Quotes using a Lua long-bracket string, which needs no escaping and so
