@@ -64,12 +64,29 @@ pub struct Location {
 
 /// Reads the EXIF of `path`. Blocking file I/O; call it off the UI
 /// thread. Never fails — see the module doc.
+/// How much of a file is handed to the EXIF reader. `kamadak-exif`
+/// reads a TIFF-shaped file — TIFF itself, and every raw format built on
+/// it, DNG included — to its very end before it looks at a single IFD:
+/// hundreds of megabytes off disk and into memory, for a panel of a few
+/// lines. Every container keeps its EXIF near the front (JPEG's APP1 is
+/// the first segment), so the head is enough; a TIFF whose IFD a writer
+/// put after the pixels reads as no camera, as a damaged one does.
+const EXIF_HEAD_BYTES: u64 = 16 << 20;
+
 pub fn read(path: &Path) -> Camera {
     let Ok(file) = std::fs::File::open(path) else {
         return Camera::default();
     };
-    let mut reader = std::io::BufReader::new(file);
-    let exif = match exif::Reader::new().continue_on_error(true).read_from_container(&mut reader) {
+    read_from(file)
+}
+
+fn read_from<R: std::io::Read>(reader: R) -> Camera {
+    let mut head = Vec::new();
+    if std::io::Read::read_to_end(&mut reader.take(EXIF_HEAD_BYTES), &mut head).is_err() {
+        return Camera::default();
+    }
+    let mut head = std::io::Cursor::new(head);
+    let exif = match exif::Reader::new().continue_on_error(true).read_from_container(&mut head) {
         Ok(exif) => exif,
         // Some of it parsed: keep that. A bad maker note must not cost
         // the shutter speed.
@@ -375,6 +392,19 @@ mod tests {
         );
         let at = camera.location.expect("a GPS block was written");
         assert_eq!(at.describe(), "38.7139° N, 9.1334° W");
+    }
+
+    /// `kamadak-exif` reads a TIFF-shaped file to its end before it looks
+    /// at the IFDs — and a DNG or a scanned TIFF is hundreds of megabytes,
+    /// all to fill in a panel of a few lines. Only the head is read.
+    #[test]
+    fn reading_the_camera_of_a_large_tiff_reads_only_its_head() {
+        let mut big = tiff_fixture();
+        big.resize(64 << 20, 0);
+        let mut file = std::io::Cursor::new(big);
+        let camera = read_from(&mut file);
+        assert!(file.position() <= EXIF_HEAD_BYTES, "read {} bytes", file.position());
+        assert_eq!(camera.body().as_deref(), Some("Fujifilm X-T5"));
     }
 
     #[test]

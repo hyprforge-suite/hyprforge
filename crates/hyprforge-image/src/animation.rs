@@ -45,6 +45,19 @@ use std::time::Duration;
 /// the first frame could be shown.
 pub const MAX_FRAMES: usize = 1000;
 
+/// The most canvas pixels one decode pass may composite before the
+/// animation is given up and shown still.
+///
+/// [`MAX_FRAMES`] bounds the count and the budget bounds what is kept,
+/// but neither bounds the work: `image` composites every frame onto the
+/// GIF's *logical screen*, whatever the size of the frame drawn into it,
+/// and the screen size is two header fields. A 20KB file declaring a
+/// 16384x8192 screen and a thousand one-pixel frames is a hundred
+/// billion pixel writes before the first frame could be shown. Two
+/// billion is a thousand frames of a 1440x1440 screen — past any GIF a
+/// chat app or screen recorder makes.
+const MAX_COMPOSITED_PIXELS: u64 = 1 << 31;
+
 /// One frame and how long it stays up.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Frame {
@@ -114,13 +127,13 @@ pub fn decode_animation(path: &Path, budget: &Budget) -> Result<Option<Animation
 
     let cap = budget.max_retained_bytes();
     let first = budget.fit(measured.source);
-    match decode_frames(path, budget, first, cap)? {
+    match decode_frames(path, budget, first, cap, MAX_COMPOSITED_PIXELS)? {
         Pass::Kept(frames) => Ok(animation(frames, first, measured)),
         Pass::TooMany => Ok(None),
         Pass::OverBudget(count) => {
             // Small enough that `count` frames fit under the cap.
             let smaller = shrink_to_fit(first, count, cap);
-            match decode_frames(path, budget, smaller, cap)? {
+            match decode_frames(path, budget, smaller, cap, MAX_COMPOSITED_PIXELS)? {
                 Pass::Kept(frames) => Ok(animation(frames, smaller, measured)),
                 // The file changed between the passes, or the arithmetic
                 // is wrong; either way, show it still rather than keep
@@ -142,17 +155,30 @@ enum Pass {
     TooMany,
 }
 
-fn decode_frames(path: &Path, budget: &Budget, size: DecodePixels, cap: u64) -> Result<Pass, ImageError> {
+/// One pass over the frames. `work` is how many canvas pixels it may
+/// composite; see [`MAX_COMPOSITED_PIXELS`].
+fn decode_frames(path: &Path, budget: &Budget, size: DecodePixels, cap: u64, work: u64) -> Result<Pass, ImageError> {
     let undecodable = |source| ImageError::Undecodable { path: path.to_path_buf(), source };
     let file = std::fs::File::open(path)
         .map_err(|source| ImageError::Unreadable { path: path.to_path_buf(), source })?;
     let mut decoder = image::codecs::gif::GifDecoder::new(std::io::BufReader::new(file)).map_err(undecodable)?;
     image::ImageDecoder::set_limits(&mut decoder, budget.limits()).map_err(undecodable)?;
 
+    let (screen_w, screen_h) = image::ImageDecoder::dimensions(&decoder);
+    let per_composite = u64::from(screen_w) * u64::from(screen_h);
     let per_frame = u64::from(size.width) * u64::from(size.height) * 4;
     let mut kept = Vec::new();
     let mut count = 0usize;
-    for frame in decoder.into_frames() {
+    let mut frames = decoder.into_frames();
+    loop {
+        // Asked before `next`, because `next` is where the compositing
+        // is: past the budget, the next frame is never drawn at all. A GIF
+        // that happened to end right there is shown still — the price of
+        // not knowing the count without paying for it.
+        if (count as u64 + 1) * per_composite > work {
+            return Ok(Pass::TooMany);
+        }
+        let Some(frame) = frames.next() else { break };
         let frame = frame.map_err(undecodable)?;
         count += 1;
         if count > MAX_FRAMES {
@@ -283,5 +309,26 @@ mod tests {
         assert_eq!(shown_for(Duration::ZERO), Duration::from_millis(100));
         assert_eq!(shown_for(Duration::from_millis(10)), Duration::from_millis(100));
         assert_eq!(shown_for(Duration::from_millis(20)), Duration::from_millis(20));
+    }
+
+    /// The work of compositing is bounded as well as what is kept: past
+    /// the pass's budget of canvas pixels, the animation is shown still
+    /// rather than drawn frame after frame onto a screen its header made
+    /// enormous.
+    #[test]
+    fn compositing_stops_at_the_work_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let colours: Vec<[u8; 4]> = (0..20).map(|i| if i % 2 == 0 { RED } else { BLUE }).collect();
+        let path = gif(dir.path(), 64, 64, &colours, 50);
+        let budget = Budget::for_edge(64);
+        let size = DecodePixels { width: 64, height: 64 };
+        let cap = budget.max_retained_bytes() * 100;
+        let ten_frames = 10 * 64 * 64;
+        assert!(matches!(decode_frames(&path, &budget, size, cap, ten_frames), Ok(Pass::TooMany)));
+        let twenty_frames = 20 * 64 * 64;
+        // The check before each frame asks for room for one more, so the
+        // whole animation needs that one frame's room too.
+        let enough = twenty_frames + 64 * 64;
+        assert!(matches!(decode_frames(&path, &budget, size, cap, enough), Ok(Pass::Kept(f)) if f.len() == 20));
     }
 }
