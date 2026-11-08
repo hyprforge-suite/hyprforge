@@ -123,7 +123,9 @@ impl Settings {
         // no-op this project keeps meeting, in the one place where the
         // user is staring at a call waiting for it.
         let picker = self.custom_picker_binary.trim();
-        if !picker.is_empty() && picker.contains('/') && !std::path::Path::new(picker).is_file() {
+        if hyprlang::breaks_line(picker) {
+            out.push((0, "the picker has to fit on one line".to_string()));
+        } else if !picker.is_empty() && picker.contains('/') && !std::path::Path::new(picker).is_file() {
             out.push((0, format!("there's no program at {picker}")));
         }
         out

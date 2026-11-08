@@ -176,6 +176,8 @@ impl Settings {
         for (i, entry) in self.entries.iter().enumerate() {
             if entry.path.trim().is_empty() {
                 out.push((i, "needs an image or a folder".to_string()));
+            } else if hyprlang::breaks_line(&entry.path) || hyprlang::breaks_line(&entry.monitor) {
+                out.push((i, "a path can't contain a line break".to_string()));
             } else if entry.timeout.is_some_and(|t| t == 0) {
                 out.push((i, "a cycle time of 0 seconds would never advance".to_string()));
             }
@@ -188,7 +190,15 @@ impl Settings {
         // flagging the block that actually applies dropped it and wrote the
         // superseded one instead. Setting a new wallpaper and leaving the
         // old block above it left the old image on screen.
-        for i in supersede::superseded(&self.entries, |e| Some(e.monitor.trim().to_string())) {
+        //
+        // Only a block that is itself written takes part. A new row starts
+        // blank, and keying it anyway let it supersede the working block
+        // above it while being skipped itself — no block at all.
+        let broken: Vec<usize> = out.iter().map(|(i, _)| *i).collect();
+        let keyed: Vec<(usize, &Entry)> = self.entries.iter().enumerate().collect();
+        for i in supersede::superseded(&keyed, |(i, e)| {
+            (!broken.contains(i)).then(|| e.monitor.trim().to_string())
+        }) {
             let monitor = self.entries[i].monitor.trim();
             out.push((
                 i,
@@ -517,6 +527,28 @@ mod tests {
         let out = generate(&s);
         assert!(out.contains("/new.png"), "the block that applies must be written: {out}");
         assert!(!out.contains("/old.png"), "the superseded block must not be: {out}");
+    }
+
+    /// A new row starts blank. Keyed regardless of validity, the blank
+    /// row superseded the working one above it and was itself skipped as
+    /// invalid, so no block was written at all.
+    #[test]
+    fn a_blank_row_does_not_knock_out_the_working_one_for_its_monitor() {
+        let mut s = Settings::default();
+        s.entries.push(entry("", "/a.png"));
+        s.entries.push(entry("", ""));
+        let mut zero = entry("", "/c");
+        zero.timeout = Some(0);
+        s.entries.push(zero);
+        assert_eq!(s.invalid().iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![1, 2]);
+        assert!(generate(&s).contains("/a.png"), "{}", generate(&s));
+    }
+
+    #[test]
+    fn a_path_with_a_line_break_is_refused() {
+        let mut s = Settings::default();
+        s.entries.push(entry("", "/a.png\npreload = /b.png"));
+        assert_eq!(s.invalid().len(), 1, "{:?}", s.invalid());
     }
 
     #[test]

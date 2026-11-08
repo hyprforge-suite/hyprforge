@@ -129,6 +129,10 @@ impl Settings {
                 // nothing — hypridle accepts it and it silently wastes
                 // the slot.
                 out.push((i, "needs a command to run".to_string()));
+            } else if hyprlang::breaks_line(&l.on_timeout) || hyprlang::breaks_line(&l.on_resume) {
+                // hyprlang cannot carry a line break; written, it would
+                // end the line and start another assignment.
+                out.push((i, "a command has to fit on one line".to_string()));
             }
         }
         out
@@ -358,6 +362,13 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(old_dispatches(&settings), vec!["hyprctl dispatch exec kitty".to_string()]);
+    }
+
+    #[test]
+    fn a_command_with_a_line_break_is_refused() {
+        let mut s = Settings::default();
+        s.listeners.push(listener(60, "loginctl lock-session\nrm -rf ~"));
+        assert_eq!(s.invalid().len(), 1, "{:?}", s.invalid());
     }
 
     fn listener(timeout: u32, on_timeout: &str) -> Listener {

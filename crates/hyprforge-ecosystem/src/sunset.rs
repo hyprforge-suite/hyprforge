@@ -78,15 +78,26 @@ impl Settings {
                 out.push((i, "gamma must be greater than 0".to_string()));
             }
         }
-        let mut seen: Vec<u32> = Vec::new();
-        for (i, p) in self.profiles.iter().enumerate() {
-            if let Some(minutes) = parse_time(&p.time) {
-                if seen.contains(&minutes) {
-                    out.push((i, format!("a second profile at {} — only one applies", p.time)));
-                }
-                seen.push(minutes);
-            }
+        // Last-one-wins at a given time, and `generate` drops whatever is
+        // reported here — so the row to flag is the *earlier* one. This
+        // flagged the later one once, which wrote the profile an edit had
+        // just replaced and dropped the edit. A row already rejected above
+        // takes no part: it is not written, so it cannot win, and keying it
+        // knocked out the working profile beside it as well.
+        let broken: Vec<usize> = out.iter().map(|(i, _)| *i).collect();
+        let keyed: Vec<Option<u32>> = self
+            .profiles
+            .iter()
+            .enumerate()
+            .map(|(i, p)| if broken.contains(&i) { None } else { parse_time(&p.time) })
+            .collect();
+        for i in hyprforge_core::supersede::superseded(&keyed, |k| *k) {
+            out.push((
+                i,
+                format!("a later profile at {} replaces this one", self.profiles[i].time.trim()),
+            ));
         }
+        out.sort_by_key(|(i, _)| *i);
         out
     }
 
@@ -230,6 +241,31 @@ mod tests {
             s.profiles.push(p);
             assert_eq!(s.invalid().len(), 1, "{bad} was accepted");
         }
+    }
+
+    /// hyprsunset is last-one-wins at a given time (`core::supersede`), and
+    /// `generate` skips whatever `invalid` reports — so flagging the later
+    /// profile dropped the one in effect and wrote the one it replaced.
+    #[test]
+    fn of_two_profiles_at_the_same_time_the_later_one_is_written() {
+        let mut s = Settings::default();
+        s.profiles.push(profile("21:00", 5500));
+        s.profiles.push(profile("21:00", 4000));
+        assert_eq!(s.invalid().iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0]);
+        let out = generate(&s);
+        assert!(out.contains("temperature = 4000"), "{out}");
+        assert!(!out.contains("temperature = 5500"), "{out}");
+    }
+
+    /// A row too broken to write takes no part: it must not knock out a
+    /// working profile at the same time.
+    #[test]
+    fn an_invalid_profile_does_not_supersede_a_valid_one_at_the_same_time() {
+        let mut s = Settings::default();
+        s.profiles.push(profile("21:00", 50));
+        s.profiles.push(profile("21:00", 4000));
+        assert_eq!(s.invalid().iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0]);
+        assert!(generate(&s).contains("temperature = 4000"));
     }
 
     #[test]

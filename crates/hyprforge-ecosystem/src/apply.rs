@@ -263,11 +263,18 @@ pub fn restart_idle() -> Result<(), std::io::Error> {
         Command::new("pkill").args(["-x", "hypridle"]),
         hyprforge_core::command::TIMEOUT,
     );
-    Command::new("hypridle")
+    let mut child = Command::new("hypridle")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
+    // Dropping a `Child` does not wait for it, so each restart whose
+    // hypridle later exits (the next restart's `pkill`, for one) left a
+    // zombie behind for as long as Settings ran. Someone has to reap it;
+    // a thread that does nothing else is the cheapest someone.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
 }
 

@@ -36,7 +36,10 @@ use hyprforge_core::hyprlang::{Document, Item};
 pub struct Imported<T> {
     pub value: T,
     /// Keys present in the block that this importer does not model, in
-    /// file order. Empty means it round-trips exactly.
+    /// file order, then modelled keys whose value could not be read (a
+    /// hyprlang `$variable`, a word where a number goes) — the model holds
+    /// a default for those, not what the user wrote. Empty means it
+    /// round-trips exactly.
     pub dropped: Vec<String>,
     /// 1-based, inclusive, into the file this came from.
     pub line: usize,
@@ -145,16 +148,20 @@ pub fn idle(doc: &Document) -> (Option<Imported<idle::General>>, Review<idle::Li
     for item in doc.blocks("listener") {
         let mut listener = idle::Listener::default();
         let mut unreadable = Vec::new();
+        let mut unread_keys = Vec::new();
         for (key, value, line) in fields(item) {
             match key {
                 "timeout" => match value.parse() {
                     Ok(seconds) => listener.timeout = seconds,
-                    // Not a dropped *key* — the key is modelled and the
-                    // value isn't a number. Recorded as a problem so the
-                    // block is never retired on the strength of a timeout
-                    // nobody can reproduce.
-                    Err(_) => unreadable
-                        .push((line, format!("`timeout = {value}` isn't a number of seconds"))),
+                    // The key is modelled and the value isn't a number.
+                    // Reported as a problem *and* counted against the item:
+                    // a problem alone left the item faithful, so it was
+                    // ticked and its block retired on the strength of a
+                    // timeout nobody can reproduce.
+                    Err(_) => {
+                        unreadable.push((line, format!("`timeout = {value}` isn't a number of seconds")));
+                        unread_keys.push(key.to_string());
+                    }
                 },
                 // Translated on the way in, so the Idle page shows the
                 // command that will actually run (idle::lua_dispatch).
@@ -170,12 +177,9 @@ pub fn idle(doc: &Document) -> (Option<Imported<idle::General>>, Review<idle::Li
         }
         let (line, end_line) = span(item);
         review.problems.extend(unreadable);
-        review.items.push(Imported {
-            value: listener,
-            dropped: unknown(item, LISTENER_KEYS),
-            line,
-            end_line,
-        });
+        let mut dropped = unknown(item, LISTENER_KEYS);
+        dropped.extend(unread_keys);
+        review.items.push(Imported { value: listener, dropped, line, end_line });
     }
     (general, review)
 }
@@ -194,21 +198,28 @@ pub fn wallpaper(doc: &Document) -> Review<wallpaper::Entry> {
     let mut review = Review { items: Vec::new(), problems: doc.problems.clone() };
     for item in doc.blocks("wallpaper") {
         let mut entry = wallpaper::Entry::default();
+        // As for a listener's timeout: an unreadable value is a problem and
+        // also makes the item unfaithful.
+        let mut unread_keys = Vec::new();
         for (key, value, line) in fields(item) {
             match key {
                 "monitor" => entry.monitor = value.to_string(),
                 "path" => entry.path = value.to_string(),
                 "fit_mode" => match wallpaper::FitMode::parse(value) {
                     Some(mode) => entry.fit_mode = mode,
-                    None => review
-                        .problems
-                        .push((line, format!("`fit_mode = {value}` isn't a fit mode"))),
+                    None => {
+                        review.problems.push((line, format!("`fit_mode = {value}` isn't a fit mode")));
+                        unread_keys.push(key.to_string());
+                    }
                 },
                 "timeout" => match value.parse() {
                     Ok(seconds) => entry.timeout = Some(seconds),
-                    Err(_) => review
-                        .problems
-                        .push((line, format!("`timeout = {value}` isn't a number of seconds"))),
+                    Err(_) => {
+                        review
+                            .problems
+                            .push((line, format!("`timeout = {value}` isn't a number of seconds")));
+                        unread_keys.push(key.to_string());
+                    }
                 },
                 "order" => entry.random_order = value.trim() == "random",
                 "recursive" => entry.recursive = flag(value),
@@ -216,12 +227,9 @@ pub fn wallpaper(doc: &Document) -> Review<wallpaper::Entry> {
             }
         }
         let (line, end_line) = span(item);
-        review.items.push(Imported {
-            value: entry,
-            dropped: unknown(item, WALLPAPER_KEYS),
-            line,
-            end_line,
-        });
+        let mut dropped = unknown(item, WALLPAPER_KEYS);
+        dropped.extend(unread_keys);
+        review.items.push(Imported { value: entry, dropped, line, end_line });
     }
     review
 }
@@ -240,19 +248,24 @@ pub fn sunset(doc: &Document) -> (Option<i64>, Review<sunset::Profile>) {
 
     for item in doc.blocks("profile") {
         let mut profile = sunset::Profile::default();
+        // As for a listener's timeout: an unreadable value is a problem and
+        // also makes the item unfaithful.
+        let mut unread_keys = Vec::new();
         for (key, value, line) in fields(item) {
             match key {
                 "time" => profile.time = value.to_string(),
                 "temperature" => match value.parse() {
                     Ok(kelvin) => profile.temperature = kelvin,
-                    Err(_) => review
-                        .problems
-                        .push((line, format!("`temperature = {value}` isn't a number"))),
+                    Err(_) => {
+                        review.problems.push((line, format!("`temperature = {value}` isn't a number")));
+                        unread_keys.push(key.to_string());
+                    }
                 },
                 "gamma" => match value.parse() {
                     Ok(gamma) => profile.gamma = gamma,
                     Err(_) => {
-                        review.problems.push((line, format!("`gamma = {value}` isn't a number")))
+                        review.problems.push((line, format!("`gamma = {value}` isn't a number")));
+                        unread_keys.push(key.to_string());
                     }
                 },
                 "identity" => profile.identity = flag(value),
@@ -260,12 +273,9 @@ pub fn sunset(doc: &Document) -> (Option<i64>, Review<sunset::Profile>) {
             }
         }
         let (line, end_line) = span(item);
-        review.items.push(Imported {
-            value: profile,
-            dropped: unknown(item, PROFILE_KEYS),
-            line,
-            end_line,
-        });
+        let mut dropped = unknown(item, PROFILE_KEYS);
+        dropped.extend(unread_keys);
+        review.items.push(Imported { value: profile, dropped, line, end_line });
     }
 
     // Only when there is no schedule at all. A file with both is one
@@ -326,33 +336,35 @@ pub fn portal(doc: &Document) -> Review<portal::Settings> {
 
     if let Some(item) = doc.blocks("screencopy").last() {
         let mut settings = portal::Settings::default();
+        // As for a listener's timeout: an unreadable value is a problem and
+        // also makes the item unfaithful.
+        let mut unread_keys = Vec::new();
         for (key, value, line) in fields(item) {
             match key {
                 "max_fps" => match value.parse() {
                     Ok(fps) => settings.max_fps = Some(fps),
-                    Err(_) => review
-                        .problems
-                        .push((line, format!("`max_fps = {value}` isn't a number"))),
+                    Err(_) => {
+                        review.problems.push((line, format!("`max_fps = {value}` isn't a number")));
+                        unread_keys.push(key.to_string());
+                    }
                 },
                 "allow_token_by_default" => settings.allow_token_by_default = flag(value),
                 "custom_picker_binary" => settings.custom_picker_binary = value.to_string(),
                 "force_shm" => settings.force_shm = flag(value),
                 "cursor_mode" => match value.parse().ok().and_then(portal::CursorMode::from_int) {
                     Some(mode) => settings.cursor_mode = mode,
-                    None => review
-                        .problems
-                        .push((line, format!("`cursor_mode = {value}` isn't 0, 1 or 2"))),
+                    None => {
+                        review.problems.push((line, format!("`cursor_mode = {value}` isn't 0, 1 or 2")));
+                        unread_keys.push(key.to_string());
+                    }
                 },
                 _ => {}
             }
         }
         let (line, end_line) = span(item);
-        review.items.push(Imported {
-            value: settings,
-            dropped: unknown(item, SCREENCOPY_KEYS),
-            line,
-            end_line,
-        });
+        let mut dropped = unknown(item, SCREENCOPY_KEYS);
+        dropped.extend(unread_keys);
+        review.items.push(Imported { value: settings, dropped, line, end_line });
     }
 
     // Reported, not adopted. Saying "there is something here this screen
@@ -591,5 +603,35 @@ mod tests {
         let (_, review) = idle(&parse("listener {\n  timeout = 1\n"));
         assert!(!review.problems.is_empty());
         assert!(!review.is_complete());
+    }
+    /// A modelled key whose value can't be read — a hyprlang `$variable`,
+    /// most often — leaves the model at its default. The item is then not
+    /// what the user wrote, so it must not be ticked or have its lines
+    /// retired: the problem list alone said so, and the item still read as
+    /// faithful.
+    #[test]
+    fn an_unreadable_value_makes_its_item_unfaithful() {
+        let (_, review) = idle(&parse("listener {\n  timeout = $LOCK\n  on-timeout = loginctl lock-session\n}\n"));
+        assert!(!review.items[0].is_faithful());
+        assert_eq!(review.items[0].dropped, vec!["timeout".to_string()]);
+
+        let review = wallpaper(&parse("wallpaper {\n  monitor =\n  path = /a.png\n  fit_mode = $FIT\n}\n"));
+        assert!(!review.items[0].is_faithful());
+        let review = wallpaper(&parse("wallpaper {\n  monitor =\n  path = /a\n  timeout = soon\n}\n"));
+        assert!(!review.items[0].is_faithful());
+
+        let (_, review) = sunset(&parse("profile {\n  time = 21:00\n  temperature = $WARM\n}\n"));
+        assert!(!review.items[0].is_faithful());
+        let (_, review) = sunset(&parse("profile {\n  time = 21:00\n  temperature = 4000\n  gamma = $G\n}\n"));
+        assert!(!review.items[0].is_faithful());
+
+        let review = portal(&parse("screencopy {\n  max_fps = $FPS\n}\n"));
+        assert!(!review.items[0].is_faithful());
+    }
+
+    #[test]
+    fn a_readable_listener_is_still_faithful() {
+        let (_, review) = idle(&parse("listener {\n  timeout = 300\n  on-timeout = loginctl lock-session\n}\n"));
+        assert!(review.items[0].is_faithful());
     }
 }
