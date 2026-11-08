@@ -28,6 +28,7 @@ use crate::backend::{
 };
 use crate::error::{ArchiveError, Result};
 use crate::model::{normalise, Index};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
@@ -39,6 +40,9 @@ pub struct PlanItem {
     pub size: u64,
     pub mode: Option<u32>,
     pub link_target: Option<String>,
+    /// Whether `link_target` is a hard link — see
+    /// [`crate::model::Member::hard_link`].
+    pub hard_link: bool,
     /// The absolute destination path, already checked to be inside the
     /// destination directory.
     pub dest: PathBuf,
@@ -89,6 +93,7 @@ pub fn plan(index: &Index, request: &ExtractRequest, archive: &Path) -> Result<P
             size: member.size,
             mode: member.mode,
             link_target: member.link_target.clone(),
+            hard_link: member.hard_link,
             dest,
         });
     }
@@ -203,6 +208,20 @@ pub struct Run<'a> {
     report: ExtractReport,
     files_total: usize,
     bytes_total: u64,
+    /// Every member this run has written: where it went, and how many
+    /// bytes it counted for.
+    ///
+    /// For the two things that have to know what *this extraction*
+    /// put on disk, as opposed to what was there before it. A tar can
+    /// name the same member twice (`tar rf`), and the later copy must
+    /// replace the earlier one wherever the earlier one landed — not
+    /// meet it as a collision, which under Skip kept the superseded
+    /// version and under Rename put the real one beside it as
+    /// `notes (1).txt`. And a hard link must point at the file this
+    /// extraction wrote for its target, which a collision may have
+    /// renamed — never at a person's own file that happened to be
+    /// sitting at the target's name.
+    written: HashMap<String, (PathBuf, u64)>,
 }
 
 impl<'a> Run<'a> {
@@ -214,6 +233,7 @@ impl<'a> Run<'a> {
             report: ExtractReport::default(),
             files_total: plan.files(),
             bytes_total: plan.bytes,
+            written: HashMap::new(),
         })
     }
 
@@ -248,9 +268,24 @@ impl<'a> Run<'a> {
             return Ok(());
         }
 
-        let Some(dest) = resolve_collision(&item.dest, self.request.collision) else {
-            self.report.skipped.push(item.member.clone());
-            return Ok(());
+        // A member this run already wrote, arriving again: the archive
+        // is superseding itself, last-one-wins, and the later copy goes
+        // exactly where the earlier one did. The collision rule was
+        // answered the first time — for what was there *before* the
+        // extraction — and asking it again would treat the archive's
+        // own write as somebody else's file.
+        let earlier = self.written.get(&item.member).cloned();
+        let (dest, replace) = match &earlier {
+            Some((dest, _)) => (dest.clone(), true),
+            None => match resolve_collision(&item.dest, self.request.collision) {
+                Some(found) => found,
+                None => {
+                    if !self.report.skipped.contains(&item.member) {
+                        self.report.skipped.push(item.member.clone());
+                    }
+                    return Ok(());
+                }
+            },
         };
 
         // The member's own parent, not the destination root: a member
@@ -267,30 +302,78 @@ impl<'a> Run<'a> {
             }
         }
 
-        if let Some(target) = &item.link_target {
-            match write_link(target, &dest) {
-                Ok(()) => self.report.files += 1,
-                Err(why) => self.report.failed.push(MemberFailure::plain(item.member.clone(), why)),
+        // Overwrite *replaces* what is there; it does not write through
+        // it. Opening an existing name for writing follows a symlink
+        // sitting at it, and the bytes then land wherever the link
+        // points — outside the destination, quite possibly. So the old
+        // entry goes first and the new one is created fresh
+        // (`create_new` in `write_file`, which refuses to follow
+        // anything). A folder in the way is not removed: that fails
+        // below as a row, as it always did.
+        if replace {
+            if let Err(e) = remove_if_present(&dest) {
+                self.report
+                    .failed
+                    .push(MemberFailure::plain(item.member.clone(), e.to_string()));
+                return Ok(());
             }
-            return Ok(());
         }
 
-        // One member's failure is a row in `failed`, never the end of
-        // the extraction — the rule `StdBackend::read_dir` follows for a
-        // directory entry it cannot describe. A cancel is the exception:
-        // it is the person's answer, not this member's problem.
-        match open().and_then(|mut source| write_file(&dest, &mut source, item.mode)) {
-            Ok(written) => {
-                self.report.files += 1;
-                self.report.bytes += written;
+        let outcome = if let (true, Some(target)) = (item.hard_link, &item.link_target) {
+            self.write_hard_link(target, &dest).map(|()| 0)
+        } else if let Some(target) = &item.link_target {
+            write_link(target, &dest).map(|()| 0)
+        } else {
+            // One member's failure is a row in `failed`, never the end
+            // of the extraction — the rule `StdBackend::read_dir`
+            // follows for a directory entry it cannot describe. A
+            // cancel is the exception: it is the person's answer, not
+            // this member's problem.
+            match open().and_then(|mut source| write_file(&dest, &mut source, item.mode)) {
+                Ok(written) => Ok(written),
+                Err(e) if e.cancelled() => return Err(e),
+                // Through `MemberFailure::new`, which reads the *kind*
+                // off the error rather than leaving a caller to search
+                // the sentence for it — see `MemberFailure`.
+                Err(e) => {
+                    self.report.failed.push(MemberFailure::new(item.member.clone(), &e));
+                    return Ok(());
+                }
             }
-            Err(e) if e.cancelled() => return Err(e),
-            // Through `MemberFailure::new`, which reads the *kind* off
-            // the error rather than leaving a caller to search the
-            // sentence for it — see `MemberFailure`.
-            Err(e) => self.report.failed.push(MemberFailure::new(item.member.clone(), &e)),
+        };
+
+        match outcome {
+            Ok(bytes) => {
+                match earlier {
+                    // Counted once: the person extracted one file.
+                    Some((_, before)) => self.report.bytes -= before,
+                    None => self.report.files += 1,
+                }
+                self.report.bytes += bytes;
+                self.written.insert(item.member.clone(), (dest, bytes));
+            }
+            Err(why) => self.report.failed.push(MemberFailure::plain(item.member.clone(), why)),
         }
         Ok(())
+    }
+
+    /// A tar hard link, as a link to the file this extraction wrote for
+    /// its target.
+    ///
+    /// The target is named from the archive's root and is looked up
+    /// among this run's own writes, which is also the guard: a target
+    /// that climbs out, or names anything this extraction did not
+    /// write, has nothing to look up and is a failed row. Copied when
+    /// the filesystem will not hard-link, so the member still arrives
+    /// with its contents.
+    fn write_hard_link(&self, target: &str, dest: &Path) -> std::result::Result<(), String> {
+        let written = normalise(target).and_then(|t| self.written.get(&t));
+        let Some((source, _)) = written else {
+            return Err(format!("links to {target}, which this extraction didn't write"));
+        };
+        std::fs::hard_link(source, dest)
+            .or_else(|_| std::fs::copy(source, dest).map(|_| ()))
+            .map_err(|e| e.to_string())
     }
 
     pub fn finish(self) -> ExtractReport {
@@ -317,8 +400,9 @@ pub fn run(
 }
 
 /// Where this member actually gets written, given what is already
-/// there. `None` means skip it.
-fn resolve_collision(dest: &Path, collision: Collision) -> Option<PathBuf> {
+/// there, and whether what is there has to be removed first. `None`
+/// means skip it.
+fn resolve_collision(dest: &Path, collision: Collision) -> Option<(PathBuf, bool)> {
     // `symlink_metadata`, so a *broken* symlink sitting at the
     // destination still counts as something being in the way. Following
     // it would report "nothing there", and the write would then go
@@ -326,12 +410,23 @@ fn resolve_collision(dest: &Path, collision: Collision) -> Option<PathBuf> {
     // escape the path guard above exists to prevent, arriving through
     // the destination directory instead of through the archive.
     if std::fs::symlink_metadata(dest).is_err() {
-        return Some(dest.to_path_buf());
+        return Some((dest.to_path_buf(), false));
     }
     match collision {
-        Collision::Overwrite => Some(dest.to_path_buf()),
+        Collision::Overwrite => Some((dest.to_path_buf(), true)),
         Collision::Skip => None,
-        Collision::Rename => Some(free_name(dest)),
+        Collision::Rename => Some((free_name(dest), false)),
+    }
+}
+
+/// Removes a file or link at `path`, if there is one. A folder is left
+/// for the write to fail on.
+fn remove_if_present(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => std::fs::remove_file(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
     }
 }
 
@@ -364,27 +459,95 @@ fn free_name(dest: &Path) -> PathBuf {
 /// fit in memory to do it. CLAUDE.md's rule about asking what a change
 /// allocates rather than only whether it works — the lock screen's
 /// 296MB wallpaper, in a different shape.
+///
+/// A failure partway removes what was written. A half-written file at
+/// the member's name reads as the member, and an edit (see
+/// [`crate::write::edit`]) used to pack exactly that back into the
+/// archive as though it were the real thing.
 fn write_file(dest: &Path, source: &mut dyn Read, mode: Option<u32>) -> Result<u64> {
-    let file = std::fs::File::create(dest).map_err(|e| ArchiveError::io(dest, e))?;
+    // `create_new`: whatever was at `dest` has been removed or renamed
+    // around by now, so anything found here arrived since — and must
+    // not be written through. See `Run::item` on Overwrite.
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dest)
+        .map_err(|e| ArchiveError::io(dest, e))?;
     let mut file = std::io::BufWriter::new(file);
-    let written = std::io::copy(source, &mut file).map_err(|e| ArchiveError::io(dest, e))?;
-    file.flush().map_err(|e| ArchiveError::io(dest, e))?;
+    let copied = std::io::copy(source, &mut file)
+        .map_err(|e| copy_error(dest, e))
+        .and_then(|written| {
+            file.flush().map_err(|e| ArchiveError::io(dest, e))?;
+            Ok(written)
+        });
     drop(file);
+    let written = match copied {
+        Ok(written) => written,
+        Err(e) => {
+            let _ = std::fs::remove_file(dest);
+            return Err(e);
+        }
+    };
 
-    // Only the permission bits, and only the ones a normal umask would
-    // allow anyway: setuid and setgid out of an archive are a way to
-    // leave a root shell in someone's Downloads folder, and no file
-    // manager's extract button should be able to create one.
+    // Only the permission bits, and only the ones the umask allows:
+    // setuid and setgid out of an archive are a way to leave a root
+    // shell in someone's Downloads folder, and no file manager's
+    // extract button should be able to create one. The umask is
+    // applied by hand because `set_permissions` does not consult it —
+    // a member marked 0666 came out writable by every user on the
+    // machine, whatever the person had asked new files to be.
     #[cfg(unix)]
     if let Some(mode) = mode {
         use std::os::unix::fs::PermissionsExt;
-        let safe = mode & 0o777;
+        let safe = mode & 0o777 & !umask();
         let _ = std::fs::set_permissions(dest, std::fs::Permissions::from_mode(safe));
     }
     #[cfg(not(unix))]
     let _ = mode;
 
     Ok(written)
+}
+
+/// A failed `io::copy` as the error it really was.
+///
+/// A copy fails on either side. The readers here wrap a failure of
+/// their own — a wrong password, a damaged member — as an
+/// [`ArchiveError`] inside the `io::Error`, so that it reaches the
+/// report as itself (`NeedsPassword` is what opens a prompt) rather
+/// than as "couldn't be read" against the destination file.
+pub(crate) fn copy_error(dest: &Path, error: std::io::Error) -> ArchiveError {
+    if error.get_ref().is_some_and(|inner| inner.is::<ArchiveError>()) {
+        if let Some(Ok(inner)) = error.into_inner().map(|b| b.downcast::<ArchiveError>()) {
+            return *inner;
+        }
+        unreachable!("checked to be an ArchiveError just above");
+    }
+    ArchiveError::io(dest, error)
+}
+
+/// The process umask, so an extracted file is never more open than a
+/// new file would be.
+///
+/// Read from `/proc/self/status` rather than with `umask(2)`, which can
+/// only be read by setting it — briefly changing it for every other
+/// thread in the process, and this one runs beside a GUI. Read once:
+/// a program changing its own umask partway through an extraction is
+/// not a case worth a file read per member. Where it cannot be read,
+/// 022 — the ordinary default, and closed to everyone but the owner for
+/// writing, which is the property that matters.
+fn umask() -> u32 {
+    static UMASK: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *UMASK.get_or_init(|| {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| parse_umask(&status))
+            .unwrap_or(0o022)
+    })
+}
+
+fn parse_umask(status: &str) -> Option<u32> {
+    let line = status.lines().find(|l| l.starts_with("Umask:"))?;
+    u32::from_str_radix(line["Umask:".len()..].trim(), 8).ok()
 }
 
 /// Writes a symlink member, refusing one that points out of the
@@ -593,6 +756,49 @@ mod tests {
         assert_eq!(report.failed[0].member, "escape");
         assert!(!out.join("escape").exists());
         assert!(out.join("safe").exists(), "a link that stays inside is written");
+    }
+
+    /// A reader that hands over some bytes and then fails, the way a
+    /// member with a broken compressed stream does.
+    struct FailsPartway(usize);
+    impl Read for FailsPartway {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.0 == 0 {
+                return Err(std::io::Error::other("the stream is damaged"));
+            }
+            let n = self.0.min(buf.len());
+            buf[..n].fill(b'x');
+            self.0 -= n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn a_member_that_fails_partway_leaves_no_partial_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::build(vec![Member::file("big.bin", 1_000_000)]);
+        let req = request(dir.path());
+        let plan = plan(&index, &req, Path::new("/a.tar")).unwrap();
+        let mut run = Run::new(&plan, &req).unwrap();
+
+        run.item(&plan.items[0], &mut NoProgress, || {
+            Ok(Box::new(FailsPartway(10_000)) as Box<dyn Read>)
+        })
+        .unwrap();
+
+        let report = run.finish();
+        assert_eq!(report.failed.len(), 1);
+        assert!(
+            !dir.path().join("big.bin").exists(),
+            "a short copy at the member's name reads as the member"
+        );
+    }
+
+    #[test]
+    fn the_umask_is_read_from_the_status_line_that_names_it() {
+        let status = "Name:\tcargo\nUmask:\t0027\nState:\tR (running)\n";
+        assert_eq!(parse_umask(status), Some(0o027));
+        assert_eq!(parse_umask("Name:\tcargo\n"), None);
     }
 
     #[test]

@@ -36,6 +36,31 @@ pub enum ArchiveError {
     #[error("{path} is encrypted and needs a password.")]
     PasswordRequired { path: PathBuf },
 
+    /// An edit asked of an archive whose members are encrypted.
+    ///
+    /// Refused rather than attempted, because an edit is a rewrite (see
+    /// [`crate::write`]) and the writers here produce plain archives
+    /// only: unpacking `secrets.zip` with its password and packing it
+    /// back up wrote every member out in the clear under the same name,
+    /// with nothing to say the encryption was gone. Its own variant, and
+    /// not `PasswordRequired`, because no password makes it possible —
+    /// a caller that answered with a prompt would ask forever.
+    #[error("{path} is encrypted, and editing an encrypted archive isn't supported yet — it was left as it was.")]
+    EncryptedEdit { path: PathBuf },
+
+    /// An edit stopped because a member would not come out of the
+    /// archive whole, so the archive was left exactly as it was.
+    ///
+    /// An edit is a rewrite: whatever is unpacked is what is packed back
+    /// in, and a member that unpacked short would be written back short.
+    /// `message` is the member's own failure, already a sentence.
+    #[error("{path} wasn't changed, because “{member}” couldn't be unpacked to rewrite it. {message}")]
+    EditIncomplete {
+        path: PathBuf,
+        member: String,
+        message: String,
+    },
+
     #[error("There's no “{member}” inside {archive}.")]
     MemberNotFound { archive: PathBuf, member: String },
 
@@ -89,6 +114,8 @@ impl ArchiveError {
             | ArchiveError::Damaged { path, .. }
             | ArchiveError::Unsupported { path, .. }
             | ArchiveError::PasswordRequired { path }
+            | ArchiveError::EncryptedEdit { path }
+            | ArchiveError::EditIncomplete { path, .. }
             | ArchiveError::Io { path, .. }
             | ArchiveError::MemberNotFound { archive: path, .. }
             | ArchiveError::UnsafeMemberPath { archive: path, .. } => {
@@ -118,6 +145,12 @@ mod tests {
                 detail: "the central directory is truncated".into(),
             },
             ArchiveError::PasswordRequired { path: "/x/a.7z".into() },
+            ArchiveError::EncryptedEdit { path: "/x/secrets.zip".into() },
+            ArchiveError::EditIncomplete {
+                path: "/x/a.tar".into(),
+                member: "big.bin".into(),
+                message: "The archive ends partway through it.".into(),
+            },
             ArchiveError::MemberNotFound {
                 archive: "/x/a.zip".into(),
                 member: "gone.txt".into(),

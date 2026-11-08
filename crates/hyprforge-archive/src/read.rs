@@ -31,9 +31,11 @@ use crate::model::{Index, Member};
 use crate::pin::Pinned;
 use crate::timestamp;
 use crate::unlock::Unlock;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::io::{BufReader, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 /// Archives on the real filesystem.
 pub struct StdArchives;
@@ -129,6 +131,7 @@ fn zip_index(archive: &Path) -> Result<Index> {
             }),
             mode: entry.unix_mode(),
             link_target: None,
+            hard_link: false,
             encrypted: entry.encrypted(),
         });
     }
@@ -144,18 +147,34 @@ fn zip_index(archive: &Path) -> Result<Index> {
         .filter(|(_, m)| m.mode.is_some_and(is_symlink_mode))
         .map(|(i, _)| i)
         .collect();
+    // Read through a limit, because those contents are as long as the
+    // archive says: a "link" whose target is two gigabytes of one
+    // letter compresses to almost nothing and was read whole into the
+    // listing. No filesystem here takes a target past `PATH_MAX`, so a
+    // longer one is not a link anything could create — it is listed
+    // without a target, and unpacks as the plain file it then is.
     for i in links {
         let name = members[i].path.clone();
-        if let Ok(mut entry) = zip.by_name(&name) {
+        if let Ok(entry) = zip.by_name(&name) {
             let mut target = String::new();
-            if entry.read_to_string(&mut target).is_ok() {
+            let read = entry.take(LINK_TARGET_MAX as u64 + 1).read_to_string(&mut target);
+            if read.is_ok() && target.len() <= LINK_TARGET_MAX {
                 members[i].link_target = Some(target);
+            } else {
+                tracing::warn!(
+                    archive = %archive.display(),
+                    "a zip symlink's target is too long, or not text; listing it as a file"
+                );
             }
         }
     }
 
     Ok(Index::build(members))
 }
+
+/// The longest symlink target this reads out of a zip — Linux's
+/// `PATH_MAX`, which no target can exceed and still be created.
+const LINK_TARGET_MAX: usize = 4096;
 
 /// Whether a Unix mode says "this is a symlink" — `S_IFLNK`, the file
 /// type bits above the permissions.
@@ -167,24 +186,31 @@ fn zip_read_member(archive: &Path, member: &str, unlock: &Unlock) -> Result<Vec<
     let mut zip = zip_open(archive)?;
     let name = resolve_name(&mut zip, archive, member)?;
     let mut bytes = Vec::new();
-    zip_entry(&mut zip, archive, &name, unlock, &mut bytes)?;
+    zip_entry(&mut zip, archive, &name, unlock)?
+        .read_to_end(&mut bytes)
+        .map_err(|e| extract::copy_error(archive, e))?;
     Ok(bytes)
 }
 
-/// Reads one zip entry into `into`, decrypting if it is encrypted and a
-/// password was given.
+/// One zip entry, opened for reading — decrypting if it is encrypted
+/// and a password was given.
 ///
 /// A zip encrypts each entry, not the archive — so a zip can hold a
 /// mixture, and asking for a password to read the unencrypted half of
 /// one would be asking for nothing. Only an entry that says it is
 /// encrypted goes down the decrypting path.
-fn zip_entry<R: Read + std::io::Seek>(
-    zip: &mut zip::ZipArchive<R>,
+///
+/// A reader and not the bytes: an extraction streams it straight into
+/// the destination file, so a member does not have to fit in memory to
+/// be unpacked. It used to be read whole into a `Vec` first — a
+/// four-gigabyte disk image in a zip was four gigabytes of this
+/// process.
+fn zip_entry<'z, R: Read + std::io::Seek + 'z>(
+    zip: &'z mut zip::ZipArchive<R>,
     archive: &Path,
     name: &str,
     unlock: &Unlock,
-    into: &mut Vec<u8>,
-) -> Result<()> {
+) -> Result<Box<dyn Read + 'z>> {
     // Asked of the *raw* entry, which reads the header without trying
     // to decrypt anything — the question here is only "is this one
     // encrypted", and answering it must not need the password it is
@@ -194,7 +220,7 @@ fn zip_entry<R: Read + std::io::Seek>(
         .and_then(|at| zip.by_index_raw(at).ok().map(|entry| entry.encrypted()))
         .unwrap_or(false);
 
-    let mut entry = if encrypted {
+    let entry = if encrypted {
         let Some(password) = unlock.expose() else {
             return Err(ArchiveError::PasswordRequired {
                 path: archive.to_path_buf(),
@@ -217,20 +243,52 @@ fn zip_entry<R: Read + std::io::Seek>(
         zip.by_name(name).map_err(|e| zip_error(archive, e))?
     };
 
-    entry.read_to_end(into).map_err(|e| {
-        // AES and ZipCrypto both authenticate on the way out, so a wrong
-        // password that got past the header check fails *here*, as a
-        // checksum or decryption error partway through the read. Same
+    Ok(Box::new(Explained {
+        inner: entry,
+        archive: archive.to_path_buf(),
+        // AES and ZipCrypto both authenticate on the way out, so a
+        // wrong password that got past the header check fails partway
+        // through the read, as a checksum or decryption error. Same
         // answer: ask again.
-        if encrypted {
-            ArchiveError::PasswordRequired {
-                path: archive.to_path_buf(),
-            }
-        } else {
-            ArchiveError::io(archive, e)
-        }
-    })?;
-    Ok(())
+        failure: if encrypted { Failure::Password } else { Failure::Read },
+    }))
+}
+
+/// What a read failure of a member means.
+#[derive(Clone, Copy)]
+enum Failure {
+    /// The member is encrypted: a failure partway is a wrong password.
+    Password,
+    /// Anything else is the archive not reading.
+    Read,
+}
+
+/// A member's reader whose failures say what they are.
+///
+/// A streamed member fails inside somebody else's `io::copy`, as a bare
+/// `io::Error` that would be reported against the *destination* file —
+/// "notes.txt couldn't be read" about a file this is writing — and,
+/// worse, without the `NeedsPassword` reason that opens a prompt. So
+/// the failure travels as the [`ArchiveError`] it is, inside the
+/// `io::Error`, and [`extract::copy_error`] takes it back out.
+struct Explained<R> {
+    inner: R,
+    archive: PathBuf,
+    failure: Failure,
+}
+
+impl<R: Read> Read for Explained<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf).map_err(|e| {
+            let explained = match self.failure {
+                Failure::Password => ArchiveError::PasswordRequired {
+                    path: self.archive.clone(),
+                },
+                Failure::Read => ArchiveError::io(self.archive.clone(), e),
+            };
+            std::io::Error::other(explained)
+        })
+    }
 }
 
 /// The name a zip actually stores for the member this crate calls
@@ -279,10 +337,13 @@ fn zip_extract(
         // Resolved before the closure so a member that is simply not
         // there is a failed row rather than a borrow tangle.
         let name = resolve_name(&mut zip, archive, &item.member);
-        run.item(item, progress, || {
-            let mut bytes = Vec::new();
-            zip_entry(&mut zip, archive, &name?, unlock, &mut bytes)?;
-            Ok(Box::new(std::io::Cursor::new(bytes)) as Box<dyn Read>)
+        let zip = &mut zip;
+        run.item(item, progress, move || {
+            // Moved out of the capture so the reader it returns can
+            // borrow the archive for as long as the write takes, rather
+            // than only for the closure's body.
+            let zip = zip;
+            zip_entry(zip, archive, &name?, unlock)
         })?;
     }
     Ok(run.finish())
@@ -290,44 +351,134 @@ fn zip_extract(
 
 // --- tar ------------------------------------------------------------
 
-/// A tar reader over the right decompressor.
-fn tar_reader(archive: &Path, compression: Compression) -> Result<tar::Archive<crate::stream::BoxRead<'static>>> {
+/// How many bytes a tar reader may take, between handing over one
+/// member and the next, before the archive is called damaged.
+///
+/// The gap is headers: the next member's own, and any extension headers
+/// in front of it — a GNU long name (`L`), a long link target (`K`), a
+/// pax record (`x`). The `tar` crate reads each of those *whole* before
+/// it hands the member over, and their size is whatever the archive
+/// claims. A two-gigabyte "name" of one repeated letter is a few
+/// megabytes as a `.tar.xz`, and listing it used to allocate the two
+/// gigabytes. A real long name is a path — a few kilobytes at most — so
+/// a megabyte is far beyond anything honest and still nothing to hold.
+const BETWEEN_MEMBERS: u64 = 1024 * 1024;
+
+/// Counts what a tar reader takes while it is looking for the next
+/// member — see [`BETWEEN_MEMBERS`].
+///
+/// Metering only that gap, not the members' own data: a member is
+/// streamed to wherever it is going and may be any size at all. The
+/// gap is made to hold *only* headers by draining each member before
+/// asking for the next (see [`walk_tar`]); otherwise the crate's own
+/// skip over an unread member would count against the limit.
+#[derive(Default)]
+struct Meter {
+    on: Cell<bool>,
+    taken: Cell<u64>,
+    tripped: Cell<bool>,
+}
+
+struct Metered<R> {
+    inner: R,
+    meter: Rc<Meter>,
+}
+
+impl<R: Read> Read for Metered<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let meter = &self.meter;
+        if meter.on.get() && meter.taken.get() > BETWEEN_MEMBERS {
+            meter.tripped.set(true);
+            return Err(std::io::Error::other("a header claims more than a header can hold"));
+        }
+        let n = self.inner.read(buf)?;
+        meter.taken.set(meter.taken.get() + n as u64);
+        Ok(n)
+    }
+}
+
+type TarStream = Metered<crate::stream::BoxRead<'static>>;
+
+/// A tar reader over the right decompressor, and the meter on it.
+fn tar_reader(archive: &Path, compression: Compression) -> Result<(tar::Archive<TarStream>, Rc<Meter>)> {
     let file = std::fs::File::open(archive).map_err(|e| ArchiveError::io(archive, e))?;
     let stream = crate::stream::decoder(compression, Box::new(BufReader::new(file)))
         .map_err(|e| ArchiveError::io(archive, e))?;
-    Ok(tar::Archive::new(stream))
+    let meter = Rc::new(Meter::default());
+    let metered = Metered { inner: stream, meter: Rc::clone(&meter) };
+    Ok((tar::Archive::new(metered), meter))
+}
+
+/// How a walk over a tar ended.
+enum Walked {
+    /// Every member was handed over.
+    Whole,
+    /// The tar stopped being readable partway. Everything handed over
+    /// before this is real; what to do about the rest is the caller's.
+    Cut(std::io::Error),
+}
+
+/// Walks a tar once, handing `each` every member with its path.
+///
+/// Every reader of a tar goes through here, so the limit on headers
+/// (see [`BETWEEN_MEMBERS`]) cannot be forgotten by one of them. A
+/// header past the limit is an error, not a short listing: it is not a
+/// tar that happened to end early, and reporting it as one would show
+/// someone a plausible half of a hostile file.
+fn walk_tar(
+    archive: &Path,
+    compression: Compression,
+    mut each: impl FnMut(&mut tar::Entry<'_, TarStream>, String) -> Result<()>,
+) -> Result<Walked> {
+    let (mut tar, meter) = tar_reader(archive, compression)?;
+    let mut entries = tar.entries().map_err(|e| tar_damaged(archive, e))?;
+    loop {
+        meter.taken.set(0);
+        meter.on.set(true);
+        let next = entries.next();
+        meter.on.set(false);
+
+        let mut entry = match next {
+            None => return Ok(Walked::Whole),
+            Some(Ok(entry)) => entry,
+            Some(Err(_)) if meter.tripped.get() => {
+                return Err(ArchiveError::Damaged {
+                    path: archive.to_path_buf(),
+                    format: "tar",
+                    detail: format!(
+                        "a header claims to hold more than {} KiB, which no real header does",
+                        BETWEEN_MEMBERS / 1024
+                    ),
+                });
+            }
+            Some(Err(e)) => return Ok(Walked::Cut(e)),
+        };
+
+        // A pax *global* header is settings for the archive as a whole,
+        // not a member — `git archive` writes one first, and it used to
+        // list as a file called `pax_global_header`. (The per-member
+        // `x` header is consumed by the crate itself.)
+        if !entry.header().entry_type().is_pax_global_extensions() {
+            let path = entry.path().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+            each(&mut entry, path)?;
+        }
+
+        // Drained here, unmetered, so the next `next` reads only headers.
+        // A failure is left for that `next` to report as the tar ending.
+        let _ = std::io::copy(&mut entry, &mut std::io::sink());
+    }
 }
 
 fn tar_index(archive: &Path, compression: Compression) -> Result<Index> {
-    let mut tar = tar_reader(archive, compression)?;
-    let entries = tar
-        .entries()
-        .map_err(|e| tar_damaged(archive, e))?;
-
     let mut members = Vec::new();
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(e) => {
-                // A tar that stops being readable partway is not an
-                // empty tar: everything walked so far is real, and
-                // reporting it beats reporting nothing. The warning is
-                // what says the listing is short.
-                tracing::warn!(
-                    archive = %archive.display(),
-                    error = %e,
-                    "a tar stopped being readable partway through; listing what was read"
-                );
-                break;
-            }
-        };
-        let header = entry.header();
-        let path = entry.path().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    let walked = walk_tar(archive, compression, |entry, path| {
         if path.is_empty() {
-            continue;
+            return Ok(());
         }
+        let header = entry.header();
+        let kind = header.entry_type();
         members.push(Member {
-            is_dir: header.entry_type().is_dir(),
+            is_dir: kind.is_dir(),
             size: entry.size(),
             size_known: true,
             // Nothing per-member: a compressed tar is one stream, and
@@ -340,11 +491,53 @@ fn tar_index(archive: &Path, compression: Compression) -> Result<Index> {
                 .ok()
                 .flatten()
                 .map(|p| p.to_string_lossy().into_owned()),
+            hard_link: kind.is_hard_link(),
             encrypted: false,
             path,
         });
+        Ok(())
+    })?;
+    if let Walked::Cut(e) = walked {
+        // A tar that stops being readable partway is not an empty tar:
+        // everything walked so far is real, and reporting it beats
+        // reporting nothing. The warning is what says the listing is
+        // short.
+        tracing::warn!(
+            archive = %archive.display(),
+            error = %e,
+            "a tar stopped being readable partway through; listing what was read"
+        );
     }
     Ok(Index::build(members))
+}
+
+/// A tar member that must deliver every byte its header promised.
+///
+/// A tar cut short ends a member's data with a plain end-of-file — no
+/// checksum to fail, as a zip or a 7z member would — so a truncated
+/// download unpacked its last member short and reported it extracted.
+/// Reading past the promise is fine (a sparse member expands beyond
+/// the bytes it stores); stopping short of it is the archive being
+/// damaged, and says so.
+struct Whole<R> {
+    inner: R,
+    promised: u64,
+    archive: PathBuf,
+}
+
+impl<R: Read> Read for Whole<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if n == 0 && self.promised > 0 && !buf.is_empty() {
+            return Err(std::io::Error::other(ArchiveError::Damaged {
+                path: self.archive.clone(),
+                format: "tar",
+                detail: "it ends partway through this member".to_string(),
+            }));
+        }
+        self.promised = self.promised.saturating_sub(n as u64);
+        Ok(n)
+    }
 }
 
 fn tar_damaged(archive: &Path, error: std::io::Error) -> ArchiveError {
@@ -360,8 +553,6 @@ fn tar_read_member(archive: &Path, compression: Compression, member: &str) -> Re
         archive: archive.to_path_buf(),
         member: member.to_string(),
     })?;
-    let mut tar = tar_reader(archive, compression)?;
-
     // Every entry, not the first match. A tar is last-one-wins (see
     // `model`'s module doc): `tar rf` appends a second `notes.txt`
     // after the first, and the one that ends up on disk when anything
@@ -370,15 +561,20 @@ fn tar_read_member(archive: &Path, compression: Compression, member: &str) -> Re
     // that would look right, which is what makes that failure hard to
     // see.
     let mut found: Option<Vec<u8>> = None;
-    for entry in tar.entries().map_err(|e| tar_damaged(archive, e))? {
-        let mut entry = entry.map_err(|e| tar_damaged(archive, e))?;
-        let path = entry.path().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    let walked = walk_tar(archive, compression, |entry, path| {
         if crate::model::normalise(&path).as_deref() != Some(wanted.as_str()) {
-            continue;
+            return Ok(());
         }
         let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes).map_err(|e| ArchiveError::io(archive, e))?;
+        let promised = entry.size();
+        Whole { inner: &mut *entry, promised, archive: archive.to_path_buf() }
+            .read_to_end(&mut bytes)
+            .map_err(|e| extract::copy_error(archive, e))?;
         found = Some(bytes);
+        Ok(())
+    })?;
+    if let Walked::Cut(e) = walked {
+        return Err(tar_damaged(archive, e));
     }
 
     found.ok_or_else(|| ArchiveError::MemberNotFound {
@@ -402,30 +598,35 @@ fn tar_extract(
         plan.items.iter().map(|item| (item.member.as_str(), item)).collect();
 
     let mut run = extract::Run::new(plan, request)?;
-    let mut tar = tar_reader(archive, compression)?;
     let mut written: Vec<&str> = Vec::new();
 
-    for entry in tar.entries().map_err(|e| tar_damaged(archive, e))? {
-        let mut entry = match entry {
-            Ok(entry) => entry,
-            Err(e) => {
-                tracing::warn!(
-                    archive = %archive.display(),
-                    error = %e,
-                    "a tar stopped being readable partway through an extraction"
-                );
-                break;
-            }
-        };
-        let path = entry.path().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    // A member the tar names twice arrives here twice, and both go to
+    // `run.item` — which knows the second is superseding its own
+    // earlier write rather than colliding with somebody's file. See
+    // `extract::Run`.
+    let walked = walk_tar(archive, compression, |entry, path| {
         let Some(normalised) = crate::model::normalise(&path) else {
-            continue;
+            return Ok(());
         };
         let Some(item) = planned.get(normalised.as_str()).copied() else {
-            continue;
+            return Ok(());
         };
         written.push(&item.member);
-        run.item(item, progress, || Ok(Box::new(&mut entry) as Box<dyn Read>))?;
+        let promised = entry.size();
+        run.item(item, progress, || {
+            Ok(Box::new(Whole {
+                inner: &mut *entry,
+                promised,
+                archive: archive.to_path_buf(),
+            }) as Box<dyn Read>)
+        })
+    })?;
+    if let Walked::Cut(e) = walked {
+        tracing::warn!(
+            archive = %archive.display(),
+            error = %e,
+            "a tar stopped being readable partway through an extraction"
+        );
     }
 
     // Directories the archive never listed have no entry to arrive on,
@@ -477,13 +678,38 @@ fn sevenz_error(archive: &Path, error: sevenz_rust2::Error) -> ArchiveError {
     }
 }
 
+/// Which of a 7z's entries are encrypted, by position in its file list.
+///
+/// A 7z encrypts *blocks*, not entries: an entry is encrypted when the
+/// block holding its data has AES among its coders. Worked out here so
+/// a 7z's listing carries the same per-member flag a zip's does — and
+/// so an edit can refuse one (see [`crate::write::edit`]) without
+/// first unpacking it in the clear.
+fn sevenz_encrypted(archive: &sevenz_rust2::Archive) -> Vec<bool> {
+    let aes = sevenz_rust2::EncoderMethod::ID_AES256_SHA256;
+    (0..archive.files.len())
+        .map(|i| {
+            archive
+                .stream_map
+                .file_block_index
+                .get(i)
+                .copied()
+                .flatten()
+                .and_then(|block| archive.blocks.get(block))
+                .is_some_and(|block| block.coders.iter().any(|c| c.encoder_method_id() == aes))
+        })
+        .collect()
+}
+
 fn sevenz_index(archive: &Path, unlock: &Unlock) -> Result<Index> {
     let reader = sevenz_open(archive, unlock)?;
+    let encrypted = sevenz_encrypted(reader.archive());
     let members = reader
         .archive()
         .files
         .iter()
-        .map(|entry| Member {
+        .zip(encrypted)
+        .map(|(entry, encrypted)| Member {
             path: entry.name().to_string(),
             is_dir: entry.is_directory(),
             size: entry.size(),
@@ -498,8 +724,9 @@ fn sevenz_index(archive: &Path, unlock: &Unlock) -> Result<Index> {
             // out of the attribute word is not worth guessing wrong.
             mode: None,
             link_target: None,
-            encrypted: false,
-            })
+            hard_link: false,
+            encrypted,
+        })
         .collect();
     Ok(Index::build(members))
 }
@@ -531,6 +758,87 @@ fn sevenz_stored_name(
             archive: archive.to_path_buf(),
             member: member.to_string(),
         })
+}
+
+/// A single pass over a 7z, streaming every planned member as it goes.
+///
+/// The tar shape, for the same two reasons. A 7z's members share
+/// compressed blocks — a *solid* archive is one block for everything —
+/// so pulling them out one at a time by name decodes the block from its
+/// start for every member, and the crate's `read_file` also hands each
+/// one back as a whole `Vec`, so a member had to fit in memory to be
+/// unpacked. Walking the blocks once, in order, streams each member
+/// straight into its file.
+///
+/// Every entry the walk passes is drained, written or not: the members
+/// of a block are one stream read in sequence, and an entry left unread
+/// would be read as the start of the next.
+fn sevenz_extract(
+    archive: &Path,
+    plan: &extract::Plan,
+    request: &ExtractRequest,
+    unlock: &Unlock,
+    progress: &mut dyn Progress,
+) -> Result<ExtractReport> {
+    let mut reader = sevenz_open(archive, unlock)?;
+    let encrypted: std::collections::HashSet<String> = reader
+        .archive()
+        .files
+        .iter()
+        .zip(sevenz_encrypted(reader.archive()))
+        .filter(|(_, encrypted)| *encrypted)
+        .filter_map(|(entry, _)| crate::model::normalise(entry.name()))
+        .collect();
+    let planned: HashMap<&str, &PlanItem> =
+        plan.items.iter().map(|item| (item.member.as_str(), item)).collect();
+
+    let mut run = extract::Run::new(plan, request)?;
+    let mut written: Vec<&str> = Vec::new();
+    // The walk's callback answers in the 7z crate's error type, which
+    // cannot carry a cancel — so a stop is kept here and the walk told
+    // only to end.
+    let mut stopped: Option<ArchiveError> = None;
+
+    reader
+        .for_each_entries(|entry, data| {
+            let name = crate::model::normalise(entry.name());
+            if let Some(item) = name.as_deref().and_then(|n| planned.get(n).copied()) {
+                written.push(&item.member);
+                let failure = if encrypted.contains(&item.member) {
+                    Failure::Password
+                } else {
+                    Failure::Read
+                };
+                let wrote = run.item(item, progress, || {
+                    Ok(Box::new(Explained {
+                        inner: &mut *data,
+                        archive: archive.to_path_buf(),
+                        failure,
+                    }) as Box<dyn Read>)
+                });
+                if let Err(e) = wrote {
+                    stopped = Some(e);
+                    return Ok(false);
+                }
+            }
+            // A failure here is the block not decoding, which the next
+            // member's read will meet and report as its own row.
+            let _ = std::io::copy(data, &mut std::io::sink());
+            Ok(true)
+        })
+        .map_err(|e| sevenz_error(archive, e))?;
+    if let Some(e) = stopped {
+        return Err(e);
+    }
+
+    // A folder the archive names only by implication has no entry to
+    // arrive on — see `tar_extract`.
+    for item in plan.items.iter().filter(|i| i.is_dir) {
+        if !written.contains(&item.member.as_str()) {
+            run.item(item, progress, || Ok(Box::new(std::io::empty()) as Box<dyn Read>))?;
+        }
+    }
+    Ok(run.finish())
 }
 
 // --- a single compressed file ---------------------------------------
@@ -622,25 +930,7 @@ impl StdArchives {
         match format {
             Format::Zip => zip_extract(archive, &plan, request, unlock, progress),
             Format::Tar(compression) => tar_extract(archive, compression, &plan, request, progress),
-            Format::SevenZ => {
-                // 7z members share compressed blocks, so pulling them one
-                // at a time can decode a block per member. Acceptable
-                // here and not for tar, because the reader keeps the file
-                // open and seeks — it is not re-reading the archive from
-                // byte zero each time, which is exactly what a tar would.
-                let mut reader = sevenz_open(archive, unlock)?;
-                let mut run = extract::Run::new(&plan, request)?;
-                for item in &plan.items {
-                    let name = sevenz_stored_name(&reader, archive, &item.member);
-                    run.item(item, progress, || {
-                        let bytes = reader
-                            .read_file(&name?)
-                            .map_err(|e| sevenz_error(archive, e))?;
-                        Ok(Box::new(std::io::Cursor::new(bytes)) as Box<dyn Read>)
-                    })?;
-                }
-                Ok(run.finish())
-            }
+            Format::SevenZ => sevenz_extract(archive, &plan, request, unlock, progress),
             Format::Compressed(compression) => {
                 let mut run = extract::Run::new(&plan, request)?;
                 for item in &plan.items {
@@ -757,6 +1047,24 @@ pub(crate) fn rewrite_in_place(
     archive: &Path,
     write: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<()> {
+    // Through a symlink to the archive it names. The rename below
+    // replaces whatever is *at* the path, and for a link that is the
+    // link: an edit of `latest.zip -> builds/0412.zip` turned the link
+    // into a regular file and left the real archive unedited, with
+    // nothing to say the two had come apart.
+    let resolved;
+    let archive = match std::fs::symlink_metadata(archive) {
+        Ok(meta) if meta.file_type().is_symlink() => match std::fs::canonicalize(archive) {
+            Ok(real) => {
+                resolved = real;
+                resolved.as_path()
+            }
+            // A dangling link has nothing to resolve to; a new archive
+            // written there replaces the link, as it always did.
+            Err(_) => archive,
+        },
+        _ => archive,
+    };
     let parent = archive.parent().unwrap_or(Path::new("."));
     let name = archive.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
 
@@ -802,9 +1110,28 @@ pub(crate) fn rewrite_in_place(
         }
     }
 
+    // On the disk before the rename, not merely written. A rename is
+    // atomic in the namespace but says nothing about the data: after a
+    // power cut the new name can survive and point at blocks that never
+    // reached the disk — a zero-length or garbage file where somebody's
+    // complete archive used to be, which is exactly what this function
+    // exists to prevent. The writers wrote through their own handles to
+    // this same inode, so syncing this one covers what they wrote.
+    holder
+        .as_file()
+        .sync_all()
+        .map_err(|e| ArchiveError::io(archive, e))?;
+
     holder
         .persist(archive)
         .map_err(|e| ArchiveError::io(archive, e.error))?;
+
+    // And the rename itself, which lives in the directory. Best effort:
+    // the edit has happened, and a filesystem that cannot sync a
+    // directory (some network mounts) is no reason to report it failed.
+    if let Err(e) = std::fs::File::open(parent).and_then(|dir| dir.sync_all()) {
+        tracing::warn!(error = %e, "could not sync the directory an archive was rewritten in");
+    }
     Ok(())
 }
 

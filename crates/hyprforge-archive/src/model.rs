@@ -62,8 +62,16 @@ pub struct Member {
     /// an archive written on a system that had none to record, which is
     /// the usual case for a zip made on Windows.
     pub mode: Option<u32>,
-    /// Where a symlink member points, verbatim from the archive.
+    /// Where a link member points, verbatim from the archive.
     pub link_target: Option<String>,
+    /// Whether `link_target` is a tar *hard* link rather than a symlink.
+    ///
+    /// The two name their targets from different places: a symlink's
+    /// target is relative to the folder the link sits in, a hard link's
+    /// to the root of the archive. Written as a symlink, a hard link
+    /// `other/b.txt` -> `dir/a.txt` pointed at `other/dir/a.txt` and
+    /// dangled. Only a tar has hard links.
+    pub hard_link: bool,
     /// Whether reading this member's contents needs a password.
     ///
     /// A state, not an error, and it has to survive into the listing:
@@ -88,6 +96,7 @@ impl Member {
             modified: None,
             mode: None,
             link_target: None,
+            hard_link: false,
             encrypted: false,
         }
     }

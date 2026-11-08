@@ -219,8 +219,10 @@ pub trait ArchiveBackend: Send + Sync {
     /// Applies `edits` to an existing archive, in place.
     ///
     /// Takes an `unlock` because a rewrite reads the whole archive
-    /// first — editing an encrypted one needs the password just as
-    /// reading it does.
+    /// first, and a 7z can need a password just to be listed. An
+    /// archive with encrypted members is refused outright, as
+    /// [`crate::ArchiveError::EncryptedEdit`]: the rewrite would come
+    /// out unencrypted, and no password changes that.
     fn edit_with(
         &self,
         archive: &Path,
@@ -468,10 +470,16 @@ pub mod mock {
             &self,
             archive: &Path,
             edits: &[Edit],
-            unlock: &Unlock,
+            _unlock: &Unlock,
             _progress: &mut dyn Progress,
         ) -> Result<()> {
-            self.check_password(archive, unlock)?;
+            // The real backend's refusal, so a caller's handling of it
+            // can be tested here — see `write::edit`.
+            if self.needs_password.lock().unwrap().contains_key(archive) {
+                return Err(ArchiveError::EncryptedEdit {
+                    path: archive.to_path_buf(),
+                });
+            }
             let mut members = self.members(archive)?;
             for edit in edits {
                 crate::write::apply_to_list(&mut members, edit);

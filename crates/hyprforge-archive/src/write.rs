@@ -20,7 +20,9 @@
 //! Three deletions applied one at a time are three full rewrites of the
 //! same file.
 
-use crate::backend::{ArchiveBackend, Collision, Edit, ExtractRequest, Progress, Source};
+use crate::backend::{
+    ArchiveBackend, Collision, Edit, ExtractRequest, FailureReason, Progress, Source,
+};
 use crate::error::{ArchiveError, Result};
 use crate::format::{Compression, Format};
 use crate::model::{normalise, Member};
@@ -125,6 +127,19 @@ pub struct Item {
     pub member: String,
     pub is_dir: bool,
     pub source: Option<PathBuf>,
+    /// The permission bits to record, where they are known. A zip
+    /// records none unless told, so a script packed (or repacked by an
+    /// edit) without this came back without `+x`.
+    pub mode: Option<u32>,
+    /// A symlink's target: the member is the link itself, never what
+    /// it points at. `source` is `None` for one.
+    pub link: Option<String>,
+}
+
+impl Item {
+    fn dir(member: String, mode: Option<u32>) -> Item {
+        Item { member, is_dir: true, source: None, mode, link: None }
+    }
 }
 
 /// Walks every directory in `sources`, so the caller can hand over "this
@@ -142,16 +157,7 @@ fn expand(sources: &[Source]) -> Result<Vec<Item>> {
         };
         let meta = std::fs::symlink_metadata(&source.path)
             .map_err(|e| ArchiveError::io(source.path.clone(), e))?;
-        if meta.is_dir() {
-            items.push(Item { member: member.clone(), is_dir: true, source: None });
-            walk(&source.path, &member, &mut items)?;
-        } else {
-            items.push(Item {
-                member,
-                is_dir: false,
-                source: Some(source.path.clone()),
-            });
-        }
+        push(&source.path, member, &meta, &mut items)?;
     }
     // Parents before children, the same ordering `extract::plan` uses
     // and for the same reason — a reader that creates directories as it
@@ -174,16 +180,51 @@ fn walk(dir: &Path, prefix: &str, items: &mut Vec<Item>) -> Result<()> {
         };
         let name = entry.file_name().to_string_lossy().into_owned();
         let member = format!("{prefix}/{name}");
-        let Ok(meta) = entry.metadata() else {
+        // `symlink_metadata`, spelled out: what decides below is what
+        // the entry *is*, and a link must answer "a link".
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
             tracing::warn!(path = %entry.path().display(), "skipping an entry whose metadata could not be read");
             continue;
         };
-        if meta.is_dir() {
-            items.push(Item { member: member.clone(), is_dir: true, source: None });
-            walk(&entry.path(), &member, items)?;
-        } else {
-            items.push(Item { member, is_dir: false, source: Some(entry.path()) });
+        push(&entry.path(), member, &meta, items)?;
+    }
+    Ok(())
+}
+
+/// Adds whatever is at `path` — walking it, if it is a folder.
+///
+/// A symlink is stored as a link and never followed. Following one put
+/// whatever it pointed at into the archive: a link to `~/.ssh` inside
+/// a folder someone compressed to send to a colleague packs a private
+/// key, or, being a directory opened as a file, failed the whole
+/// archive. And anything that is not a file, a folder or a link — a
+/// socket, a FIFO, a device — is left out with a warning: there is
+/// nothing in it to archive, and *opening* a FIFO blocks until somebody
+/// writes to it, which hung the compression forever.
+fn push(path: &Path, member: String, meta: &std::fs::Metadata, items: &mut Vec<Item>) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let kind = meta.file_type();
+    let mode = Some(meta.permissions().mode() & 0o7777);
+    if kind.is_symlink() {
+        match std::fs::read_link(path) {
+            Ok(target) => items.push(Item {
+                member,
+                is_dir: false,
+                source: None,
+                mode: None,
+                link: Some(target.to_string_lossy().into_owned()),
+            }),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "skipping a link whose target could not be read");
+            }
         }
+    } else if kind.is_dir() {
+        items.push(Item::dir(member.clone(), mode));
+        walk(path, &member, items)?;
+    } else if kind.is_file() {
+        items.push(Item { member, is_dir: false, source: Some(path.to_path_buf()), mode, link: None });
+    } else {
+        tracing::warn!(path = %path.display(), "leaving out something that is not a file, a folder or a link");
     }
     Ok(())
 }
@@ -207,7 +248,21 @@ fn write_zip(dest: &Path, items: &[Item], progress: &mut dyn Progress) -> Result
                 })?;
             continue;
         }
+        if let Some(target) = &item.link {
+            zip.add_symlink(&item.member, target, options)
+                .map_err(|e| ArchiveError::Damaged {
+                    path: dest.to_path_buf(),
+                    format: "zip",
+                    detail: e.to_string(),
+                })?;
+            done += 1;
+            continue;
+        }
         let Some(source) = &item.source else { continue };
+        let options = match item.mode {
+            Some(mode) => options.unix_permissions(mode),
+            None => options,
+        };
         zip.start_file(&item.member, options).map_err(|e| ArchiveError::Damaged {
             path: dest.to_path_buf(),
             format: "zip",
@@ -253,9 +308,29 @@ fn write_tar(
                 .map_err(|e| ArchiveError::io(dest, e))?;
             continue;
         }
+        if let Some(target) = &item.link {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_size(0);
+            header.set_mode(0o777);
+            header.set_mtime(now_seconds());
+            tar.append_link(&mut header, &item.member, target)
+                .map_err(|e| ArchiveError::io(dest, e))?;
+            done += 1;
+            continue;
+        }
         let Some(source) = &item.source else { continue };
         let mut input = std::fs::File::open(source).map_err(|e| ArchiveError::io(source.clone(), e))?;
-        tar.append_file(&item.member, &mut input)
+        // The header from the file, as `append_file` would make it, and
+        // then the member's own mode over the top: in an edit the file
+        // is a scratch copy whose mode the umask has already narrowed.
+        let meta = input.metadata().map_err(|e| ArchiveError::io(source.clone(), e))?;
+        let mut header = tar::Header::new_gnu();
+        header.set_metadata(&meta);
+        if let Some(mode) = item.mode {
+            header.set_mode(mode & 0o7777);
+        }
+        tar.append_data(&mut header, &item.member, &mut input)
             .map_err(|e| ArchiveError::io(dest, e))?;
         done += 1;
     }
@@ -291,6 +366,14 @@ fn write_sevenz(dest: &Path, items: &[Item], progress: &mut dyn Progress) -> Res
                 .map_err(|e| sevenz_write_error(dest, e))?;
             continue;
         }
+        if item.link.is_some() {
+            // 7z as written here has no way to say "this is a link" —
+            // the crate's writer records Windows attributes only. Left
+            // out, never followed: following it is the leak `push`
+            // exists to prevent.
+            tracing::warn!(member = %item.member, "leaving a symlink out of a 7z, which can't hold one");
+            continue;
+        }
         let Some(source) = &item.source else { continue };
         let input = std::fs::File::open(source).map_err(|e| ArchiveError::io(source.clone(), e))?;
         let entry = sevenz_rust2::ArchiveEntry::new_file(&item.member);
@@ -324,6 +407,9 @@ fn now_seconds() -> u64 {
 // --- editing --------------------------------------------------------
 
 /// Applies `edits` to an existing archive, in place.
+///
+/// Refuses an archive with any encrypted member, with
+/// [`ArchiveError::EncryptedEdit`] — see the check in `edit_from`.
 ///
 /// Reads the whole thing out to a scratch directory, applies the edits
 /// to the listing, and writes a new archive from the result — then
@@ -381,7 +467,27 @@ fn edit_from(
     }
 
     let backend = crate::read::StdArchives;
-    let index = backend.index_with(source, unlock)?;
+    let index = match backend.index_with(source, unlock) {
+        Ok(index) => index,
+        // A 7z that needs a password just to list is encrypted, and
+        // would be refused below once the password came — asking for
+        // it first would be a prompt with no way through.
+        Err(ArchiveError::PasswordRequired { .. }) if format == Format::SevenZ => {
+            return Err(ArchiveError::EncryptedEdit { path: archive.to_path_buf() });
+        }
+        Err(e) => return Err(e),
+    };
+
+    // Before anything is unpacked: an edit is a rewrite, the writers
+    // write plain archives, and the scratch copy is the plaintext. With
+    // the password, renaming one member of `secrets.zip` unpacked every
+    // member and packed them all back unencrypted under the same name.
+    // Encrypting the rewrite is a feature of its own (which cipher, is
+    // the 7z header encrypted too); until it exists, refusing is the
+    // only answer that does not quietly remove the protection.
+    if index.members().iter().any(|m| m.encrypted) {
+        return Err(ArchiveError::EncryptedEdit { path: archive.to_path_buf() });
+    }
 
     let request = ExtractRequest {
         members: Vec::new(),
@@ -389,7 +495,45 @@ fn edit_from(
         strip_prefix: None,
         collision: Collision::Overwrite,
     };
-    backend.extract_with(source, &request, unlock, progress)?;
+    let report = backend.extract_with(source, &request, unlock, progress)?;
+
+    // Every member has to have come out whole, because what comes out
+    // is what goes back in. The report used to be dropped here: a
+    // member with a bad checksum, or one cut short at the end of the
+    // file, unpacked as far as its bytes went, and the rewrite packed
+    // that and said the edit had worked — the member's real contents
+    // gone for good from an archive somebody was only renaming
+    // something else in.
+    //
+    // Except a symlink. Its target travels in the listing and is
+    // written from there, never from the scratch copy — so the
+    // extraction refusing to *create* one (it points outside, say,
+    // which a rootfs tarball's `lib -> /usr/lib` does) costs the
+    // rewrite nothing.
+    let carried_by_listing = |member: &str| {
+        index
+            .get(member)
+            .is_some_and(|m| m.link_target.is_some() && !m.hard_link)
+    };
+    if let Some(failure) = report.failed.iter().find(|f| !carried_by_listing(&f.member)) {
+        return Err(match failure.reason {
+            FailureReason::NeedsPassword => ArchiveError::PasswordRequired {
+                path: archive.to_path_buf(),
+            },
+            FailureReason::Other => ArchiveError::EditIncomplete {
+                path: archive.to_path_buf(),
+                member: failure.member.clone(),
+                message: failure.message.clone(),
+            },
+        });
+    }
+    if let Some(member) = report.skipped.first() {
+        return Err(ArchiveError::EditIncomplete {
+            path: archive.to_path_buf(),
+            member: member.clone(),
+            message: "It was skipped.".to_string(),
+        });
+    }
 
     // The second element is where the member's bytes are *now*: the
     // path it was unpacked under, which is the name it had in the
@@ -425,12 +569,20 @@ fn edit_from(
         }
     }
 
+    // A symlink is written from its target in the listing; a hard
+    // link, from the file the extraction made for it, which is a copy
+    // of its target's bytes (zip and 7z have no hard links to keep).
     let mut items: Vec<Item> = listing
         .into_iter()
-        .map(|(member, unpacked_as)| Item {
-            member: member.path,
-            is_dir: member.is_dir,
-            source: (!member.is_dir).then(|| scratch.join(unpacked_as)),
+        .map(|(member, unpacked_as)| {
+            let link = member.link_target.filter(|_| !member.hard_link);
+            Item {
+                source: (!member.is_dir && link.is_none()).then(|| scratch.join(unpacked_as)),
+                member: member.path,
+                is_dir: member.is_dir,
+                mode: member.mode,
+                link,
+            }
         })
         .collect();
     // Added members come off the real filesystem and may be whole
