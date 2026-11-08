@@ -227,7 +227,7 @@ impl Cache {
         create_private_dir(dir)?;
         let bytes = encode(thumbnail, &file_uri(source), stamp)?;
         let target = dir.join(thumbnail_name(source));
-        let temp = dir.join(format!(".{}.{}.tmp", thumbnail_name(source), std::process::id()));
+        let temp = temporary(dir, source);
         write_private(&temp, &bytes)?;
         fs::rename(&temp, &target).inspect_err(|_| {
             let _ = fs::remove_file(&temp);
@@ -465,16 +465,56 @@ fn create_private_dir(dir: &Path) -> io::Result<()> {
     fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
 }
 
+/// Where one write of `source`'s thumbnail is staged before its rename.
+///
+/// Unique per write, not per process: the process id alone was shared by
+/// every thread, so two threads thumbnailing one file opened the same
+/// temporary, truncated each other and renamed the interleaving into the
+/// cache. The counter makes each write's name its own.
+fn temporary(dir: &Path, source: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, Ordering::Relaxed);
+    dir.join(format!(".{}.{}-{n}.tmp", thumbnail_name(source), std::process::id()))
+}
+
+/// Creates `path` owner-only and writes `bytes`. `create_new`, so a file
+/// already under that name — another write's, or anything planted there
+/// — is an error rather than something written through.
 fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    let mut file = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
-    file.write_all(bytes)
+    let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
+    file.write_all(bytes).inspect_err(|_| {
+        let _ = fs::remove_file(path);
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two writers of one thumbnail — two threads of Files, or Files and
+    /// the viewer — must not share a temporary. With one name opened
+    /// create-and-truncate, their writes interleaved in one file and the
+    /// rename put the mixture in the cache.
+    #[test]
+    fn every_write_has_a_temporary_of_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("a.png");
+        assert_ne!(temporary(dir.path(), &source), temporary(dir.path(), &source));
+    }
+
+    /// And the temporary is created, never reused: a file already there
+    /// under its name is somebody else's write.
+    #[test]
+    fn a_temporary_that_already_exists_is_not_written_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".taken.tmp");
+        fs::write(&path, b"someone else's").unwrap();
+        assert!(write_private(&path, b"mine").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"someone else's");
+    }
 
     fn picture(opaque: bool) -> Rgba {
         let pixels = (0..16 * 16).flat_map(|i| [i as u8, 0, 255 - i as u8, if opaque { 255 } else { 128 }]).collect();
