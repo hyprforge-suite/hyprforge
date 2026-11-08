@@ -316,7 +316,7 @@ def backlog() -> None:
         ui.bad(f"{len(problems)} problem(s) in docs/backlog.md")
         ui.detail(problems)
     else:
-        ui.ok(f"{(_lines(out, 'CHECKED ') or ['?'])[0]} backlog item(s), each with a title and the day it was added")
+        ui.ok(f"{(_lines(out, 'CHECKED ') or ['?'])[0]} backlog item(s): tagged, dated, none stale")
 
 
 def lua_dispatch() -> None:
