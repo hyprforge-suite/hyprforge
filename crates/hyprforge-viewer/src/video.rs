@@ -183,8 +183,7 @@ impl VideoPane {
         match message {
             VideoMessage::Player(generation, _) if generation != self.generation => {}
             VideoMessage::Player(_, Update::Frame(frame)) => {
-                let serial = self.frame.as_ref().map_or(0, |(_, s)| s + 1);
-                self.frame = Some((frame, serial));
+                self.frame = Some((frame, crate::film::next_serial()));
             }
             VideoMessage::Player(_, Update::Playback(playback)) => {
                 let first_size = !shaped(&self.playback) && shaped(&playback);

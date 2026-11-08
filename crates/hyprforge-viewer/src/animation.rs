@@ -28,7 +28,8 @@ use std::time::Duration;
 pub struct Animation {
     frames: Vec<(Arc<Frame>, Duration)>,
     current: usize,
-    /// Bumped per [`Self::advance`], so the film writes its texture
+    /// New per [`Self::advance`], from the film's one process-wide count
+    /// (see [`crate::film::next_serial`]), so the film writes its texture
     /// exactly when the picture changed.
     serial: u64,
     backdrop: [u8; 4],
@@ -57,7 +58,7 @@ impl Animation {
             })
             .collect();
         let [r, g, b] = backdrop;
-        Some(Animation { frames, current: 0, serial: 0, backdrop: [r, g, b, 255] })
+        Some(Animation { frames, current: 0, serial: crate::film::next_serial(), backdrop: [r, g, b, 255] })
     }
 
     /// How long the frame that is up stays up.
@@ -68,7 +69,7 @@ impl Animation {
     /// The next frame, round to the first after the last: a GIF loops.
     pub fn advance(&mut self) {
         self.current = (self.current + 1) % self.frames.len();
-        self.serial += 1;
+        self.serial = crate::film::next_serial();
     }
 
     /// Which frame is up, from 0.
@@ -149,6 +150,19 @@ mod tests {
         assert_ne!(animation.program().serial, first);
         animation.advance();
         assert_eq!(animation.current(), 0, "round to the start");
+    }
+
+    /// The film's pipeline is shared by every pane, and it skips the
+    /// upload when the serial matches the one it last wrote — so a serial
+    /// counted from 0 per animation let a new GIF open showing the old
+    /// one's frame until it advanced. No two animations share one.
+    #[test]
+    fn two_animations_never_share_a_serial() {
+        let two = || Animation::over(vec![(frame([1, 0, 0, 255]), ms(50)), (frame([2, 0, 0, 255]), ms(70))], [0; 3]).unwrap();
+        let (mut a, b) = (two(), two());
+        assert_ne!(a.program().serial, b.program().serial);
+        a.advance();
+        assert_ne!(a.program().serial, b.program().serial);
     }
 
     /// One frame is a still picture; the window shows it as one.

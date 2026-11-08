@@ -27,11 +27,25 @@ use iced::wgpu;
 use iced::{mouse, Rectangle};
 use std::sync::Arc;
 
+/// A serial no frame has had before, from any source.
+///
+/// One count for the whole process, not one per video or animation: the
+/// film's pipeline — and so the serial it last wrote — is shared by every
+/// shader widget of this type, and it skips the upload when the serials
+/// match. Counted from 0 per source, the first frame of a new video or
+/// GIF matched the last one written for the previous and was never
+/// uploaded, so the old picture showed until the new one moved on.
+pub fn next_serial() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
+    SERIAL.fetch_add(1, Ordering::Relaxed)
+}
+
 /// The frame to show, and which one it is.
 pub struct FilmProgram {
     pub frame: Arc<Frame>,
-    /// Bumped per delivered frame, so the texture is written exactly when
-    /// the picture changed.
+    /// From [`next_serial`] per delivered frame, so the texture is written
+    /// exactly when the picture changed.
     pub serial: u64,
     /// The theme's root surface, as sRGB bytes.
     pub backdrop: [u8; 4],
