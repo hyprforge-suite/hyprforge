@@ -122,8 +122,12 @@ impl Security {
     }
 
     /// Whether joining this network means typing something.
+    ///
+    /// Not WEP: it cannot be joined from here at all (see
+    /// [`unsupported_reason`](Self::unsupported_reason)), and a password box
+    /// for it would only collect a key that goes nowhere.
     pub fn needs_passphrase(self) -> bool {
-        matches!(self, Security::Wep | Security::Wpa2Personal | Security::Wpa3Personal)
+        matches!(self, Security::Wpa2Personal | Security::Wpa3Personal)
     }
 
     /// `802-11-wireless-security.key-mgmt`, or `None` for a network that
@@ -150,6 +154,26 @@ impl Security {
                 "This network uses enterprise (802.1X) security, which needs a certificate \
                  and sign-in details. Hyprforge cannot join it yet — use nmcli or nmtui.",
             ),
+            // WEP was offered as joinable and never could be: its key
+            // belongs in `wep-key0` with a `wep-key-type`, not in `psk`,
+            // which NetworkManager ignores for `key-mgmt = none` — and a
+            // 5- or 13-character WEP key failed the WPA length check
+            // before it was even sent. Not worth building: WEP has been
+            // broken for twenty years and is gone from current hardware.
+            Security::Wep => Some(
+                "This network uses WEP, an old security type Hyprforge does not support \
+                 — use nmcli or nmtui to join it.",
+            ),
+            _ => None,
+        }
+    }
+
+    /// [`unsupported_reason`](Self::unsupported_reason) shortened for a
+    /// menu row, which has room for a few words and not a sentence.
+    pub fn unsupported_label(self) -> Option<&'static str> {
+        match self {
+            Security::Enterprise => Some("enterprise sign-in not supported"),
+            Security::Wep => Some("WEP not supported"),
             _ => None,
         }
     }
@@ -253,6 +277,25 @@ mod tests {
         assert_eq!(s, Security::Enterprise);
         assert!(!s.needs_passphrase());
         assert!(s.unsupported_reason().is_some());
+    }
+
+    /// WEP used to get a password box, and whatever was typed was sent in
+    /// a field NetworkManager ignores for WEP — so it could never connect.
+    #[test]
+    fn a_wep_network_is_listed_but_says_why_it_cannot_be_joined() {
+        let s = Security::classify(PRIVACY, 0, 0);
+        assert_eq!(s, Security::Wep);
+        assert!(!s.needs_passphrase());
+        assert!(s.unsupported_reason().is_some_and(|r| r.contains("nmcli")));
+        assert!(s.unsupported_label().is_some());
+    }
+
+    #[test]
+    fn every_unsupported_network_has_a_short_label_too() {
+        use Security::*;
+        for s in [Open, Owe, Wep, Wpa2Personal, Wpa3Personal, Enterprise] {
+            assert_eq!(s.unsupported_reason().is_some(), s.unsupported_label().is_some(), "{s:?}");
+        }
     }
 
     /// OWE is encrypted and passphrase-less, so treating it as Open would
