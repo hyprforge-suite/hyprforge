@@ -175,18 +175,23 @@ impl BlueZBackend {
         bounded(TIMEOUT, manager.get_managed_objects()).await
     }
 
-    /// The path of the first `Adapter1` BlueZ reports.
+    /// The path of the lowest-numbered `Adapter1` BlueZ reports.
     ///
     /// Resolved per call rather than cached, because a USB dongle can
     /// appear and disappear while the screen is open and a cached path
-    /// would outlive the adapter it names.
+    /// would outlive the adapter it names. Chosen by [`first_adapter`]
+    /// rather than whichever comes first: the objects arrive as a
+    /// `HashMap`, so "first" was a different adapter from one call to the
+    /// next on a machine with two.
     async fn adapter_path(&self) -> Result<OwnedObjectPath, BluetoothError> {
         let objects = self.managed_objects().await?;
-        objects
-            .into_iter()
-            .find(|(_, ifaces)| ifaces.contains_key("org.bluez.Adapter1"))
-            .map(|(path, _)| path)
-            .ok_or(BluetoothError::NoAdapter)
+        first_adapter(
+            objects
+                .into_iter()
+                .filter(|(_, ifaces)| ifaces.contains_key("org.bluez.Adapter1"))
+                .map(|(path, _)| path),
+        )
+        .ok_or(BluetoothError::NoAdapter)
     }
 
     async fn adapter(&self) -> Result<AdapterDbusProxy<'_>, BluetoothError> {
@@ -225,7 +230,7 @@ impl BlueZBackend {
         let adapter_path = self.adapter_path().await?;
         let objects = self.managed_objects().await?;
         for (path, ifaces) in objects {
-            if !path.as_str().starts_with(adapter_path.as_str()) {
+            if !is_under(path.as_str(), adapter_path.as_str()) {
                 continue;
             }
             let Some(dev) = ifaces.get("org.bluez.Device1") else {
@@ -303,7 +308,7 @@ impl BluetoothBackend for BlueZBackend {
         let objects = self.managed_objects().await?;
         let mut devices = Vec::new();
         for (path, ifaces) in objects {
-            if !path.as_str().starts_with(adapter_path.as_str()) {
+            if !is_under(path.as_str(), adapter_path.as_str()) {
                 continue;
             }
             let Some(dev_props) = ifaces.get("org.bluez.Device1") else {
@@ -376,10 +381,49 @@ impl BluetoothBackend for BlueZBackend {
     }
 }
 
+/// The adapter to use out of several: `hci0` before `hci1` before
+/// `hci10`. Shorter first, then by text, which is numeric order for
+/// BlueZ's `/org/bluez/hciN` paths and a stable order for anything else.
+fn first_adapter(paths: impl Iterator<Item = OwnedObjectPath>) -> Option<OwnedObjectPath> {
+    paths.min_by(|a, b| {
+        (a.as_str().len(), a.as_str()).cmp(&(b.as_str().len(), b.as_str()))
+    })
+}
+
+/// Whether `path` is an object under `adapter` — a device of it.
+///
+/// With the separator, not a bare `starts_with`: `/org/bluez/hci1` is a
+/// prefix of `/org/bluez/hci10/dev_…`, so the bare test listed the other
+/// adapter's devices as this one's.
+fn is_under(path: &str, adapter: &str) -> bool {
+    path.strip_prefix(adapter).is_some_and(|rest| rest.starts_with('/'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use zbus::zvariant::Value;
+
+    fn path(p: &str) -> OwnedObjectPath {
+        OwnedObjectPath::try_from(p).unwrap()
+    }
+
+    #[test]
+    fn the_same_adapter_is_chosen_whatever_order_bluez_lists_them_in() {
+        for order in [["/org/bluez/hci1", "/org/bluez/hci0"], ["/org/bluez/hci0", "/org/bluez/hci1"]] {
+            let chosen = first_adapter(order.into_iter().map(path));
+            assert_eq!(chosen.as_ref().map(|p| p.as_str()), Some("/org/bluez/hci0"));
+        }
+        let chosen = first_adapter(["/org/bluez/hci10", "/org/bluez/hci2"].into_iter().map(path));
+        assert_eq!(chosen.as_ref().map(|p| p.as_str()), Some("/org/bluez/hci2"));
+    }
+
+    #[test]
+    fn a_device_of_hci10_is_not_a_device_of_hci1() {
+        assert!(is_under("/org/bluez/hci1/dev_AA_BB", "/org/bluez/hci1"));
+        assert!(!is_under("/org/bluez/hci10/dev_AA_BB", "/org/bluez/hci1"));
+        assert!(!is_under("/org/bluez/hci1", "/org/bluez/hci1"), "the adapter is not its own device");
+    }
 
     fn owned(v: Value<'_>) -> OwnedValue {
         OwnedValue::try_from(v).expect("test value converts")
