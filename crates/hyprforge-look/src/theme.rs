@@ -423,7 +423,7 @@ impl Theme {
                     .and_then(|e| e.to_str())
                     .unwrap_or("img");
                 let destination = dir.join(format!("wallpaper.{extension}"));
-                std::fs::copy(source, &destination).map_err(|source| ThemeError::Write {
+                replace_with_copy(source, &destination).map_err(|source| ThemeError::Write {
                     path: destination.display().to_string(),
                     source,
                 })?;
@@ -446,6 +446,41 @@ impl Theme {
         })?;
         Ok(exported)
     }
+}
+
+/// Copies `source` to `destination` without trusting anything already at
+/// `destination`.
+///
+/// `std::fs::copy` opens the destination by name and follows a symlink
+/// there. The export directory is writable by everyone in the `hyprforge`
+/// group, so anyone in it could leave `wallpaper.png -> ~/.ssh/authorized_keys`
+/// and have Settings, running as the user, overwrite that file with an
+/// image. Here the bytes go into a fresh temp file — `create_new` is
+/// O_EXCL, which refuses any existing name, a link included — and a rename
+/// then *replaces* whatever was at the name rather than writing into it.
+///
+/// Streamed rather than read whole and handed to `write_atomic_bytes`: a
+/// wallpaper can be a 36-megapixel PNG, and this need not hold it.
+fn replace_with_copy(source: &Path, destination: &Path) -> std::io::Result<()> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut input = std::fs::File::open(source)?;
+    let mut attempts = 0;
+    let (temp, mut output) = loop {
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let temp = destination.with_file_name(format!(".wallpaper.{}.{n}.tmp", std::process::id()));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&temp) {
+            Ok(file) => break (temp, file),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempts < 64 => attempts += 1,
+            Err(e) => return Err(e),
+        }
+    };
+    let result = std::io::copy(&mut input, &mut output)
+        .and_then(|_| output.sync_all())
+        .and_then(|()| std::fs::rename(&temp, destination));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -600,6 +635,29 @@ mod tests {
         let theme = theme_with_wallpaper(&dir.path().join("gone.png"));
         let exported = theme.export(&dir.path().join("export")).unwrap();
         assert_eq!(exported.wallpaper, None);
+    }
+
+    /// The export directory is group-writable, so a link left at the
+    /// wallpaper's name must be replaced, never written through.
+    #[test]
+    fn a_link_planted_at_the_exported_wallpaper_is_replaced_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let export = dir.path().join("export");
+        std::fs::create_dir(&export).unwrap();
+        let victim = dir.path().join("authorized_keys");
+        std::fs::write(&victim, b"untouched").unwrap();
+        std::os::unix::fs::symlink(&victim, export.join("wallpaper.png")).unwrap();
+        let source = dir.path().join("w.png");
+        std::fs::write(&source, b"image").unwrap();
+
+        let exported = theme_with_wallpaper(&source).export(&export).unwrap();
+
+        assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
+        let copy = exported.wallpaper.unwrap();
+        assert!(!std::fs::symlink_metadata(&copy).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&copy).unwrap(), b"image");
+        let leftovers = std::fs::read_dir(&export).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).count();
+        assert_eq!(leftovers, 0);
     }
 
     /// Exporting twice must replace the wallpaper rather than leave the
