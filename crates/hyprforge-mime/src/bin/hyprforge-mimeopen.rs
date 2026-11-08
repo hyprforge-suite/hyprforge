@@ -171,7 +171,7 @@ fn main() {
 /// would otherwise hang this command forever with no way out.
 fn launch(entry: &Path, files: &[String]) -> Result<(), String> {
     let mut command = std::process::Command::new("gio");
-    command.arg("launch").arg(entry).args(files);
+    command.args(gio_arguments(entry, files)?);
     match hyprforge_process::output(&mut command, hyprforge_process::TIMEOUT) {
         Ok(out) if out.status.success() => Ok(()),
         Ok(out) => Err(format!("the application exited with {}", out.status)),
@@ -181,6 +181,23 @@ fn launch(entry: &Path, files: &[String]) -> Result<(), String> {
         ),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// `gio launch`'s arguments, with every file made absolute.
+///
+/// Absolute because `gio` reads its file arguments twice over: as
+/// options first — a file called `-x` is "Unknown option -x" — and then
+/// through `g_file_new_for_commandline_arg`, which takes anything with a
+/// scheme as a URI, so a file called `http:x` would be fetched rather
+/// than opened. `--` is no way out: measured, `gio launch` passes it on
+/// as a file. A path beginning with `/` is neither an option nor a URI.
+fn gio_arguments(entry: &Path, files: &[String]) -> Result<Vec<std::ffi::OsString>, String> {
+    let mut args = vec!["launch".into(), entry.as_os_str().to_owned()];
+    for file in files {
+        let path = std::path::absolute(file).map_err(|e| format!("{}: {e}", shown_name(file)))?;
+        args.push(path.into_os_string());
+    }
+    Ok(args)
 }
 
 /// The numbered prompt, and the answer.
@@ -334,6 +351,20 @@ mod tests {
         assert_eq!(args.files, ["/tmp/part.3mf"]);
     }
 
+
+    /// A file named like an option or a URL reaches `gio` as the file it
+    /// is: an absolute path, which is neither.
+    #[test]
+    fn every_file_reaches_gio_as_an_absolute_path() {
+        let files = ["-x".to_string(), "http:x".to_string(), "/tmp/a b.stl".to_string()];
+        let args = gio_arguments(Path::new("/usr/share/applications/v.desktop"), &files).unwrap();
+        assert_eq!(args[0], "launch");
+        assert_eq!(args[1], "/usr/share/applications/v.desktop");
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(args[2], cwd.join("-x").into_os_string());
+        assert_eq!(args[3], cwd.join("http:x").into_os_string());
+        assert_eq!(args[4], "/tmp/a b.stl");
+    }
 
     /// This command's own table still reaches the shared parser — the
     /// form `xdg-open` calls is the one that must not drift.

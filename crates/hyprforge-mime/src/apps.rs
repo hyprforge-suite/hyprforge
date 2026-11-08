@@ -144,12 +144,21 @@ pub fn on_path(program: &str) -> bool {
 /// on disk said `zeditor` while the caller's copy said
 /// `/usr/bin/zeditor`.
 ///
-/// `command` is written into `Exec=` as given. Nothing here parses it —
+/// `command` is written into `Exec=` as given, but for the two things a
+/// desktop entry would otherwise read differently from what was typed:
+/// a `%` that is not a field code is doubled (`date +%s` would launch as
+/// `date +` and a file name), and `%f` is appended only when the command
+/// has no file field code of its own. A command of more than one line is
+/// refused, since a line break would end `Exec=` and begin whatever key
+/// the next line names. Beyond that nothing here parses it —
 /// see this module's doc — which does mean a command that is nonsense
 /// produces an entry that fails to launch. That is visible immediately
 /// and recoverable by choosing again; guessing at what somebody meant
 /// would not be.
 pub fn write_custom_entry(applications: &Path, command: &str) -> std::io::Result<(String, String)> {
+    if command.chars().any(char::is_control) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "a command is one line"));
+    }
     let word = command
         .split_whitespace()
         .next()
@@ -169,12 +178,41 @@ pub fn write_custom_entry(applications: &Path, command: &str) -> std::io::Result
             continue;
         }
         let entry = format!(
-            "[Desktop Entry]\nType=Application\nName={word}\nNoDisplay=true\nExec={command} %f\n"
+            "[Desktop Entry]\nType=Application\nName={word}\nNoDisplay=true\nExec={}\n",
+            exec_line(command)
         );
         hyprforge_paths::write_atomic(&path, &entry)?;
         return Ok((id, word.to_string()));
     }
     Err(std::io::Error::other("too many entries already exist for that command"))
+}
+
+/// `command` as an `Exec=` value: field codes kept, every other `%`
+/// doubled, and `%f` added if nothing in it says where files go.
+fn exec_line(command: &str) -> String {
+    let mut out = String::with_capacity(command.len() + 3);
+    let mut takes_files = false;
+    let mut chars = command.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek().copied() {
+            // The spec's field codes, and `%%`, already mean what they say.
+            Some(code @ ('f' | 'F' | 'u' | 'U' | 'i' | 'c' | 'k' | '%')) => {
+                takes_files |= matches!(code, 'f' | 'F' | 'u' | 'U');
+                out.push('%');
+                out.push(code);
+                chars.next();
+            }
+            _ => out.push_str("%%"),
+        }
+    }
+    if !takes_files {
+        out.push_str(" %f");
+    }
+    out
 }
 
 #[cfg(test)]
@@ -285,6 +323,35 @@ mod tests {
         assert_eq!(id, "zeditor-usercreated-1.desktop");
         assert_eq!(name, "zeditor", "the path is stripped in both places, or neither");
         assert!(std::fs::read_to_string(dir.path().join(&id)).unwrap().contains("Exec=/usr/bin/zeditor --wait %f"));
+    }
+
+    /// A `%` in `Exec=` is a field code to whoever launches the entry, so
+    /// a typed `date +%s` would have been launched as `date +` and a file
+    /// name. A literal percent is written doubled.
+    #[test]
+    fn a_percent_in_a_typed_command_stays_a_percent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (id, _) = write_custom_entry(dir.path(), "stamp +%s").unwrap();
+        let text = std::fs::read_to_string(dir.path().join(&id)).unwrap();
+        assert!(text.contains("Exec=stamp +%%s %f\n"), "{text}");
+    }
+
+    /// A command that already says where the files go keeps its own field
+    /// code, and is not handed a second `%f` it never asked for.
+    #[test]
+    fn a_command_with_its_own_field_code_is_not_given_another() {
+        let dir = tempfile::tempdir().unwrap();
+        let (id, _) = write_custom_entry(dir.path(), "viewer --open %U").unwrap();
+        let text = std::fs::read_to_string(dir.path().join(&id)).unwrap();
+        assert!(text.contains("Exec=viewer --open %U\n"), "{text}");
+    }
+
+    /// A line break would end `Exec=` and start a key of the command's
+    /// choosing; a desktop entry value is one line.
+    #[test]
+    fn a_command_spanning_lines_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(write_custom_entry(dir.path(), "kate\nTryExec=/nowhere").is_err());
     }
 
     #[test]
