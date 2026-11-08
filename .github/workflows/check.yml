@@ -25,6 +25,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Read the code and nothing else. Every action below is pinned by commit,
+# as publish.yml and the component CIs already are: a tag can be moved
+# under a workflow, a commit cannot.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   # Debug info is the largest thing in a Rust `target/` — routinely
@@ -48,7 +54,7 @@ jobs:
     steps:
       # The components are submodules: without them every
       # crates/<component> is empty and the workspace will not load.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
 
@@ -85,10 +91,10 @@ jobs:
       - name: Show toolchain
         run: rustc --version && cargo --version && cargo clippy --version
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # Every tier runs through nextest (.config/nextest.toml).
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: nextest
 
