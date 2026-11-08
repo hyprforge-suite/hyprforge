@@ -81,6 +81,20 @@ pub fn key_press(event: &keyboard::Event) -> Option<KeyPress> {
     Some(KeyPress { key, mods, text })
 }
 
+/// Whether `event` is the keyboard's auto-repeat of a key already held,
+/// rather than a fresh press.
+///
+/// Separate from [`key_press`], which drops it, because the grammar's
+/// `KeyPress` describes *which* key a binding matches and has no field
+/// for it — and adding one would change a struct every app builds by
+/// hand. Most bindings want repeats (holding Right pages on), so the
+/// app asks this only for the actions where a repeat is a second,
+/// unasked-for act: holding Delete in the image viewer trashed one
+/// picture per repeat, each the one that had just slid into view.
+pub fn is_repeat(event: &keyboard::Event) -> bool {
+    matches!(event, keyboard::Event::KeyPressed { repeat: true, .. })
+}
+
 fn function_key_number(named: key::Named) -> Option<u8> {
     use key::Named as N;
     let n = match named {
@@ -132,6 +146,29 @@ mod tests {
         }
     }
 
+    fn repeated(event: keyboard::Event) -> keyboard::Event {
+        match event {
+            keyboard::Event::KeyPressed {
+                key,
+                modified_key,
+                physical_key,
+                location,
+                modifiers,
+                text,
+                ..
+            } => keyboard::Event::KeyPressed {
+                key,
+                modified_key,
+                physical_key,
+                location,
+                modifiers,
+                text,
+                repeat: true,
+            },
+            other => other,
+        }
+    }
+
     fn character(c: &str) -> keyboard::Key {
         keyboard::Key::Character(c.into())
     }
@@ -168,6 +205,19 @@ mod tests {
         let event =
             pressed(keyboard::Key::Named(key::Named::MediaPlay), IcedModifiers::empty(), None);
         assert_eq!(key_press(&event), None);
+    }
+
+    /// Holding Delete is one press followed by the keyboard's repeats.
+    /// An app has to be able to tell them apart, or holding a key that
+    /// does something irreversible does it again on every repeat.
+    #[test]
+    fn a_held_key_says_its_repeats_are_repeats() {
+        let first = pressed(keyboard::Key::Named(key::Named::Delete), IcedModifiers::empty(), None);
+        assert!(!is_repeat(&first));
+        let again = repeated(first);
+        assert!(is_repeat(&again));
+        // The repeat is still the same press as far as a binding goes.
+        assert_eq!(key_press(&again).unwrap().key, Key::Delete);
     }
 
     #[test]
