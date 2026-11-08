@@ -91,6 +91,16 @@ fn thumbnails_at(edge: u32) -> usize {
 /// window: see [`density::preview_width`].
 pub const PREVIEW_WIDTH: f32 = density::PREVIEW_MAX_WIDTH;
 
+/// How the folder in view was reached — see `Browser::arrived_by`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Arrival {
+    /// Opened, typed, or anything else that pushed the folder before it
+    /// onto Back.
+    Step,
+    Back,
+    Forward,
+}
+
 /// A folder to the left of the one in view, in column view — see
 /// [`crate::columns`].
 #[derive(Debug, Clone)]
@@ -449,13 +459,15 @@ impl Selection {
             self.clear();
             return;
         }
-        // A focus that is no longer shown restarts from the top, the
-        // same reading as having no focus at all.
-        let current = self
-            .focused
-            .as_deref()
-            .and_then(|f| rows.iter().position(|e| e.path == f))
-            .unwrap_or(0) as i32;
+        // No focus — or one no longer shown — restarts from the top:
+        // the cursor is just above the first row, so Down lands *on* it
+        // (and Up, clamped, does too). It once counted as already on
+        // row 0, so Down from nothing skipped the first row and selected
+        // the second.
+        let current = match self.focused.as_deref().and_then(|f| rows.iter().position(|e| e.path == f)) {
+            Some(at) => at as i32,
+            None => -1,
+        };
         let next = (current + delta).clamp(0, rows.len() as i32 - 1) as usize;
         self.click(&rows[next].path);
     }
@@ -1199,6 +1211,9 @@ pub struct Browser {
     search: searching::SearchState,
     back_stack: Vec<PathBuf>,
     forward_stack: Vec<PathBuf>,
+    /// How the folder in view was reached, so a navigation that fails
+    /// can be taken back the way it came — see [`Self::unwind_navigation`].
+    arrived_by: Arrival,
     load_state: LoadState,
     prefs: Prefs,
     sidebar: Vec<SidebarItem>,
@@ -1358,6 +1373,7 @@ impl Browser {
             search: searching::SearchState::default(),
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
+            arrived_by: Arrival::Step,
             load_state: LoadState::Loading,
             prefs,
             sidebar,
@@ -2426,20 +2442,43 @@ impl Browser {
         let allowed = self.config.thumbnails;
         let mut by_edge: Vec<(u32, Vec<PathBuf>)> = Vec::new();
         let mut asked = Vec::new();
-        let wanted = self
+        let wanted: HashMap<PathBuf, u32> = self
             .rows()
             .into_iter()
             .filter(|e| !e.is_dir && crate::preview::wants_thumbnail(&e.path, grid, &allowed))
-            .take(MAX_THUMBNAILS);
-        for (position, entry) in wanted.enumerate() {
-            let want = if position < big { bucket } else { smallest };
-            if self.media.requested.get(&entry.path).is_some_and(|&had| had >= want) {
+            .take(MAX_THUMBNAILS)
+            .enumerate()
+            .map(|(position, e)| (e.path.clone(), if position < big { bucket } else { smallest }))
+            .collect();
+        // The budget above is for what is wanted *now*, so what is held
+        // has to be cut to that before asking for more. It was once only
+        // let go when the folder changed, and every search, sort or zoom
+        // in a big folder of photographs added up to 600 more pictures
+        // without end. Asked for again if it is shown again — from the
+        // shared cache, which is cheap.
+        self.media.thumbnails.retain(|path, _| wanted.contains_key(path));
+        self.media.made.retain(|path, _| wanted.contains_key(path));
+        self.media.requested.retain(|path, _| wanted.contains_key(path));
+        // One made bigger than its place now earns is asked for again at
+        // the size it does. Its old picture is drawn until then: with
+        // `made` forgotten, the smaller answer is not refused as a
+        // downgrade (see `ThumbnailLoaded`).
+        for (path, want) in &wanted {
+            if self.media.made.get(path).is_some_and(|had| had > want) {
+                self.media.made.remove(path);
+                self.media.requested.remove(path);
+            }
+        }
+        let rows: Vec<PathBuf> = self.rows().into_iter().map(|e| e.path.clone()).collect();
+        for path in rows {
+            let Some(&want) = wanted.get(&path) else { continue };
+            if self.media.requested.get(&path).is_some_and(|&had| had >= want) {
                 continue;
             }
-            asked.push((entry.path.clone(), want));
+            asked.push((path.clone(), want));
             match by_edge.iter_mut().find(|(edge, _)| *edge == want) {
-                Some((_, paths)) => paths.push(entry.path.clone()),
-                None => by_edge.push((want, vec![entry.path.clone()])),
+                Some((_, paths)) => paths.push(path),
+                None => by_edge.push((want, vec![path])),
             }
         }
         self.media.requested.extend(asked);
@@ -3346,6 +3385,9 @@ impl Browser {
     /// bookkeeping; they had a copy of this each, and a fourth thing to
     /// reset would have meant remembering all three.
     fn arrive_at(&mut self, path: PathBuf) -> Outcome {
+        // Anything that is not Back or Forward is a step: those two say
+        // so after this returns.
+        self.arrived_by = Arrival::Step;
         self.menu = None;
         self.renaming = None;
         self.path_edit = None;
@@ -3367,6 +3409,12 @@ impl Browser {
 
     fn go_to(&mut self, path: PathBuf) -> Outcome {
         let left = self.current_dir.clone();
+        // Going where it already is reads it again and is not a step:
+        // pushing it made Back a button that went nowhere, and cleared
+        // a Forward that was still good.
+        if path == self.current_dir {
+            return self.arrive_at(path);
+        }
         self.back_stack.push(self.current_dir.clone());
         // A fresh navigation abandons whatever "forward" pointed to —
         // pinned by `tests::navigating_somewhere_new_truncates_the_forward_stack`.
@@ -3394,7 +3442,9 @@ impl Browser {
             return Outcome::None;
         };
         self.forward_stack.push(self.current_dir.clone());
-        self.arrive_at(prev)
+        let outcome = self.arrive_at(prev);
+        self.arrived_by = Arrival::Back;
+        outcome
     }
 
     fn go_forward(&mut self) -> Outcome {
@@ -3402,7 +3452,9 @@ impl Browser {
             return Outcome::None;
         };
         self.back_stack.push(self.current_dir.clone());
-        self.arrive_at(next)
+        let outcome = self.arrive_at(next);
+        self.arrived_by = Arrival::Forward;
+        outcome
     }
 
     /// A folder navigates into itself; a file becomes [`Outcome::Activated`]
@@ -3482,8 +3534,19 @@ impl Browser {
     /// destination on the forward stack, so the Forward button would
     /// offer to try it again — an offer to repeat something that did not
     /// work. This one is "that never happened".
+    ///
+    /// Back the way it came: a destination reached by Back returns to
+    /// where Back was pressed, which `go_back` put on the forward stack,
+    /// and one reached by Forward likewise. It once always popped the
+    /// back stack, which after Back went one place further back still,
+    /// leaving the person's real place on Forward. Either way the
+    /// failed destination leaves the history.
     fn unwind_navigation(&mut self) -> Outcome {
-        match self.back_stack.pop() {
+        let previous = match self.arrived_by {
+            Arrival::Back => self.forward_stack.pop(),
+            Arrival::Step | Arrival::Forward => self.back_stack.pop(),
+        };
+        match previous {
             Some(previous) => self.arrive_at(previous),
             None => Outcome::None,
         }
@@ -7335,6 +7398,31 @@ mod tests {
         assert!(!browser.menu_open());
     }
 
+    /// J23: navigating to the folder already in view pushed it onto
+    /// Back, so Back then "went" nowhere.
+    #[test]
+    fn navigating_to_the_folder_in_view_is_not_a_step_back_can_take() {
+        let mut browser = loaded_browser(&["a.txt"]);
+        let here = browser.current_dir().to_path_buf();
+        assert!(matches!(browser.update(Message::Navigate(here)), Outcome::ReadDir(_)), "it is read again");
+        assert!(browser.back_stack.is_empty());
+    }
+
+    /// J22: with nothing focused, Down counted the cursor as already on
+    /// the first row and moved past it, so the first press selected the
+    /// second.
+    #[test]
+    fn down_from_nothing_selects_the_first_row() {
+        let mut browser = loaded_browser(&["a.txt", "b.txt", "c.txt"]);
+        let first = browser.rows()[0].path.clone();
+        browser.perform(Action::FocusDown);
+        assert_eq!(browser.selection().focused(), Some(first.as_path()));
+
+        let mut browser = loaded_browser(&["a.txt", "b.txt", "c.txt"]);
+        browser.perform(Action::FocusUp);
+        assert_eq!(browser.selection().focused(), Some(first.as_path()), "Up from nothing, as before");
+    }
+
     #[test]
     fn escape_closes_the_menu_and_leaves_the_search_alone() {
         let mut browser = loaded_browser(&["alpha.txt", "beta.txt"]);
@@ -8577,6 +8665,28 @@ mod archive_tests {
         assert!(!browser.action_context().can_go_forward);
     }
 
+    /// J21: the failed destination reached by Back, not by opening it.
+    /// Taking it back popped the Back stack again — one place further
+    /// back than where the person was — and left them on Forward.
+    #[test]
+    fn a_failed_archive_reached_by_back_returns_to_where_back_was_pressed() {
+        let mut browser = loaded(&[("photo.zip", false)]);
+        let not_an_archive = || {
+            Err(DirError { message: "photo.zip isn't an archive.".to_string(), kind: DirErrorKind::NotAnArchive })
+        };
+        // /dir, then into photo.zip (which listed, once), then /dir/sub.
+        browser.update(Message::Navigate(PathBuf::from("/dir/photo.zip")));
+        browser.update(Message::Navigate(PathBuf::from("/dir/sub")));
+        browser.update(Message::GoBack);
+        assert_eq!(browser.current_dir(), Path::new("/dir/photo.zip"));
+
+        browser.update(Message::DirLoaded(PathBuf::from("/dir/photo.zip"), not_an_archive()));
+
+        assert_eq!(browser.current_dir(), Path::new("/dir/sub"), "back where Back was pressed");
+        assert_eq!(browser.back_stack, [PathBuf::from("/dir")], "with /dir still behind it");
+        assert!(browser.forward_stack.is_empty(), "and nothing ahead");
+    }
+
     // --- what the menus and the actions offer ---------------------------
 
     #[test]
@@ -8836,6 +8946,42 @@ mod media_tests {
         // asks for the video, and the grid then asks for that alone.
         assert!(!listed.iter().any(|p| p.ends_with("clip.mp4")));
         assert_eq!(gridded, [PathBuf::from("/dir/clip.mp4")]);
+    }
+
+    /// J14: the budget is per pass over what the listing shows, and the
+    /// thumbnails were only let go when the folder changed — so every
+    /// search, sort or zoom in a big folder of photographs added up to
+    /// 600 more, without end. What is no longer wanted is let go.
+    #[test]
+    fn thumbnails_no_longer_shown_are_let_go() {
+        let mut browser = loaded(&[("a.png", false), ("b.png", false), ("c.png", false)]);
+        for name in ["a.png", "b.png", "c.png"] {
+            browser.update(Message::ThumbnailLoaded(PathBuf::from("/dir").join(name), Picture::Raster(a_handle()), 128));
+        }
+        assert_eq!(browser.media.thumbnails.len(), 3);
+
+        browser.update(Message::SearchChanged("a.png".to_string()));
+        assert_eq!(browser.rows().len(), 1, "the search shows one");
+        assert_eq!(browser.media.thumbnails.keys().collect::<Vec<_>>(), [Path::new("/dir/a.png")]);
+
+        // And come back when they are shown again.
+        let cleared = browser.update(Message::SearchCleared);
+        assert_eq!(asks_thumbnails(&cleared).len(), 2, "{cleared:?}");
+    }
+
+    /// J14: a thumbnail made bigger than its place now earns — a zoom
+    /// back out, a re-sort past the big ones — is asked for again at the
+    /// size it does earn, so the big ones together stay inside
+    /// `THUMBNAIL_BYTES`.
+    #[test]
+    fn a_thumbnail_bigger_than_its_place_earns_is_made_again_at_that_size() {
+        let mut browser = loaded(&[("a.png", false)]);
+        browser.update(Message::ThumbnailLoaded(PathBuf::from("/dir/a.png"), Picture::Raster(a_handle()), 128));
+        browser.media.made.insert(PathBuf::from("/dir/a.png"), 512);
+        browser.media.requested.insert(PathBuf::from("/dir/a.png"), 512);
+        let asked = browser.thumbnail_asks(false);
+        assert_eq!(asks_thumbnails_at(&Outcome::Many(asked)), [(PathBuf::from("/dir/a.png"), 128)]);
+        assert!(browser.media.thumbnails.contains_key(Path::new("/dir/a.png")), "the old one is drawn until then");
     }
 
     /// A thumbnail arriving for something this browser did not ask for —

@@ -197,10 +197,88 @@ pub enum Picture {
     Raster(iced::widget::image::Handle),
 }
 
+/// The most of an SVG read to draw it as a thumbnail or a preview. A
+/// drawing bigger than this is not a drawing anyone wants rasterised on
+/// the thread that paints the window, which is where iced parses one.
+pub const SVG_BYTES: u64 = 8 * 1024 * 1024;
+
+/// The only `data:` pictures an SVG drawn here may embed. Not
+/// `image/svg+xml`, nor anything else: usvg parses an embedded SVG as a
+/// drawing of its own, and that one's `href`s are hidden from
+/// [`svg_is_self_contained`] inside base64.
+const EMBEDDABLE: [&str; 5] = ["data:image/png", "data:image/jpeg", "data:image/jpg", "data:image/gif", "data:image/webp"];
+
+/// Whether an SVG can be drawn without reading any file but itself.
+///
+/// usvg, which iced draws SVGs with, resolves an `<image href>` that is
+/// a path by reading that path — `/dev/zero` freezes the window and
+/// runs it out of memory, a FIFO hangs it, and any picture this user can
+/// read could be drawn into a file someone sent them. iced gives no way
+/// to pass usvg a resolver that refuses, and rasterising here instead
+/// would need usvg as a dependency of this crate, so this refuses the
+/// whole drawing whenever it names anything outside itself. Crude on
+/// purpose — a text scan, erring towards refusing — and the cost of a
+/// refusal is an icon where a thumbnail would have been.
+///
+/// Refused, besides any `href` that is neither `#fragment` nor one of
+/// `EMBEDDABLE`:
+/// - gzip (`.svgz`): the text cannot be scanned without unpacking it;
+/// - any `<!ENTITY`: an entity's text is expanded where it is used, and
+///   character references inside it can spell out an `href` this scan
+///   would never see. Some editors declare a few harmless ones; those
+///   drawings keep their icon.
+pub fn svg_is_self_contained(svg: &[u8]) -> bool {
+    if svg.starts_with(&[0x1f, 0x8b]) {
+        return false;
+    }
+    let text = String::from_utf8_lossy(svg).to_ascii_lowercase();
+    if text.contains("<!entity") {
+        return false;
+    }
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find("href") {
+        rest = &rest[at + "href".len()..];
+        // Not an attribute: the word in a text node, or in a longer name.
+        let Some(value) = rest.trim_start().strip_prefix('=') else { continue };
+        let value = value.trim_start();
+        let Some(value) = value.strip_prefix('"').or_else(|| value.strip_prefix('\'')) else { continue };
+        let value = value.trim_start();
+        if !(value.starts_with('#') || EMBEDDABLE.iter().any(|kind| value.starts_with(kind))) {
+            return false;
+        }
+    }
+    true
+}
+
 impl Picture {
+    /// An SVG from a file nobody vouches for — anything in a listing, a
+    /// preview, an icon a user picked — or `None` to keep the icon.
+    ///
+    /// Read here, once, and handed to iced as bytes, never as a path:
+    /// iced reads a path itself when it first draws it, on the thread
+    /// that paints, with no size cap and whatever the file has become by
+    /// then. Only a regular file is opened (a FIFO named `x.svg` would
+    /// block the read for good), only up to `max_bytes`, and only one
+    /// [`svg_is_self_contained`] accepts is drawn.
+    pub fn untrusted_svg(path: &Path, max_bytes: u64) -> Option<Picture> {
+        use std::io::Read;
+        let meta = std::fs::metadata(path).ok()?;
+        if !meta.is_file() || meta.len() > max_bytes {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(path).ok()?.take(max_bytes.saturating_add(1)).read_to_end(&mut bytes).ok()?;
+        if bytes.len() as u64 > max_bytes || !svg_is_self_contained(&bytes) {
+            return None;
+        }
+        Some(Picture::Svg(iced::widget::svg::Handle::from_memory(bytes)))
+    }
+
     /// By extension: for a theme icon, which `hyprforge-icons` only ever
-    /// answers with as a `.png` or an `.svg`, and for an SVG preview.
-    /// iced reads the file itself the first time it draws it.
+    /// answers with as a `.png` or an `.svg`. iced reads the file itself
+    /// the first time it draws it, so this is for files the system
+    /// installed — anything a user could have been sent goes through
+    /// [`Self::untrusted_svg`].
     pub fn from_path(path: &Path) -> Picture {
         if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
             Picture::Svg(iced::widget::svg::Handle::from_path(path))
@@ -264,6 +342,52 @@ impl Picture {
 
 #[cfg(test)]
 mod tests {
+    // --- SVGs from files nobody vouches for (D2) ------------------------
+
+    #[test]
+    fn an_svg_that_draws_only_itself_is_accepted() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+            <defs><linearGradient id="g"/></defs>
+            <use xlink:href="#g"/><image href = 'data:image/png;base64,AAAA'/>
+            <text>an href in a sentence</text></svg>"##;
+        assert!(super::svg_is_self_contained(svg));
+    }
+
+    /// usvg reads whatever path an `<image href>` names: `/dev/zero`
+    /// froze the window and ran it out of memory.
+    #[test]
+    fn an_svg_that_reaches_for_a_file_is_refused() {
+        for href in ["/dev/zero", "file:///etc/passwd", "../secret.png", " /dev/zero", "&x;", "&#47;dev/zero"] {
+            let svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg"><image href="{href}"/></svg>"#);
+            assert!(!super::svg_is_self_contained(svg.as_bytes()), "{href}");
+        }
+        let xlink = br#"<svg><image xlink:href='/dev/zero'/></svg>"#;
+        assert!(!super::svg_is_self_contained(xlink));
+    }
+
+    /// An embedded SVG is parsed as a drawing of its own, with its own
+    /// `href`s hidden in base64; an entity can spell one out with
+    /// character references; a gzipped one cannot be read at all.
+    #[test]
+    fn an_svg_that_could_hide_a_reach_is_refused() {
+        let nested = br#"<svg><image href="data:image/svg+xml;base64,PHN2Zz4="/></svg>"#;
+        assert!(!super::svg_is_self_contained(nested));
+        let entity = br#"<!DOCTYPE svg [<!ENTITY i "<image hr&#101;f='/dev/zero'/>">]><svg>&i;</svg>"#;
+        assert!(!super::svg_is_self_contained(entity));
+        assert!(!super::svg_is_self_contained(&[0x1f, 0x8b, 8, 0]));
+    }
+
+    #[test]
+    fn an_untrusted_svg_over_the_cap_or_not_a_file_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let fine = dir.path().join("fine.svg");
+        std::fs::write(&fine, br#"<svg xmlns="http://www.w3.org/2000/svg"/>"#).unwrap();
+        assert!(matches!(super::Picture::untrusted_svg(&fine, 1024), Some(super::Picture::Svg(_))));
+        assert!(super::Picture::untrusted_svg(&fine, 8).is_none(), "over the cap");
+        assert!(super::Picture::untrusted_svg(dir.path(), 1024).is_none(), "a folder");
+        assert!(super::Picture::untrusted_svg(Path::new("/dev/zero"), 1024).is_none(), "a device");
+    }
+
     use super::*;
 
     use crate::config::Thumbnails;

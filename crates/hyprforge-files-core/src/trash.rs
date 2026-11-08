@@ -105,10 +105,19 @@ impl TrashBackend {
 
 impl FsBackend for TrashBackend {
     fn read_dir(&self, _path: &Path) -> Result<Vec<Entry>, FilesError> {
-        let items = hyprforge_fileops::list(&self.root).map_err(|e| FilesError::Io {
+        // Not the strict `list`: one record that will not parse —
+        // another program's, or a write cut short — failed the whole
+        // listing, and the Trash showed an error with every good item
+        // hidden behind it. Each bad record is said, in the log, and the
+        // rest are listed; only a trash whose `info/` cannot be read at
+        // all is an error here.
+        let (items, problems) = hyprforge_fileops::list_with_problems(&self.root).map_err(|e| FilesError::Io {
             path: self.root.clone(),
             source: std::io::Error::other(e.to_string()),
         })?;
+        for problem in &problems {
+            tracing::warn!(error = %problem, "a Trash record could not be read; that item is not listed");
+        }
         Ok(items.iter().filter_map(TrashBackend::entry).collect())
     }
 
@@ -259,6 +268,19 @@ mod tests {
         assert!(!entries[0].is_dir);
         assert_eq!(entries[0].size, crate::types::EntrySize::Bytes(1));
         assert_eq!(entries[0].origin.as_deref(), Some(Path::new("/home/alex")), "where it came from");
+    }
+
+    /// C20: one record that will not parse — another program's, or a
+    /// write cut short — failed the whole listing, and the Trash showed
+    /// an error with every good item behind it.
+    #[test]
+    fn one_unreadable_record_does_not_hide_the_rest_of_the_trash() {
+        let dir = trash_with("/home/alex/kept.txt", "kept.txt", "x");
+        fs::write(dir.path().join("files").join("broken.txt"), "y").unwrap();
+        fs::write(dir.path().join("info").join("broken.txt.trashinfo"), "not a trash record").unwrap();
+        let backend = TrashBackend::at(dir.path());
+        let entries = backend.read_dir(&backend.listing_dir()).expect("the readable items are listed");
+        assert_eq!(entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["kept.txt"]);
     }
 
     /// The brief's own wording: the trash must be recognised "including
