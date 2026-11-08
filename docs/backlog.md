@@ -32,7 +32,18 @@ Started and not finished — so a second agent, or the next session, sees
 what is already in hand before it starts the same thing. Say what is
 left, and move an item back to its section if it stops.
 
-Nothing in hand.
+- [feature] **Parked mid-pass: the look following Hyprland, and procman's redesign.**
+  Done and committed: every procman tab redesigned, data drawn in text
+  shades rather than state colours (procman b294a63, on `next`), and the
+  look reading both borders from the running Hyprland with surfaces in the
+  inactive border's hue (the monorepo commit after fa1e088). Left: render
+  Settings, Files and the lock screen under the new surfaces and compare a
+  screenshot's pixels against the theme (CLAUDE.md's rule about two hosts
+  looking the same); the half-width layouts of the five over-time tabs;
+  move the canvas designs' hex values to the derived ones. A start on the
+  first sits uncommitted: Settings' `render::render_every_screen` (its
+  `src/main.rs` and `Cargo.toml`), with its line in `.config/nextest.toml`
+  and the `Cargo.lock` entries it needs. *Added 2026-10-18.* *Started 2026-11-08.*
 
 ## Needs you
 
@@ -180,18 +191,16 @@ someone watching the screen. Ranked by what each one unblocks.
 
 Open work Claude can do unattended. Nothing here blocks a release.
 
-- [feature] **Parked mid-pass: the look following Hyprland, and procman's redesign.**
-  Done and committed: every procman tab redesigned, data drawn in text
-  shades rather than state colours (procman b294a63, on `next`), and the
-  look reading both borders from the running Hyprland with surfaces in the
-  inactive border's hue (the monorepo commit after fa1e088). Left: render
-  Settings, Files and the lock screen under the new surfaces and compare a
-  screenshot's pixels against the theme (CLAUDE.md's rule about two hosts
-  looking the same); the half-width layouts of the five over-time tabs;
-  move the canvas designs' hex values to the derived ones. A start on the
-  first sits uncommitted: Settings' `render::render_every_screen` (its
-  `src/main.rs` and `Cargo.toml`), with its line in `.config/nextest.toml`
-  and the `Cargo.lock` entries it needs. *Added 2026-10-18.*
+- [bug] **Waking from idle leaves the screen dim.** Reported 2026-11-08.
+  Two idle listeners each save the backlight before dimming — `brightnessctl
+  -s set 10` at 150 s and `brightnessctl -s set 0` at 300 s — so the second
+  save overwrites the first, and every `brightnessctl -r` on resume restores
+  10, not the user's level (`/run/user/1000/brightnessctl/backlight/
+  nvidia_wmi_ec_backlight` held `10`). The user's immediate fix is the 300 s
+  listener as `brightnessctl set 0`, no `-s`. The suite's half: Settings'
+  Idle page accepts the pair silently — it should flag a second save of the
+  same device while the first is still held (`hyprforge-ecosystem/src/
+  idle.rs`'s `invalid()`), and offer the fix. *Added 2026-11-08.*
 - [bug] **Why receiving one D-Bus signal costs the tray ~45 wakeups.** After
   the 2026-10-17 work the tray idles at ~1,590 wakeups a minute, from
   ~3,400. Measured again 2026-10-18 (one thread, nothing else in the
