@@ -485,7 +485,16 @@ pub fn apply_press<B: Backend>(conversation: &mut Conversation<B>, press: Press)
             // characters and show a dot for nothing — Enter and
             // Backspace both produce text as well as being keys.
             if !text.is_empty() && !text.chars().any(char::is_control) {
-                let mut entered = conversation.typed().to_string();
+                // Sized for the result before the first byte is copied.
+                // `to_string()` then `push_str` allocates exactly the old
+                // length and then grows, and growing frees the first
+                // buffer — with the password so far still in it, since
+                // only what ends up inside a `Secret` is ever zeroed.
+                // (Backspace's `pop` never grows, and zeroize clears a
+                // string's whole capacity, so it needs no such care.)
+                let typed = conversation.typed();
+                let mut entered = String::with_capacity(typed.len() + text.len());
+                entered.push_str(typed);
                 entered.push_str(&text);
                 conversation.type_into(entered);
             }
