@@ -827,6 +827,41 @@ fn fingerprint_keeps_a_local_stack_and_undo_restores_it_exactly() {
     assert_eq!(r.read(&local), mine);
 }
 
+/// `setup.toml` is the user's own file, and undo runs as root. A record
+/// rewritten to say polkit's stack used to be `pam_permit` must not have
+/// undo install that.
+#[test]
+fn a_tampered_record_cannot_choose_what_undo_writes_into_polkits_stack() {
+    let r = rig();
+    let local = r.env.pam_dir.join("polkit-1");
+    r.apply("fingerprint-polkit").unwrap();
+    let mut rec = record::load(&r.env.setup_toml()).unwrap();
+    rec.items.get_mut("fingerprint-polkit").unwrap().change =
+        Change::FingerprintPam { previous: Some("auth sufficient pam_permit.so\n".into()) };
+    record::save(&r.env.setup_toml(), &rec).unwrap();
+
+    r.undo("fingerprint-polkit").unwrap();
+
+    assert!(!r.read(&local).contains("pam_permit"), "{}", r.read(&local));
+    assert!(!local.exists(), "what was left is the vendor's stack, so the copy goes");
+}
+
+/// The same for the recorder: the unit undo disables is the recorder's,
+/// whatever the record names.
+#[test]
+fn a_tampered_record_cannot_choose_which_unit_undo_stops_as_root() {
+    let r = rig();
+    r.apply("record-history").unwrap();
+    let mut rec = record::load(&r.env.setup_toml()).unwrap();
+    rec.items.get_mut("record-history").unwrap().change = Change::SystemService { unit: "sshd.service".into() };
+    record::save(&r.env.setup_toml(), &rec).unwrap();
+
+    r.undo("record-history").unwrap();
+
+    assert!(!r.sys.calls().iter().any(|c| c.contains("sshd")), "{:?}", r.sys.calls());
+    assert_eq!(r.sys.system_unit(crate::items::recorder::UNIT), Some(false));
+}
+
 #[test]
 fn fingerprint_is_offered_only_when_a_finger_could_answer() {
     let r = rig();

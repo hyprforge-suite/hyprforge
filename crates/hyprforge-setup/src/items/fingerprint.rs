@@ -25,8 +25,8 @@
 //! work breaks `pkexec`, and `pkexec` is how undo runs. So the stack is
 //! never written from scratch: it is the one already in effect with one
 //! line added, and the tests hold every other line to coming through
-//! unchanged. Undo writes back exactly what was there, or removes the
-//! file when there was none.
+//! unchanged. Undo takes that line back out of the file as it is now, or
+//! removes the file when what is left is the vendor's stack.
 //!
 //! Offered only when it can do something: pam_fprintd installed, and a
 //! finger enrolled for this user. Off by default — a password prompt in
@@ -132,10 +132,45 @@ pub(super) fn apply(cx: &Cx<'_>) -> Result<Applied, String> {
     })
 }
 
-/// Puts back exactly what was there — or, when there was nothing,
-/// removes the file so the vendor's stack applies again.
-pub(super) fn undo(cx: &Cx<'_>, previous: Option<&str>) -> Result<Option<String>, String> {
-    cx.sys.write_as_root(&local(cx), previous)?;
+/// `stack` with the two lines [`with_fingerprint`] added taken back out,
+/// every other line as it is — or `None` when they are not there.
+pub(crate) fn without_fingerprint(stack: &str) -> Option<String> {
+    let lines: Vec<&str> = stack.lines().collect();
+    let at = lines.windows(2).position(|pair| pair[0] == MARK && pair[1] == LINE)?;
+    let mut out = String::with_capacity(stack.len());
+    for (i, line) in lines.iter().enumerate() {
+        if i != at && i != at + 1 {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    Some(out)
+}
+
+/// Takes this item's line back out of the stack in effect — or, when
+/// what is left is exactly the vendor's, removes the local file so the
+/// vendor's stack applies again.
+///
+/// `_previous` is deliberately not what gets written. It comes from
+/// `setup.toml`, which the user's own account can write, and this runs as
+/// root: installing it would let anything running as the user put
+/// `auth sufficient pam_permit.so` into polkit's stack and be root
+/// without a password the next time anyone undid this item. The record
+/// only says *that* the line was added; the file itself says what to
+/// keep.
+pub(super) fn undo(cx: &Cx<'_>, _previous: Option<&str>) -> Result<Option<String>, String> {
+    let Some(current) = read(&local(cx))? else {
+        return Ok(Some("polkit's stack had no local copy left to change.".into()));
+    };
+    let Some(restored) = without_fingerprint(&current) else {
+        return Ok(Some("The fingerprint line was already gone from polkit's stack.".into()));
+    };
+    let vendor = read(&cx.env.vendor_pam_dir.join(STACK))?;
+    if vendor.as_deref() == Some(restored.as_str()) {
+        cx.sys.write_as_root(&local(cx), None)?;
+    } else {
+        cx.sys.write_as_root(&local(cx), Some(&restored))?;
+    }
     Ok(None)
 }
 
@@ -158,6 +193,16 @@ mod tests {
         let kept: Vec<&str> = out.lines().filter(|l| *l != LINE && *l != MARK).collect();
         assert_eq!(kept, ARCH.lines().collect::<Vec<_>>());
         assert!(out.starts_with("#%PAM-1.0\n"), "the header stays the first line");
+    }
+
+    #[test]
+    fn taking_the_finger_out_gives_back_the_stack_it_went_into() {
+        assert_eq!(without_fingerprint(&with_fingerprint(ARCH)).as_deref(), Some(ARCH));
+        assert_eq!(without_fingerprint(ARCH), None, "nothing of ours to take out");
+        // A line someone wrote themselves, identical to ours but without
+        // the mark, is theirs and stays.
+        let theirs = format!("{LINE}\n{ARCH}");
+        assert_eq!(without_fingerprint(&theirs), None);
     }
 
     #[test]

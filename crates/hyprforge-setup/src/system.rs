@@ -172,10 +172,39 @@ impl Drop for Staged {
     }
 }
 
+/// Stages `text` for root to install.
+///
+/// `/tmp` is shared, and the name is guessable, so `std::fs::write` — which
+/// follows a symlink and truncates whatever is there — let another user
+/// plant the name first: either to have this write into a file of theirs
+/// pointing somewhere of ours, or to hold the file open and swap its
+/// contents before root's `install` read it, putting their own PAM stack
+/// in `/etc/pam.d`. `create_new` is O_EXCL, refusing any name that exists
+/// (a link included), and 0600 means nobody else can open it at all; root
+/// reads it regardless.
 fn tempfile_with(text: &str) -> Result<Staged, String> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
     let path = std::env::temp_dir().join(format!("hyprforge-setup-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)));
-    std::fs::write(&path, text).map_err(|e| format!("couldn't stage {}: {e}", path.display()))?;
-    Ok(Staged(path))
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|e| format!("couldn't stage {}: {e}", path.display()))?;
+    // Owned from here: a failed write removes the file on the way out.
+    let staged = Staged(path);
+    file.write_all(text.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|e| format!("couldn't stage {}: {e}", staged.path().display()))?;
+    Ok(staged)
+}
+
+/// The argv after `pkexec` that enables or disables a system unit. `--`
+/// before the unit, so a name that starts with a dash is a unit and never
+/// an option to a program running as root.
+pub(crate) fn enable_now_argv(unit: &str, enable: bool) -> [&str; 5] {
+    ["systemctl", if enable { "enable" } else { "disable" }, "--now", "--", unit]
 }
 
 fn run(program: &str, args: &[&str]) -> Result<std::process::Output, String> {
@@ -313,7 +342,7 @@ impl System for RealSystem {
     }
 
     fn system_unit_state(&self, unit: &str) -> Result<UnitState, String> {
-        let out = run("systemctl", &["is-enabled", unit])?;
+        let out = run("systemctl", &["is-enabled", "--", unit])?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         match stdout.split_whitespace().next() {
             Some(word) => Ok(UnitState::parse(word)),
@@ -331,7 +360,7 @@ impl System for RealSystem {
     fn system_enable_now(&self, unit: &str, enable: bool) -> Result<(), String> {
         let verb = if enable { "enable" } else { "disable" };
         let mut command = Command::new("pkexec");
-        command.args(["systemctl", verb, "--now", unit]);
+        command.args(enable_now_argv(unit, enable));
         // Two minutes, not the shared bound: someone is reading a prompt
         // and typing a password.
         let out = hyprforge_process::output(&mut command, std::time::Duration::from_secs(120))
@@ -407,6 +436,28 @@ mod tests {
         assert_eq!(UnitState::parse("masked"), UnitState::Masked);
         assert_eq!(UnitState::parse("not-found"), UnitState::NotFound);
         assert_eq!(UnitState::parse("static"), UnitState::Other("static".into()));
+    }
+}
+
+#[cfg(test)]
+mod staging_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn a_staged_file_for_root_is_readable_by_nobody_else() {
+        let staged = tempfile_with("auth include system-auth\n").unwrap();
+        let mode = std::fs::metadata(staged.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(std::fs::read_to_string(staged.path()).unwrap(), "auth include system-auth\n");
+    }
+
+    #[test]
+    fn a_unit_name_is_never_read_as_an_option_by_root() {
+        let argv = enable_now_argv("--root=/elsewhere", false);
+        let dashdash = argv.iter().position(|a| *a == "--").expect("a -- before the unit");
+        assert_eq!(&argv[dashdash + 1..], ["--root=/elsewhere"]);
+        assert_eq!(enable_now_argv("x.service", true)[..3], ["systemctl", "enable", "--now"]);
     }
 }
 

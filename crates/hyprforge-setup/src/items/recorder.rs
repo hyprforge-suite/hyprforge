@@ -40,7 +40,12 @@ pub(super) fn apply(cx: &Cx<'_>) -> Result<Applied, String> {
 /// Stops recording. The history already written stays, for the recorder's
 /// own retention to age out — deleting it is not "putting things back",
 /// it is losing what the user may still want to look at.
-pub(super) fn undo(cx: &Cx<'_>, unit: &str) -> Result<Option<String>, String> {
-    cx.sys.system_enable_now(unit, false)?;
+///
+/// Always [`UNIT`], never the name in the record. `setup.toml` is the
+/// user's own file and this runs `systemctl` as root: a record naming
+/// `sshd.service` — or `--root=/elsewhere` — would have undo do that, as
+/// root, with the user's password prompt as the only warning.
+pub(super) fn undo(cx: &Cx<'_>, _unit: &str) -> Result<Option<String>, String> {
+    cx.sys.system_enable_now(UNIT, false)?;
     Ok(Some("The history recorded so far is kept; it ages out by the recorder's own limits.".into()))
 }
