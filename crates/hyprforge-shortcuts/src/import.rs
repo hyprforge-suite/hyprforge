@@ -58,8 +58,31 @@ pub fn shortcut_from_call(kind: &str, args: &[Value]) -> Option<Result<Imported,
         .unwrap_or_default()
         .to_string();
     let flags = options.map(flags_from_options).unwrap_or_default();
-    Some(Ok(Imported { combo, action, description, flags }))
+    let dropped = options.map(dropped_options).unwrap_or_default();
+    Some(Ok(Imported { combo, action, description, flags, dropped }))
 }
+
+/// The options-table keys this crate has no field for, or whose value is
+/// not the type its field holds — `{ submap = "resize" }`, `{ mouse = 1 }`.
+///
+/// They used to vanish without a word, and the bind still counted as
+/// imported, so its hand-written line was removed and the regenerated one
+/// lacked the option. Naming them is what lets a caller leave the original
+/// alone, the way window rules do with theirs.
+fn dropped_options(options: &serde_json::Map<String, Value>) -> Vec<String> {
+    options
+        .iter()
+        .filter(|(key, value)| match key.as_str() {
+            "description" => !value.is_string(),
+            k if FLAG_KEYS.contains(&k) => !value.is_boolean(),
+            _ => true,
+        })
+        .map(|(key, _)| key.clone())
+        .collect()
+}
+
+/// The options [`flags_from_options`] reads.
+const FLAG_KEYS: [&str; 6] = ["mouse", "locked", "repeating", "release", "long_press", "non_consuming"];
 
 /// What one recovered `hl.bind` call amounts to.
 ///
@@ -73,6 +96,20 @@ pub struct Imported {
     pub action: Action,
     pub description: String,
     pub flags: BindFlags,
+    /// Options-table keys that were present and could not be carried over
+    /// — see `dropped_options`. Non-empty means the regenerated bind
+    /// would differ from the original.
+    pub dropped: Vec<String>,
+}
+
+impl Imported {
+    /// Whether the regenerated bind would be the original: an action was
+    /// recovered (codegen emits nothing for an empty one) and no option
+    /// was lost. Only a complete import may have its source line removed
+    /// or be ticked by default.
+    pub fn is_complete(&self) -> bool {
+        !self.action.is_empty() && self.dropped.is_empty()
+    }
 }
 
 /// `hl.bind`'s third argument, minus the description.
@@ -101,7 +138,13 @@ fn parse_combo(s: &str) -> Option<KeyCombo> {
     if key.is_empty() {
         return None;
     }
-    let mods: Vec<Modifier> = mod_parts.iter().filter_map(|p| modifier_from_keyword(p)).collect();
+    // Every modifier token has to be one this crate knows. `filter_map`
+    // here once dropped the ones it didn't, so `MOD4 + Q` imported as a
+    // bare `Q` — a different bind, which then replaced the original when
+    // its line was removed. No alias table is attempted: none of
+    // Hyprland's spellings beyond these could be confirmed on this
+    // machine, and an unreadable bind is reported, never rewritten.
+    let mods: Vec<Modifier> = mod_parts.iter().map(|p| modifier_from_keyword(p)).collect::<Option<_>>()?;
     Some(KeyCombo { mods, key: key.to_string() })
 }
 
@@ -240,6 +283,44 @@ mod tests {
         shortcut_from_call(&call.kind, &call.args)
             .expect("should be recognised as a bind")
             .expect("should read as a bind")
+    }
+
+    /// `MOD4` is not a keyword this crate knows, and dropping it turned
+    /// `MOD4 + Q` into a bind on `Q` alone.
+    #[test]
+    fn an_unknown_modifier_makes_the_bind_unreadable_rather_than_dropping_it() {
+        let result = evaluated(r#"hl.bind("MOD4 + Q", hl.dsp.window.close())"#);
+        let out = shortcut_from_call(&result.calls[0].kind, &result.calls[0].args)
+            .expect("still a bind call");
+        assert!(out.is_err(), "MOD4 + Q must not import as {:?}", out.map(|i| i.combo));
+    }
+
+    #[test]
+    fn modifiers_are_still_read_in_any_case() {
+        let out = imported(r#"hl.bind("super + Shift + Q", hl.dsp.window.close())"#);
+        assert_eq!(out.combo.mods, vec![Modifier::Super, Modifier::Shift]);
+    }
+
+    /// An option this crate has no field for would be missing from the
+    /// regenerated bind, so the import is not complete and its line stays.
+    #[test]
+    fn an_unmodelled_option_is_named_and_makes_the_import_incomplete() {
+        let out = imported(
+            r#"hl.bind("SUPER + R", hl.dsp.window.close(), { description = "x", submap = "resize", mouse = 1 })"#,
+        );
+        let mut dropped = out.dropped.clone();
+        dropped.sort();
+        assert_eq!(dropped, vec!["mouse".to_string(), "submap".to_string()]);
+        assert!(!out.is_complete());
+    }
+
+    #[test]
+    fn a_bind_with_only_modelled_options_is_complete() {
+        let out = imported(
+            r#"hl.bind("SUPER + mouse:272", hl.dsp.window.drag(), { description = "Drag", mouse = true })"#,
+        );
+        assert!(out.dropped.is_empty());
+        assert!(out.is_complete());
     }
 
     /// The case that motivates this whole feature: `hyprctl binds -j`
