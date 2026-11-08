@@ -135,6 +135,10 @@ impl Settings {
                 out.push((i, format!("\"{}\" isn't a direction", gesture.direction.trim())));
             } else if !ACTIONS.iter().any(|(a, _, _)| *a == gesture.action.trim()) {
                 out.push((i, format!("\"{}\" isn't an action", gesture.action.trim())));
+            } else if gesture.scale.is_some_and(|s| !s.is_finite()) {
+                // Written bare, `NaN` and `inf` are Lua globals reading as
+                // nil, not a scale.
+                out.push((i, "the scale has to be a number".to_string()));
             }
         }
 
@@ -194,12 +198,10 @@ pub fn render_one(gesture: &Gesture) -> String {
         let value = gesture.argument.trim();
         if !value.is_empty() {
             // Numeric arguments go unquoted; a quoted zoom level is a
-            // string where Hyprland wants a number.
-            if value.parse::<f64>().is_ok() {
-                fields.push(format!("{name} = {value}"));
-            } else {
-                fields.push(format!("{name} = {}", lua_string(value)));
-            }
+            // string where Hyprland wants a number. `lua_scalar`, not
+            // `parse::<f64>()`: that accepts `nan`, `inf` and `+5`, none of
+            // which Lua reads as a number written bare.
+            fields.push(format!("{name} = {}", hyprforge_core::lua::lua_scalar(value)));
         }
     }
     format!("hl.gesture({{ {} }})\n", fields.join(", "))
@@ -216,6 +218,21 @@ mod tests {
             action: action.into(),
             ..Gesture::default()
         }
+    }
+
+    #[test]
+    fn an_argument_lua_cannot_read_as_a_number_is_quoted() {
+        let mut g = gesture(3, "horizontal", "cursor_zoom");
+        g.argument = "inf".into();
+        let out = render_one(&g);
+        assert!(out.contains("zoom_level = [[inf]]"), "{out}");
+        g.argument = "1.5".into();
+        assert!(render_one(&g).contains("zoom_level = 1.5"));
+        let mut s = Settings::default();
+        let mut bad = gesture(3, "horizontal", "workspace");
+        bad.scale = Some(f64::NAN);
+        s.gestures.push(bad);
+        assert_eq!(s.invalid(&[]).len(), 1);
     }
 
     /// The exact shape from this machine's own config.

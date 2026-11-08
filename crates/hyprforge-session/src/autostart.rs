@@ -137,7 +137,10 @@ pub fn generate(settings: &Settings) -> String {
         out.push_str(&format!("hl.on({}, function()\n", lua_string(when.event())));
         for program in programs {
             if !program.note.trim().is_empty() {
-                out.push_str(&format!("    -- {}\n", program.note.trim()));
+                // A line comment ends at the line break, and whatever a note
+                // carried after one would be live Lua in the user's session.
+                let note = program.note.trim().replace(['\n', '\r'], " ");
+                out.push_str(&format!("    -- {note}\n"));
             }
             out.push_str(&format!("    hl.exec_cmd({})\n", lua_string(program.command.trim())));
         }
@@ -152,6 +155,20 @@ mod tests {
 
     fn program(command: &str) -> Program {
         Program { command: command.into(), enabled: true, ..Program::default() }
+    }
+
+    #[test]
+    fn a_note_with_a_line_break_stays_a_comment() {
+        let mut p = program("waybar");
+        p.note = "bar\nos.execute('rm -rf ~')\r-- x".into();
+        let out = generate(&Settings { programs: vec![p] });
+        for line in out.lines() {
+            let line = line.trim_start();
+            assert!(
+                line.starts_with("--") || line.starts_with("hl.") || line == "end)",
+                "a note escaped its comment: {line:?}\n{out}"
+            );
+        }
     }
 
     /// The handler is what makes this run once at login rather than on
