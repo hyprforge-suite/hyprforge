@@ -64,7 +64,11 @@
 //!
 //! Regular permission bits (the low 12 bits of `st_mode`) and mtime are
 //! preserved, best-effort — a failure to preserve one is logged and does
-//! not fail the copy. Not preserved at all: extended attributes, ACLs,
+//! not fail the copy. Setuid and setgid survive only onto a copy with the
+//! source's own owner and group (see `copied_mode`): the Files root
+//! helper runs this as root. A folder merged into rather than created
+//! keeps its own mode and mtime — it was somebody else's. Pipes, sockets
+//! and devices are reported, never opened. Not preserved at all: extended attributes, ACLs,
 //! hard-link identity (two hard-linked sources become two independent
 //! files at the destination), and a symlink's own mtime (Linux has no
 //! stable safe API this crate uses for `lutimes`; the *target* of a copied
@@ -74,7 +78,8 @@ use crate::fs::Filesystem;
 use crate::trash::unique_name;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -161,6 +166,19 @@ pub enum OpsError {
         #[source]
         source: io::Error,
     },
+
+    /// A pipe, socket or device. None of them is a file with contents to
+    /// copy: opening a pipe for reading waits for a writer that never
+    /// comes, and reading `/dev/zero` never ends — as root, it fills the
+    /// destination disk.
+    #[error("{path} is a special file (a pipe, socket or device) and can't be copied")]
+    Special { path: PathBuf },
+
+    /// The source was replaced — by a link, or by a different file —
+    /// between the walk seeing it and the copy opening it. Copying
+    /// whatever is there now would copy something nobody chose.
+    #[error("{path} changed while it was being copied")]
+    SourceChanged { path: PathBuf },
 }
 
 impl OpsError {
@@ -181,7 +199,11 @@ impl OpsError {
             | OpsError::Write { source, .. }
             | OpsError::Remove { source, .. }
             | OpsError::ListDir { source, .. } => source.kind() == io::ErrorKind::PermissionDenied,
-            OpsError::SourceNotFound { .. } | OpsError::SourceVanished { .. } | OpsError::DiskFull { .. } => false,
+            OpsError::SourceNotFound { .. }
+            | OpsError::SourceVanished { .. }
+            | OpsError::DiskFull { .. }
+            | OpsError::Special { .. }
+            | OpsError::SourceChanged { .. } => false,
         }
     }
 }
@@ -318,6 +340,17 @@ enum EntryKind {
     Dir,
     File { size: u64 },
     Symlink,
+    /// A pipe, socket or device — reported, never opened. See
+    /// [`OpsError::Special`].
+    Special,
+}
+
+/// A file's identity, `(st_dev, st_ino)`: what a name pointed at when it
+/// was looked at, so a later open can tell whether it still does.
+type FileId = (u64, u64);
+
+fn id_of(meta: &fs::Metadata) -> FileId {
+    (meta.dev(), meta.ino())
 }
 
 #[derive(Debug, Clone)]
@@ -331,6 +364,14 @@ struct Entry {
     /// rewrites this (and every descendant's) prefix.
     dest_relative: PathBuf,
     kind: EntryKind,
+    /// The source as the walk saw it. A file opened later must still be
+    /// this file — see [`OpsError::SourceChanged`].
+    seen: FileId,
+    /// The folder this operation created for a `Dir` entry, recorded at
+    /// creation. The last pass sets folder permissions only on a folder
+    /// that is still this one; `None` for a folder merged into rather
+    /// than made, which is somebody else's and keeps its own mode.
+    made: Option<FileId>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -549,7 +590,13 @@ impl<F: Filesystem> Operation<F> {
             if let EntryKind::File { size } = kind {
                 self.bytes_total += size;
             }
-            self.entries.push(Entry { source_relative: PathBuf::new(), dest_relative: PathBuf::new(), kind });
+            self.entries.push(Entry {
+                source_relative: PathBuf::new(),
+                dest_relative: PathBuf::new(),
+                kind,
+                seen: id_of(&root_status),
+                made: None,
+            });
         }
 
         // A collision on the root is checked before anything else — in
@@ -583,7 +630,11 @@ impl<F: Filesystem> Operation<F> {
                 }
             };
             if same_device {
-                match fs::rename(&self.source, &self.dest) {
+                // No-replace: the collision check above looked a moment
+                // ago, and a plain `rename(2)` would silently replace
+                // anything that arrived since. `EEXIST` then reaches the
+                // report as a failure, which is what it is.
+                match crate::batch::rename_noreplace(&self.source, &self.dest) {
                     Ok(()) => {
                         self.move_strategy = Some(MoveStrategy::Renamed);
                         self.succeeded.push(self.dest.clone());
@@ -673,7 +724,18 @@ impl<F: Filesystem> Operation<F> {
             }
         };
 
-        let mut children: Vec<_> = read.collect::<Result<Vec<_>, _>>().unwrap_or_default();
+        // A listing that breaks partway is a failure, never an empty
+        // folder. It used to be `unwrap_or_default()`, which walked the
+        // folder as having nothing in it — and a move, seeing no failure,
+        // then deleted the source folder with everything the walk never
+        // saw still inside it.
+        let mut children: Vec<_> = match read.collect::<Result<Vec<_>, _>>() {
+            Ok(children) => children,
+            Err(source) => {
+                self.fail(abs_dir.clone(), OpsError::ListDir { path: abs_dir.clone(), source });
+                return StepOutcome::Progress(self.progress_snapshot(abs_dir));
+            }
+        };
         children.sort_by_key(|e| e.file_name());
         for child in children {
             let child_rel = rel_dir.join(child.file_name());
@@ -696,6 +758,8 @@ impl<F: Filesystem> Operation<F> {
                 source_relative: child_rel.clone(),
                 dest_relative: child_rel,
                 kind,
+                seen: id_of(&status),
+                made: None,
             });
         }
         StepOutcome::Progress(self.progress_snapshot(abs_dir))
@@ -769,11 +833,27 @@ impl<F: Filesystem> Operation<F> {
         let dest_path = join_relative(&self.dest, &entry.dest_relative);
 
         match entry.kind {
+            EntryKind::Special => {
+                self.fail(src_path.clone(), OpsError::Special { path: src_path.clone() });
+                self.index += 1;
+                StepOutcome::Progress(self.progress_snapshot(src_path))
+            }
             EntryKind::Dir => {
-                match fs::create_dir(&dest_path) {
-                    Ok(()) => {
-                        if let Ok(meta) = fs::symlink_metadata(&src_path) {
-                            let _ = fs::set_permissions(&dest_path, fs::Permissions::from_mode(meta.mode() & 0o7777));
+                // Created, then opened without following a link, and the
+                // mode set through that handle. The old `set_permissions`
+                // by path followed whatever the name had become since
+                // `create_dir` — a link to `/etc`, swapped in by anyone who
+                // can write to the destination, and a root copy chmods
+                // `/etc` to the source folder's mode.
+                let made = fs::create_dir(&dest_path).and_then(|()| open_nofollow(&dest_path));
+                match made {
+                    Ok(dir) => {
+                        if let (Ok(meta), Ok(here)) = (fs::symlink_metadata(&src_path), dir.metadata()) {
+                            if here.is_dir() {
+                                self.entries[idx].made = Some(id_of(&here));
+                                let mode = copied_mode(meta.mode(), (meta.uid(), meta.gid()), (here.uid(), here.gid()), true);
+                                let _ = dir.set_permissions(fs::Permissions::from_mode(mode));
+                            }
                         }
                         self.succeeded.push(dest_path);
                     }
@@ -794,23 +874,45 @@ impl<F: Filesystem> Operation<F> {
                 StepOutcome::Progress(self.progress_snapshot(src_path))
             }
             EntryKind::File { .. } => {
-                let src_meta = match fs::symlink_metadata(&src_path) {
-                    Ok(m) => m,
+                // The source is opened without following a link and
+                // without waiting on a pipe, and everything known about it
+                // comes from that handle. A `stat` by name then an `open`
+                // by name are two looks at what may be two files: a file
+                // swapped for a link between them was copied as whatever
+                // the link pointed at, under the old file's mode.
+                let opened = open_nofollow(&src_path).and_then(|f| f.metadata().map(|m| (f, m)));
+                let (reader, src_meta) = match opened {
+                    Ok((f, m)) if m.is_file() && id_of(&m) == entry.seen => (f, m),
+                    Ok(_) => {
+                        self.fail(src_path.clone(), OpsError::SourceChanged { path: src_path.clone() });
+                        self.index += 1;
+                        return StepOutcome::Progress(self.progress_snapshot(src_path));
+                    }
+                    Err(e) if e.raw_os_error() == Some(ELOOP) => {
+                        self.fail(src_path.clone(), OpsError::SourceChanged { path: src_path.clone() });
+                        self.index += 1;
+                        return StepOutcome::Progress(self.progress_snapshot(src_path));
+                    }
                     Err(source) => {
                         self.fail(src_path.clone(), classify_read(&src_path, source));
                         self.index += 1;
                         return StepOutcome::Progress(self.progress_snapshot(src_path));
                     }
                 };
-                let reader = match File::open(&src_path) {
-                    Ok(f) => f,
-                    Err(source) => {
-                        self.fail(src_path.clone(), classify_read(&src_path, source));
-                        self.index += 1;
-                        return StepOutcome::Progress(self.progress_snapshot(src_path));
-                    }
-                };
-                let writer = match File::create(&dest_path) {
+                // `create_new` and no following: this operation makes a
+                // new file and never writes through a name it did not
+                // make. `File::create` truncated whatever was there, and
+                // a link planted there after the collision check looked
+                // sent a root copy's bytes into `/etc/shadow`. A Replace
+                // removed the old destination before this; something
+                // that reappears in between is a failure, not a target.
+                let writer = match fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .custom_flags(O_NOFOLLOW)
+                    .open(&dest_path)
+                {
                     Ok(f) => f,
                     Err(source) => {
                         self.fail(src_path.clone(), classify_write(&dest_path, source));
@@ -969,9 +1071,19 @@ impl<F: Filesystem> Operation<F> {
             .collect();
         dirs.sort_by_key(|&i| std::cmp::Reverse(self.entries[i].dest_relative.components().count()));
         for i in dirs {
-            let src = self.source.join(&self.entries[i].source_relative);
-            let dst = self.dest.join(&self.entries[i].dest_relative);
-            if let (Ok(meta), Ok(dir)) = (fs::symlink_metadata(&src), File::open(&dst)) {
+            // Only a folder this operation made, and only while the name
+            // still opens — without following a link — to that same
+            // folder. Opening by name and chmodding by name had a folder
+            // swapped for a link to `/etc` pass its mode on to `/etc`.
+            let Some(made) = self.entries[i].made else { continue };
+            let src = join_relative(&self.source, &self.entries[i].source_relative);
+            let dst = join_relative(&self.dest, &self.entries[i].dest_relative);
+            let Ok(dir) = open_nofollow(&dst) else { continue };
+            if !dir.metadata().is_ok_and(|here| id_of(&here) == made) {
+                tracing::warn!(path = %dst.display(), "a copied folder was replaced before its permissions were set; leaving it alone");
+                continue;
+            }
+            if let Ok(meta) = fs::symlink_metadata(&src).and_then(|m| if m.is_dir() { Ok(m) } else { Err(io::ErrorKind::NotADirectory.into()) }) {
                 preserve_attrs(&dir, &src, &dst, &meta, "directory");
             }
         }
@@ -981,19 +1093,51 @@ impl<F: Filesystem> Operation<F> {
             && self.failed.is_empty()
             && !self.cancelled
         {
-            let root_kind = self.entries[0].kind;
-            let result = match root_kind {
-                EntryKind::Dir => fs::remove_dir_all(&self.source),
-                _ => fs::remove_file(&self.source),
-            };
-            if let Err(source) = result {
-                self.source_removal_failed =
-                    Some(OpsError::Remove { path: self.source.clone(), source }.to_string());
+            if let Err(err) = self.remove_moved_source() {
+                self.source_removal_failed = Some(err.to_string());
             }
         }
 
         self.phase = Phase::Done;
         self.step()
+    }
+
+    /// The last half of a copy-then-delete move: removes what was copied,
+    /// and only that, deepest first.
+    ///
+    /// It used to `remove_dir_all` the source root whenever nothing had
+    /// *failed* — and a Skip is not a failure, so a file the person chose
+    /// to skip, never copied anywhere, was deleted along with the rest.
+    /// Removing entry by entry keeps a skipped file, and the folders
+    /// holding it, where they are; a folder that is not empty for any
+    /// other reason — something that arrived after the walk — is kept
+    /// too, and reported, because the source is then not gone.
+    fn remove_moved_source(&self) -> Result<(), OpsError> {
+        if self.entries[0].kind != EntryKind::Dir {
+            return fs::remove_file(&self.source).map_err(|source| OpsError::Remove { path: self.source.clone(), source });
+        }
+        let skipped: std::collections::HashSet<&Path> = self.skipped.iter().map(PathBuf::as_path).collect();
+        let mut order: Vec<&Entry> = self.entries.iter().collect();
+        order.sort_by_key(|e| std::cmp::Reverse(e.source_relative.components().count()));
+        for entry in order {
+            let path = join_relative(&self.source, &entry.source_relative);
+            if skipped.contains(path.as_path()) {
+                continue;
+            }
+            let dir = entry.kind == EntryKind::Dir;
+            let result = if entry.source_relative.as_os_str().is_empty() {
+                fs::remove_dir(&self.source)
+            } else {
+                remove_beneath(&self.source, &entry.source_relative, dir)
+            };
+            match result {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) if dir && e.kind() == io::ErrorKind::DirectoryNotEmpty && self.skipped.iter().any(|s| s.starts_with(&path)) => {}
+                Err(source) => return Err(OpsError::Remove { path, source }),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1025,8 +1169,12 @@ fn entry_kind_of(status: &fs::Metadata) -> EntryKind {
         EntryKind::Symlink
     } else if status.is_dir() {
         EntryKind::Dir
-    } else {
+    } else if status.is_file() {
         EntryKind::File { size: status.len() }
+    } else {
+        // Not "anything else is a file": that opened a pipe and waited
+        // forever, and read `/dev/zero` until the disk was full.
+        EntryKind::Special
     }
 }
 
@@ -1077,7 +1225,13 @@ fn renamed_sibling(dest: &Path) -> io::Result<PathBuf> {
 /// tags among them — see `crate::xattr`.
 fn preserve_attrs(handle: &File, source: &Path, dest_path: &Path, src_meta: &fs::Metadata, what: &'static str) {
     crate::xattr::copy_user(source, handle, dest_path);
-    if let Err(e) = fs::set_permissions(dest_path, fs::Permissions::from_mode(src_meta.mode() & 0o7777)) {
+    // Through the handle (`fchmod`), never by name: the name may point
+    // somewhere else by now, and this runs as root in the Files helper.
+    let set_mode = handle.metadata().and_then(|here| {
+        let mode = copied_mode(src_meta.mode(), (src_meta.uid(), src_meta.gid()), (here.uid(), here.gid()), here.is_dir());
+        handle.set_permissions(fs::Permissions::from_mode(mode))
+    });
+    if let Err(e) = set_mode {
         tracing::warn!(path = %dest_path.display(), error = %e, "could not preserve {what} permissions");
     }
     let mut times = fs::FileTimes::new();
@@ -1090,6 +1244,92 @@ fn preserve_attrs(handle: &File, source: &Path, dest_path: &Path, src_meta: &fs:
     if let Err(e) = handle.set_times(times) {
         tracing::warn!(path = %dest_path.display(), error = %e, "could not preserve {what} mtime");
     }
+}
+
+/// The mode a copy gets: the source's permission bits, less what would
+/// grant the copy's *owner's* authority to someone else.
+///
+/// Setuid and setgid run a program as its owner and group. Copied by
+/// root, somebody else's 4755 program used to come out as a root-owned
+/// 4755 program — a root shell for whoever wrote the original. They
+/// survive only when the copy has the source's own owner and group, which
+/// is the ordinary unprivileged copy of one's own file, where they grant
+/// nothing new. Sticky only means something on a folder, so a file loses
+/// it.
+fn copied_mode(src_mode: u32, src_owner: (u32, u32), dest_owner: (u32, u32), is_dir: bool) -> u32 {
+    let mut mode = src_mode & 0o7777;
+    if src_owner != dest_owner {
+        mode &= !0o6000;
+    }
+    if !is_dir {
+        mode &= !0o1000;
+    }
+    mode
+}
+
+/// Linux's `O_NOFOLLOW`: refuse, with `ELOOP`, to open a name that is a
+/// symlink. Spelled out rather than taken from a `libc` dependency, as
+/// `batch.rs` does for `renameat2`; the value is per architecture.
+#[cfg(any(target_arch = "aarch64", target_arch = "arm", target_arch = "powerpc", target_arch = "powerpc64"))]
+const O_NOFOLLOW: i32 = 0o100000;
+#[cfg(not(any(target_arch = "aarch64", target_arch = "arm", target_arch = "powerpc", target_arch = "powerpc64")))]
+const O_NOFOLLOW: i32 = 0o400000;
+/// `O_NONBLOCK`: an open that would wait — a pipe with no writer — does
+/// not. Meaningless for the regular files and folders this opens.
+const O_NONBLOCK: i32 = 0o4000;
+/// `O_CLOEXEC`, which `std` sets on every descriptor it opens and a raw
+/// `openat` has to ask for.
+const O_CLOEXEC: i32 = 0o2000000;
+/// `ELOOP`: what `O_NOFOLLOW` answers for a symlink.
+const ELOOP: i32 = 40;
+
+/// Opens `path` read-only without following a link at its last component
+/// and without blocking — the open everything here that acts on a file it
+/// already looked at goes through, so the handle is the thing looked at
+/// or nothing. Works on folders too.
+fn open_nofollow(path: &Path) -> io::Result<File> {
+    fs::OpenOptions::new().read(true).custom_flags(O_NOFOLLOW | O_NONBLOCK).open(path)
+}
+
+extern "C" {
+    fn openat(dirfd: std::os::raw::c_int, path: *const std::os::raw::c_char, flags: std::os::raw::c_int, ...) -> std::os::raw::c_int;
+    fn unlinkat(dirfd: std::os::raw::c_int, path: *const std::os::raw::c_char, flags: std::os::raw::c_int) -> std::os::raw::c_int;
+}
+
+/// `unlinkat`'s flag for removing a folder rather than a file.
+const AT_REMOVEDIR: i32 = 0x200;
+
+/// Removes `root/relative` — a file, or with `dir` an empty folder —
+/// resolving every folder on the way down from `root` with `O_NOFOLLOW`.
+///
+/// Removing by the full path name follows a link at any component, so a
+/// folder inside the source swapped for a link to `/etc` between the copy
+/// and the removal would have a root move delete `/etc`'s files. Opening
+/// each step without following, then `unlinkat` beneath the last, means
+/// the removal only ever happens inside the tree it was asked about.
+fn remove_beneath(root: &Path, relative: &Path, dir: bool) -> io::Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let c = |s: &std::ffi::OsStr| std::ffi::CString::new(s.as_bytes()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput));
+    let names: Vec<_> = relative.components().map(|c| c.as_os_str().to_os_string()).collect();
+    let Some((last, parents)) = names.split_last() else {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    };
+    let mut at: OwnedFd = open_nofollow(root)?.into();
+    for name in parents {
+        let name = c(name)?;
+        // SAFETY: a live NUL-terminated string and a descriptor this
+        // function owns; `openat` keeps neither. A non-negative return is
+        // a new descriptor nothing else owns, so `OwnedFd` may take it.
+        let fd = unsafe { openat(at.as_raw_fd(), name.as_ptr(), O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        at = unsafe { OwnedFd::from_raw_fd(fd) };
+    }
+    let last = c(last)?;
+    // SAFETY: as above.
+    let status = unsafe { unlinkat(at.as_raw_fd(), last.as_ptr(), if dir { AT_REMOVEDIR } else { 0 }) };
+    if status == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
 }
 
 /// Drives an [`Operation`] to completion, resolving every collision with
@@ -1616,5 +1856,220 @@ mod tests {
         for total in totals.into_iter().flatten() {
             assert_eq!(total, (CHUNK_SIZE * 2 + 5) as u64);
         }
+    }
+
+    /// Steps `op` until `ready` holds — the seam the race tests below
+    /// use to do something to the disk *between* two steps, which is
+    /// exactly where another user's process gets to act.
+    fn step_until<F: Filesystem>(op: &mut Operation<F>, ready: impl Fn(&Operation<F>) -> bool) {
+        for _ in 0..1000 {
+            if ready(op) {
+                return;
+            }
+            if let StepOutcome::Done(report) = op.step() {
+                panic!("finished before the moment the test needed: {report:?}");
+            }
+        }
+        panic!("never reached the moment the test needed");
+    }
+
+    /// Past the walk, with the root folder created and nothing else.
+    fn root_created<F: Filesystem>(op: &Operation<F>) -> bool {
+        op.phase == Phase::Copying && op.index == 1 && op.current_copy.is_none()
+    }
+
+    /// The Files root helper copies as root, so a copy of somebody
+    /// else's setuid program must not come out as a setuid program
+    /// owned by root. Tests cannot `chown`, so this asks the decision.
+    #[test]
+    fn a_setuid_or_setgid_bit_survives_only_onto_a_file_owned_by_the_same_user_and_group() {
+        let theirs = (1000, 1000);
+        let root = (0, 0);
+        assert_eq!(copied_mode(0o4755, theirs, root, false), 0o755);
+        assert_eq!(copied_mode(0o2755, theirs, root, false), 0o755);
+        assert_eq!(copied_mode(0o6755, theirs, (1000, 0), false), 0o755, "the group must match too");
+        assert_eq!(copied_mode(0o4755, theirs, theirs, false), 0o4755, "setuid to yourself is harmless");
+        assert_eq!(copied_mode(0o1755, theirs, theirs, false), 0o755, "sticky means nothing on a file");
+        assert_eq!(copied_mode(0o1777, theirs, root, true), 0o1777, "a sticky folder stays sticky");
+        assert_eq!(copied_mode(0o2775, theirs, root, true), 0o775);
+    }
+
+    /// Someone who can write to the destination folder plants a link
+    /// where the copy is about to create its file. Following it would
+    /// truncate whatever it points at — `/etc/shadow`, for a root copy.
+    #[test]
+    fn a_symlink_planted_where_a_file_is_about_to_be_created_is_never_written_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_root = dir.path().join("src");
+        write_file(&src_root.join("a.txt"), "copied");
+        let victim = dir.path().join("victim");
+        fs::write(&victim, "precious").unwrap();
+        let dest = dir.path().join("dst");
+
+        let mut op = Operation::real(OpKind::Copy, &src_root, &dest);
+        step_until(&mut op, root_created);
+        std::os::unix::fs::symlink(&victim, dest.join("a.txt")).unwrap();
+        // Straight to creation, past the collision check — the race is
+        // a link that arrives after the check looked.
+        op.create_entry(1);
+        if let Some(mut copy) = op.current_copy.take() {
+            let _ = copy.writer.write_all(b"copied");
+        }
+
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "precious");
+        assert!(fs::symlink_metadata(dest.join("a.txt")).unwrap().file_type().is_symlink());
+        assert_eq!(op.failed.len(), 1, "a planted link is a failure row: {:?}", op.failed);
+    }
+
+    /// The copy's permissions go onto the file this operation created,
+    /// by its handle — not onto whatever the name points at by the time
+    /// the last chunk is written.
+    #[test]
+    fn a_copied_files_permissions_never_land_on_a_symlink_swapped_in_for_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_root = dir.path().join("src");
+        write_file(&src_root.join("a.txt"), "copied");
+        fs::set_permissions(src_root.join("a.txt"), fs::Permissions::from_mode(0o600)).unwrap();
+        let victim = dir.path().join("victim");
+        fs::write(&victim, "precious").unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o644)).unwrap();
+        let dest = dir.path().join("dst");
+
+        let mut op = Operation::real(OpKind::Copy, &src_root, &dest);
+        step_until(&mut op, |op| op.current_copy.is_some());
+        fs::remove_file(dest.join("a.txt")).unwrap();
+        std::os::unix::fs::symlink(&victim, dest.join("a.txt")).unwrap();
+        drive(&mut op, no_collisions);
+
+        assert_eq!(fs::metadata(&victim).unwrap().mode() & 0o7777, 0o644);
+    }
+
+    /// A folder this copy created, swapped for a link to `/etc` before
+    /// the last pass sets folder permissions, must not get `/etc`
+    /// chmodded to the source folder's mode.
+    #[test]
+    fn a_created_folder_swapped_for_a_symlink_does_not_pass_its_mode_to_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_root = dir.path().join("src");
+        fs::create_dir_all(src_root.join("sub")).unwrap();
+        fs::set_permissions(src_root.join("sub"), fs::Permissions::from_mode(0o700)).unwrap();
+        let victim = dir.path().join("victim");
+        fs::create_dir(&victim).unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o755)).unwrap();
+        let dest = dir.path().join("dst");
+
+        let mut op = Operation::real(OpKind::Copy, &src_root, &dest);
+        step_until(&mut op, |op| op.phase == Phase::Copying && op.index == op.entries.len());
+        fs::remove_dir(dest.join("sub")).unwrap();
+        std::os::unix::fs::symlink(&victim, dest.join("sub")).unwrap();
+        drive(&mut op, no_collisions);
+
+        assert_eq!(fs::metadata(&victim).unwrap().mode() & 0o7777, 0o755);
+    }
+
+    /// A source file replaced by a link after the walk saw it: the copy
+    /// must not follow the link and hand over what it points at.
+    #[test]
+    fn a_source_file_swapped_for_a_symlink_after_the_walk_is_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_root = dir.path().join("src");
+        write_file(&src_root.join("a.txt"), "public");
+        let secret = dir.path().join("secret");
+        fs::write(&secret, "secret").unwrap();
+        let dest = dir.path().join("dst");
+
+        let mut op = Operation::real(OpKind::Copy, &src_root, &dest);
+        step_until(&mut op, root_created);
+        fs::remove_file(src_root.join("a.txt")).unwrap();
+        std::os::unix::fs::symlink(&secret, src_root.join("a.txt")).unwrap();
+        let report = drive(&mut op, no_collisions);
+
+        assert_ne!(fs::read_to_string(dest.join("a.txt")).ok().as_deref(), Some("secret"));
+        assert_eq!(report.failed.len(), 1, "{report:?}");
+    }
+
+    /// Skip means "leave mine alone" — and for a move, mine includes
+    /// the source. A move that skipped a file never copied it, so
+    /// deleting the source afterwards destroys the only copy.
+    #[test]
+    fn a_cross_device_move_never_deletes_a_source_file_it_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_root = dir.path().join("src");
+        write_file(&src_root.join("a.txt"), "moved");
+        write_file(&src_root.join("b.txt"), "only copy");
+        let dest = dir.path().join("dst");
+        let fs_seam = MockFilesystem::new();
+        fs_seam.mount(&src_root, 7);
+
+        let mut op = Operation::new(fs_seam, OpKind::Move, &src_root, &dest);
+        step_until(&mut op, root_created);
+        fs::write(dest.join("b.txt"), "theirs").unwrap();
+        let report = drive(&mut op, |_| CollisionDecision { policy: CollisionPolicy::Skip, apply_to_rest: false });
+
+        assert_eq!(fs::read_to_string(src_root.join("b.txt")).unwrap(), "only copy", "{report:?}");
+        assert_eq!(fs::read_to_string(dest.join("b.txt")).unwrap(), "theirs");
+        assert_eq!(fs::read_to_string(dest.join("a.txt")).unwrap(), "moved");
+        assert!(!src_root.join("a.txt").exists(), "what was copied is still moved");
+        assert!(report.source_removal_failed.is_none(), "a skip is not a failure: {report:?}");
+    }
+
+    /// Removing a moved source entry by entry must not follow a folder
+    /// inside it that was swapped for a link — that would delete the
+    /// link target's files, which `remove_dir_all` never did.
+    #[test]
+    fn removing_a_moved_source_never_follows_a_folder_swapped_for_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_root = dir.path().join("src");
+        write_file(&src_root.join("sub").join("f.txt"), "moved");
+        let victim = dir.path().join("victim");
+        write_file(&victim.join("f.txt"), "precious");
+        let dest = dir.path().join("dst");
+        let fs_seam = MockFilesystem::new();
+        fs_seam.mount(&src_root, 7);
+
+        let mut op = Operation::new(fs_seam, OpKind::Move, &src_root, &dest);
+        step_until(&mut op, |op| op.phase == Phase::Copying && op.index == op.entries.len());
+        fs::rename(src_root.join("sub"), dir.path().join("moved-away")).unwrap();
+        std::os::unix::fs::symlink(&victim, src_root.join("sub")).unwrap();
+        let report = drive(&mut op, no_collisions);
+
+        assert_eq!(fs::read_to_string(victim.join("f.txt")).unwrap(), "precious");
+        assert!(report.source_removal_failed.is_some(), "{report:?}");
+    }
+
+    /// A device is not a file to copy: `/dev/zero` read as one, as root,
+    /// fills the destination disk.
+    #[test]
+    fn a_device_is_reported_not_copied() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("null");
+        let mut op = Operation::real(OpKind::Copy, "/dev/null", &dest);
+        let report = drive(&mut op, no_collisions);
+        assert_eq!(report.failed.len(), 1, "{report:?}");
+        assert!(fs::symlink_metadata(&dest).is_err(), "nothing is created for it");
+    }
+
+    /// Opening a pipe for reading blocks until something writes to it —
+    /// forever, in a copy.
+    #[test]
+    fn a_pipe_in_the_tree_is_reported_rather_than_opened() {
+        extern "C" {
+            fn mkfifo(path: *const std::os::raw::c_char, mode: u32) -> std::os::raw::c_int;
+        }
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let src_root = dir.path().join("src");
+        write_file(&src_root.join("a.txt"), "x");
+        let fifo = std::ffi::CString::new(src_root.join("pipe").as_os_str().as_bytes()).unwrap();
+        // SAFETY: a live NUL-terminated string, read and not kept.
+        assert_eq!(unsafe { mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let dest = dir.path().join("dst");
+
+        let mut op = Operation::real(OpKind::Copy, &src_root, &dest);
+        let report = drive(&mut op, no_collisions);
+
+        assert_eq!(report.failed.len(), 1, "{report:?}");
+        assert_eq!(report.failed[0].0, src_root.join("pipe"));
+        assert_eq!(fs::read_to_string(dest.join("a.txt")).unwrap(), "x");
     }
 }

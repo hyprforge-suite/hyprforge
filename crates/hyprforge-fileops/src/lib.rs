@@ -19,7 +19,7 @@ pub use ops::{
     Progress, Report, StepOutcome,
 };
 pub use trash::{
-    delete_permanently, erase, erase_stored, find_stored, home_trash_dir, list, list_per_filesystem, restore, trash, trash_into,
+    delete_permanently, erase, erase_stored, find_stored, home_trash_dir, list, list_per_filesystem, list_with_problems, restore, trash, trash_into,
     TrashError, TrashedItem,
 };
 

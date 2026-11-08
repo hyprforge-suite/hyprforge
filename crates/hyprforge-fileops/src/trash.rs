@@ -55,6 +55,11 @@
 //! differently. The name stored in `files/` is **not** percent-encoded —
 //! only the `Path=` value inside the info file is; that matches the real
 //! entries too (a literal space in the filename on disk).
+//!
+//! A name is claimed by creating its `.trashinfo` with `O_EXCL`, as the
+//! spec asks, and the file then moved in with `RENAME_NOREPLACE`; either
+//! one finding the name taken moves on to the next. Two trashers racing
+//! for `notes.txt` get two names, never one record and one overwrite.
 
 use crate::fs::{Filesystem, RealFilesystem};
 use crate::localtime::LocalDateTime;
@@ -230,14 +235,7 @@ pub fn trash_into<F: Filesystem>(
             source: io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"),
         })?;
     let files_dir = dir.base.join("files");
-    let name = unique_name(&files_dir, original_name).map_err(|source| TrashError::Filesystem {
-        path: files_dir.clone(),
-        source,
-    })?;
-    let files_dest = files_dir.join(&name);
-    let mut info_name = name.clone();
-    info_name.push(".trashinfo");
-    let info_dest = dir.base.join("info").join(&info_name);
+    let info_dir = dir.base.join("info");
 
     let path_field = match &dir.topdir {
         None => percent::encode_path(&absolute),
@@ -252,18 +250,57 @@ pub fn trash_into<F: Filesystem>(
     let deleted_at = LocalDateTime::now().to_iso8601();
     let info_contents = format!("[Trash Info]\nPath={path_field}\nDeletionDate={deleted_at}\n");
 
-    // Written before the move — see the module doc's "`.trashinfo`"
-    // section for why the ordering is this way round and not the other.
-    hyprforge_paths::write_atomic(&info_dest, &info_contents)
-        .map_err(|source| TrashError::WriteInfo { path: info_dest.clone(), source })?;
+    // The record is written before the move — see the module doc's
+    // "`.trashinfo`" section for why that way round — and written with
+    // `create_new`, which is what makes it a *reservation*: the spec's
+    // own answer to two trashers picking the same name at once. Checking
+    // `files/` for a free name and then writing the record over whatever
+    // was in `info/` let a second trasher overwrite the first's record,
+    // then its file. A name whose record exists is taken, even if its
+    // file has not arrived yet; a name whose file appears in `files/`
+    // anyway is given back and the next one tried.
+    for name in candidate_names(original_name) {
+        let files_dest = files_dir.join(&name);
+        if std::fs::symlink_metadata(&files_dest).is_ok() {
+            continue;
+        }
+        let mut info_name = name;
+        info_name.push(".trashinfo");
+        let info_dest = info_dir.join(&info_name);
+        match reserve(&info_dest, &info_contents) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(source) => return Err(TrashError::WriteInfo { path: info_dest, source }),
+        }
+        match crate::batch::rename_noreplace(path, &files_dest) {
+            Ok(()) => {
+                return Ok(TrashedItem { original_path: absolute, deleted_at, trashed_file: files_dest, info_file: info_dest })
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                let _ = std::fs::remove_file(&info_dest);
+            }
+            Err(source) => {
+                // A record whose file never arrives lists as an item that
+                // is not there, so a failed move takes it back out.
+                let _ = std::fs::remove_file(&info_dest);
+                return Err(TrashError::Move { from: path.to_path_buf(), to: files_dest, source });
+            }
+        }
+    }
+    unreachable!("candidate_names never ends")
+}
 
-    std::fs::rename(path, &files_dest).map_err(|source| TrashError::Move {
-        from: path.to_path_buf(),
-        to: files_dest.clone(),
-        source,
-    })?;
-
-    Ok(TrashedItem { original_path: absolute, deleted_at, trashed_file: files_dest, info_file: info_dest })
+/// Creates `info` holding `contents`, failing with `AlreadyExists` if the
+/// name is already taken — never replacing it — and flushed to the drive
+/// before it counts.
+fn reserve(info: &Path, contents: &str) -> io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(info)?;
+    let written = file.write_all(contents.as_bytes()).and_then(|()| file.sync_all());
+    if written.is_err() {
+        let _ = std::fs::remove_file(info);
+    }
+    written
 }
 
 /// Decides the home trash vs. a per-filesystem one, per the spec.
@@ -324,6 +361,14 @@ fn current_uid(source_path: &Path) -> Result<u32, TrashError> {
 /// per-filesystem trash — see the module doc's placement section for why
 /// that case is named separately from an ordinary I/O error.
 fn create_trash_dirs(dir: &TrashDir, source_path: &Path) -> Result<(), TrashError> {
+    if dir.topdir.is_some() {
+        let uid = current_uid(source_path)?;
+        own_private_dir(&dir.base, uid).map_err(|source| TrashError::PerFilesystemTrashUnavailable {
+            path: source_path.to_path_buf(),
+            tried: dir.base.clone(),
+            source,
+        })?;
+    }
     for sub in ["files", "info"] {
         let path = dir.base.join(sub);
         std::fs::create_dir_all(&path).map_err(|source| match &dir.topdir {
@@ -336,6 +381,28 @@ fn create_trash_dirs(dir: &TrashDir, source_path: &Path) -> Result<(), TrashErro
         })?;
     }
     Ok(())
+}
+
+/// Makes sure a per-filesystem trash directory (`$topdir/.Trash/$uid` or
+/// `$topdir/.Trash-$uid`) is a real folder this user owns, creating it
+/// mode 700 — the spec's words — if it is missing.
+///
+/// Both names sit somewhere other users can write: a shared disk's root,
+/// or the sticky `.Trash`. `create_dir_all` accepted whatever was already
+/// there, a link to somebody else's folder included, and trashed this
+/// user's files into it; and it created a missing one 755, so anyone could
+/// list what had been thrown away.
+fn own_private_dir(base: &Path, uid: u32) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    match std::fs::symlink_metadata(base) {
+        Ok(meta) if meta.is_dir() && meta.uid() == uid => Ok(()),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "it is a link, not a folder, or a folder somebody else owns",
+        )),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => std::fs::DirBuilder::new().mode(0o700).create(base),
+        Err(e) => Err(e),
+    }
 }
 
 /// `path`, made absolute against the current directory if it is not
@@ -372,29 +439,47 @@ fn split_stem_ext(name: &[u8]) -> (&[u8], Option<&[u8]>) {
 /// needs exactly this disambiguation and reuses it rather than growing a
 /// second implementation of the same `stem.N.ext` scheme.
 pub(crate) fn unique_name(files_dir: &Path, original: &OsStr) -> io::Result<OsString> {
-    let bytes = original.as_bytes();
-    if !files_dir.join(original).exists() {
-        return Ok(original.to_os_string());
-    }
-    let (stem, ext) = split_stem_ext(bytes);
-    let mut n = 2;
-    loop {
+    // `symlink_metadata`, not `exists()`: `exists()` follows a link, so a
+    // dangling one — a name that is very much taken — read as free, and
+    // the caller then wrote through it or failed on it.
+    Ok(candidate_names(original)
+        .find(|candidate| std::fs::symlink_metadata(files_dir.join(candidate)).is_err())
+        .expect("candidate_names never ends"))
+}
+
+/// `original`, then `stem.2.ext`, `stem.3.ext`, ... without end.
+fn candidate_names(original: &OsStr) -> impl Iterator<Item = OsString> + '_ {
+    let (stem, ext) = split_stem_ext(original.as_bytes());
+    std::iter::once(original.to_os_string()).chain((2u64..).map(move |n| {
         let mut candidate = stem.to_vec();
         candidate.extend_from_slice(format!(".{n}").as_bytes());
         if let Some(ext) = ext {
             candidate.push(b'.');
             candidate.extend_from_slice(ext);
         }
-        let candidate = OsString::from_vec(candidate);
-        if !files_dir.join(&candidate).exists() {
-            return Ok(candidate);
-        }
-        n += 1;
-    }
+        OsString::from_vec(candidate)
+    }))
 }
 
 /// Everything in the home trash.
+///
+/// Strict: a record that will not read or parse fails the whole listing,
+/// so nothing is ever silently missing from it. A caller that would
+/// rather show the rest — a window listing the trash — wants
+/// [`list_with_problems`].
 pub fn list(home_trash: &Path) -> Result<Vec<TrashedItem>, TrashError> {
+    strict(list_dir(home_trash, None)?)
+}
+
+/// Everything in the home trash that could be read, and a
+/// [`TrashError`] naming each record that could not.
+///
+/// The problems are returned, not dropped: one malformed `.trashinfo` —
+/// another program's, or a write cut short — must not hide every other
+/// item, and must not vanish either (CLAUDE.md's rule on collapsing
+/// "could not be read" into "there is nothing there"). Only a trash whose
+/// `info/` cannot be listed at all is an `Err`.
+pub fn list_with_problems(home_trash: &Path) -> Result<(Vec<TrashedItem>, Vec<TrashError>), TrashError> {
     list_dir(home_trash, None)
 }
 
@@ -402,49 +487,60 @@ pub fn list(home_trash: &Path) -> Result<Vec<TrashedItem>, TrashError> {
 /// `$topdir/.Trash/$uid` or `$topdir/.Trash-$uid` — whichever the caller
 /// used), whose entries store `Path=` relative to `topdir`.
 pub fn list_per_filesystem(base: &Path, topdir: &Path) -> Result<Vec<TrashedItem>, TrashError> {
-    list_dir(base, Some(topdir))
+    strict(list_dir(base, Some(topdir))?)
 }
 
-fn list_dir(base: &Path, topdir: Option<&Path>) -> Result<Vec<TrashedItem>, TrashError> {
+/// [`list`]'s rule: the first problem fails the listing.
+fn strict((items, problems): (Vec<TrashedItem>, Vec<TrashError>)) -> Result<Vec<TrashedItem>, TrashError> {
+    match problems.into_iter().next() {
+        Some(problem) => Err(problem),
+        None => Ok(items),
+    }
+}
+
+fn list_dir(base: &Path, topdir: Option<&Path>) -> Result<(Vec<TrashedItem>, Vec<TrashError>), TrashError> {
     let info_dir = base.join("info");
     let entries = match std::fs::read_dir(&info_dir) {
         Ok(entries) => entries,
         // A trash directory that was never created is first-run, not an
         // error — nothing has been trashed here yet.
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((Vec::new(), Vec::new())),
         Err(source) => return Err(TrashError::ListDir { path: info_dir, source }),
     };
 
     let mut items = Vec::new();
+    let mut problems = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|source| TrashError::ListDir { path: info_dir.clone(), source })?;
         let info_path = entry.path();
         if info_path.extension().and_then(|e| e.to_str()) != Some("trashinfo") {
             continue;
         }
-
-        let text = std::fs::read_to_string(&info_path)
-            .map_err(|source| TrashError::ReadInfo { path: info_path.clone(), source })?;
-        let parsed = parse_info(&text, &info_path)?;
-
-        let original_path = match topdir {
-            Some(topdir) => topdir.join(&parsed.path),
-            None => parsed.path,
-        };
-        let stem = info_path.file_stem().ok_or_else(|| TrashError::InvalidInfo {
-            path: info_path.clone(),
-            reason: "info file has no name".to_string(),
-        })?;
-        let trashed_file = base.join("files").join(stem);
-
-        items.push(TrashedItem {
-            original_path,
-            deleted_at: parsed.deletion_date,
-            trashed_file,
-            info_file: info_path,
-        });
+        match read_item(base, topdir, info_path) {
+            Ok(item) => items.push(item),
+            Err(problem) => problems.push(problem),
+        }
     }
-    Ok(items)
+    Ok((items, problems))
+}
+
+/// One `.trashinfo` record, read and resolved into the item it describes.
+fn read_item(base: &Path, topdir: Option<&Path>, info_path: PathBuf) -> Result<TrashedItem, TrashError> {
+    let text = std::fs::read_to_string(&info_path)
+        .map_err(|source| TrashError::ReadInfo { path: info_path.clone(), source })?;
+    let parsed = parse_info(&text, &info_path)?;
+
+    let original_path = match topdir {
+        Some(topdir) => topdir.join(&parsed.path),
+        None => parsed.path,
+    };
+    let stem = info_path.file_stem().ok_or_else(|| TrashError::InvalidInfo {
+        path: info_path.clone(),
+        reason: "info file has no name".to_string(),
+    })?;
+    let trashed_file = base.join("files").join(stem);
+
+    Ok(TrashedItem { original_path, deleted_at: parsed.deletion_date, trashed_file, info_file: info_path })
 }
 
 struct ParsedInfo {
@@ -517,8 +613,15 @@ pub fn restore(item: &TrashedItem) -> Result<(), TrashError> {
         std::fs::create_dir_all(parent)
             .map_err(|source| TrashError::Restore { path: item.original_path.clone(), source })?;
     }
-    std::fs::rename(&item.trashed_file, &item.original_path)
-        .map_err(|source| TrashError::Restore { path: item.original_path.clone(), source })?;
+    // No-replace, in the kernel: the check above looked a moment ago, and
+    // a plain rename would silently replace whatever arrived since.
+    crate::batch::rename_noreplace(&item.trashed_file, &item.original_path).map_err(|source| {
+        if source.kind() == io::ErrorKind::AlreadyExists {
+            TrashError::RestoreWouldOverwrite { path: item.original_path.clone() }
+        } else {
+            TrashError::Restore { path: item.original_path.clone(), source }
+        }
+    })?;
     std::fs::remove_file(&item.info_file)
         .map_err(|source| TrashError::RemoveInfo { path: item.info_file.clone(), source })?;
     Ok(())
@@ -540,7 +643,11 @@ pub fn erase(item: &TrashedItem) -> Result<(), TrashError> {
 /// The record for a trashed item, found by its stored path — a listing
 /// of the trash shows those, not the records behind them.
 pub fn find_stored(home_trash: &Path, trashed_file: &Path) -> Result<TrashedItem, TrashError> {
-    list(home_trash)?
+    // The lenient listing: somebody else's broken record has nothing to
+    // do with whether this one can be found, and stopped every erase in
+    // the trash while it was there.
+    list_with_problems(home_trash)?
+        .0
         .into_iter()
         .find(|item| item.trashed_file == trashed_file)
         .ok_or_else(|| TrashError::NotInTrash { path: trashed_file.to_path_buf() })
@@ -897,5 +1004,134 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].original_path, trashed.original_path);
         assert_eq!(items[0].deleted_at, trashed.deleted_at);
+    }
+
+    /// A dangling link is still something with that name: `exists()`
+    /// follows it, finds nothing, and called the name free.
+    #[test]
+    fn a_dangling_symlink_still_takes_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), dir.path().join("notes.txt")).unwrap();
+        assert_eq!(unique_name(dir.path(), OsStr::new("notes.txt")).unwrap(), "notes.2.txt");
+    }
+
+    /// Another trasher wrote its record first and is about to move its
+    /// file in under that name. Taking the same name overwrote its record
+    /// and then its file.
+    #[test]
+    fn a_name_another_trash_operation_has_reserved_is_not_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let home_trash = dir.path().join("home").join("Trash");
+        let reserved = home_trash.join("info").join("notes.txt.trashinfo");
+        write_file(&reserved, "[Trash Info]\nPath=/elsewhere/notes.txt\nDeletionDate=2026-01-01T00:00:00\n");
+        std::fs::create_dir_all(home_trash.join("files")).unwrap();
+        let source = dir.path().join("docs").join("notes.txt");
+        write_file(&source, "mine");
+
+        let item = trash_into(&MockFilesystem::new(), &home_trash, &source).unwrap();
+
+        assert_ne!(item.info_file, reserved);
+        assert!(std::fs::read_to_string(&reserved).unwrap().contains("/elsewhere/notes.txt"));
+        assert_eq!(std::fs::read_to_string(&item.trashed_file).unwrap(), "mine");
+    }
+
+    /// A record whose file never arrived lists as an item that is not
+    /// there; a failed move must take its record back out.
+    #[test]
+    fn a_trash_that_fails_to_move_leaves_no_record_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::MetadataExt;
+        if std::fs::metadata("/proc/self").unwrap().uid() == 0 {
+            eprintln!("HYPRFORGE-SKIP: running as root, which ignores the permission bits this test needs");
+            return;
+        }
+        let home_trash = dir.path().join("home").join("Trash");
+        let docs = dir.path().join("docs");
+        let source = docs.join("notes.txt");
+        write_file(&source, "mine");
+        // A folder the file cannot leave: the record is written, then
+        // the rename is refused.
+        std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = trash_into(&MockFilesystem::new(), &home_trash, &source);
+        std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(matches!(result, Err(TrashError::Move { .. })), "{result:?}");
+        assert_eq!(std::fs::read_dir(home_trash.join("info")).unwrap().count(), 0);
+        assert!(source.exists());
+    }
+
+    /// `.Trash-$uid` on a shared disk is a name anyone can create first.
+    /// A link there sent this user's trash wherever its author chose.
+    #[test]
+    fn a_per_filesystem_trash_that_is_a_symlink_is_never_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let home_trash = dir.path().join("home").join("Trash");
+        let usb = dir.path().join("mnt").join("usb");
+        let source = usb.join("photo.jpg");
+        write_file(&source, "bytes");
+        let theirs = dir.path().join("theirs");
+        std::fs::create_dir_all(&theirs).unwrap();
+        std::os::unix::fs::symlink(&theirs, usb.join(format!(".Trash-{}", this_uid()))).unwrap();
+        let fs = MockFilesystem::new();
+        fs.mount(&usb, 7);
+
+        let result = trash_into(&fs, &home_trash, &source);
+
+        assert!(matches!(result, Err(TrashError::PerFilesystemTrashUnavailable { .. })), "{result:?}");
+        assert_eq!(std::fs::read_dir(&theirs).unwrap().count(), 0);
+        assert!(source.exists());
+    }
+
+    /// The spec's own words: created with permissions 700.
+    #[test]
+    fn a_new_per_filesystem_trash_is_private() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let home_trash = dir.path().join("home").join("Trash");
+        let usb = dir.path().join("mnt").join("usb");
+        let source = usb.join("photo.jpg");
+        write_file(&source, "bytes");
+        let fs = MockFilesystem::new();
+        fs.mount(&usb, 7);
+
+        trash_into(&fs, &home_trash, &source).unwrap();
+
+        let made = std::fs::metadata(usb.join(format!(".Trash-{}", this_uid()))).unwrap();
+        assert_eq!(made.mode() & 0o777, 0o700);
+    }
+
+    /// One unreadable record must not stand between a person and every
+    /// other item in the trash.
+    #[test]
+    fn a_broken_record_does_not_stop_another_item_being_erased() {
+        let dir = tempfile::tempdir().unwrap();
+        let home_trash = dir.path().join("home").join("Trash");
+        let source = dir.path().join("docs").join("notes.txt");
+        write_file(&source, "hi");
+        let item = trash_into(&MockFilesystem::new(), &home_trash, &source).unwrap();
+        std::fs::write(home_trash.join("info").join("broken.trashinfo"), "garbage").unwrap();
+
+        erase_stored(&home_trash, &item.trashed_file).unwrap();
+
+        assert!(!item.trashed_file.exists());
+    }
+
+    /// The listing that reports what it could not read beside what it
+    /// could, rather than one or the other.
+    #[test]
+    fn a_lenient_listing_returns_the_good_items_and_names_the_broken_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let home_trash = dir.path().join("home").join("Trash");
+        let source = dir.path().join("docs").join("notes.txt");
+        write_file(&source, "hi");
+        trash_into(&MockFilesystem::new(), &home_trash, &source).unwrap();
+        std::fs::write(home_trash.join("info").join("broken.trashinfo"), "garbage").unwrap();
+
+        let (items, problems) = list_with_problems(&home_trash).unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(problems.len(), 1);
+        assert!(matches!(problems[0], TrashError::InvalidInfo { .. }));
     }
 }
