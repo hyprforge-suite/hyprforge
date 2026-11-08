@@ -20,6 +20,12 @@ pub struct RecordedCall {
     /// safe to remove after a successful import. A multi-line call's
     /// start line fails that check on its own, so the same test doubles
     /// as "don't touch anything whose full span isn't known."
+    ///
+    /// `None` as well whenever the line is not this call's alone: a line
+    /// any other recorded call also came from (a loop, two calls on one
+    /// line), a call made inside a function body, or one reached through a
+    /// tail call or a C function. Removing such a line takes more with it
+    /// than the call that was imported.
     pub line: Option<usize>,
     pub args: Vec<serde_json::Value>,
 }

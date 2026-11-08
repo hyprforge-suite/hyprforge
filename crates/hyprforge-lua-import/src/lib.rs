@@ -29,8 +29,10 @@
 //! config run `os.execute`. The globals are nil'd explicitly before
 //! anything evaluates, `require()` is reimplemented to resolve against
 //! the Hyprland config directory rather than Lua's `package.path`, and a
-//! memory limit and an instruction limit bound a script that never
-//! returns. A test asserts `os` and `io` stay
+//! memory limit, an instruction limit and a deadline bound a script that
+//! never returns — and stay tripped, with `pcall`, `xpcall` and the
+//! coroutine functions wrapped to re-raise them, because an error a config
+//! can catch is no limit. A test asserts `os` and `io` stay
 //! unreachable; anyone reusing `Lua::new()` on foreign Lua elsewhere
 //! should not assume otherwise.
 //!
