@@ -83,14 +83,19 @@ impl Camera {
 
     /// Frame a freshly loaded mesh. `keep_view` is used on reload/autoreload so
     /// the user does not lose their vantage point.
+    ///
+    /// The new bounds are remembered either way: keeping the view keeps
+    /// where the user is looking from, not the old model's size, and
+    /// returning before recording them left Centre framing a model that
+    /// had since changed size on disk.
     pub fn fit(&mut self, min: Vec3, max: Vec3, keep_view: bool, reset_orientation: bool) {
+        self.default_center = (min + max) * 0.5;
+        let diag = (max - min).length();
+        self.default_scale = if diag > 0.0 { 2.0 / diag } else { 1.0 };
         if keep_view {
             return;
         }
-        self.default_center = (min + max) * 0.5;
         self.center = self.default_center;
-        let diag = (max - min).length();
-        self.default_scale = if diag > 0.0 { 2.0 / diag } else { 1.0 };
         self.scale = self.default_scale;
         self.zoom = 1.0;
         if reset_orientation {
@@ -277,6 +282,19 @@ mod tests {
         let before = camera.transform_matrix();
         camera.fit(Vec3::ZERO, Vec3::splat(50.0), true, true);
         assert_eq!(camera.transform_matrix(), before);
+    }
+
+    /// A reload keeps the view, but Centre afterwards frames the model as
+    /// it is now — the same as a fresh fit to the new bounds.
+    #[test]
+    fn centring_after_a_reload_frames_the_reloaded_model() {
+        let mut camera = Camera::default();
+        camera.fit(Vec3::ZERO, Vec3::splat(10.0), false, true);
+        camera.fit(Vec3::ZERO, Vec3::splat(50.0), true, true);
+        camera.set_viewpoint(ViewPoint::Center);
+        let mut fresh = Camera::default();
+        fresh.fit(Vec3::ZERO, Vec3::splat(50.0), false, true);
+        assert_eq!((camera.center, camera.scale), (fresh.center, fresh.scale));
     }
 
     /// Every viewpoint is a pure rotation: nothing stretched, nothing

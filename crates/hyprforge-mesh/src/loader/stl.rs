@@ -74,6 +74,7 @@ fn parse_binary(data: &[u8]) -> Result<Mesh> {
         colors.extend_from_slice(&[color; 3]);
     }
 
+    super::ensure_finite(&positions)?;
     Ok(weld(positions, colors, has_colors))
 }
 
@@ -99,6 +100,7 @@ fn parse_ascii(data: &[u8]) -> Result<Mesh> {
     if positions.is_empty() || !positions.len().is_multiple_of(3) {
         bail!("ASCII STL contains no complete triangles");
     }
+    super::ensure_finite(&positions)?;
     let colors = vec![WHITE; positions.len()];
     Ok(weld(positions, colors, false))
 }

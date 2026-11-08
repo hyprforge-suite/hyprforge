@@ -10,6 +10,7 @@ pub mod stl;
 pub mod threemf;
 
 use anyhow::{bail, Result};
+use rayon::prelude::*;
 use std::path::Path;
 
 use crate::mesh::Mesh;
@@ -78,5 +79,23 @@ pub fn load(path: &Path, obj_y_up: bool) -> Result<(Mesh, Option<String>)> {
             "{} has an unsupported extension (expected .stl, .3mf or .obj)",
             path.display()
         ),
+    }
+}
+
+/// Refuses a model with a coordinate that is not a finite number.
+///
+/// One infinite corner makes the bounds infinite, the camera's fit NaN,
+/// and every projected point NaN with it — and a NaN bounding box clamps
+/// to the whole canvas, so the thumbnail rasteriser scanned every pixel
+/// for every triangle: hours, for a file Files opens unasked. Text
+/// formats spell it directly (`inf` and `NaN` both parse as `f32`, and so
+/// does `1e39`, as infinity), binary STL carries the bits, and a 3MF
+/// transform can overflow perfectly finite input — so it is checked on
+/// what each loader is about to weld, after every transform.
+pub(crate) fn ensure_finite(positions: &[[f32; 3]]) -> Result<()> {
+    if positions.par_iter().flatten().all(|c| c.is_finite()) {
+        Ok(())
+    } else {
+        bail!("model has a coordinate that is not a finite number")
     }
 }

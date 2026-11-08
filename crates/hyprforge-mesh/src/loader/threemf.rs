@@ -6,13 +6,49 @@ use glam::{Mat4, Vec3};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
 use rustc_hash::FxHashMap;
-use std::io::BufReader;
+use std::io::{BufReader, Read as _};
 use std::path::Path;
 
 use crate::mesh::{pack_rgb, weld, Mesh, WHITE};
 
 const MAX_DEPTH: usize = 32;
 const REL_TYPE_3DMODEL: &str = "3dmodel";
+
+/// What one file may cost before it is refused. Files thumbnails every
+/// .3mf in a folder it is shown, unasked, so a file has to be unable to
+/// take the process down — and a 3MF is a zip of XML, both of which say
+/// "this is small" on the outside and decide how big they are inside.
+///
+/// Each limit closes a different door. `part_bytes` bounds how much XML
+/// is inflated and parsed (a deflate bomb is a few KB for a gigabyte);
+/// `vertices` and `triangles` bound what the parse keeps; `positions`
+/// and `instances` bound what the component tree multiplies that into,
+/// which depth alone never did — a chain of objects each naming the next
+/// twice is 2^32 copies at the depth cap, from a file of a few KB. The
+/// numbers are far past any real model: a ten-million-triangle mesh is a
+/// half-gigabyte STL, and a plate of copies is hundreds of instances.
+struct Limits {
+    /// Decompressed bytes of XML, across every model part of the file.
+    part_bytes: u64,
+    vertices: usize,
+    triangles: usize,
+    /// Triangle corners after instancing: what `weld` is handed.
+    positions: usize,
+    /// Objects instantiated by the component tree, empty ones included —
+    /// a tree of nothing but references is still billions of calls.
+    instances: usize,
+}
+
+const LIMITS: Limits = Limits {
+    part_bytes: 1 << 30,
+    vertices: 10_000_000,
+    triangles: 10_000_000,
+    positions: 50_000_000,
+    instances: 1_000_000,
+};
+
+/// `_rels/.rels` names one part; a real one is a few hundred bytes.
+const MAX_RELS_BYTES: u64 = 1 << 20;
 
 /// A reference to an object, possibly in another model part (the 3MF
 /// production extension, which every slicer uses for project files).
@@ -56,13 +92,26 @@ struct Model {
 }
 
 pub fn load(path: &Path) -> Result<Mesh> {
+    load_with(path, &LIMITS)
+}
+
+fn load_with(path: &Path, limits: &Limits) -> Result<Mesh> {
     let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let mut zip = zip::ZipArchive::new(BufReader::new(file))
+    let zip = zip::ZipArchive::new(BufReader::new(file))
         .with_context(|| format!("{} is not a valid 3MF (zip) container", path.display()))?;
+    load_zip(zip, limits)
+}
+
+fn load_zip<R: std::io::Read + std::io::Seek>(
+    mut zip: zip::ZipArchive<R>,
+    limits: &Limits,
+) -> Result<Mesh> {
 
     let root = model_part_name(&mut zip);
     let mut parts: FxHashMap<String, Part> = FxHashMap::default();
     let mut queue = vec![root.clone()];
+    let mut kept = Kept::default();
+    let mut bytes_left = limits.part_bytes;
 
     // Slicer project files split objects across parts via the production
     // extension, so follow every p:path reference until the graph is closed.
@@ -70,10 +119,24 @@ pub fn load(path: &Path) -> Result<Mesh> {
         if parts.contains_key(&name) {
             continue;
         }
-        let entry = zip
+        let mut entry = zip
             .by_name(&name)
             .with_context(|| format!("3MF has no model part at {name}"))?;
-        let part = parse_part(BufReader::new(entry), &name)?;
+        // The declared size is the zip's claim and only a fast refusal; the
+        // `take` is what holds, because a bomb is free to understate it.
+        if entry.size() > bytes_left {
+            bail!("3MF model part {name} is too large to open");
+        }
+        let mut bounded = (&mut entry).take(bytes_left + 1);
+        let part = parse_part(BufReader::new(&mut bounded), &name, limits, &mut kept)?;
+        // A part cut off by the limit would parse as a model that simply
+        // ended early — drawn, wrong, and with no word said. One byte past
+        // the budget is the tell that there was more.
+        let read = bytes_left + 1 - bounded.limit();
+        if read > bytes_left {
+            bail!("3MF model part {name} is too large to open");
+        }
+        bytes_left -= read;
 
         for reference in part.build.iter().map(|(r, _)| r).chain(
             part.objects
@@ -87,7 +150,14 @@ pub fn load(path: &Path) -> Result<Mesh> {
         parts.insert(name, part);
     }
 
-    flatten(&Model { parts, root })
+    flatten(&Model { parts, root }, limits)
+}
+
+/// What the parse has kept so far, across every part of one file.
+#[derive(Default)]
+struct Kept {
+    vertices: usize,
+    triangles: usize,
 }
 
 fn normalize_part(path: &str) -> String {
@@ -101,7 +171,7 @@ fn model_part_name<R: std::io::Read + std::io::Seek>(zip: &mut zip::ZipArchive<R
     let Ok(rels) = zip.by_name("_rels/.rels") else {
         return DEFAULT.to_owned();
     };
-    let mut reader = Reader::from_reader(BufReader::new(rels));
+    let mut reader = Reader::from_reader(BufReader::new(rels.take(MAX_RELS_BYTES)));
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
@@ -176,7 +246,9 @@ fn unit_scale(unit: &str) -> f32 {
 /// `#RRGGBB` or `#RRGGBBAA`.
 fn parse_color(s: &str) -> Option<u32> {
     let h = s.trim().strip_prefix('#')?;
-    if h.len() < 6 {
+    // The slicing below is by byte, and a multi-byte character would put
+    // a cut inside it — a panic, from a colour attribute.
+    if h.len() < 6 || !h.is_ascii() {
         return None;
     }
     let c = |i: usize| {
@@ -189,7 +261,12 @@ fn parse_color(s: &str) -> Option<u32> {
 
 /// Parses one model part. `self_part` names it, so that references without a
 /// `p:path` resolve inside this same part.
-fn parse_part<R: std::io::BufRead>(reader: R, self_part: &str) -> Result<Part> {
+fn parse_part<R: std::io::BufRead>(
+    reader: R,
+    self_part: &str,
+    limits: &Limits,
+    kept: &mut Kept,
+) -> Result<Part> {
     let mut xml = Reader::from_reader(reader);
     let mut buf = Vec::new();
     let mut model = Part {
@@ -242,6 +319,10 @@ fn parse_part<R: std::io::BufRead>(reader: R, self_part: &str) -> Result<Part> {
                     }
                     b"vertex" => {
                         if let Some((_, obj)) = object.as_mut() {
+                            kept.vertices += 1;
+                            if kept.vertices > limits.vertices {
+                                bail!("3MF has too many vertices to open");
+                            }
                             obj.vertices.push([
                                 attr_f32(e, b"x").unwrap_or(0.0),
                                 attr_f32(e, b"y").unwrap_or(0.0),
@@ -254,6 +335,10 @@ fn parse_part<R: std::io::BufRead>(reader: R, self_part: &str) -> Result<Part> {
                             let (v1, v2, v3) =
                                 (attr_u32(e, b"v1"), attr_u32(e, b"v2"), attr_u32(e, b"v3"));
                             if let (Some(a), Some(b), Some(c)) = (v1, v2, v3) {
+                                kept.triangles += 1;
+                                if kept.triangles > limits.triangles {
+                                    bail!("3MF has too many triangles to open");
+                                }
                                 obj.triangles.push(Triangle {
                                     v: [a, b, c],
                                     pid: attr_u32(e, b"pid"),
@@ -315,10 +400,8 @@ fn parse_part<R: std::io::BufRead>(reader: R, self_part: &str) -> Result<Part> {
 
 /// Instantiates the build items (or, failing that, every object that nothing
 /// else references) into a single welded mesh.
-fn flatten(model: &Model) -> Result<Mesh> {
-    let mut positions: Vec<[f32; 3]> = Vec::new();
-    let mut colors: Vec<u32> = Vec::new();
-    let mut has_colors = false;
+fn flatten(model: &Model, limits: &Limits) -> Result<Mesh> {
+    let mut out = Sink::default();
 
     let unit_scale = model
         .parts
@@ -358,40 +441,57 @@ fn flatten(model: &Model) -> Result<Mesh> {
         build
     };
 
-    for (reference, m) in roots {
-        emit(
-            model,
-            &reference,
-            scale * m,
-            0,
-            &mut positions,
-            &mut colors,
-            &mut has_colors,
-        );
+    for (reference, m) in &roots {
+        emit(model, reference, scale * *m, &mut Vec::new(), limits, &mut out)?;
     }
 
-    if positions.is_empty() {
+    if out.positions.is_empty() {
         bail!("3MF model contains no triangles");
     }
-    Ok(weld(positions, colors, has_colors))
+    super::ensure_finite(&out.positions)?;
+    Ok(weld(out.positions, out.colors, out.has_colors))
 }
 
-fn emit(
-    model: &Model,
-    reference: &ObjectRef,
+/// What the component tree has produced so far.
+#[derive(Default)]
+struct Sink {
+    positions: Vec<[f32; 3]>,
+    colors: Vec<u32>,
+    has_colors: bool,
+    instances: usize,
+}
+
+/// Instantiates `reference` and everything under it. `path` is the chain
+/// of references that led here, which is what tells a cycle from an
+/// object merely used twice: a plate of two copies names one object from
+/// two places, and only a reference to something already on the path
+/// leads back into itself.
+fn emit<'m>(
+    model: &'m Model,
+    reference: &'m ObjectRef,
     xform: Mat4,
-    depth: usize,
-    positions: &mut Vec<[f32; 3]>,
-    colors: &mut Vec<u32>,
-    has_colors: &mut bool,
-) {
-    if depth > MAX_DEPTH {
+    path: &mut Vec<&'m ObjectRef>,
+    limits: &Limits,
+    out: &mut Sink,
+) -> Result<()> {
+    if path.len() > MAX_DEPTH {
         tracing::warn!("3MF component tree exceeds {MAX_DEPTH} levels; stopping recursion");
-        return;
+        return Ok(());
+    }
+    if path.contains(&reference) {
+        bail!(
+            "3MF object {} in {} contains itself",
+            reference.id,
+            reference.part
+        );
+    }
+    out.instances += 1;
+    if out.instances > limits.instances {
+        bail!("3MF component tree has too many instances to open");
     }
     let Some(part) = model.parts.get(&reference.part) else {
         tracing::warn!("3MF references missing part {}", reference.part);
-        return;
+        return Ok(());
     };
     let Some(obj) = part.objects.get(&reference.id) else {
         tracing::warn!(
@@ -399,8 +499,14 @@ fn emit(
             reference.id,
             reference.part
         );
-        return;
+        return Ok(());
     };
+
+    // Checked before a single corner is pushed, so a refusal costs nothing
+    // and the budget is the most that is ever allocated.
+    if out.positions.len() + obj.triangles.len() * 3 > limits.positions {
+        bail!("3MF component tree has too many triangles to open");
+    }
 
     // Property groups live in the object's own part, but the root part is a
     // common place for shared materials, so fall back to it.
@@ -426,30 +532,153 @@ fn emit(
             }
         };
 
-        for (corner, &vi) in tri.v.iter().enumerate() {
-            let Some(p) = obj.vertices.get(vi as usize) else {
-                tracing::warn!("3MF object {} references missing vertex {vi}", reference.id);
-                return;
-            };
+        // All three corners, or none: a triangle abandoned after its first
+        // corner leaves every later triangle in the list shifted by one.
+        let corners = tri.v.map(|vi| obj.vertices.get(vi as usize));
+        let [Some(a), Some(b), Some(c)] = corners else {
+            tracing::warn!("3MF object {} references a missing vertex", reference.id);
+            return Ok(());
+        };
+        for (corner, p) in [a, b, c].into_iter().enumerate() {
             let p = xform.transform_point3(Vec3::from(*p));
-            positions.push(p.to_array());
+            out.positions.push(p.to_array());
             let c = corner_color(corner);
             if c != WHITE {
-                *has_colors = true;
+                out.has_colors = true;
             }
-            colors.push(c);
+            out.colors.push(c);
         }
     }
 
+    path.push(reference);
     for (child, m) in &obj.components {
-        emit(
-            model,
-            child,
-            xform * *m,
-            depth + 1,
-            positions,
-            colors,
-            has_colors,
+        emit(model, child, xform * *m, path, limits, out)?;
+    }
+    path.pop();
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ROOT: &str = "3D/3dmodel.model";
+
+    /// Loads one model part from its XML, the way `load` does after the zip.
+    fn load_xml(xml: &str) -> Result<Mesh> {
+        let part = parse_part(xml.as_bytes(), ROOT, &LIMITS, &mut Kept::default())?;
+        let mut parts = FxHashMap::default();
+        parts.insert(ROOT.to_owned(), part);
+        flatten(&Model { parts, root: ROOT.to_owned() }, &LIMITS)
+    }
+
+    const TRIANGLE: &str = r#"<mesh><vertices>
+        <vertex x="0" y="0" z="0"/><vertex x="1" y="0" z="0"/><vertex x="0" y="1" z="0"/>
+        </vertices><triangles><triangle v1="0" v2="1" v3="2"/></triangles></mesh>"#;
+
+    /// An object that names itself as its own component is a loop, not a
+    /// model: following it only stops at the depth cap, having drawn the
+    /// same triangles thirty-three times — and two such references per
+    /// object are four billion.
+    #[test]
+    fn a_component_that_contains_itself_is_refused() {
+        let xml = format!(
+            r#"<model><resources><object id="1">{TRIANGLE}<components><component objectid="1"/></components></object></resources>
+            <build><item objectid="1"/></build></model>"#
         );
+        let Err(err) = load_xml(&xml) else { panic!("a cyclic component tree loaded") };
+        assert!(format!("{err:#}").contains("contains itself"), "{err:#}");
+    }
+
+    /// Depth alone is no bound: each level naming the next twice doubles
+    /// the instances, so a few kilobytes of XML describe more triangles than
+    /// memory holds. Twenty-one levels is two million leaves, and a
+    /// thumbnailer that loads every .3mf in a folder must say no to it
+    /// rather than spend a gigabyte finding out.
+    #[test]
+    fn a_component_tree_that_multiplies_past_the_budget_is_refused() {
+        let levels = 21;
+        let mut xml = format!(r#"<model><resources><object id="{levels}">{TRIANGLE}</object>"#);
+        for id in (0..levels).rev() {
+            let next = id + 1;
+            xml.push_str(&format!(
+                r#"<object id="{id}"><components><component objectid="{next}"/><component objectid="{next}"/></components></object>"#
+            ));
+        }
+        xml.push_str(r#"</resources><build><item objectid="0"/></build></model>"#);
+        let Err(err) = load_xml(&xml) else { panic!("an exponential component tree loaded") };
+        assert!(format!("{err:#}").contains("too many"), "{err:#}");
+    }
+
+    /// The same object used twice is not a cycle — a plate of two copies
+    /// is the commonest 3MF there is.
+    #[test]
+    fn an_object_used_twice_is_drawn_twice() {
+        let xml = format!(
+            r#"<model><resources><object id="2">{TRIANGLE}</object>
+            <object id="1"><components><component objectid="2"/><component objectid="2" transform="1 0 0 0 1 0 0 0 1 5 0 0"/></components></object></resources>
+            <build><item objectid="1"/></build></model>"#
+        );
+        let mesh = load_xml(&xml).unwrap();
+        assert_eq!(mesh.tri_count(), 2);
+    }
+
+    /// A colour is hex digits; anything else is no colour, never a panic
+    /// from slicing a multi-byte character in half.
+    #[test]
+    fn a_colour_that_is_not_ascii_is_no_colour() {
+        assert_eq!(parse_color("#aéééé"), None);
+        assert_eq!(parse_color("#ff0000"), Some(pack_rgb(1.0, 0.0, 0.0)));
+    }
+
+    /// A coordinate that is not a finite number makes the whole model's
+    /// bounds infinite, and everything drawn from them — the camera, the
+    /// thumbnail — NaN.
+    #[test]
+    fn a_vertex_that_is_not_finite_is_refused() {
+        let xml = r#"<model><resources><object id="1"><mesh><vertices>
+            <vertex x="0" y="0" z="0"/><vertex x="inf" y="0" z="0"/><vertex x="0" y="1" z="0"/>
+            </vertices><triangles><triangle v1="0" v2="1" v3="2"/></triangles></mesh></object></resources>
+            <build><item objectid="1"/></build></model>"#;
+        assert!(load_xml(xml).is_err());
+    }
+
+    fn zipped(model: &str) -> zip::ZipArchive<std::io::Cursor<Vec<u8>>> {
+        use std::io::Write as _;
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        writer.start_file(ROOT, options).unwrap();
+        writer.write_all(model.as_bytes()).unwrap();
+        zip::ZipArchive::new(writer.finish().unwrap()).unwrap()
+    }
+
+    fn one_triangle() -> String {
+        format!(r#"<model><resources><object id="1">{TRIANGLE}</object></resources><build><item objectid="1"/></build></model>"#)
+    }
+
+    /// The model part is inflated and parsed only up to a budget: a few
+    /// kilobytes of deflate are a gigabyte of XML.
+    #[test]
+    fn a_model_part_past_the_byte_budget_is_refused() {
+        let xml = one_triangle();
+        let fits = Limits { part_bytes: xml.len() as u64, ..LIMITS };
+        assert!(load_zip(zipped(&xml), &fits).is_ok());
+        let short = Limits { part_bytes: xml.len() as u64 - 1, ..LIMITS };
+        let Err(err) = load_zip(zipped(&xml), &short) else { panic!("an oversized part loaded") };
+        assert!(format!("{err:#}").contains("too large"), "{err:#}");
+    }
+
+    /// What the parse keeps is counted as it goes, so a part of nothing
+    /// but vertices stops at the budget rather than at the end of memory.
+    #[test]
+    fn a_model_with_more_vertices_or_triangles_than_the_budget_is_refused() {
+        let xml = one_triangle();
+        let few_vertices = Limits { vertices: 2, ..LIMITS };
+        assert!(load_zip(zipped(&xml), &few_vertices).is_err());
+        let no_triangles = Limits { triangles: 0, ..LIMITS };
+        assert!(load_zip(zipped(&xml), &no_triangles).is_err());
+        let few_positions = Limits { positions: 2, ..LIMITS };
+        assert!(load_zip(zipped(&xml), &few_positions).is_err());
     }
 }

@@ -33,6 +33,19 @@ const SUPERSAMPLE: u32 = 2;
 /// Draws `mesh` fitted inside an `edge`-pixel square, from the view the
 /// viewer opens on.
 pub fn render(mesh: &Mesh, edge: u32) -> Image {
+    draw(mesh, edge).0
+}
+
+/// How many pixels the rasteriser may test, as a multiple of the canvas.
+/// A real model covers each pixel a few times over — its front, its back,
+/// the triangles' boxes overlapping — so sixty-four is far past any of
+/// them. Without it, a file of a million triangles each as large as the
+/// view is a trillion tests: valid, small, and an afternoon of one core.
+const OVERDRAW: u64 = 64;
+
+/// [`render`], and how many pixels it tested — the work, which is what a
+/// hostile model attacks and what the tests measure.
+fn draw(mesh: &Mesh, edge: u32) -> (Image, u64) {
     let edge = edge.max(1);
     let side = edge * SUPERSAMPLE;
     let (w, h) = (side as usize, side as usize);
@@ -57,16 +70,34 @@ pub fn render(mesh: &Mesh, edge: u32) -> Image {
 
     let mut depth = vec![f32::INFINITY; w * h];
     let mut color = vec![[0u8; 4]; w * h];
+    let mut work = 0u64;
+    let budget = OVERDRAW * (w * h) as u64;
 
     for tri in mesh.indices.chunks_exact(3) {
         let [a, b, c] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
         let (pa, pb, pc) = (screen[a], screen[b], screen[c]);
+        // A NaN corner does not fail the bounds below — `NaN.max(0.0)` is
+        // 0 and `NaN.min(w)` is w — so it turned into a box the size of
+        // the canvas, scanned in full for every triangle, drawing nothing.
+        // The loaders refuse such a model; this is for whatever else
+        // hands one in, and for finite input the camera overflows.
+        if ![pa, pb, pc].iter().all(|p| p.is_finite()) {
+            continue;
+        }
         let shade = shade(clip[a], clip[b], clip[c], mesh.has_colors.then(|| mesh.verts[a].color));
         let (minx, maxx) = (pa.x.min(pb.x).min(pc.x).floor().max(0.0), pa.x.max(pb.x).max(pc.x).ceil().min(w as f32 - 1.0));
         let (miny, maxy) = (pa.y.min(pb.y).min(pc.y).floor().max(0.0), pa.y.max(pb.y).max(pc.y).ceil().min(h as f32 - 1.0));
         if minx > maxx || miny > maxy {
             continue;
         }
+        let pixels = (maxx - minx + 1.0) as u64 * (maxy - miny + 1.0) as u64;
+        if work + pixels > budget {
+            // What has been drawn is a fair picture of the model; stopping
+            // is better than a thumbnail that never arrives.
+            tracing::warn!("model thumbnail stopped at its drawing budget");
+            break;
+        }
+        work += pixels;
         let area = edge_fn(pa, pb, pc);
         if area.abs() < 1e-9 {
             continue;
@@ -88,7 +119,7 @@ pub fn render(mesh: &Mesh, edge: u32) -> Image {
         }
     }
 
-    downsample(&color, side, edge)
+    (downsample(&color, side, edge), work)
 }
 
 /// Twice the signed area of the triangle `a b p`, in screen space.
@@ -241,5 +272,34 @@ mod tests {
     fn an_empty_mesh_draws_nothing() {
         let img = render(&Mesh::default(), 32);
         assert!(img.pixels.chunks_exact(4).all(|p| p[3] == 0));
+    }
+
+    /// One corner that is not a finite number makes the camera's fit and
+    /// every projected point NaN; the rasteriser must skip what it cannot
+    /// place rather than scan the whole canvas for each triangle.
+    #[test]
+    fn a_model_with_a_corner_that_is_not_finite_costs_no_drawing() {
+        let mut mesh = cube(10.0, WHITE);
+        mesh.verts[0].pos[0] = f32::INFINITY;
+        mesh.bounds.extend(Vec3::from(mesh.verts[0].pos));
+        let (_, work) = draw(&mesh, 64);
+        assert_eq!(work, 0);
+    }
+
+    /// However many triangles a model has, the pixels tested stop at the
+    /// budget: here two thousand triangles each covering the whole view.
+    #[test]
+    fn the_pixels_tested_are_bounded_however_large_the_triangles() {
+        let mut positions = Vec::new();
+        for i in 0..2000 {
+            let z = i as f32 * 0.001;
+            positions.extend([[-1.0, -1.0, z], [1.0, -1.0, z], [0.0, 1.0, z]]);
+        }
+        let colors = vec![WHITE; positions.len()];
+        let mesh = weld(positions, colors, false);
+        let edge = 64u32;
+        let (_, work) = draw(&mesh, edge);
+        let canvas = u64::from(edge * SUPERSAMPLE).pow(2);
+        assert!(work <= OVERDRAW * canvas, "{work} pixels tested");
     }
 }
