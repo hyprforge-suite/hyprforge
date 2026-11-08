@@ -32,13 +32,7 @@ Started and not finished — so a second agent, or the next session, sees
 what is already in hand before it starts the same thing. Say what is
 left, and move an item back to its section if it stops.
 
-- [bug] **The greeter's look lags a hand-edited border.** Apps resolve the look
-  as they open and Settings refreshes the lock screen's copy as it starts
-  (Settings, 2026-10-18), but the greeter's export is written only on an
-  Appearance save — on purpose, since an isolated run of Settings must not
-  write the real login screen's theme. A fix wants a writer that can tell
-  the real session from a test: an `hl.exec_cmd` at login, or a check that
-  `XDG_CONFIG_HOME` is the user's own. *Added 2026-10-18.* *Started 2026-11-07.*
+Nothing in hand.
 
 ## Needs you
 
@@ -285,3 +279,10 @@ pruned — git history has the rest.
   pushed to `main` and pinned; clipboard, files, media, procman and
   settings pushed to `next` for the release. *Added 2026-11-07.*
   *Done 2026-11-07.*
+- **The greeter's look follows a hand-edited border**: Settings refreshes
+  the greeter's export as it starts, as it did the lock screen's, when
+  the config is the user's own `~/.config` or the export directory was
+  named on purpose — so an isolated test run still cannot restyle the
+  login screen (Settings c36a9ca, on `next`). Both copies catch up when
+  Settings next opens, not the moment the file is edited.
+  *Added 2026-11-07.* *Done 2026-11-07.*
