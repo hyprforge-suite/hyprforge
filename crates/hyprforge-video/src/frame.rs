@@ -59,11 +59,19 @@ pub fn arguments(path: &Path, edge: u32, skip_dark: bool) -> Vec<OsString> {
     } else {
         fit
     };
-    let mut args: Vec<OsString> = vec!["-v".into(), "error".into()];
+    // `-nostdin`: ffmpeg reads the terminal for its interactive keys, and a
+    // thumbnailer has no business on one. The input is named `file:` and
+    // limited to that protocol, because ffmpeg takes anything before a
+    // colon as a protocol — a file called `concat:a|b` or `http:x` is not
+    // the file — and a playlist inside a file (HLS) opens whatever its
+    // lines name, for a file thumbnailed merely by being in a folder.
+    let mut args: Vec<OsString> = vec!["-nostdin".into(), "-v".into(), "error".into()];
     if skip_dark {
         args.extend(["-t".into(), SEARCH_SECONDS.to_string().into()]);
     }
-    args.extend(["-i".into(), path.as_os_str().to_owned()]);
+    let mut input = OsString::from("file:");
+    input.push(path.as_os_str());
+    args.extend(["-protocol_whitelist".into(), "file".into(), "-i".into(), input]);
     args.extend(
         ["-an", "-sn", "-frames:v", "1", "-vf"].iter().map(OsString::from).chain([filter.into()]).chain(
             ["-f", "image2pipe", "-c:v", "png", "-"].iter().map(OsString::from),
@@ -95,9 +103,19 @@ mod tests {
     #[test]
     fn the_search_skips_dark_frames_within_a_bounded_stretch() {
         let a = joined(&arguments(Path::new("/v/clip.mp4"), 128, true));
-        assert!(a.contains("-t 20 -i /v/clip.mp4"), "{a}");
+        assert!(a.contains("-t 20 -protocol_whitelist file -i file:/v/clip.mp4"), "{a}");
         assert!(a.contains("blackframe=amount=0,metadata=mode=select:key=lavfi.blackframe.pblack:value=90:function=less"), "{a}");
         assert!(a.contains("-frames:v 1"), "{a}");
+    }
+
+    /// The input is a file, whatever its name says: a name that looks like
+    /// a protocol is not opened as one, and nothing inside it can open
+    /// anything but a file. And ffmpeg never waits on a terminal.
+    #[test]
+    fn the_input_is_only_ever_a_local_file() {
+        let a = joined(&arguments(Path::new("concat:a|http:b"), 128, false));
+        assert!(a.starts_with("-nostdin "), "{a}");
+        assert!(a.contains("-protocol_whitelist file -i file:concat:a|http:b"), "{a}");
     }
 
     /// Fitted inside a square, so a portrait video is as bounded as a

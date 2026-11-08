@@ -259,19 +259,27 @@ fn run(
     }
 }
 
-fn play(
-    api: Arc<Api>,
-    path: &Path,
-    options: Options,
-    wake: Sender<Msg>,
-    rx: &mpsc::Receiver<Msg>,
-    on_update: &mut impl FnMut(Update),
-) -> Result<(), MpvError> {
-    let mut mpv = Mpv::new(api)?;
+/// Every option mpv is started with, in order.
+fn settings(options: &Options) -> Vec<(&'static str, String)> {
     let [r, g, b] = options.background;
-    for (name, value) in [
+    let background = format!("#{r:02x}{g:02x}{b:02x}");
+    [
         // No window of mpv's own: frames come out through the renderer.
         ("vo", "libmpv"),
+        // A preview plays the file it was handed, and nothing that file
+        // points at. mpv's defaults are a player's: a playlist or an HLS
+        // index is followed to whatever URLs it lists, and the ytdl hook
+        // hands a URL to youtube-dl. Quick Look opens files merely
+        // because they were selected, so any of that is a network request
+        // made by browsing a folder. `access-references` is the one that
+        // closes it — measured: with only lavf's `protocol_whitelist`, an
+        // .m3u8 of one http URL was read by mpv's own playlist parser and
+        // fetched anyway. The whitelist stays for any demuxer that opens a
+        // second stream by itself.
+        ("access-references", "no"),
+        ("ytdl", "no"),
+        ("load-scripts", "no"),
+        ("demuxer-lavf-o", "protocol_whitelist=file"),
         // Decode on the GPU where it is safe, copy back, and fall back to
         // software quietly where it is not.
         ("hwdec", "auto-safe"),
@@ -284,11 +292,26 @@ fn play(
         ("input-vo-keyboard", "no"),
         ("terminal", "no"),
         ("audio-client-name", "hyprforge-media"),
-        ("background-color", &format!("#{r:02x}{g:02x}{b:02x}")),
+        ("background-color", &background),
         ("pause", if options.paused { "yes" } else { "no" }),
         ("mute", if options.muted { "yes" } else { "no" }),
-    ] {
-        mpv.set_option(name, value)?;
+    ]
+    .into_iter()
+    .map(|(name, value)| (name, value.to_owned()))
+    .collect()
+}
+
+fn play(
+    api: Arc<Api>,
+    path: &Path,
+    options: Options,
+    wake: Sender<Msg>,
+    rx: &mpsc::Receiver<Msg>,
+    on_update: &mut impl FnMut(Update),
+) -> Result<(), MpvError> {
+    let mut mpv = Mpv::new(api)?;
+    for (name, value) in settings(&options) {
+        mpv.set_option(name, &value)?;
     }
     mpv.initialize()?;
     let mut render = mpv.software_renderer()?;
@@ -310,6 +333,9 @@ fn play(
     ] {
         mpv.observe(name, format)?;
     }
+    // Absolute, so a file whose relative name reads as a URL or a
+    // protocol (`http:x.mp4`, `ytdl://x`) is opened as the file it is.
+    let path = std::path::absolute(path).map_err(|e| MpvError::Failed(e.to_string()))?;
     let file = path.to_str().ok_or_else(|| MpvError::Failed("the path is not UTF-8".into()))?;
     mpv.command(&["loadfile", file])?;
 
@@ -419,6 +445,21 @@ fn play(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A preview never reaches the network on a file's say-so: no
+    /// references followed, no youtube-dl, no user scripts, and lavf
+    /// opens files only.
+    #[test]
+    fn a_preview_is_started_unable_to_follow_a_file_anywhere() {
+        let options = Options { background: [0, 0, 0], size: (16, 16), paused: true, muted: true };
+        let settings = settings(&options);
+        let set = |name: &str| settings.iter().find(|(n, _)| *n == name).map(|(_, v)| v.as_str());
+        assert_eq!(set("access-references"), Some("no"));
+        assert_eq!(set("ytdl"), Some("no"));
+        assert_eq!(set("load-scripts"), Some("no"));
+        assert_eq!(set("demuxer-lavf-o"), Some("protocol_whitelist=file"));
+        assert_eq!(set("config"), Some("no"));
+    }
 
     fn seek(seconds: f64, relative: bool, exact: bool) -> Msg {
         Msg::Cmd(Command::Seek { seconds, relative, exact })

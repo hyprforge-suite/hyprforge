@@ -56,6 +56,21 @@ pub struct Event {
     pub data: *mut c_void,
 }
 
+/// `mpv_event_end_file`, the data of an `EVENT_END_FILE`.
+#[repr(C)]
+pub struct EventEndFile {
+    /// `mpv_end_file_reason`, a C enum: an `int`.
+    pub reason: c_int,
+    /// An `MPV_ERROR_*` code when `reason` is [`END_FILE_REASON_ERROR`].
+    pub error: c_int,
+    pub playlist_entry_id: i64,
+    pub playlist_insert_id: i64,
+    pub playlist_insert_num_entries: c_int,
+}
+
+/// `MPV_END_FILE_REASON_ERROR`.
+pub const END_FILE_REASON_ERROR: c_int = 4;
+
 #[repr(C)]
 pub struct EventProperty {
     pub name: *const c_char,
@@ -167,6 +182,19 @@ pub enum Happened {
     Other,
 }
 
+/// What an end-file event means.
+///
+/// Why the file ended is in the event's *data*, not in `mpv_event.error`:
+/// that field is for replies to asynchronous requests, and mpv leaves it
+/// at 0 on an `END_FILE` however the file ended. Reading only it, a
+/// corrupt video never reported a failure — it ended "normally" before a
+/// single frame, and Media and Quick Look showed "Loading…" for good.
+/// The event's own `error` is still honoured should mpv ever set it.
+fn end_file(event_error: c_int, data: Option<&EventEndFile>) -> Happened {
+    let failed = data.is_some_and(|d| d.reason == END_FILE_REASON_ERROR || d.error < 0);
+    Happened::EndFile { error: failed || event_error < 0 }
+}
+
 /// Something mpv calls back on its own threads: it may only nudge, and
 /// the nudge has to be `Send`. A boxed closure, leaked into a raw pointer
 /// for mpv to hold and reclaimed when the owner is dropped.
@@ -267,7 +295,12 @@ impl Mpv {
             EVENT_NONE => Happened::Nothing,
             EVENT_SHUTDOWN => Happened::Shutdown,
             EVENT_FILE_LOADED => Happened::FileLoaded,
-            EVENT_END_FILE => Happened::EndFile { error: event.error < 0 },
+            EVENT_END_FILE => {
+                // SAFETY: an end-file event's data is an mpv_event_end_file,
+                // per client.h, when it is not NULL.
+                let data = (!event.data.is_null()).then(|| unsafe { &*(event.data as *const EventEndFile) });
+                end_file(event.error, data)
+            }
             EVENT_PROPERTY_CHANGE if !event.data.is_null() => {
                 // SAFETY: a property-change event's data is an
                 // mpv_event_property, per client.h.
@@ -393,5 +426,43 @@ impl Drop for Render {
                 drop(Box::from_raw(boxed));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ended(reason: c_int, error: c_int) -> EventEndFile {
+        EventEndFile { reason, error, playlist_entry_id: 1, playlist_insert_id: 0, playlist_insert_num_entries: 0 }
+    }
+
+    /// The failure mpv reports for a file it cannot open is in the event's
+    /// data; the event itself says 0. Reading the event alone, a broken
+    /// video was "Loading…" forever.
+    #[test]
+    fn a_file_mpv_could_not_play_ends_in_an_error() {
+        // MPV_ERROR_LOADING_FAILED, with the envelope left at 0 as mpv leaves it.
+        let failed = ended(END_FILE_REASON_ERROR, -13);
+        assert_eq!(end_file(0, Some(&failed)), Happened::EndFile { error: true });
+    }
+
+    /// The end of a file played through, or stopped, is not a failure.
+    #[test]
+    fn a_file_that_played_to_its_end_is_not_an_error() {
+        for reason in [0, 2, 3] {
+            assert_eq!(end_file(0, Some(&ended(reason, 0))), Happened::EndFile { error: false });
+        }
+        assert_eq!(end_file(0, None), Happened::EndFile { error: false });
+    }
+
+    /// The struct is read straight out of mpv's memory, so its layout is
+    /// client.h's: two ints, two int64s, an int, padded to eight.
+    #[test]
+    fn the_end_file_struct_has_client_h_layout() {
+        assert_eq!(std::mem::size_of::<EventEndFile>(), 32);
+        assert_eq!(std::mem::offset_of!(EventEndFile, error), 4);
+        assert_eq!(std::mem::offset_of!(EventEndFile, playlist_entry_id), 8);
+        assert_eq!(std::mem::offset_of!(EventEndFile, playlist_insert_num_entries), 24);
     }
 }
