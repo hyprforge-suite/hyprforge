@@ -92,14 +92,17 @@ pub fn parse(contents: &str, home: &Path) -> UserDirs {
         let Some(value) = unquote(value.trim()) else {
             continue;
         };
+        // `None` for a value that names no directory of its own — and a
+        // later line still replaces an earlier one, disabled or not, the
+        // way the shell that sources this file would.
         let path = resolve(&value, home);
         match key {
-            "XDG_DESKTOP_DIR" => dirs.desktop = Some(path),
-            "XDG_DOWNLOAD_DIR" => dirs.download = Some(path),
-            "XDG_DOCUMENTS_DIR" => dirs.documents = Some(path),
-            "XDG_MUSIC_DIR" => dirs.music = Some(path),
-            "XDG_PICTURES_DIR" => dirs.pictures = Some(path),
-            "XDG_VIDEOS_DIR" => dirs.videos = Some(path),
+            "XDG_DESKTOP_DIR" => dirs.desktop = path,
+            "XDG_DOWNLOAD_DIR" => dirs.download = path,
+            "XDG_DOCUMENTS_DIR" => dirs.documents = path,
+            "XDG_MUSIC_DIR" => dirs.music = path,
+            "XDG_PICTURES_DIR" => dirs.pictures = path,
+            "XDG_VIDEOS_DIR" => dirs.videos = path,
             // XDG_PUBLICSHARE_DIR and XDG_TEMPLATES_DIR exist in the
             // real format too, but nothing in this browser's sidebar
             // brief asks for either — see the module doc's own scoping.
@@ -118,22 +121,32 @@ fn unquote(value: &str) -> Option<String> {
     Some(value.to_string())
 }
 
-/// Replaces a leading `$HOME` with the real home directory; anything
-/// else is treated as already-absolute (or, rarely, relative — left as
-/// written, since the spec doesn't otherwise define what a bare relative
-/// path here would mean).
-fn resolve(value: &str, home: &Path) -> PathBuf {
-    match value.strip_prefix("$HOME") {
-        Some(rest) => {
-            let rest = rest.trim_start_matches('/');
-            if rest.is_empty() {
-                home.to_path_buf()
-            } else {
-                home.join(rest)
-            }
-        }
-        None => PathBuf::from(value),
+/// Replaces a leading `$HOME/` with the real home directory, or `None`
+/// when the value names no directory of its own.
+///
+/// Three shapes are refused rather than guessed at:
+/// - `"$HOME"` or `"$HOME/"` alone is how `xdg-user-dirs` writes a
+///   *disabled* directory, and so is a value that resolves to home itself.
+///   Taking it literally put a "Downloads" shortcut in the sidebar that
+///   opened the home folder.
+/// - `"$HOMEfoo"` is not `$HOME/foo`: only `$HOME` followed by a separator
+///   is the substitution the format uses. Stripping the prefix and then
+///   the slashes used to turn it into `$HOME/foo`.
+/// - A relative path has no defined meaning here, and resolving it against
+///   whatever directory the app was started from is how a sidebar ends up
+///   pointing somewhere different on every launch.
+fn resolve(value: &str, home: &Path) -> Option<PathBuf> {
+    let path = if value == "$HOME" {
+        return None;
+    } else if let Some(rest) = value.strip_prefix("$HOME/") {
+        home.join(rest.trim_start_matches('/'))
+    } else {
+        PathBuf::from(value)
+    };
+    if !path.is_absolute() || path.components().eq(home.components()) {
+        return None;
     }
+    Some(path)
 }
 
 #[cfg(test)]
@@ -191,5 +204,32 @@ mod tests {
         let dirs = load(dir.path(), home);
         assert_eq!(dirs.documents, Some(PathBuf::from("/home/alex/OnlyThis")));
         assert_eq!(dirs.download, None, "present file wins outright, no fallback merge");
+    }
+
+    #[test]
+    fn a_directory_set_to_home_itself_is_disabled_not_home() {
+        let contents = "XDG_DOWNLOAD_DIR=\"$HOME/\"\nXDG_MUSIC_DIR=\"$HOME\"\nXDG_VIDEOS_DIR=\"/home/alex/\"";
+        let dirs = parse(contents, Path::new("/home/alex"));
+        assert_eq!(dirs.download, None);
+        assert_eq!(dirs.music, None);
+        assert_eq!(dirs.videos, None);
+    }
+
+    #[test]
+    fn home_without_a_separator_is_not_a_substitution() {
+        let dirs = parse("XDG_MUSIC_DIR=\"$HOMEfoo\"", Path::new("/home/alex"));
+        assert_eq!(dirs.music, None);
+    }
+
+    #[test]
+    fn a_relative_value_is_skipped_not_resolved_against_the_cwd() {
+        let dirs = parse("XDG_PICTURES_DIR=\"Pictures\"", Path::new("/home/alex"));
+        assert_eq!(dirs.pictures, None);
+    }
+
+    #[test]
+    fn an_absolute_value_outside_home_is_kept() {
+        let dirs = parse("XDG_PICTURES_DIR=\"/data/photos\"", Path::new("/home/alex"));
+        assert_eq!(dirs.pictures, Some(PathBuf::from("/data/photos")));
     }
 }

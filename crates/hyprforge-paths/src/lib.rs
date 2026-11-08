@@ -25,8 +25,56 @@ pub fn config_home() -> PathBuf {
             return dir;
         }
     }
-    let home = std::env::var_os("HOME").expect("HOME must be set");
-    PathBuf::from(home).join(".config")
+    home().join(".config")
+}
+
+/// The home directory every fallback above hangs off.
+///
+/// `$HOME` is trusted only when it is absolute, exactly as the `XDG_*`
+/// variables are. `HOME=""` used to produce `./.config`, so a daemon
+/// started from a unit with an empty environment wrote its config into
+/// whatever directory it was launched from — and read someone else's back
+/// from there. An unset `HOME` used to panic outright.
+///
+/// The fallback is the account's own entry in `/etc/passwd`, found by the
+/// owner of `/proc/self` — which is this process's effective uid, so no
+/// `libc` is needed to ask. An account that lives only in LDAP or
+/// systemd-homed has no line there; for that, with no usable `$HOME`
+/// either, there is no answer that is not a guess, and the panic stays.
+fn home() -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        if home.is_absolute() {
+            return home;
+        }
+    }
+    passwd_home().expect("no usable home directory: HOME is unset or relative, and /etc/passwd has no entry for this user")
+}
+
+/// This process's home directory as `/etc/passwd` records it, if it does.
+fn passwd_home() -> Option<PathBuf> {
+    let uid = euid()?;
+    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+    passwd_home_in(&passwd, uid)
+}
+
+/// This process's effective uid: `/proc/self` is owned by it, which saves
+/// a `libc` dependency for one `geteuid`.
+fn euid() -> Option<u32> {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata("/proc/self").ok().map(|m| m.uid())
+}
+
+/// The pure half of [`passwd_home`]: `name:x:uid:gid:gecos:home:shell`.
+fn passwd_home_in(passwd: &str, uid: u32) -> Option<PathBuf> {
+    passwd.lines().find_map(|line| {
+        let fields: Vec<&str> = line.split(':').collect();
+        if fields.len() < 7 || fields[2].parse::<u32>().ok()? != uid {
+            return None;
+        }
+        let home = PathBuf::from(fields[5]);
+        home.is_absolute().then_some(home)
+    })
 }
 
 
@@ -48,8 +96,7 @@ pub fn data_home() -> PathBuf {
             return dir;
         }
     }
-    let home = std::env::var_os("HOME").expect("HOME must be set");
-    PathBuf::from(home).join(".local").join("share")
+    home().join(".local").join("share")
 }
 
 /// The lock screen's theme, written by Settings and read by
@@ -199,9 +246,110 @@ pub fn write_atomic(path: &std::path::Path, contents: &str) -> std::io::Result<(
 /// every existing caller (all of which pass `&str`) keeps its exact
 /// signature.
 pub fn write_atomic_bytes(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    write_atomic_inner(path, contents, None)
+}
+
+/// [`write_atomic_bytes`] for a file nobody else should read — clipboard
+/// history, for one. The file is `0600` from the moment it exists, and any
+/// directory created on the way to it is `0700` (see
+/// [`create_dir_private`]).
+///
+/// "From the moment it exists" is the point. Writing with the default mode
+/// and `chmod`ing afterwards leaves a window in which the temp file is
+/// `0644` and anyone can open it — and an open descriptor survives the
+/// `chmod`.
+pub fn write_atomic_private(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        create_dir_private(parent)?;
+    }
+    write_atomic_with_mode(path, contents, 0o600)
+}
+
+/// [`write_atomic_bytes`] with the file's permission bits set to exactly
+/// `mode`, whatever the umask and whatever mode the file had before. The
+/// temp file is created with `mode` (never wider), so it is never readable
+/// by anyone `mode` excludes, even for an instant.
+pub fn write_atomic_with_mode(path: &std::path::Path, contents: &[u8], mode: u32) -> std::io::Result<()> {
+    write_atomic_inner(path, contents, Some(mode & 0o7777))
+}
+
+/// `create_dir_all`, with every directory it creates `0700`. Directories
+/// that already exist are left exactly as they are: tightening a parent
+/// someone chose (their `~/.config`) is not this function's decision.
+pub fn create_dir_private(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(path)
+}
+
+/// Where a write to `path` should really land. A dotfile managed by stow
+/// or home-manager is a symlink into a repository, and renaming over the
+/// *link* replaces it with a regular file: the user's managed config
+/// silently stops being managed. So a link is followed, and the write
+/// happens beside the file it names; the link itself is never touched.
+///
+/// Only a link this user owns is followed. Some of these files are
+/// written into a directory other people can write too — the greeter's
+/// export in `/var/lib/hyprforge/greet` is writable by the whole
+/// `hyprforge` group — and there a link someone else planted at
+/// `monitors.lua` pointing at `~/.bashrc` must be *replaced*, as a plain
+/// rename always did, not written through. It is the kernel's own
+/// `protected_symlinks` rule for shared directories; a stow or
+/// home-manager link is always the user's own.
+///
+/// A dangling link is followed one level by hand — `canonicalize` needs
+/// the target to exist — with a relative link text resolved against the
+/// link's own directory, the way the kernel resolves it.
+fn write_target(path: &std::path::Path, me: Option<u32>) -> std::path::PathBuf {
+    use std::os::unix::fs::MetadataExt as _;
+    let ours = match std::fs::symlink_metadata(path) {
+        Ok(m) => m.file_type().is_symlink() && me.is_some() && Some(m.uid()) == me,
+        Err(_) => false,
+    };
+    if !ours {
+        return path.to_path_buf();
+    }
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return real;
+    }
+    match std::fs::read_link(path) {
+        Ok(text) if text.is_absolute() => text,
+        Ok(text) => path.parent().map(|p| p.join(&text)).unwrap_or(text),
+        Err(_) => path.to_path_buf(),
+    }
+}
+
+fn write_atomic_inner(path: &std::path::Path, contents: &[u8], mode: Option<u32>) -> std::io::Result<()> {
+    write_atomic_as(path, contents, mode, euid())
+}
+
+/// [`write_atomic_inner`] for the user `me` — a parameter only so a test
+/// can play a different user than the one running it.
+fn write_atomic_as(path: &std::path::Path, contents: &[u8], mode: Option<u32>, me: Option<u32>) -> std::io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+    let path = &write_target(path, me);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+
+    // The mode the result should have. An explicit one wins; otherwise a
+    // file that already exists keeps its own. Before this, every save
+    // created a fresh file at the umask's 0644, so a config the user had
+    // `chmod 600`ed came back world-readable the first time Settings
+    // touched it. A brand-new file gets the umask, as `File::create` gave
+    // — and so does one owned by someone else: a group-writable directory
+    // lets another user leave a 0666 file at the name, and copying that
+    // would make this user's file writable by everyone.
+    let keep = match mode {
+        Some(mode) => Some(mode),
+        None => std::fs::symlink_metadata(path)
+            .ok()
+            .filter(|m| m.is_file() && me.is_some() && {
+                use std::os::unix::fs::MetadataExt as _;
+                Some(m.uid()) == me
+            })
+            .map(|m| m.permissions().mode() & 0o7777),
+    };
 
     // Unique per call, not a fixed `<name>.tmp`. Two processes write some
     // of these files — `monitors.lua` has both the display daemon and the
@@ -212,17 +360,37 @@ pub fn write_atomic_bytes(path: &std::path::Path, contents: &[u8]) -> std::io::R
     //
     // Process id and a counter rather than randomness: no dependency, and
     // the only collision that matters is between concurrent writers,
-    // which these distinguish. A leftover from a previous boot with a
-    // recycled pid is cleaned up below rather than reused.
+    // which these distinguish.
+    //
+    // The name is predictable, so the open must not trust whatever is
+    // already there. `create_new` is O_CREAT|O_EXCL, which fails on *any*
+    // existing name — a symlink planted to point at `~/.bashrc` included,
+    // dangling or not: POSIX says O_EXCL does not follow a final link, so
+    // no O_NOFOLLOW (and no libc) is needed. std opens with O_CLOEXEC
+    // already. A name that is taken — a leftover from a previous boot
+    // with a recycled pid, or something planted — is skipped for the next
+    // counter value rather than reused.
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("hyprforge");
-    let tmp = path.with_file_name(format!(".{stem}.{}.{unique}.tmp", std::process::id()));
+    let mut attempts = 0;
+    let (tmp, file) = loop {
+        let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = path.with_file_name(format!(".{stem}.{}.{unique}.tmp", std::process::id()));
+        let mut open = std::fs::OpenOptions::new();
+        open.write(true).create_new(true);
+        if let Some(mode) = mode {
+            open.mode(mode);
+        }
+        match open.open(&tmp) {
+            Ok(file) => break (tmp, file),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempts < 64 => attempts += 1,
+            Err(e) => return Err(e),
+        }
+    };
 
     // Removes the temp file unless the rename claimed it. Without this a
     // full disk leaves one behind on every failed save, accumulating in
-    // the user's config directory — and a leftover is not inert, because
-    // it is exactly what the next writer would have reused.
+    // the user's config directory.
     struct Cleanup<'a>(Option<&'a std::path::Path>);
     impl Drop for Cleanup<'_> {
         fn drop(&mut self) {
@@ -234,7 +402,12 @@ pub fn write_atomic_bytes(path: &std::path::Path, contents: &[u8]) -> std::io::R
     let mut cleanup = Cleanup(Some(&tmp));
 
     {
-        let file = std::fs::File::create(&tmp)?;
+        // fchmod on the descriptor, before the rename makes it visible
+        // under the real name — and for an explicit mode, after a create
+        // the umask may have narrowed, so the result is exactly `mode`.
+        if let Some(mode) = keep {
+            file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        }
         {
             use std::io::Write as _;
             let mut writer = std::io::BufWriter::new(&file);
@@ -488,6 +661,159 @@ mod tests {
             clipboard_image_path("abc123"),
             PathBuf::from("/custom/config/hyprforge/clipboard/images/abc123.bin")
         );
+    }
+
+    fn mode_of(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
+    }
+
+    #[test]
+    fn a_private_file_keeps_its_mode_across_a_save() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.toml");
+        write_atomic(&path, "first").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        write_atomic(&path, "second").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+        assert_eq!(mode_of(&path), 0o600);
+    }
+
+    #[test]
+    fn a_symlinked_dotfile_stays_a_symlink_and_its_target_is_updated() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("dotfiles");
+        std::fs::create_dir(&repo).unwrap();
+        let real = repo.join("tray.toml");
+        std::fs::write(&real, "old").unwrap();
+        let link = dir.path().join("tray.toml");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        write_atomic(&link, "new").unwrap();
+
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "new");
+    }
+
+    /// In a directory other users can write (the greeter's export), a
+    /// link someone else planted at the name must be replaced, never
+    /// written through to wherever it points.
+    #[test]
+    fn a_symlink_someone_else_owns_is_replaced_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("bashrc");
+        std::fs::write(&victim, "untouched").unwrap();
+        let link = dir.path().join("monitors.lua");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        let someone_else = euid().map(|uid| uid.wrapping_add(1));
+        write_atomic_as(&link, b"payload", None, someone_else).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+        assert!(!std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), "payload");
+    }
+
+    /// Nor does a file someone else owns lend this one its mode: a 0666
+    /// left in a shared directory must not make the user's file writable
+    /// by everyone.
+    #[test]
+    fn a_file_someone_else_owns_does_not_lend_its_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("theme.toml");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+
+        let someone_else = euid().map(|uid| uid.wrapping_add(1));
+        write_atomic_as(&path, b"new", None, someone_else).unwrap();
+
+        assert_eq!(mode_of(&path) & 0o002, 0, "world-writable: {:o}", mode_of(&path));
+    }
+
+    #[test]
+    fn a_dangling_relative_symlink_is_written_through_to_where_it_points() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("repo")).unwrap();
+        let link = dir.path().join("files.toml");
+        std::os::unix::fs::symlink("repo/files.toml", &link).unwrap();
+
+        write_atomic(&link, "body").unwrap();
+
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(dir.path().join("repo/files.toml")).unwrap(), "body");
+    }
+
+    /// The temp name is predictable (`.<name>.<pid>.<n>.tmp`), so someone
+    /// who can write the directory can plant a link there first. Following
+    /// it would write the user's config into whatever it names.
+    #[test]
+    fn a_planted_link_at_the_temp_name_is_never_written_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "untouched").unwrap();
+        let target = dir.path().join("cfg.toml");
+        // Plant links at the first names this process would pick (nextest
+        // runs each test in a process of its own, so the counter starts at
+        // zero). Fewer than the retry limit, so the save still succeeds —
+        // by stepping past them.
+        for n in 0..8 {
+            let name = format!(".cfg.toml.{}.{n}.tmp", std::process::id());
+            std::os::unix::fs::symlink(&victim, dir.path().join(name)).unwrap();
+        }
+
+        write_atomic(&target, "payload").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "payload");
+    }
+
+    #[test]
+    fn a_private_write_is_0600_and_its_new_directories_0700() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clipboard").join("images").join("x.bin");
+        write_atomic_private(&path, b"bytes").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"bytes");
+        assert_eq!(mode_of(&path), 0o600);
+        assert_eq!(mode_of(&dir.path().join("clipboard")), 0o700);
+        assert_eq!(mode_of(&dir.path().join("clipboard/images")), 0o700);
+    }
+
+    #[test]
+    fn an_explicit_mode_replaces_whatever_the_file_had() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.toml");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_atomic_with_mode(&path, b"new", 0o600).unwrap();
+
+        assert_eq!(mode_of(&path), 0o600);
+    }
+
+    #[test]
+    fn an_empty_or_relative_home_is_not_trusted() {
+        for bad in [Some(""), Some("relative/home"), None] {
+            let _g = EnvGuard::set(None, bad);
+            // Falls back to this account's /etc/passwd entry, which on a
+            // machine running the tests exists.
+            assert!(config_home().is_absolute(), "HOME={bad:?}");
+            assert!(data_home().is_absolute(), "HOME={bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_passwd_home_is_matched_by_uid_not_by_position() {
+        let passwd = "root:x:0:0::/root:/bin/bash\nalex:x:1000:1000::/home/alex:/bin/zsh\nodd:x:1001:1001::relative:/bin/sh\n";
+        assert_eq!(passwd_home_in(passwd, 1000), Some(PathBuf::from("/home/alex")));
+        assert_eq!(passwd_home_in(passwd, 0), Some(PathBuf::from("/root")));
+        assert_eq!(passwd_home_in(passwd, 1001), None, "a relative home is no better from passwd");
+        assert_eq!(passwd_home_in(passwd, 4242), None);
     }
 
     #[test]
