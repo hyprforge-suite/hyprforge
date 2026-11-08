@@ -23,13 +23,61 @@
 /// 2. A newline immediately after the opening bracket is dropped by the
 ///    parser, so a value that starts with one has to be opened with an
 ///    extra newline to survive the round trip.
+///
+/// And one it cannot express at all: inside a long bracket Lua normalises
+/// every `\r\n`, `\n\r` and lone `\r` to `\n`, so a value carrying a
+/// carriage return comes back as a different string. Those are written as
+/// an escaped short string instead (see `escaped_string`).
 pub fn lua_string(s: &str) -> String {
+    if s.contains('\r') {
+        return escaped_string(s);
+    }
     let level = (0..).find(|level| fits_at_level(s, *level)).unwrap_or(0);
     let eq = "=".repeat(level);
     // Rule 2: the parser eats a newline directly after `[[`, so give it one
     // to eat that isn't the value's own.
     let lead = if s.starts_with('\n') { "\n" } else { "" };
     format!("[{eq}[{lead}{s}]{eq}]")
+}
+
+/// `s` as a double-quoted Lua string, every byte that needs it escaped.
+///
+/// Control characters go out as three-digit decimal escapes: Lua's `\ddd`
+/// takes up to three digits, so a shorter `\0` followed by a digit in the
+/// value would read as a different byte.
+fn escaped_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => out.push_str(&format!("\\{:03}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// `s` bare if Lua reads it as the same finite number, quoted otherwise.
+///
+/// For a field that takes either a number or an expression string — a
+/// window rule's `move`, a gesture's argument. "Does Rust parse it as an
+/// `f64`" is not that test: Rust accepts `nan`, `inf` and `infinity`,
+/// which bare are Lua globals reading as `nil`, and `+5`, which Lua has no
+/// syntax for — one such value made Hyprland refuse the whole file.
+pub fn lua_scalar(s: &str) -> String {
+    let numeric = !s.starts_with('+')
+        && s.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'e' | b'E' | b'+'))
+        && s.parse::<f64>().is_ok_and(f64::is_finite);
+    if numeric {
+        s.to_string()
+    } else {
+        lua_string(s)
+    }
 }
 
 /// Whether `s` can be quoted at this bracket level without terminating early.
@@ -79,6 +127,33 @@ mod tests {
         assert_eq!(lua_string("a]]b]=]c"), "[==[a]]b]=]c]==]");
     }
 
+    /// A long bracket hands back `\r` and `\r\n` as `\n` — Lua normalises
+    /// line endings inside one — so a value carrying a carriage return
+    /// cannot be quoted that way and still be itself.
+    #[test]
+    fn a_carriage_return_is_never_put_in_long_brackets() {
+        for s in ["a\rb", "a\r\nb", "\r"] {
+            let quoted = lua_string(s);
+            assert!(!quoted.starts_with('['), "{s:?} quoted as {quoted}");
+            assert!(!quoted.contains('\r'), "{s:?} quoted as {quoted:?}");
+        }
+        assert_eq!(lua_string("a\rb"), "\"a\\rb\"");
+    }
+
+    /// A value is written bare only if Lua reads it as that same number.
+    /// Rust's `f64` parser accepts `nan`, `inf` and `infinity` — bare, those
+    /// are Lua globals that read as `nil` — and `+5`, which is no Lua at
+    /// all and takes the whole generated file down.
+    #[test]
+    fn only_a_finite_number_lua_can_read_is_written_bare() {
+        for bare in ["5", "-5", "0.5", ".5", "5.", "1e3", "-2.5E-1"] {
+            assert_eq!(lua_scalar(bare), bare, "{bare}");
+        }
+        for quoted in ["nan", "NaN", "inf", "-inf", "infinity", "+5", "1e999", "50%", "cursor_x"] {
+            assert!(lua_scalar(quoted).starts_with('['), "{quoted} written bare");
+        }
+    }
+
     /// Lua drops a newline directly after the opening bracket, so a value
     /// starting with one has to be given a spare to eat.
     #[test]
@@ -112,6 +187,10 @@ mod tests {
             "^firefox[0-9]",
             "grep -o '[a-z]'",
             "desc:BOE 0x0BC9",
+            "a\rb",
+            "a\r\nb",
+            "\r",
+            "tab\there \\ \"q\" \x01",
         ] {
             let quoted = lua_string(s);
             assert_eq!(

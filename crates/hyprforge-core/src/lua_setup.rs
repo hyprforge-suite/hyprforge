@@ -89,6 +89,155 @@ pub enum Placement {
     AtEnd,
 }
 
+/// The first line that isn't a comment or blank, 1-indexed — where a block
+/// belongs when it has to go "at the top" without displacing a file's header
+/// comment. Falls back to line 1 for a file that is nothing but comments.
+///
+/// Only a line that starts at the top level counts (see [`top_level_lines`]):
+/// the inside of a `--[[ … ]]` header is not content, and a line in it
+/// that doesn't happen to start with `--` used to read as if it were.
+fn first_content_line(lines: &[&str], top: &[bool]) -> usize {
+    lines
+        .iter()
+        .enumerate()
+        .position(|(i, l)| {
+            let t = l.trim_start();
+            top[i] && !t.is_empty() && !t.starts_with("--")
+        })
+        .map(|i| i + 1)
+        .unwrap_or(1)
+}
+
+/// For each line of `src` (as `str::lines` splits it), whether it starts
+/// at the top level of the chunk: outside any long comment or long string,
+/// and outside every block and bracket.
+///
+/// Every decision in this module is about lines — is a `require` already
+/// here, which line does a new block go before — and a line-by-line
+/// reading cannot see that a line sits inside `--[[ … ]]` or an
+/// `if … end`. Inserting there put the require inside a comment, or made
+/// it conditional, and the presence check then read the very line it had
+/// inserted as proof the module was loaded. This is not a Lua parser and
+/// does not need to be one: it tracks the long brackets (with their `=`
+/// levels), short strings, line comments, and the keywords that open and
+/// close a block — `function`, `if`, `do` (which is how `for` and `while`
+/// open theirs) and `repeat` against `end` and `until` — plus `( { [`.
+fn top_level_lines(src: &str) -> Vec<bool> {
+    let bytes = src.as_bytes();
+    let mut out = Vec::new();
+    let mut depth: i64 = 0;
+    // `Some(level)` while inside a long comment or long string.
+    let mut long: Option<usize> = None;
+    let mut i = 0;
+    let mut at_line_start = true;
+    while i <= bytes.len() {
+        if at_line_start {
+            out.push(long.is_none() && depth == 0);
+            at_line_start = false;
+        }
+        let Some(&c) = bytes.get(i) else { break };
+        if let Some(level) = long {
+            if c == b']' && closes_long(bytes, i, level) {
+                long = None;
+                i += level + 2;
+                continue;
+            }
+            if c == b'\n' {
+                at_line_start = true;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\n' => {
+                at_line_start = true;
+                i += 1;
+            }
+            b'-' if bytes.get(i + 1) == Some(&b'-') => {
+                if let Some(level) = opens_long(bytes, i + 2) {
+                    long = Some(level);
+                    i += 2 + level + 2;
+                } else {
+                    // A line comment runs to the newline, which the loop
+                    // then sees as usual.
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                }
+            }
+            b'[' => {
+                if let Some(level) = opens_long(bytes, i) {
+                    long = Some(level);
+                    i += level + 2;
+                } else {
+                    depth += 1;
+                    i += 1;
+                }
+            }
+            b'"' | b'\'' => {
+                // A short string ends at its quote or, unterminated, at the
+                // newline; a backslash escapes whatever follows, including a
+                // newline (which the string then spans).
+                i += 1;
+                while i < bytes.len() && bytes[i] != c {
+                    if bytes[i] == b'\\' {
+                        if bytes.get(i + 1) == Some(&b'\n') {
+                            out.push(false);
+                        }
+                        i += 1;
+                    } else if bytes[i] == b'\n' {
+                        break;
+                    }
+                    i += 1;
+                }
+                if bytes.get(i) == Some(&c) {
+                    i += 1;
+                }
+            }
+            b'(' | b'{' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' | b'}' | b']' => {
+                depth -= 1;
+                i += 1;
+            }
+            c if c.is_ascii_alphabetic() || c == b'_' => {
+                let start = i;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                match &src[start..i] {
+                    "function" | "if" | "do" | "repeat" => depth += 1,
+                    "end" | "until" => depth -= 1,
+                    _ => {}
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    // `str::lines` yields no empty line after a trailing newline; the loop
+    // above records one, for the position just past the last line.
+    out.truncate(src.lines().count());
+    out
+}
+
+/// The level of a long bracket opening at `at` (`[[` is 0, `[==[` is 2).
+fn opens_long(bytes: &[u8], at: usize) -> Option<usize> {
+    if bytes.get(at) != Some(&b'[') {
+        return None;
+    }
+    let level = bytes[at + 1..].iter().take_while(|&&b| b == b'=').count();
+    (bytes.get(at + 1 + level) == Some(&b'[')).then_some(level)
+}
+
+/// Whether a long bracket of `level` closes at `at`.
+fn closes_long(bytes: &[u8], at: usize, level: usize) -> bool {
+    bytes.get(at) == Some(&b']')
+        && bytes.get(at + 1..at + 1 + level).is_some_and(|eq| eq.iter().all(|&b| b == b'='))
+        && bytes.get(at + 1 + level) == Some(&b']')
+}
+
 /// Detects whether `hyprland_lua` already sources `line`, and where it would
 /// go if not.
 ///
@@ -97,30 +246,26 @@ pub enum Placement {
 /// `BeforeUserRequires` module lands inside the first one's block, not in
 /// an arbitrary position determined by whichever require happened to be
 /// textually first at install time.
-/// The first line that isn't a comment or blank, 1-indexed — where a block
-/// belongs when it has to go "at the top" without displacing a file's header
-/// comment. Falls back to line 1 for a file that is nothing but comments.
-fn first_content_line(lines: &[&str]) -> usize {
-    lines
-        .iter()
-        .position(|l| {
-            let t = l.trim_start();
-            !t.is_empty() && !t.starts_with("--")
-        })
-        .map(|i| i + 1)
-        .unwrap_or(1)
-}
-
+///
+/// Only lines at the top level of the chunk count, both as a require that
+/// is already present and as somewhere to insert one — see
+/// `top_level_lines`.
 pub fn detect(hyprland_lua: &str, line: &str, placement: Placement) -> SetupPlan {
-    if hyprland_lua
-        .lines()
-        .any(|l| l.trim_start().starts_with("require(") && l.contains(line))
+    let lines: Vec<&str> = hyprland_lua.lines().collect();
+    let top = top_level_lines(hyprland_lua);
+    if lines
+        .iter()
+        .enumerate()
+        .any(|(i, l)| top[i] && l.trim_start().starts_with("require(") && l.contains(line))
     {
         return SetupPlan::AlreadyPresent;
     }
 
-    let lines: Vec<&str> = hyprland_lua.lines().collect();
-    if let Some(start_idx) = lines.iter().position(|l| l.trim() == marker_start(placement)) {
+    if let Some(start_idx) = lines
+        .iter()
+        .enumerate()
+        .position(|(i, l)| top[i] && l.trim() == marker_start(placement))
+    {
         if let Some(offset) = lines[start_idx..].iter().position(|l| l.trim() == MARKER_END) {
             let end_idx = start_idx + offset;
             return SetupPlan::NeedsInsert { insert_before_line: end_idx + 1 };
@@ -143,7 +288,7 @@ pub fn detect(hyprland_lua: &str, line: &str, placement: Placement) -> SetupPlan
         Placement::BeforeUserRequires => lines
             .iter()
             .enumerate()
-            .find(|(i, l)| !managed[*i] && l.trim_start().starts_with("require("))
+            .find(|(i, l)| !managed[*i] && top[*i] && l.trim_start().starts_with("require("))
             .map(|(i, _)| i + 1)
             // No requires at all. "The end" is the tempting fallback and it
             // is exactly backwards: Hyprland applies the *last* matching
@@ -151,7 +296,7 @@ pub fn detect(hyprland_lua: &str, line: &str, placement: Placement) -> SetupPlan
             // what it promises — the user's own config winning — by landing
             // early. Falling back to the end inverted that for every config
             // without a `require()` of its own, which is most of them.
-            .unwrap_or_else(|| first_content_line(&lines)),
+            .unwrap_or_else(|| first_content_line(&lines, &top)),
     };
     // Never inside a block of ours: step back to its opening marker.
     let mut insert_before_line = insert_before_line;
@@ -508,6 +653,73 @@ mod tests {
         assert!(
             out.find("hyprforge/monitors").unwrap() < out.find("hl.config").unwrap(),
             "still has to land before the user's own content: {out}"
+        );
+    }
+
+    /// A `require` inside a block comment is not one the user has: going
+    /// "before" it put the new block inside the comment, where it does
+    /// nothing, and `detect` then read the commented line as present — so
+    /// setup reported done, forever, for a module never loaded.
+    #[test]
+    fn a_require_inside_a_block_comment_is_not_an_insertion_point() {
+        let cfg = "--[[\nrequire(\"mine\")\n]]\nhl.config({})\n";
+        let line = require_line("monitors");
+        assert_eq!(
+            detect(cfg, &line, Placement::BeforeUserRequires),
+            SetupPlan::NeedsInsert { insert_before_line: 4 }
+        );
+    }
+
+    #[test]
+    fn a_require_line_inside_a_block_comment_is_not_present() {
+        let line = require_line("monitors");
+        for cfg in [
+            format!("--[[\n{line}\n]]\n"),
+            format!("--[==[ ]] still a comment\n{line}\n]==]\n"),
+            format!("local s = [[\n{line}\n]]\n"),
+        ] {
+            assert!(
+                matches!(detect(&cfg, &line, Placement::AtEnd), SetupPlan::NeedsInsert { .. }),
+                "{cfg}"
+            );
+        }
+    }
+
+    /// Inside an `if`, the line runs only when the condition holds — and a
+    /// block for the whole config does not belong there.
+    #[test]
+    fn a_require_inside_a_block_is_not_an_insertion_point() {
+        let cfg = "if os_ok then\n  require(\"mine\")\nend\nrequire(\"other\")\n";
+        let line = require_line("monitors");
+        assert_eq!(
+            detect(cfg, &line, Placement::BeforeUserRequires),
+            SetupPlan::NeedsInsert { insert_before_line: 4 }
+        );
+        let present = format!("if os_ok then\n  {line}\nend\n");
+        assert!(matches!(detect(&present, &line, Placement::AtEnd), SetupPlan::NeedsInsert { .. }));
+    }
+
+    /// A header written as a long comment is still a header, and its inside
+    /// is not content.
+    #[test]
+    fn a_long_comment_header_is_skipped_whole() {
+        let cfg = "--[==[\nmy config\n]] not the end\n]==]\nlocal gaps = 4\n";
+        let line = require_line("monitors");
+        assert_eq!(
+            detect(cfg, &line, Placement::BeforeUserRequires),
+            SetupPlan::NeedsInsert { insert_before_line: 5 }
+        );
+    }
+
+    /// The scanner must not be fooled the other way: brackets and keywords
+    /// in strings and line comments are not code.
+    #[test]
+    fn keywords_in_strings_and_comments_do_not_open_blocks() {
+        let cfg = "local a = \"if do function\" -- for while repeat\nlocal b = '[[' \nrequire(\"mine\")\n";
+        let line = require_line("monitors");
+        assert_eq!(
+            detect(cfg, &line, Placement::BeforeUserRequires),
+            SetupPlan::NeedsInsert { insert_before_line: 3 }
         );
     }
 

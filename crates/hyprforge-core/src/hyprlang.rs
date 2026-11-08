@@ -42,8 +42,11 @@ pub enum SourcePlan {
 /// An absolute path rather than `~`: hyprlang expands tildes, but the
 /// path is built from `$XDG_CONFIG_HOME`, which needn't be under `$HOME`
 /// at all — and a wrong `~` expansion fails silently as "no wallpaper".
+///
+/// Escaped like any other value: `#` starts a comment anywhere on a line,
+/// so a path through a directory named `#cfg` was cut short there.
 pub fn source_line(generated: &Path) -> String {
-    format!("source = {}", generated.display())
+    format!("source = {}", escape_value(&generated.display().to_string()))
 }
 
 /// Detects whether `contents` already sources the generated file.
@@ -143,8 +146,23 @@ pub fn install(target: &Path, source_line: &str) -> Result<SourcePlan, SetupErro
 /// anywhere because hyprlang saw a perfectly valid line.
 ///
 /// Applied by [`keyword`] and [`block`], so no caller has to remember.
+///
+/// A line break has no escape at all. One inside a value ends the line,
+/// and what follows is read as an assignment of its own — in hypridle's
+/// file, a command it will run. So `\n`, `\r` and NUL become spaces here,
+/// unconditionally, and the screens that take free text report them
+/// through [`breaks_line`] in their `invalid()`, so a user is told rather
+/// than finding the value quietly changed.
 pub fn escape_value(value: &str) -> String {
-    value.replace('#', "##")
+    value
+        .replace('#', "##")
+        .replace(['\n', '\r', '\0'], " ")
+}
+
+/// Whether `value` holds a character [`escape_value`] has to replace
+/// because hyprlang cannot carry it.
+pub fn breaks_line(value: &str) -> bool {
+    value.contains(['\n', '\r', '\0'])
 }
 
 /// Recovers the value hyprlang would see: everything before the first
@@ -424,6 +442,30 @@ pub fn header(subject: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// hyprlang has no escape for a line break: one inside a value ends the
+    /// line, and whatever follows it is read as a new assignment — in
+    /// hypridle's file, a command of its own.
+    #[test]
+    fn a_value_can_never_start_a_new_line() {
+        for value in ["lock\non-timeout = rm -rf ~", "a\rb", "a\0b"] {
+            let out = keyword("on-timeout", value);
+            assert_eq!(out.lines().count(), 1, "{value:?} wrote {out:?}");
+            assert!(!out.contains('\0'), "{out:?}");
+            let out = block("listener", &[("on-timeout", value.to_string())]);
+            assert_eq!(out.lines().count(), 3, "{value:?} wrote {out:?}");
+            assert!(breaks_line(value), "{value:?}");
+        }
+        assert!(!breaks_line("loginctl lock-session"));
+    }
+
+    /// `#` starts a comment anywhere on a line, and a `source` path with
+    /// one in it was cut short there.
+    #[test]
+    fn a_source_path_with_a_hash_is_escaped() {
+        let line = source_line(Path::new("/home/v/#cfg/gen.conf"));
+        assert_eq!(strip_comment(line.split_once('=').unwrap().1), "/home/v/#cfg/gen.conf");
+    }
 
     #[test]
     fn a_source_line_is_appended_in_a_marked_block() {

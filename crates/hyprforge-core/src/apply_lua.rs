@@ -10,6 +10,18 @@
 use crate::paths::write_atomic;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Mutex;
+
+/// Held for the whole of every [`apply`], across every module.
+///
+/// An apply is a read-modify-check sequence against state two applies
+/// share: the file's previous contents, and Hyprland's one list of config
+/// errors. Two at once interleave — A snapshots the errors, B writes and
+/// reloads, A writes and reloads — and A then sees B's rejection as its
+/// own, rolls *its* file back, and may restore a "previous" version that
+/// was B's half-written state. Global rather than per path because the
+/// error list is global: two different files race over it just the same.
+static APPLYING: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApplyError {
@@ -72,6 +84,11 @@ pub struct GeneratedFile<'a> {
 /// what puts Hyprland's error overlay on screen. Neither check subsumes the
 /// other, so both are here.
 pub fn apply(file: GeneratedFile<'_>) -> Result<(), ApplyError> {
+    // A panic in another apply poisons the lock; the state it guards is
+    // files on disk and the compositor, which a panic here never left in
+    // a Rust-level invalid state, so carrying on is right.
+    let _serialised = APPLYING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
     // Snapshot first: the user's own config may already have errors that
     // aren't ours, and failing their save over someone else's typo would be
     // its own dead end. Only errors that appear between here and the reload
